@@ -1,0 +1,878 @@
+{
+  "entities": [
+    {
+      "name": "hero",
+      "components": {
+        "Player": {},
+        "Position": {
+          "x": 0,
+          "y": 3
+        },
+        "Velocity": {
+          "x": 0,
+          "y": 0
+        },
+        "Collider": {
+          "w": 1.3,
+          "h": 2.1
+        },
+        "Body": {
+          "gravity": -34,
+          "grounded": false
+        },
+        "Score": {
+          "value": 0
+        },
+        "Sprite": {
+          "w": 1.7,
+          "h": 2.2,
+          "image": "hero-idle.png"
+        },
+        "Anim": {
+          "clip": "idle",
+          "prev": "",
+          "t": 0,
+          "done": false
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": -4,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": -2,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 2,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 4,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 6,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 8,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 10,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 12,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 14,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 16,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 18,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 20,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 22,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 24,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 26,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 28,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 30,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 32,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 34,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 36,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 38,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 40,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 42,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 44,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 46,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 48,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 50,
+          "y": -1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 10,
+          "y": 2.5
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 12,
+          "y": 2.5
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 17,
+          "y": 4.5
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 19,
+          "y": 4.5
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 25,
+          "y": 3
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 27,
+          "y": 3
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 33,
+          "y": 6
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 35,
+          "y": 6
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 40,
+          "y": 4
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 42,
+          "y": 4
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile.png"
+        }
+      }
+    },
+    {
+      "name": "gem-0",
+      "components": {
+        "Gem": {},
+        "Position": {
+          "x": 10,
+          "y": 4.6
+        },
+        "Collider": {
+          "w": 1.0,
+          "h": 1.3
+        },
+        "Sprite": {
+          "w": 1.0,
+          "h": 1.3,
+          "image": "gem.png"
+        }
+      }
+    },
+    {
+      "name": "gem-1",
+      "components": {
+        "Gem": {},
+        "Position": {
+          "x": 18,
+          "y": 6.6
+        },
+        "Collider": {
+          "w": 1.0,
+          "h": 1.3
+        },
+        "Sprite": {
+          "w": 1.0,
+          "h": 1.3,
+          "image": "gem.png"
+        }
+      }
+    },
+    {
+      "name": "gem-2",
+      "components": {
+        "Gem": {},
+        "Position": {
+          "x": 25,
+          "y": 5.1
+        },
+        "Collider": {
+          "w": 1.0,
+          "h": 1.3
+        },
+        "Sprite": {
+          "w": 1.0,
+          "h": 1.3,
+          "image": "gem.png"
+        }
+      }
+    },
+    {
+      "name": "gem-3",
+      "components": {
+        "Gem": {},
+        "Position": {
+          "x": 34,
+          "y": 8.1
+        },
+        "Collider": {
+          "w": 1.0,
+          "h": 1.3
+        },
+        "Sprite": {
+          "w": 1.0,
+          "h": 1.3,
+          "image": "gem.png"
+        }
+      }
+    },
+    {
+      "name": "gem-4",
+      "components": {
+        "Gem": {},
+        "Position": {
+          "x": 40,
+          "y": 6.1
+        },
+        "Collider": {
+          "w": 1.0,
+          "h": 1.3
+        },
+        "Sprite": {
+          "w": 1.0,
+          "h": 1.3,
+          "image": "gem.png"
+        }
+      }
+    },
+    {
+      "name": "lantern",
+      "components": {
+        "Position": {
+          "x": 47,
+          "y": 1.6
+        },
+        "Sprite": {
+          "w": 1.3,
+          "h": 3.2,
+          "image": "lantern.png"
+        }
+      }
+    },
+    {
+      "name": "goal",
+      "components": {
+        "Goal": {},
+        "Position": {
+          "x": 47,
+          "y": 1.5
+        },
+        "Collider": {
+          "w": 2.5,
+          "h": 3.0
+        }
+      }
+    },
+    {
+      "name": "camera",
+      "components": {
+        "Camera": {
+          "x": 0,
+          "y": 3,
+          "scale": 14,
+          "follow": "hero",
+          "lerp": 0.12
+        },
+        "Shake": {
+          "amplitude": 0,
+          "decay": 0.88
+        }
+      }
+    },
+    {
+      "name": "hud",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 8
+        },
+        "Text": {
+          "content": "GEMS 0/5",
+          "size": 0.7,
+          "color": "#ffd75e",
+          "screen": true
+        }
+      }
+    }
+  ]
+}

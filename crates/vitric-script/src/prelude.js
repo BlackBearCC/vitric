@@ -102,6 +102,43 @@ function __makeCtx(payload, ops, rng) {
   };
 }
 
+// ---- 数字保真序列化 ----
+// QuickJS 的 JSON.stringify 打印 f64 不是最短往返（-7.3666666666666645 会
+// 被截成 -7.366666666666664，差一个 ULP），跨边界一来一回精度静默漂移，
+// 写检测也会把只读系统误判成越权写。读方向（JSON.parse/strtod）是正确舍入的，
+// 打印方向 toString/toPrecision 同源同病，文本路线修不干净——非整数直接走位串。
+const __f64view = new DataView(new ArrayBuffer(8));
+function __numStr(x) {
+  if (!isFinite(x)) throw new Error("数值 " + x + " 无法写进世界（JSON 不支持 NaN/Infinity）");
+  if (Number.isInteger(x) && Math.abs(x) < 9007199254740992) return String(x);
+  // 非整数不走文本：QuickJS 的 dtoa（toString/toPrecision 同源）不是最短往返，
+  // 文本化必丢 ULP。直接导出 IEEE754 位串，Rust 侧逐位还原。
+  __f64view.setFloat64(0, x);
+  const hi = __f64view.getUint32(0).toString(16).padStart(8, "0");
+  const lo = __f64view.getUint32(4).toString(16).padStart(8, "0");
+  return '{"$f64":"' + hi + lo + '"}';
+}
+function __jsonStr(v) {
+  switch (typeof v) {
+    case "number": return __numStr(v);
+    case "string": return JSON.stringify(v);
+    case "boolean": return v ? "true" : "false";
+    case "undefined": return "null";
+    case "object": {
+      if (v === null) return "null";
+      if (Array.isArray(v)) return "[" + v.map(__jsonStr).join(",") + "]";
+      const parts = [];
+      for (const k of Object.keys(v)) {
+        if (v[k] === undefined) continue;
+        parts.push(JSON.stringify(k) + ":" + __jsonStr(v[k]));
+      }
+      return "{" + parts.join(",") + "}";
+    }
+    default:
+      throw new Error("无法序列化 " + typeof v + " 类型的值");
+  }
+}
+
 // Rust 侧入口：跑第 idx 个系统
 globalThis.__runSystem = function (idx, payloadJson) {
   const sys = __systems[idx];
@@ -110,7 +147,7 @@ globalThis.__runSystem = function (idx, payloadJson) {
   const ops = [];
   const ctx = __makeCtx(payload, ops, rng);
   sys.fn(payload.entities, ctx);
-  return JSON.stringify({
+  return __jsonStr({
     entities: payload.entities,
     ops,
     rng: { state: rng.state.toString(), inc: rng.inc.toString() },
@@ -132,7 +169,7 @@ globalThis.__callFn = function (name, payloadJson) {
   const ctx = __makeCtx(payload, ops, rng);
   ctx.self = payload.self; // 触发规则时绑定的实体句柄（可能为 null）
   f(payload.args, ctx);
-  return JSON.stringify({ ops, rng: { state: rng.state.toString(), inc: rng.inc.toString() } });
+  return __jsonStr({ ops, rng: { state: rng.state.toString(), inc: rng.inc.toString() } });
 };
 
 // Rust 侧入口：枚举注册结果

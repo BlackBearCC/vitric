@@ -1,0 +1,29 @@
+{
+  "clips": {
+    "idle": {
+      "frames": [
+        "hero-idle.png",
+        "hero-walk2.png"
+      ],
+      "fps": 2,
+      "loop": true
+    },
+    "walk": {
+      "frames": [
+        "hero-walk1.png",
+        "hero-idle.png",
+        "hero-walk2.png",
+        "hero-idle.png"
+      ],
+      "fps": 8,
+      "loop": true
+    },
+    "jump": {
+      "frames": [
+        "hero-jump.png"
+      ],
+      "fps": 1,
+      "loop": true
+    }
+  }
+}

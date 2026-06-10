@@ -612,11 +612,20 @@ fn build_vertices(
         let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Text.color: {e}"))?;
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;
+        // screen=true: HUD 锚定——与 CPU 路径同语义,坐标相对屏幕中心,不随相机走
+        let screen_anchored = world
+            .get_field(id, "Text.screen")
+            .ok()
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
 
         let chars: Vec<char> = content.chars().collect();
         let n = chars.len() as f64;
-        let cx = (width as f64) / 2.0 + (px - cam_x) * scale;
-        let cy = (height as f64) / 2.0 - (py - cam_y) * scale;
+        let (cx, cy) = if screen_anchored {
+            ((width as f64) / 2.0 + px * scale, (height as f64) / 2.0 - py * scale)
+        } else {
+            ((width as f64) / 2.0 + (px - cam_x) * scale, (height as f64) / 2.0 - (py - cam_y) * scale)
+        };
         let char_w = size * scale;
         let left = cx - n * char_w / 2.0;
         let (y0, y1) = ((cy - char_w / 2.0) as f32, (cy + char_w / 2.0) as f32);

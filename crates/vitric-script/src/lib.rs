@@ -170,10 +170,11 @@ impl ScriptEngine {
         });
 
         let result_str = self.call_js("__runSystem", (idx as i32, payload.to_string()), &location)?;
-        let result: Value = serde_json::from_str(&result_str).map_err(|e| ScriptError::Op {
+        let mut result: Value = serde_json::from_str(&result_str).map_err(|e| ScriptError::Op {
             location: location.clone(),
             message: format!("返回值不是合法 JSON: {e}"),
         })?;
+        revive_f64(&mut result, &location)?;
 
         // 随机数状态写回（脚本抽过几次就推进几步）
         *rng = rng_from_json(result.get("rng"), &location)?;
@@ -268,10 +269,11 @@ impl ScriptEngine {
         });
         let result_str =
             self.call_js("__callFn", (function.to_string(), payload.to_string()), &location)?;
-        let result: Value = serde_json::from_str(&result_str).map_err(|e| ScriptError::Op {
+        let mut result: Value = serde_json::from_str(&result_str).map_err(|e| ScriptError::Op {
             location: location.clone(),
             message: format!("返回值不是合法 JSON: {e}"),
         })?;
+        revive_f64(&mut result, &location)?;
         *rng = rng_from_json(result.get("rng"), &location)?;
         let mut out = ScriptOutput::default();
         self.apply_ops(result.get("ops"), world, &mut out, &location)?;
@@ -389,6 +391,41 @@ impl ScriptEngine {
             .collect();
         self.fns = to_string_vec(&v["fns"]);
         Ok(())
+    }
+}
+
+/// 还原 prelude 的位串浮点：`{"$f64":"<16hex>"}` → f64。
+/// QuickJS 的 dtoa 不是最短往返，非整数浮点跨边界只能走 IEEE754 位串。
+fn revive_f64(v: &mut Value, location: &str) -> Result<(), ScriptError> {
+    match v {
+        Value::Object(map) => {
+            if map.len() == 1 {
+                if let Some(Value::String(hex)) = map.get("$f64") {
+                    let bits = u64::from_str_radix(hex, 16).map_err(|e| ScriptError::Op {
+                        location: location.to_string(),
+                        message: format!("$f64 位串 {hex:?} 不合法: {e}"),
+                    })?;
+                    *v = serde_json::Number::from_f64(f64::from_bits(bits))
+                        .map(Value::Number)
+                        .ok_or_else(|| ScriptError::Op {
+                            location: location.to_string(),
+                            message: format!("$f64 位串 {hex:?} 不是有限浮点数"),
+                        })?;
+                    return Ok(());
+                }
+            }
+            for child in map.values_mut() {
+                revive_f64(child, location)?;
+            }
+            Ok(())
+        }
+        Value::Array(arr) => {
+            for child in arr {
+                revive_f64(child, location)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -566,6 +603,28 @@ mod tests {
         let err = eng.run_systems(&mut w, &mut rng, 0).unwrap_err();
         assert!(matches!(err, ScriptError::UndeclaredWrite { .. }), "{err}");
         assert_eq!(w.get_field(a, "Velocity.x").unwrap().as_f64(), Some(1.0), "半改状态泄漏");
+    }
+
+    #[test]
+    fn js_boundary_preserves_f64_precision_exactly() {
+        // 回归：QuickJS 的 JSON.stringify 不是最短往返（-7.3666666666666645 截成
+        // -7.366666666666664，差 1 ULP）。prelude 的 __numStr 必须精确还原，
+        // 否则只读系统被误判越权写、读写系统静默丢精度。
+        let tricky = -7.366_666_666_666_664_5_f64;
+        let mut eng = engine_with(
+            r#"
+            vitric.system("mover", {query: ["Position", "Velocity"], writes: ["Velocity"]}, (entities) => {
+                for (const e of entities) { e.Velocity.x = e.Position.y; } // 刁钻值原样搬运
+            });
+            "#,
+        );
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": tricky})).unwrap();
+        w.set_component(e, "Velocity", json!({"x": 0.0, "y": tricky})).unwrap();
+        let mut rng = Pcg32::new(1);
+        eng.run_systems(&mut w, &mut rng, 0).unwrap(); // Velocity.y 只读：不得误判越权
+        assert_eq!(w.get_field(e, "Velocity.x").unwrap().as_f64(), Some(tricky), "精度丢了");
     }
 
     #[test]

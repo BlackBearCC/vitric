@@ -149,11 +149,20 @@ fn draw_texts(
         let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Text.color: {e}"))?;
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;
+        // screen=true: HUD 锚定——Position 解释为相对屏幕中心的偏移,不随相机走
+        let screen_anchored = world
+            .get_field(id, "Text.screen")
+            .ok()
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         let chars: Vec<char> = content.chars().collect();
         let n = chars.len();
-        let cx = (width as f64) / 2.0 + (px - cam_x) * scale;
-        let cy = (height as f64) / 2.0 - (py - cam_y) * scale;
+        let (cx, cy) = if screen_anchored {
+            ((width as f64) / 2.0 + px * scale, (height as f64) / 2.0 - py * scale)
+        } else {
+            ((width as f64) / 2.0 + (px - cam_x) * scale, (height as f64) / 2.0 - (py - cam_y) * scale)
+        };
         let half_w = n as f64 * size * scale / 2.0;
         let half_h = size * scale / 2.0;
         let x0 = (cx - half_w).floor().max(0.0) as i64;
@@ -386,8 +395,12 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
         }
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;
-        let dx = px - cam_x;
-        let dy = py - cam_y;
+        let screen_anchored = world
+            .get_field(id, "Text.screen")
+            .ok()
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let (dx, dy) = if screen_anchored { (px, py) } else { (px - cam_x, py - cam_y) };
         let mut entry = serde_json::Map::new();
         entry.insert("id".into(), json!(id.to_string()));
         if let Some(n) = world.name_of(id) {

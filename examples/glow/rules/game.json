@@ -1,0 +1,200 @@
+{
+  "rules": [
+    {
+      "id": "run-left",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "left",
+          "phase": "pressed"
+        }
+      },
+      "do": [
+        {
+          "set": "@hero.Velocity.x",
+          "to": -9
+        }
+      ]
+    },
+    {
+      "id": "run-right",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "right",
+          "phase": "pressed"
+        }
+      },
+      "do": [
+        {
+          "set": "@hero.Velocity.x",
+          "to": 9
+        }
+      ]
+    },
+    {
+      "id": "stop-left",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "left",
+          "phase": "released"
+        }
+      },
+      "do": [
+        {
+          "set": "@hero.Velocity.x",
+          "to": 0
+        }
+      ]
+    },
+    {
+      "id": "stop-right",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "right",
+          "phase": "released"
+        }
+      },
+      "do": [
+        {
+          "set": "@hero.Velocity.x",
+          "to": 0
+        }
+      ]
+    },
+    {
+      "id": "jump",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "space",
+          "phase": "pressed"
+        }
+      },
+      "if": [
+        [
+          "@hero.Body.grounded",
+          "==",
+          true
+        ]
+      ],
+      "do": [
+        {
+          "set": "@hero.Velocity.y",
+          "to": 16
+        },
+        {
+          "call": "burst",
+          "with": {
+            "x": "@hero.Position.x",
+            "y": "@hero.Position.y",
+            "kind": "dust",
+            "n": 6
+          }
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "jump.wav"
+          }
+        }
+      ]
+    },
+    {
+      "id": "collect-gem",
+      "on": {
+        "event": "collision",
+        "between": [
+          "Player",
+          "Gem"
+        ]
+      },
+      "do": [
+        {
+          "add": "self.Score.value",
+          "by": 1
+        },
+        {
+          "despawn": "other"
+        },
+        {
+          "set": "@hud.Text.content",
+          "to": {
+            "format": "GEMS {}/5",
+            "args": [
+              "self.Score.value"
+            ]
+          }
+        },
+        {
+          "set": "@camera.Shake.amplitude",
+          "to": 0.25
+        },
+        {
+          "call": "burst",
+          "with": {
+            "x": "self.Position.x",
+            "y": "self.Position.y",
+            "kind": "spark",
+            "n": 10
+          }
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "gem.wav"
+          }
+        }
+      ]
+    },
+    {
+      "id": "reach-lantern",
+      "on": {
+        "event": "collision",
+        "between": [
+          "Player",
+          "Goal"
+        ]
+      },
+      "do": [
+        {
+          "despawn": "other"
+        },
+        {
+          "set": "@hud.Text.content",
+          "to": {
+            "format": "LIT! {}/5 GEMS",
+            "args": [
+              "self.Score.value"
+            ]
+          }
+        },
+        {
+          "set": "@camera.Shake.amplitude",
+          "to": 0.7
+        },
+        {
+          "call": "burst",
+          "with": {
+            "x": "self.Position.x",
+            "y": "self.Position.y",
+            "kind": "confetti",
+            "n": 24
+          }
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "win.wav"
+          }
+        },
+        {
+          "emit": "game-won",
+          "data": {}
+        }
+      ]
+    }
+  ]
+}
