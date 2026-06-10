@@ -252,7 +252,12 @@ impl Dispatcher {
             }
             "sim/hash" => Ok(json!(format!("{:#018x}", sim.world.state_hash()))),
 
-            // ---- 渲染（无头截图：不需要 GPU/窗口，agent 直接拿像素）----
+            // ---- 观察（语义描述是主通道，截图是兜底验证）----
+            "render/describe" => {
+                let width = params.get("width").and_then(|v| v.as_u64()).unwrap_or(320) as u32;
+                let height = params.get("height").and_then(|v| v.as_u64()).unwrap_or(240) as u32;
+                vitric_render::describe_world(&sim.world, width, height)
+            }
             "render/screenshot" => {
                 let width = params.get("width").and_then(|v| v.as_u64()).unwrap_or(320) as u32;
                 let height = params.get("height").and_then(|v| v.as_u64()).unwrap_or(240) as u32;
@@ -316,7 +321,7 @@ impl Dispatcher {
                 "未知方法 {other:?}。可用方法: ping, world/entities, world/get, world/set, \
                  world/spawn, world/despawn, input/inject, sim/pause, sim/resume, sim/step, \
                  sim/speed, sim/quit, sim/snapshot, sim/restore, sim/hash, events/recent, \
-                 render/screenshot, assert/add, assert/remove, assert/list, assert/failures"
+                 render/describe, render/screenshot, assert/add, assert/remove, assert/list, assert/failures"
             )),
         }
     }

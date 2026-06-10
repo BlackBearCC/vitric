@@ -25,7 +25,8 @@ vitric replay <项目目录> <录像.json>      # 重放录像并逐校验点验
 | `world/entities` | `components?: []` | 列实体（可按组件过滤） |
 | `world/get` | `entity` | 一个实体的全部组件。实体写法：`"@名字"` 或句柄 `"e3v1"` |
 | `events/recent` | `since?: tick` | 最近事件（输入/碰撞/规则和脚本 emit 的全部可见） |
-| `render/screenshot` | `width? height? path? inline?` | **无头截图**，不需要 GPU/窗口；`inline:true` 返回 base64 PNG |
+| `render/describe` | `width? height?` | **语义观察（主通道）**：画面翻译成精确文字——可见实体的九宫格方位/世界与屏幕坐标/颜色尺寸、视觉遮挡对、视野外实体的方向和距离，附中文摘要。比看像素更精准 |
+| `render/screenshot` | `width? height? path? inline?` | 无头截图（兜底验证：怀疑渲染本身有问题、或要做像素级断言时用），不需要 GPU/窗口 |
 | `sim/hash` | — | 世界状态哈希（断言两次运行一致就比它） |
 
 ### 动
@@ -63,8 +64,9 @@ curl -s :6173/rpc -d '{"method":"sim/pause"}'                       # 3. 暂停
 curl -s :6173/rpc -d '{"method":"assert/add","params":{"id":"hp","if":[["@player.Health.hp",">",0]]}}'
 curl -s :6173/rpc -d '{"method":"input/inject","params":{"action":"right"}}'
 curl -s :6173/rpc -d '{"method":"sim/step","params":{"ticks":60}}'  # 4. 确定性单步
-curl -s :6173/rpc -d '{"method":"render/screenshot","params":{"path":"shot.png"}}'  # 5. 亲眼看
+curl -s :6173/rpc -d '{"method":"render/describe"}'                 # 5. 语义观察：画面上有什么、在哪、谁挡谁
 curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'         # 6. 查状态
+# 怀疑渲染不对劲再截图对照: {"method":"render/screenshot","params":{"path":"shot.png"}}
 ```
 
 复现 bug：`vitric run my-game --ticks 600 --record bug.json` 录下来，

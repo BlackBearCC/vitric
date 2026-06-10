@@ -17,3 +17,6 @@ vitric-rules = { path = "../vitric-rules" }
 vitric-script = { path = "../vitric-script" }
 vitric-sim = { path = "../vitric-sim" }
 vitric-control = { path = "../vitric-control" }
+winit = "0.30"
+softbuffer = "0.4"
+vitric-render = { version = "0.1.0", path = "../vitric-render" }

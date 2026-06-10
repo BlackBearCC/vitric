@@ -77,6 +77,140 @@ pub fn screenshot_png(world: &World, width: u32, height: u32) -> Result<Vec<u8>,
     encode_png(&rgba, width, height)
 }
 
+/// 语义观察：把"画面上有什么"翻译成 LLM 能精确读懂的结构化描述。
+///
+/// 这是 agent 的**主观察通道**——比让模型看像素更精准：
+/// 坐标是确切数字、方位是九宫格词、遮挡是明确的实体对、
+/// 视野外的东西有方向和距离。截图（screenshot）退居兜底验证。
+pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_json::Value, String> {
+    use serde_json::json;
+
+    if width == 0 || height == 0 {
+        return Err(format!("分辨率 {width}x{height} 不合法"));
+    }
+    let (cam_x, cam_y, scale) = camera_of(world)?;
+    let half_w_units = width as f64 / scale / 2.0;
+    let half_h_units = height as f64 / scale / 2.0;
+
+    let mut visible = Vec::new();
+    let mut offscreen = Vec::new();
+    let mut rects: Vec<(String, f64, f64, f64, f64)> = Vec::new(); // (id, x, y, w, h) 世界坐标
+
+    for id in world.query(&["Position", "Sprite"]) {
+        let px = num(world, id, "Position.x")?;
+        let py = num(world, id, "Position.y")?;
+        let sw = num(world, id, "Sprite.w")?;
+        let sh = num(world, id, "Sprite.h")?;
+        let color = world
+            .get_field(id, "Sprite.color")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "#ffffff".to_string());
+        let name = world.name_of(id).map(String::from);
+
+        let dx = px - cam_x;
+        let dy = py - cam_y;
+        let on_screen = dx.abs() - sw / 2.0 < half_w_units && dy.abs() - sh / 2.0 < half_h_units;
+
+        let mut entry = serde_json::Map::new();
+        entry.insert("id".into(), json!(id.to_string()));
+        if let Some(n) = &name {
+            entry.insert("name".into(), json!(n));
+        }
+        entry.insert("world".into(), json!({"x": px, "y": py}));
+        entry.insert("sprite".into(), json!({"w": sw, "h": sh, "color": color}));
+
+        if on_screen {
+            let sx = width as f64 / 2.0 + dx * scale;
+            let sy = height as f64 / 2.0 - dy * scale;
+            entry.insert("screen_px".into(), json!({"x": sx.round(), "y": sy.round()}));
+            entry.insert(
+                "region".into(),
+                json!(region_word(sx / width as f64, sy / height as f64)),
+            );
+            rects.push((id.to_string(), px, py, sw, sh));
+            visible.push(serde_json::Value::Object(entry));
+        } else {
+            let direction = direction_word(dx, dy);
+            entry.insert("direction".into(), json!(direction));
+            entry.insert(
+                "distance_units".into(),
+                json!((dx.powi(2) + dy.powi(2)).sqrt().round()),
+            );
+            offscreen.push(serde_json::Value::Object(entry));
+        }
+    }
+
+    // 视觉重叠（画面上谁压着谁）
+    let mut overlaps = Vec::new();
+    for i in 0..rects.len() {
+        for j in (i + 1)..rects.len() {
+            let (ref a, ax, ay, aw, ah) = rects[i];
+            let (ref b, bx, by, bw, bh) = rects[j];
+            if (ax - bx).abs() * 2.0 < aw + bw && (ay - by).abs() * 2.0 < ah + bh {
+                overlaps.push(json!([a, b]));
+            }
+        }
+    }
+
+    // 一段给 LLM 直接读的中文摘要（结构化字段的浓缩版）
+    let mut lines = vec![format!(
+        "相机({cam_x},{cam_y}) 缩放{scale}，可见世界范围 x∈[{:.0},{:.0}] y∈[{:.0},{:.0}]。可见 {} 个、视野外 {} 个带图形的实体。",
+        cam_x - half_w_units, cam_x + half_w_units,
+        cam_y - half_h_units, cam_y + half_h_units,
+        visible.len(), offscreen.len(),
+    )];
+    for v in &visible {
+        lines.push(format!(
+            "- {} {} 在{}（世界 {},{}）",
+            v.get("name").and_then(|n| n.as_str()).unwrap_or_else(|| v["id"].as_str().expect("id")),
+            v["sprite"]["color"].as_str().expect("color"),
+            v["region"].as_str().expect("region"),
+            v["world"]["x"], v["world"]["y"],
+        ));
+    }
+    for o in &offscreen {
+        lines.push(format!(
+            "- {} 在视野外{}方向 {} 单位",
+            o.get("name").and_then(|n| n.as_str()).unwrap_or_else(|| o["id"].as_str().expect("id")),
+            o["direction"].as_str().expect("direction"),
+            o["distance_units"],
+        ));
+    }
+
+    Ok(json!({
+        "camera": {"x": cam_x, "y": cam_y, "scale": scale},
+        "viewport": {"width": width, "height": height},
+        "visible": visible,
+        "offscreen": offscreen,
+        "overlaps": overlaps,
+        "text": lines.join("\n"),
+    }))
+}
+
+/// 屏幕九宫格方位词（输入为 0..1 的屏幕比例坐标）。
+fn region_word(fx: f64, fy: f64) -> &'static str {
+    let col = if fx < 1.0 / 3.0 { 0 } else if fx < 2.0 / 3.0 { 1 } else { 2 };
+    let row = if fy < 1.0 / 3.0 { 0 } else if fy < 2.0 / 3.0 { 1 } else { 2 };
+    match (row, col) {
+        (0, 0) => "左上", (0, 1) => "上方", (0, 2) => "右上",
+        (1, 0) => "左侧", (1, 1) => "中心", (1, 2) => "右侧",
+        (2, 0) => "左下", (2, 1) => "下方", _ => "右下",
+    }
+}
+
+/// 视野外方向词（世界坐标系，y 向上）。
+fn direction_word(dx: f64, dy: f64) -> &'static str {
+    let horiz = if dx < -0.5 { -1 } else if dx > 0.5 { 1 } else { 0 };
+    let vert = if dy < -0.5 { -1 } else if dy > 0.5 { 1 } else { 0 };
+    match (horiz, vert) {
+        (-1, 1) => "左上", (0, 1) => "上", (1, 1) => "右上",
+        (-1, 0) => "左", (1, 0) => "右",
+        (-1, -1) => "左下", (0, -1) => "下", (1, -1) => "右下",
+        _ => "原地",
+    }
+}
+
 fn camera_of(world: &World) -> Result<(f64, f64, f64), String> {
     let cams = world.query(&["Camera"]);
     match cams.first() {
@@ -169,6 +303,36 @@ mod tests {
         let mut out = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut out).unwrap();
         assert_eq!((info.width, info.height), (32, 32));
+    }
+
+    #[test]
+    fn describe_gives_semantic_view() {
+        let mut w = World::new();
+        let p = w.spawn_named("player").unwrap();
+        w.set_component(p, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(p, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000"})).unwrap();
+        // 跟玩家重叠的金币
+        let c = w.spawn_named("coin").unwrap();
+        w.set_component(c, "Position", json!({"x": 0.5, "y": 0.0})).unwrap();
+        w.set_component(c, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#ffd84d"})).unwrap();
+        // 视野外左边远处一个
+        let far = w.spawn_named("far-away").unwrap();
+        w.set_component(far, "Position", json!({"x": -100.0, "y": 0.0})).unwrap();
+        w.set_component(far, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#00ff00"})).unwrap();
+
+        let d = describe_world(&w, 64, 64).unwrap();
+        assert_eq!(d["visible"].as_array().unwrap().len(), 2);
+        assert_eq!(d["offscreen"].as_array().unwrap().len(), 1);
+        assert_eq!(d["visible"][0]["name"], json!("player"));
+        assert_eq!(d["visible"][0]["region"], json!("中心"));
+        assert_eq!(d["offscreen"][0]["direction"], json!("左"));
+        assert_eq!(d["offscreen"][0]["distance_units"], json!(100.0));
+        // 玩家和金币视觉重叠要被点名
+        let overlaps = d["overlaps"].as_array().unwrap();
+        assert_eq!(overlaps.len(), 1, "{overlaps:?}");
+        // 摘要可直接读
+        let text = d["text"].as_str().unwrap();
+        assert!(text.contains("player") && text.contains("中心") && text.contains("视野外"), "{text}");
     }
 
     #[test]

@@ -11,6 +11,8 @@
 //!   --ticks <N>    跑满 N tick 后自动退出（CI/脚本用，全速不限速）
 //!   --record <文件> 退出时把录像写到文件
 
+mod window;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -71,10 +73,15 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let mut speed: f64 = 1.0;
     let mut max_ticks: Option<u64> = None;
     let mut record_path: Option<String> = None;
+    let mut windowed = false;
     let mut i = 1;
     while i < args.len() {
         let need = |key: &str| format!("{key} 缺少参数值");
         match args[i].as_str() {
+            "--window" => {
+                windowed = true;
+                i += 1;
+            }
             "--port" => {
                 port = args.get(i + 1).ok_or(need("--port"))?.parse().map_err(|e| format!("--port: {e}"))?;
                 i += 2;
@@ -91,7 +98,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
                 record_path = Some(args.get(i + 1).ok_or(need("--record"))?.clone());
                 i += 2;
             }
-            other => return Err(format!("未知选项 {other:?}。可用: --port --speed --ticks --record")),
+            other => return Err(format!("未知选项 {other:?}。可用: --window --port --speed --ticks --record")),
         }
     }
 
@@ -114,8 +121,19 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
             "project": project.manifest.name,
             "control": format!("http://127.0.0.1:{}/rpc", server.port),
             "seed": project.manifest.seed,
+            "window": windowed,
         })
     );
+
+    if windowed {
+        let game = window::WindowedGame::new(sim, rt, dispatcher, server);
+        let (mut sim, error) = game.run()?;
+        finish_recording(&mut sim, record_path)?;
+        return match error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        };
+    }
 
     // 主循环：固定步长 + 倍速 + 帧边界处理控制命令
     let mut last = Instant::now();
@@ -163,6 +181,11 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(1));
     }
 
+    finish_recording(&mut sim, record_path)?;
+    Ok(())
+}
+
+fn finish_recording(sim: &mut vitric_sim::Sim, record_path: Option<String>) -> Result<(), String> {
     if let Some(path) = record_path {
         let rec = sim.stop_recording().expect("启动时已开录");
         std::fs::write(&path, serde_json::to_string(&rec).expect("录像可序列化"))
@@ -179,7 +202,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn step_once(
+pub fn step_once(
     sim: &mut vitric_sim::Sim,
     rt: &mut Runtime,
     dispatcher: &mut Dispatcher,

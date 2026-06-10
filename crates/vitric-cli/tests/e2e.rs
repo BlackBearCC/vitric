@@ -223,6 +223,16 @@ fn agent_drives_game_over_http() {
     let failures = rpc(port, "assert/failures", json!({}));
     assert_eq!(failures["result"].as_array().unwrap().len(), 0, "{failures}");
 
+    // 看（语义级，主通道）：画面翻译成精确描述
+    let desc = rpc(port, "render/describe", json!({}));
+    assert_eq!(desc["ok"], json!(true), "{desc}");
+    let visible = desc["result"]["visible"].as_array().unwrap();
+    assert!(
+        visible.iter().any(|v| v["name"] == json!("player")),
+        "玩家应在画面里: {desc}"
+    );
+    assert!(desc["result"]["text"].as_str().unwrap().contains("相机"));
+
     // 看（像素级）：无头截图，PNG 直接回传 base64
     let shot = rpc(port, "render/screenshot", json!({"width": 320, "height": 240, "inline": true}));
     assert_eq!(shot["ok"], json!(true), "{shot}");
