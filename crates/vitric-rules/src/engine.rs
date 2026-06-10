@@ -140,6 +140,8 @@ impl Engine {
     }
 
     /// 处理 each 展开后逐实体执行。
+    /// 参数是级联执行线程过来的全套上下文（输出/事件队列/深度/调用链），拆开反而藏语义。
+    #[allow(clippy::too_many_arguments)]
     fn run_rule_bound(
         &self,
         rule: &Rule,
@@ -166,6 +168,7 @@ impl Engine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_rule_once(
         &self,
         rule: &Rule,
@@ -191,6 +194,7 @@ impl Engine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn eval_condition(
         &self,
         world: &World,
@@ -272,7 +276,10 @@ impl Engine {
             let (id, path) = self.entity_field(world, ctx, target).map_err(&err)?;
             let cur = world.get_field(id, &path).map_err(|e| err(e.to_string()))?.clone();
             let sum = match (cur.as_i64(), delta.as_i64()) {
-                (Some(a), Some(b)) => json!(a + b),
+                // 显式 checked：debug panic / release 回绕会让同一录像在两种构建下分歧
+                (Some(a), Some(b)) => json!(a.checked_add(b).ok_or_else(|| err(format!(
+                    "add 整数溢出：{a} + {b} 超出 i64 范围"
+                )))?),
                 _ => match (cur.as_f64(), delta.as_f64()) {
                     (Some(a), Some(b)) => json!(a + b),
                     _ => {

@@ -76,6 +76,15 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 复现 bug：`vitric run my-game --ticks 600 --record bug.json` 录下来，
 `vitric replay my-game bug.json` 任何时候逐帧复现；重放跑偏会精确报告在哪个校验点开始不一致。
 
+## 确定性边界
+
+引擎保证什么、不保证什么，边界说清楚：
+
+- **录像只记输入流。** 录制期间 `world/set` / `world/spawn` / `world/despawn` / `project/reload` / `sim/restore` 会被明确拒绝（改了的状态不进录像，录出来必然重放分歧），检查器拖拽也会被禁用。要在录制中影响世界，用 `input/inject`——输入会被录下来。
+- **脚本必须无状态。** 跨 tick 的状态只能放组件里。`globalThis`/闭包里存的东西不进快照、热重载时清零，restore 之后必然分歧。`Math.random` / `Date.now` / `new Date()` 直接 throw 并指路 `ctx.random()` / `ctx.tick`；显式传参的 `new Date(0)` 是纯计算，放行。
+- **快照是全量的。** `sim/snapshot` 含世界、tick、随机数状态、未消化的输入、逻辑层暂存事件，restore 后继续跑和原轨迹逐位一致（有测试锁着）。
+- **确定性保证范围 = 同平台同二进制。** `Math.sin` 这类超越函数依赖系统数学库，跨平台（Linux ↔ Windows）末位可能不同；跨平台分享录像/比对哈希不在保证内。
+
 ## 写游戏的数据语言
 
 - `vitric.json` 清单：name / schema / entry / scenes / rules / scripts / seed

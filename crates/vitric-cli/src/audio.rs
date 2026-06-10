@@ -29,6 +29,10 @@ impl Audio {
 
     /// 播放一个音效（项目 sounds/ 目录下的 wav/ogg/mp3/flac）。
     pub fn play(&mut self, name: &str) -> Result<(), String> {
+        // 音效名来自事件 data（运行时可拼接），不许逃出 sounds/ 目录
+        if name.contains("..") || name.starts_with('/') || name.contains('\\') {
+            return Err(format!("音效名 {name:?} 不合法：只能是 sounds/ 目录内的相对文件名"));
+        }
         let bytes = match self.cache.get(name) {
             Some(b) => b.clone(),
             None => {

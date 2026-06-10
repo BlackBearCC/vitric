@@ -77,6 +77,15 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'
 Reproducing a bug: `vitric run my-game --ticks 600 --record bug.json`, then
 `vitric replay my-game bug.json` replays it frame-exact, and divergence is pinpointed to a checkpoint window.
 
+## Determinism boundaries
+
+What the engine guarantees, and where the guarantee ends:
+
+- **Recordings capture the input stream only.** While recording, `world/set` / `world/spawn` / `world/despawn` / `project/reload` / `sim/restore` are explicitly rejected (out-of-band mutations don't enter the recording, so it would silently become unreplayable), and inspector dragging is disabled. To affect the world during a recording, use `input/inject` — inputs are recorded.
+- **Scripts must be stateless.** Cross-tick state belongs in components. Anything stashed in `globalThis` or closures is invisible to snapshots and wiped by hot reload. `Math.random` / `Date.now` / `new Date()` throw and point you to `ctx.random()` / `ctx.tick`; explicit-argument `new Date(0)` is pure computation and allowed.
+- **Snapshots are complete.** `sim/snapshot` includes the world, tick, RNG state, pending inputs, and the logic layer's carried-over events; restore-then-continue is bit-identical to the original trajectory (locked by test).
+- **The guarantee is per platform, per binary.** Transcendental functions like `Math.sin` depend on the system math library; last-bit results may differ across Linux ↔ Windows. Sharing recordings or comparing hashes across platforms is outside the guarantee.
+
 ## The data language
 
 - `vitric.json` manifest: name / schema / entry / scenes / rules / scripts / animations / budgets / seed

@@ -327,7 +327,7 @@ impl World {
 }
 
 /// 把 "Comp.a.b" 切成 ("Comp", ["a","b"])。
-fn split_path<'p>(id: EntityId, path: &'p str) -> Result<(&'p str, Vec<&'p str>), EcsError> {
+fn split_path(id: EntityId, path: &str) -> Result<(&str, Vec<&str>), EcsError> {
     let mut parts = path.split('.');
     let component = parts.next().filter(|s| !s.is_empty()).ok_or_else(|| {
         EcsError::BadFieldPath {

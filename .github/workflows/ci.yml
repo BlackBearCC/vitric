@@ -22,10 +22,8 @@ jobs:
           sudo npm install -g esbuild
       - name: 全部测试
         run: cargo test --workspace
-      - name: 零警告
-        run: |
-          cargo build --workspace 2>&1 | tee /tmp/build.log
-          ! grep -q "^warning" /tmp/build.log
+      - name: 零警告（clippy 全量门禁）
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   windows-build:
     name: 交叉编译（Windows exe）
