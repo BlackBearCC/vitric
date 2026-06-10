@@ -10,6 +10,8 @@
 //! - `Sprite`  {"w": 数字, "h": 数字, "color": "#rrggbb"} — 有它才会被画
 //! - `Position` {"x", "y"} — 世界坐标，y 向上
 //! - `Camera` {"x", "y", "scale"} — 可选；取第一个，没有则原点、8 像素/单位
+//! - `Text` {"content", "size", "color"} — 屏上文字（内嵌 8x8 点阵，ASCII），
+//!   每字符 size×size 世界单位、整串居中于 Position，画在精灵之上
 
 mod assets;
 
@@ -105,7 +107,80 @@ pub fn render_world(
             }
         }
     }
+
+    draw_texts(world, &mut buf, width, height, (cam_x, cam_y, scale))?;
     Ok(buf)
+}
+
+/// 文字：`Text` {"content","size","color"} + `Position`，内嵌 8x8 点阵字体。
+/// 每个字符占 size×size 世界单位，整串以 Position 为中心，画在所有精灵之上。
+/// 字体只覆盖 ASCII（分数/提示/调试足够），其他字符画实心方块占位。
+fn draw_texts(
+    world: &World,
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    (cam_x, cam_y, scale): (f64, f64, f64),
+) -> Result<(), String> {
+    for id in world.query(&["Position", "Text"]) {
+        let content = world
+            .get_field(id, "Text.content")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        if content.is_empty() {
+            continue;
+        }
+        let size = num(world, id, "Text.size")?;
+        if size <= 0.0 {
+            continue;
+        }
+        let color = world
+            .get_field(id, "Text.color")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "#ffffff".to_string());
+        let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Text.color: {e}"))?;
+        let px = num(world, id, "Position.x")?;
+        let py = num(world, id, "Position.y")?;
+
+        let chars: Vec<char> = content.chars().collect();
+        let n = chars.len();
+        let cx = (width as f64) / 2.0 + (px - cam_x) * scale;
+        let cy = (height as f64) / 2.0 - (py - cam_y) * scale;
+        let half_w = n as f64 * size * scale / 2.0;
+        let half_h = size * scale / 2.0;
+        let x0 = (cx - half_w).floor().max(0.0) as i64;
+        let x1 = (cx + half_w).ceil().min(width as f64) as i64;
+        let y0 = (cy - half_h).floor().max(0.0) as i64;
+        let y1 = (cy + half_h).ceil().min(height as f64) as i64;
+        let span_x = 2.0 * half_w;
+        let span_y = 2.0 * half_h;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let u = ((x as f64 + 0.5) - (cx - half_w)) / span_x; // 0..1 横跨整串
+                let v = ((y as f64 + 0.5) - (cy - half_h)) / span_y; // 0..1 纵跨一字
+                let idx = ((u * n as f64) as usize).min(n - 1);
+                let col = (((u * n as f64 - idx as f64) * 8.0) as usize).min(7);
+                let row = ((v * 8.0) as usize).min(7);
+                if glyph_of(chars[idx])[row] & (1 << col) != 0 {
+                    let i = ((y as u32 * width + x as u32) * 4) as usize;
+                    buf[i..i + 4].copy_from_slice(&rgba);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 字符 → 8x8 点阵（每字节一行，低位在左）。非 ASCII 用实心方块占位。
+fn glyph_of(c: char) -> [u8; 8] {
+    let cp = c as usize;
+    if cp < 128 {
+        font8x8::legacy::BASIC_LEGACY[cp]
+    } else {
+        [0xff; 8]
+    }
 }
 
 /// 屏幕像素 → 世界坐标（检查器拖拽、点选用）。
@@ -287,6 +362,38 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
         }
     }
 
+    // 屏上文字：内容本身就是语义，agent 不用 OCR 截图
+    let mut texts = Vec::new();
+    for id in world.query(&["Position", "Text"]) {
+        let content = world
+            .get_field(id, "Text.content")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        if content.is_empty() {
+            continue;
+        }
+        let px = num(world, id, "Position.x")?;
+        let py = num(world, id, "Position.y")?;
+        let dx = px - cam_x;
+        let dy = py - cam_y;
+        let mut entry = serde_json::Map::new();
+        entry.insert("id".into(), json!(id.to_string()));
+        if let Some(n) = world.name_of(id) {
+            entry.insert("name".into(), json!(n));
+        }
+        entry.insert("content".into(), json!(content));
+        entry.insert("world".into(), json!({"x": px, "y": py}));
+        if dx.abs() < half_w_units && dy.abs() < half_h_units {
+            let sx = width as f64 / 2.0 + dx * scale;
+            let sy = height as f64 / 2.0 - dy * scale;
+            entry.insert("region".into(), json!(region_word(sx / width as f64, sy / height as f64)));
+        } else {
+            entry.insert("region".into(), json!("视野外"));
+        }
+        texts.push(serde_json::Value::Object(entry));
+    }
+
     // 视觉重叠（画面上谁压着谁）
     let mut overlaps = Vec::new();
     for i in 0..rects.len() {
@@ -323,12 +430,21 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
             o["distance_units"],
         ));
     }
+    for t in &texts {
+        lines.push(format!(
+            "- 文字 {:?} 在{}（世界 {},{}）",
+            t["content"].as_str().expect("content"),
+            t["region"].as_str().expect("region"),
+            t["world"]["x"], t["world"]["y"],
+        ));
+    }
 
     Ok(json!({
         "camera": {"x": cam_x, "y": cam_y, "scale": scale},
         "viewport": {"width": width, "height": height},
         "visible": visible,
         "offscreen": offscreen,
+        "texts": texts,
         "overlaps": overlaps,
         "text": lines.join("\n"),
     }))
@@ -431,6 +547,41 @@ mod tests {
         let buf = render_world(&w, 64, 64, &Assets::empty()).unwrap();
         assert_eq!(pixel(&buf, 64, 32 - 16, 32), [255, 0, 0, 255]);
         assert_eq!(pixel(&buf, 64, 32 + 8, 32), [24, 26, 33, 255]);
+    }
+
+    #[test]
+    fn text_renders_glyph_pixels_and_describe_reads_content() {
+        let mut w = World::new();
+        let e = w.spawn_named("score").unwrap();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        // "I" 单字符，4 单位 → 32x32 像素，居中
+        w.set_component(e, "Text", json!({"content": "I", "size": 4.0, "color": "#00ff00"}))
+            .unwrap();
+        let buf = render_world(&w, 64, 64, &Assets::empty()).unwrap();
+        // "I" 的竖干在字形第 2-3 列（8x8 点阵字形偏左），取样打在竖干上
+        assert_eq!(pixel(&buf, 64, 25, 32), [0, 255, 0, 255], "竖干处应是字形像素");
+        assert_eq!(pixel(&buf, 64, 2, 2), [24, 26, 33, 255]);
+        // 同世界同字节（文字也确定性）
+        assert_eq!(buf, render_world(&w, 64, 64, &Assets::empty()).unwrap());
+
+        let d = describe_world(&w, 64, 64).unwrap();
+        let texts = d["texts"].as_array().unwrap();
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0]["content"], json!("I"));
+        assert_eq!(texts[0]["region"], json!("中心"));
+        assert!(d["text"].as_str().unwrap().contains("文字 \"I\""), "{}", d["text"]);
+    }
+
+    #[test]
+    fn empty_text_is_skipped() {
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Text", json!({"content": "", "size": 4.0, "color": "#00ff00"}))
+            .unwrap();
+        let buf = render_world(&w, 64, 64, &Assets::empty()).unwrap();
+        assert_eq!(pixel(&buf, 64, 32, 32), [24, 26, 33, 255], "空文本不画");
+        assert_eq!(describe_world(&w, 64, 64).unwrap()["texts"].as_array().unwrap().len(), 0);
     }
 
     #[test]

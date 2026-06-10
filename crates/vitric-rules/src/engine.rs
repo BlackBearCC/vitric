@@ -367,6 +367,13 @@ impl Engine {
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Array),
             Value::Object(map) => {
+                // 字符串模板 {"format": "SCORE {}", "args": [路径...]}——
+                // 数字状态转屏上文字（Text.content）的正路，规则里别无他法
+                if let Some(fmt) = map.get("format").and_then(|v| v.as_str()) {
+                    if map.len() == 1 || (map.len() == 2 && map.contains_key("args")) {
+                        return self.format_template(world, ctx, fmt, map.get("args"));
+                    }
+                }
                 let mut out = Map::new();
                 for (k, v) in map {
                     out.insert(k.clone(), self.resolve(world, ctx, v)?);
@@ -375,6 +382,41 @@ impl Engine {
             }
             other => Ok(other.clone()),
         }
+    }
+
+    /// `{}` 逐个换成 resolve 后的 args；个数必须严格对上。
+    fn format_template(
+        &self,
+        world: &World,
+        ctx: Ctx,
+        fmt: &str,
+        args: Option<&Value>,
+    ) -> Result<Value, String> {
+        let args = match args {
+            None => Vec::new(),
+            Some(Value::Array(a)) => a
+                .iter()
+                .map(|v| self.resolve(world, ctx, v))
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(other) => return Err(format!("format 的 args 必须是数组，拿到 {other}")),
+        };
+        let slots = fmt.matches("{}").count();
+        if slots != args.len() {
+            return Err(format!(
+                "format 模板 {fmt:?} 有 {slots} 个 {{}}，但 args 给了 {} 个",
+                args.len()
+            ));
+        }
+        let mut parts = fmt.split("{}");
+        let mut out = String::from(parts.next().unwrap_or(""));
+        for (arg, part) in args.iter().zip(parts) {
+            match arg {
+                Value::String(s) => out.push_str(s),
+                other => out.push_str(&other.to_string()),
+            }
+            out.push_str(part);
+        }
+        Ok(Value::String(out))
     }
 
     /// 字符串是引用则求值；不是引用返回 None（按字面量处理）。
@@ -544,6 +586,37 @@ mod tests {
         let c = w.spawn().to_owned();
         w.set_component(c, "Coin", json!({"value": 5})).unwrap();
         (w, p, c)
+    }
+
+    #[test]
+    fn format_template_renders_numbers_into_text() {
+        let eng = engine(json!({"rules": [{
+            "id": "show-score",
+            "on": {"event": "refresh"},
+            "do": [{"set": "@player.Label.text",
+                    "to": {"format": "SCORE {} / {}", "args": ["@player.Score.value", 3]}}]
+        }]}));
+        let (mut w, p, _) = world_with_player_and_coin();
+        w.set_component(p, "Label", json!({"text": ""})).unwrap();
+        w.set_field(p, "Score.value", json!(2)).unwrap();
+        eng.process_tick(&mut w, vec![Event::new("refresh", json!({}))]).unwrap();
+        assert_eq!(w.get_field(p, "Label.text").unwrap(), &json!("SCORE 2 / 3"));
+    }
+
+    #[test]
+    fn format_template_arity_mismatch_is_reported() {
+        let eng = engine(json!({"rules": [{
+            "id": "bad-fmt",
+            "on": {"event": "refresh"},
+            "do": [{"set": "@player.Label.text",
+                    "to": {"format": "A {} B {}", "args": ["@player.Score.value"]}}]
+        }]}));
+        let (mut w, p, _) = world_with_player_and_coin();
+        w.set_component(p, "Label", json!({"text": ""})).unwrap();
+        let err = eng
+            .process_tick(&mut w, vec![Event::new("refresh", json!({}))])
+            .unwrap_err();
+        assert!(err.to_string().contains("format"), "{err}");
     }
 
     #[test]
