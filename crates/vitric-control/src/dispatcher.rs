@@ -38,6 +38,8 @@ pub struct Dispatcher {
     events: VecDeque<(u64, Event)>,
     /// 素材仓库（render 方法用；项目无素材则为空仓库）。
     assets: vitric_render::Assets,
+    /// 检查器选中的实体——人点的和 AI 设的是同一个状态，双向可见。
+    selection: Option<EntityId>,
     pub ctl: LoopCtl,
 }
 
@@ -50,8 +52,18 @@ impl Dispatcher {
             failures: Vec::new(),
             events: VecDeque::new(),
             assets: vitric_render::Assets::empty(),
+            selection: None,
             ctl: LoopCtl::default(),
         }
+    }
+
+    /// 检查器选中态（窗口点选写、AI inspect/select 写，双方都读这里）。
+    pub fn selection(&self) -> Option<EntityId> {
+        self.selection
+    }
+
+    pub fn set_selection(&mut self, selection: Option<EntityId>) {
+        self.selection = selection;
     }
 
     /// 挂载项目素材目录（加载即校验，坏图/超预算立刻报错）。
@@ -303,6 +315,21 @@ impl Dispatcher {
                 Ok(Value::Object(result))
             }
 
+            // ---- 检查器（人指哪 AI 看哪，反向也行）----
+            "inspect/selection" => match self.selection.filter(|&id| sim.world.is_alive(id)) {
+                Some(id) => Ok(json!({"selected": entity_json(&sim.world, id)})),
+                None => Ok(json!({"selected": null})),
+            },
+            "inspect/select" => {
+                if params.get("entity").is_some_and(|v| v.is_null()) {
+                    self.selection = None;
+                    return Ok(json!({"selected": null}));
+                }
+                let id = entity_param(&sim.world, params, "entity")?;
+                self.selection = Some(id);
+                Ok(json!({"selected": entity_json(&sim.world, id)}))
+            }
+
             // ---- 事件 ----
             "events/recent" => {
                 let since = params.get("since").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -348,8 +375,8 @@ impl Dispatcher {
                 "未知方法 {other:?}。可用方法: ping, world/entities, world/get, world/set, \
                  world/spawn, world/despawn, input/inject, sim/pause, sim/resume, sim/step, \
                  sim/speed, sim/quit, sim/snapshot, sim/restore, sim/hash, project/reload, \
-                 events/recent, render/describe, render/screenshot, \
-                 assert/add, assert/remove, assert/list, assert/failures"
+                 inspect/selection, inspect/select, events/recent, render/describe, \
+                 render/screenshot, assert/add, assert/remove, assert/list, assert/failures"
             )),
         }
     }
@@ -595,6 +622,27 @@ mod tests {
         );
         let e = call_err(&mut d, &mut sim, "input/inject", json!({"action": "x", "phase": "held"}));
         assert!(e.contains("pressed"), "{e}");
+    }
+
+    #[test]
+    fn inspect_selection_two_way() {
+        let (mut d, mut sim) = setup();
+        // 初始无选中
+        let r = call(&mut d, &mut sim, "inspect/selection", json!({}));
+        assert_eq!(r["selected"], json!(null));
+        // AI 设选中（等价于窗口里人点了一下）
+        let r = call(&mut d, &mut sim, "inspect/select", json!({"entity": "@player"}));
+        assert_eq!(r["selected"]["name"], json!("player"));
+        assert!(d.selection().is_some());
+        // 实体销毁后选中态自动失效
+        let p = sim.world.entity("player").unwrap();
+        sim.world.despawn(p).unwrap();
+        let r = call(&mut d, &mut sim, "inspect/selection", json!({}));
+        assert_eq!(r["selected"], json!(null));
+        // 清空选中
+        d.set_selection(None);
+        let r = call(&mut d, &mut sim, "inspect/select", json!({"entity": null}));
+        assert_eq!(r["selected"], json!(null));
     }
 
     #[test]

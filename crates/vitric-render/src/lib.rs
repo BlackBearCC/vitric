@@ -108,6 +108,88 @@ pub fn render_world(
     Ok(buf)
 }
 
+/// 屏幕像素 → 世界坐标（检查器拖拽、点选用）。
+pub fn screen_to_world(
+    world: &World,
+    width: u32,
+    height: u32,
+    px: f64,
+    py: f64,
+) -> Result<(f64, f64), String> {
+    let (cam_x, cam_y, scale) = camera_of(world)?;
+    Ok((
+        cam_x + (px - width as f64 / 2.0) / scale,
+        cam_y - (py - height as f64 / 2.0) / scale,
+    ))
+}
+
+/// 点选拾取：返回屏幕坐标 (px,py) 命中的最上层实体（绘制顺序靠后者优先）。
+pub fn pick(
+    world: &World,
+    width: u32,
+    height: u32,
+    px: f64,
+    py: f64,
+) -> Result<Option<vitric_ecs::EntityId>, String> {
+    let (wx, wy) = screen_to_world(world, width, height, px, py)?;
+    let ids = world.query(&["Position", "Sprite"]);
+    // 倒序：后画的盖在上面，优先命中
+    for &id in ids.iter().rev() {
+        let x = num(world, id, "Position.x")?;
+        let y = num(world, id, "Position.y")?;
+        let w = num(world, id, "Sprite.w")?;
+        let h = num(world, id, "Sprite.h")?;
+        if (wx - x).abs() * 2.0 <= w && (wy - y).abs() * 2.0 <= h {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+/// 在已渲染的帧上给实体画选中描边（检查器高亮，青色 2px）。
+pub fn draw_selection_outline(
+    buf: &mut [u8],
+    world: &World,
+    width: u32,
+    height: u32,
+    selected: vitric_ecs::EntityId,
+) -> Result<(), String> {
+    if !world.is_alive(selected) || !world.has_component(selected, "Sprite") {
+        return Ok(()); // 选中的实体没了/不可见，描边静默跳过（选中态本身由上层管理）
+    }
+    let (cam_x, cam_y, scale) = camera_of(world)?;
+    let x = num(world, selected, "Position.x")?;
+    let y = num(world, selected, "Position.y")?;
+    let w = num(world, selected, "Sprite.w")?;
+    let h = num(world, selected, "Sprite.h")?;
+    let cx = (width as f64) / 2.0 + (x - cam_x) * scale;
+    let cy = (height as f64) / 2.0 - (y - cam_y) * scale;
+    let half_w = w * scale / 2.0 + 2.0;
+    let half_h = h * scale / 2.0 + 2.0;
+    let x0 = (cx - half_w).floor().max(0.0) as i64;
+    let x1 = (cx + half_w).ceil().min(width as f64) as i64 - 1;
+    let y0 = (cy - half_h).floor().max(0.0) as i64;
+    let y1 = (cy + half_h).ceil().min(height as f64) as i64 - 1;
+    const TEAL: [u8; 4] = [39, 192, 168, 255];
+    let mut put = |x: i64, y: i64| {
+        if x >= 0 && y >= 0 && (x as u32) < width && (y as u32) < height {
+            let i = ((y as u32 * width + x as u32) * 4) as usize;
+            buf[i..i + 4].copy_from_slice(&TEAL);
+        }
+    };
+    for t in 0..2i64 {
+        for x in x0..=x1 {
+            put(x, y0 + t);
+            put(x, y1 - t);
+        }
+        for y in y0..=y1 {
+            put(x0 + t, y);
+            put(x1 - t, y);
+        }
+    }
+    Ok(())
+}
+
 /// RGBA 像素 → PNG 字节。
 pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
@@ -437,6 +519,43 @@ mod tests {
         // 摘要可直接读
         let text = d["text"].as_str().unwrap();
         assert!(text.contains("player") && text.contains("中心") && text.contains("视野外"), "{text}");
+    }
+
+    #[test]
+    fn pick_topmost_and_miss() {
+        let mut w = World::new();
+        let below = w.spawn_named("below").unwrap();
+        w.set_component(below, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(below, "Sprite", json!({"w": 4.0, "h": 4.0, "color": "#ff0000"})).unwrap();
+        let above = w.spawn_named("above").unwrap();
+        w.set_component(above, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(above, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#00ff00"})).unwrap();
+        // 屏幕中心：两个都覆盖，命中后画的 above
+        assert_eq!(pick(&w, 64, 64, 32.0, 32.0).unwrap(), Some(above));
+        // 偏一点：只有大的 below 覆盖（above 半宽 1 单位 = 8px）
+        assert_eq!(pick(&w, 64, 64, 32.0 + 12.0, 32.0).unwrap(), Some(below));
+        // 空地
+        assert_eq!(pick(&w, 64, 64, 2.0, 2.0).unwrap(), None);
+        // 坐标往返
+        let (wx, wy) = screen_to_world(&w, 64, 64, 32.0 + 8.0, 32.0 - 16.0).unwrap();
+        assert!((wx - 1.0).abs() < 1e-9 && (wy - 2.0).abs() < 1e-9, "{wx},{wy}");
+    }
+
+    #[test]
+    fn selection_outline_draws_border() {
+        let w_ = {
+            let mut w = World::new();
+            let e = w.spawn();
+            w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+            w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000"})).unwrap();
+            (w, e)
+        };
+        let (w, e) = w_;
+        let mut buf = render_world(&w, 64, 64, &Assets::empty()).unwrap();
+        draw_selection_outline(&mut buf, &w, 64, 64, e).unwrap();
+        // 精灵半宽 8px + 2px 外扩 → 描边在 x=32±10
+        assert_eq!(pixel(&buf, 64, 32 - 10, 32), [39, 192, 168, 255], "左描边");
+        assert_eq!(pixel(&buf, 64, 32, 32), [255, 0, 0, 255], "精灵本体不被盖");
     }
 
     #[test]
