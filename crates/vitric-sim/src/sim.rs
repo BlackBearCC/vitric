@@ -30,6 +30,12 @@ pub trait GameLogic {
     fn drain_observed(&mut self) -> Vec<Event> {
         Vec::new()
     }
+
+    /// 热重载逻辑层（规则/脚本从磁盘换新，世界状态不动）。
+    /// 成功返回重载摘要；失败必须保持旧逻辑原样可用。
+    fn reload(&mut self) -> Result<serde_json::Value, String> {
+        Err("该运行时不支持热重载".to_string())
+    }
 }
 
 /// 空逻辑（纯物理跑模拟用）。

@@ -19,6 +19,8 @@ use vitric_sim::{GameLogic, Pcg32, Sim};
 pub struct Runtime {
     pub rules: Engine,
     pub scripts: ScriptEngine,
+    /// 项目根目录（热重载从这里重读磁盘）。
+    root: Option<std::path::PathBuf>,
     /// 脚本上一 tick 发出的事件，本 tick 交给规则。
     carryover: Vec<Event>,
     /// 本 tick 规则/脚本 emit 的全部事件副本，主循环取走送进控制面事件日志。
@@ -42,13 +44,14 @@ impl Runtime {
             scripts.load(file, src).map_err(|e| e.to_string())?;
         }
 
-        Ok(Runtime { rules, scripts, carryover: Vec::new(), observed: Vec::new() })
+        Ok(Runtime { rules, scripts, root: None, carryover: Vec::new(), observed: Vec::new() })
     }
 
     /// 加载项目 + 装配 + 实例化入口场景，给出可以直接跑的 (Sim, Runtime)。
     pub fn boot(dir: &Path) -> Result<(Sim, Runtime), String> {
         let project = Project::load(dir).map_err(|r| r.to_string())?;
-        let runtime = Runtime::build(&project)?;
+        let mut runtime = Runtime::build(&project)?;
+        runtime.root = Some(dir.to_path_buf());
         let mut sim = Sim::new(project.manifest.seed);
         vitric_data::instantiate_scene(project.entry_scene(), &project.schema, &mut sim.world)
             .map_err(|r| r.to_string())?;
@@ -92,6 +95,25 @@ impl GameLogic for Runtime {
     /// 取走本 tick 规则/脚本发出的事件（控制面观测用）。
     fn drain_observed(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.observed)
+    }
+
+    /// 热重载：从磁盘重读规则+脚本，整体重建后原子替换；
+    /// 任何一步失败都保持旧逻辑不动（不会半死不活）。
+    /// 注意：schema/场景改动不在热重载范围（它们定义世界形状，改了要重启）。
+    fn reload(&mut self) -> Result<serde_json::Value, String> {
+        let root = self.root.clone().ok_or("该运行时没有项目目录，无法热重载")?;
+        let project = Project::load(&root).map_err(|r| r.to_string())?;
+        let fresh = Runtime::build(&project)?;
+        self.rules = fresh.rules;
+        self.scripts = fresh.scripts;
+        // carryover 里是纯数据事件，跨重载安全，保留不丢
+        Ok(serde_json::json!({
+            "reloaded": ["rules", "scripts"],
+            "note": "schema/场景的改动不走热重载，需要重启进程",
+            "rules": self.rules.rules.rules.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+            "systems": self.scripts.systems.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+            "fns": self.scripts.fns.clone(),
+        }))
     }
 }
 

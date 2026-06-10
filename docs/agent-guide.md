@@ -46,6 +46,7 @@ vitric replay <项目目录> <录像.json>      # 重放录像并逐校验点验
 | `sim/step` | `ticks?`（只在暂停时可用；返回里带新发生的断言失败） |
 | `sim/speed` | `multiplier`（无上限，无头狂奔随便开） |
 | `sim/snapshot` / `sim/restore` | — / `snapshot`（时间旅行：存档任意时刻、跳回去） |
+| `project/reload` | —（**热重载**：改完磁盘上的规则/脚本文件后调用，毫秒级生效，世界状态不动；失败保持旧逻辑。schema/场景改动需重启） |
 | `sim/quit` | — |
 
 ### 测

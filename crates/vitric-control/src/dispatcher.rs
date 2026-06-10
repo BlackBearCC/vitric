@@ -243,6 +243,9 @@ impl Dispatcher {
                 Ok(json!({}))
             }
 
+            // ---- 热重载（AI 改完规则/脚本，毫秒级生效，世界状态不动）----
+            "project/reload" => logic.reload(),
+
             // ---- 快照 / 哈希 ----
             "sim/snapshot" => Ok(sim.snapshot()),
             "sim/restore" => {
@@ -320,8 +323,9 @@ impl Dispatcher {
             other => Err(format!(
                 "未知方法 {other:?}。可用方法: ping, world/entities, world/get, world/set, \
                  world/spawn, world/despawn, input/inject, sim/pause, sim/resume, sim/step, \
-                 sim/speed, sim/quit, sim/snapshot, sim/restore, sim/hash, events/recent, \
-                 render/describe, render/screenshot, assert/add, assert/remove, assert/list, assert/failures"
+                 sim/speed, sim/quit, sim/snapshot, sim/restore, sim/hash, project/reload, \
+                 events/recent, render/describe, render/screenshot, \
+                 assert/add, assert/remove, assert/list, assert/failures"
             )),
         }
     }
