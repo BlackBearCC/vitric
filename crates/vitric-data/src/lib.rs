@@ -9,6 +9,6 @@ mod scene;
 mod schema;
 
 pub use error::{ValidationError, ValidationReport};
-pub use project::{Project, ProjectManifest};
+pub use project::{Clip, Project, ProjectManifest};
 pub use scene::{instantiate_scene, Scene};
 pub use schema::{ComponentSchema, FieldDef, FieldType, Schema};

@@ -139,6 +139,11 @@ impl Sim {
     pub fn step(&mut self, logic: &mut dyn GameLogic) -> Result<StepReport, SimError> {
         let mut events = Vec::new();
 
+        // 0. 世界的第一个 tick 发 start 事件——初始化规则的标准入口
+        if self.tick == 0 {
+            events.push(Event::new("start", json!({})));
+        }
+
         // 1. 输入
         for (action, phase) in std::mem::take(&mut self.pending_inputs) {
             if let Some(rec) = &mut self.recorder {

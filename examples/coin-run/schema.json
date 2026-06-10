@@ -109,6 +109,26 @@
           "min": 0.1
         }
       }
+    },
+    "Anim": {
+      "fields": {
+        "clip": {
+          "type": "text",
+          "default": ""
+        },
+        "prev": {
+          "type": "text",
+          "default": ""
+        },
+        "t": {
+          "type": "int",
+          "default": 0
+        },
+        "done": {
+          "type": "bool",
+          "default": false
+        }
+      }
     }
   }
 }

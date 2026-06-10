@@ -1,0 +1,29 @@
+{
+  "clips": {
+    "coin-spin": {
+      "frames": [
+        "coin-0.png",
+        "coin-1.png",
+        "coin-2.png",
+        "coin-3.png"
+      ],
+      "fps": 8,
+      "loop": true
+    },
+    "idle": {
+      "frames": [
+        "player.png"
+      ],
+      "fps": 1,
+      "loop": true
+    },
+    "walk": {
+      "frames": [
+        "player-walk-0.png",
+        "player-walk-1.png"
+      ],
+      "fps": 6,
+      "loop": true
+    }
+  }
+}

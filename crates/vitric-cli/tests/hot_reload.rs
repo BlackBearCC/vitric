@@ -14,17 +14,22 @@ fn copy_example(tag: &str) -> PathBuf {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/coin-run");
     let dst = std::env::temp_dir().join(format!("vitric-reload-{}-{tag}", std::process::id()));
     let _ = fs::remove_dir_all(&dst);
-    for sub in ["", "scenes", "rules", "scripts"] {
+    for sub in ["", "scenes", "rules", "scripts", "assets"] {
         fs::create_dir_all(dst.join(sub)).unwrap();
     }
     for rel in [
         "vitric.json",
         "schema.json",
+        "animations.json",
         "scenes/main.json",
         "rules/game.json",
         "scripts/systems.js",
     ] {
         fs::copy(src.join(rel), dst.join(rel)).unwrap();
+    }
+    for entry in fs::read_dir(src.join("assets")).unwrap() {
+        let p = entry.unwrap().path();
+        fs::copy(&p, dst.join("assets").join(p.file_name().unwrap())).unwrap();
     }
     dst
 }

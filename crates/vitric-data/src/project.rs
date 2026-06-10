@@ -32,9 +32,27 @@ pub struct ProjectManifest {
     pub rules: Vec<String>,
     #[serde(default)]
     pub scripts: Vec<String>,
+    /// 动画定义文件（可选）。
+    #[serde(default)]
+    pub animations: Option<String>,
     /// 世界随机种子；同种子同输入 = 同结果。
     #[serde(default = "default_seed")]
     pub seed: u64,
+}
+
+/// 一个动画片段：帧图序列 + 播放速率。
+///
+/// ```json
+/// { "clips": { "coin-spin": { "frames": ["coin1.png", "coin2.png"], "fps": 8, "loop": true } } }
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct Clip {
+    /// 帧图（素材仓库里的路径）。
+    pub frames: Vec<String>,
+    pub fps: u32,
+    /// true 循环播放；false 播完停在末帧并发 anim-finished 事件。
+    #[serde(default, rename = "loop")]
+    pub looping: bool,
 }
 
 fn default_seed() -> u64 {
@@ -56,6 +74,8 @@ pub struct Project {
     pub rules: Vec<(String, Value)>,
     /// (相对路径, 脚本源码)
     pub scripts: Vec<(String, String)>,
+    /// 动画片段（名字 -> 定义）。
+    pub animations: BTreeMap<String, Clip>,
 }
 
 impl Project {
@@ -141,11 +161,61 @@ impl Project {
             }
         }
 
-        report.into_result(Project { root, manifest, schema, scenes, rules, scripts })
+        // 动画
+        let mut animations = BTreeMap::new();
+        if let Some(rel) = &manifest.animations {
+            match read_json(&root.join(rel)) {
+                Ok(doc) => parse_animations(&doc, rel, &mut animations, &mut report),
+                Err(e) => report.push("VD040", rel, e, "清单 animations 字段指向的文件必须存在"),
+            }
+        }
+
+        report.into_result(Project { root, manifest, schema, scenes, rules, scripts, animations })
     }
 
     pub fn entry_scene(&self) -> &Scene {
         &self.scenes[&self.manifest.entry]
+    }
+}
+
+fn parse_animations(
+    doc: &Value,
+    file: &str,
+    out: &mut BTreeMap<String, Clip>,
+    report: &mut ValidationReport,
+) {
+    let Some(clips) = doc.get("clips").and_then(|v| v.as_object()) else {
+        report.push(
+            "VD050",
+            format!("{file}#/clips"),
+            "动画文件缺少 clips 对象",
+            "顶层结构: {\"clips\": {\"片段名\": {\"frames\": [\"图.png\"], \"fps\": 8, \"loop\": true}}}",
+        );
+        return;
+    };
+    for (name, cdoc) in clips {
+        let cpath = format!("{file}#/clips/{name}");
+        let clip: Clip = match serde_json::from_value(cdoc.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                report.push(
+                    "VD051",
+                    &cpath,
+                    format!("片段解析失败: {e}"),
+                    "片段写法: {\"frames\": [\"图.png\", ...], \"fps\": 8, \"loop\": true}",
+                );
+                continue;
+            }
+        };
+        if clip.frames.is_empty() {
+            report.push("VD052", format!("{cpath}/frames"), "frames 不能为空", "至少一帧");
+            continue;
+        }
+        if clip.fps == 0 {
+            report.push("VD053", format!("{cpath}/fps"), "fps 必须 > 0", "常用 4-12");
+            continue;
+        }
+        out.insert(name.clone(), clip);
     }
 }
 

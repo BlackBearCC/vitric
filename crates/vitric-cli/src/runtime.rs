@@ -1,10 +1,12 @@
 //! Runtime — 把项目数据、规则引擎、脚本引擎装配成一台能跑的游戏。
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use vitric_data::Project;
+use vitric_data::{Clip, Project};
+use vitric_ecs::World;
 use vitric_rules::{Engine, Event, RuleSet, ScriptCall};
 use vitric_script::ScriptEngine;
 use vitric_sim::{GameLogic, Pcg32, Sim};
@@ -19,6 +21,8 @@ use vitric_sim::{GameLogic, Pcg32, Sim};
 pub struct Runtime {
     pub rules: Engine,
     pub scripts: ScriptEngine,
+    /// 动画片段定义。
+    pub animations: BTreeMap<String, Clip>,
     /// 项目根目录（热重载从这里重读磁盘）。
     root: Option<std::path::PathBuf>,
     /// 脚本上一 tick 发出的事件，本 tick 交给规则。
@@ -44,7 +48,14 @@ impl Runtime {
             scripts.load(file, src).map_err(|e| e.to_string())?;
         }
 
-        Ok(Runtime { rules, scripts, root: None, carryover: Vec::new(), observed: Vec::new() })
+        Ok(Runtime {
+            rules,
+            scripts,
+            animations: project.animations.clone(),
+            root: None,
+            carryover: Vec::new(),
+            observed: Vec::new(),
+        })
     }
 
     /// 加载项目 + 装配 + 实例化入口场景，给出可以直接跑的 (Sim, Runtime)。
@@ -89,6 +100,12 @@ impl GameLogic for Runtime {
         self.observed.extend(so.events.iter().cloned());
         self.carryover.extend(so.events);
 
+        // 4. 动画推帧（引擎独占 Sprite.image 的写权——动画永远不会被别的逻辑"打断"，
+        //    想换动画只有一条正路：改 Anim.clip）
+        let anim_events = advance_animations(world, &self.animations)?;
+        self.observed.extend(anim_events.iter().cloned());
+        self.carryover.extend(anim_events);
+
         Ok(())
     }
 
@@ -117,6 +134,81 @@ impl GameLogic for Runtime {
     }
 }
 
+/// 动画系统：每 tick 推帧。状态全在 Anim 组件里（快照/回放安全）：
+/// `clip` 当前片段（空串=不播）、`prev` 引擎用来检测切换、`t` 片段内 tick 数、
+/// `done` 非循环片段是否已播完（播完那一刻发一次 `anim-finished` 事件）。
+pub fn advance_animations(
+    world: &mut World,
+    clips: &BTreeMap<String, Clip>,
+) -> Result<Vec<Event>, String> {
+    let mut events = Vec::new();
+    for id in world.query(&["Anim", "Sprite"]) {
+        let clip_name = world
+            .get_field(id, "Anim.clip")
+            .map_err(|e| e.to_string())?
+            .as_str()
+            .ok_or_else(|| format!("实体 {id} 的 Anim.clip 必须是文本"))?
+            .to_string();
+        if clip_name.is_empty() {
+            continue; // 空串 = 不播动画，Sprite.image 归还给用户
+        }
+        let clip = clips.get(&clip_name).ok_or_else(|| {
+            format!(
+                "实体 {id} 的 Anim.clip {clip_name:?} 没有定义。已定义片段: [{}]。\
+                 提示：片段在 animations 文件的 clips 里定义",
+                clips.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
+        let prev = world
+            .get_field(id, "Anim.prev")
+            .map_err(|e| e.to_string())?
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let mut t = world
+            .get_field(id, "Anim.t")
+            .map_err(|e| e.to_string())?
+            .as_i64()
+            .ok_or_else(|| format!("实体 {id} 的 Anim.t 必须是整数"))?;
+        let mut done = world
+            .get_field(id, "Anim.done")
+            .map_err(|e| e.to_string())?
+            .as_bool()
+            .unwrap_or(false);
+
+        if clip_name != prev {
+            // 切换片段：从头播
+            t = 0;
+            done = false;
+            world.set_field(id, "Anim.prev", json!(clip_name)).map_err(|e| e.to_string())?;
+        } else {
+            t += 1;
+        }
+
+        // 整数运算保确定性：第 t tick 对应第 t*fps/60 帧
+        let raw = (t as u64 * clip.fps as u64 / vitric_sim::TICKS_PER_SECOND) as usize;
+        let idx = if clip.looping {
+            raw % clip.frames.len()
+        } else {
+            if raw >= clip.frames.len() && !done {
+                done = true;
+                events.push(Event::new(
+                    "anim-finished",
+                    json!({"entity": id.to_string(), "clip": clip_name}),
+                ));
+            }
+            raw.min(clip.frames.len() - 1)
+        };
+
+        world.set_field(id, "Anim.t", json!(t)).map_err(|e| e.to_string())?;
+        world.set_field(id, "Anim.done", json!(done)).map_err(|e| e.to_string())?;
+        world
+            .set_field(id, "Sprite.image", json!(clip.frames[idx]))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(events)
+}
+
 /// `vitric check`：只验数据不开跑。返回人类/AI 可读的完整报告。
 pub fn check(dir: &Path) -> Result<Value, String> {
     let project = Project::load(dir).map_err(|r| r.to_string())?;
@@ -141,9 +233,31 @@ pub fn check(dir: &Path) -> Result<Value, String> {
             }
         }
     }
+    // 动画：clip 引用的帧图都在素材库、场景里 Anim.clip 都已定义
+    for (cname, clip) in &project.animations {
+        for frame in &clip.frames {
+            if assets.image(frame).is_none() {
+                missing.push(format!("动画片段 {cname:?} 引用了不存在的帧图 {frame:?}"));
+            }
+        }
+    }
+    for id in sim.world.query(&["Anim"]) {
+        if let Ok(clip) = sim.world.get_field(id, "Anim.clip") {
+            if let Some(name) = clip.as_str().filter(|s| !s.is_empty()) {
+                if !project.animations.contains_key(name) {
+                    missing.push(format!(
+                        "实体 {}{} 的 Anim.clip 引用了未定义的片段 {name:?}（已定义: [{}]）",
+                        id,
+                        sim.world.name_of(id).map(|n| format!("({n})")).unwrap_or_default(),
+                        project.animations.keys().cloned().collect::<Vec<_>>().join(", "),
+                    ));
+                }
+            }
+        }
+    }
     if !missing.is_empty() {
         return Err(format!(
-            "素材引用校验失败:\n  {}\n现有素材: [{}]",
+            "素材/动画引用校验失败:\n  {}\n现有素材: [{}]",
             missing.join("\n  "),
             assets.names().join(", ")
         ));

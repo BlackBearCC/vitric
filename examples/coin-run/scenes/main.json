@@ -27,6 +27,9 @@
           "h": 2,
           "color": "#4da3ff",
           "image": "player.png"
+        },
+        "Anim": {
+          "clip": "idle"
         }
       }
     },
@@ -59,6 +62,9 @@
           "h": 1,
           "color": "#ffd84d",
           "image": "coin.png"
+        },
+        "Anim": {
+          "clip": "coin-spin"
         }
       }
     },
@@ -81,6 +87,9 @@
           "h": 1,
           "color": "#ffd84d",
           "image": "coin.png"
+        },
+        "Anim": {
+          "clip": "coin-spin"
         }
       }
     },
@@ -103,6 +112,9 @@
           "h": 1,
           "color": "#ffd84d",
           "image": "coin.png"
+        },
+        "Anim": {
+          "clip": "coin-spin"
         }
       }
     }
