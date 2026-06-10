@@ -1,0 +1,32 @@
+{
+  "rules": [
+    {
+      "id": "move-right-start",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "pressed" } },
+      "do": [{ "set": "@player.Velocity.x", "to": "@player.Speed.value" }]
+    },
+    {
+      "id": "move-right-stop",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "released" } },
+      "do": [{ "set": "@player.Velocity.x", "to": 0 }]
+    },
+    {
+      "id": "collect-coin",
+      "on": { "event": "collision", "between": ["Player", "Coin"] },
+      "do": [
+        { "add": "self.Score.value", "by": "other.Coin.value" },
+        { "despawn": "other" },
+        { "emit": "coin-collected", "data": { "who": "self", "total": "self.Score.value" } }
+      ]
+    },
+    {
+      "id": "win-check",
+      "on": { "event": "coin-collected" },
+      "if": [["@player.Score.value", ">=", 3]],
+      "do": [
+        { "call": "celebrate", "with": { "score": "@player.Score.value" } },
+        { "set": "@player.Velocity.x", "to": 0 }
+      ]
+    }
+  ]
+}

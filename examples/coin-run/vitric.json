@@ -1,0 +1,9 @@
+{
+  "name": "coin-run",
+  "schema": "schema.json",
+  "entry": "scenes/main.json",
+  "scenes": ["scenes/main.json"],
+  "rules": ["rules/game.json"],
+  "scripts": ["scripts/systems.js"],
+  "seed": 42
+}

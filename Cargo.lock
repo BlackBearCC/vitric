@@ -222,6 +222,12 @@ name = "vitric-cli"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "vitric-control",
+ "vitric-data",
+ "vitric-ecs",
+ "vitric-rules",
+ "vitric-script",
+ "vitric-sim",
 ]
 
 [[package]]

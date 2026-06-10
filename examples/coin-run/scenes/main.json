@@ -1,0 +1,39 @@
+{
+  "entities": [
+    {
+      "name": "player",
+      "components": {
+        "Player": {},
+        "Position": { "x": 0, "y": 0 },
+        "Velocity": { "x": 0, "y": 0 },
+        "Collider": { "w": 1, "h": 2 },
+        "Score": { "value": 0 },
+        "Speed": { "value": 60 }
+      }
+    },
+    {
+      "name": "coin-1",
+      "components": {
+        "Coin": { "value": 1 },
+        "Position": { "x": 10, "y": 0 },
+        "Collider": { "w": 1, "h": 1 }
+      }
+    },
+    {
+      "name": "coin-2",
+      "components": {
+        "Coin": { "value": 1 },
+        "Position": { "x": 20, "y": 0 },
+        "Collider": { "w": 1, "h": 1 }
+      }
+    },
+    {
+      "name": "coin-3",
+      "components": {
+        "Coin": { "value": 1 },
+        "Position": { "x": 30, "y": 0 },
+        "Collider": { "w": 1, "h": 1 }
+      }
+    }
+  ]
+}

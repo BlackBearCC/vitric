@@ -1,0 +1,35 @@
+{
+  "components": {
+    "Position": {
+      "fields": {
+        "x": { "type": "number", "default": 0 },
+        "y": { "type": "number", "default": 0 }
+      }
+    },
+    "Velocity": {
+      "fields": {
+        "x": { "type": "number", "default": 0 },
+        "y": { "type": "number", "default": 0 }
+      }
+    },
+    "Collider": {
+      "fields": {
+        "w": { "type": "number", "required": true, "min": 0 },
+        "h": { "type": "number", "required": true, "min": 0 }
+      }
+    },
+    "Player": { "fields": {} },
+    "Coin": {
+      "fields": {
+        "value": { "type": "int", "default": 1, "min": 1 },
+        "home_y": { "type": "number", "default": 0 }
+      }
+    },
+    "Score": {
+      "fields": { "value": { "type": "int", "default": 0, "min": 0 } }
+    },
+    "Speed": {
+      "fields": { "value": { "type": "number", "default": 60 } }
+    }
+  }
+}

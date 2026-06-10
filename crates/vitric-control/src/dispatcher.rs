@@ -224,6 +224,8 @@ impl Dispatcher {
                 for _ in 0..ticks {
                     let report = sim.step(logic).map_err(|e| e.to_string())?;
                     self.record_events(report.tick, &report.events);
+                    let observed = logic.drain_observed();
+                    self.record_events(report.tick, &observed);
                     new_failures.extend(self.check_assertions(sim));
                 }
                 Ok(json!({"tick": sim.tick, "assert_failures": new_failures}))

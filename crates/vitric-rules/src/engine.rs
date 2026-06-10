@@ -24,6 +24,8 @@ pub struct TickOutput {
     pub calls: Vec<ScriptCall>,
     /// 本 tick 触发过的规则 id（含触发次数顺序），调试/录像用。
     pub fired: Vec<String>,
+    /// 规则 emit 过的事件副本——控制面事件日志靠它，AI 才看得见因果链。
+    pub emitted: Vec<Event>,
 }
 
 /// 规则运行时错误。规则系统不写 fallback：错了就停下来把话说清楚。
@@ -324,7 +326,9 @@ impl Engine {
             let resolved = self.resolve(world, ctx, &data).map_err(&err)?;
             let mut new_chain = chain.to_vec();
             new_chain.push(format!("{}→{}", rule.id, name));
-            queue.push_back((Event::new(name, resolved), depth + 1, new_chain));
+            let event = Event::new(name, resolved);
+            out.emitted.push(event.clone());
+            queue.push_back((event, depth + 1, new_chain));
             return Ok(());
         }
 

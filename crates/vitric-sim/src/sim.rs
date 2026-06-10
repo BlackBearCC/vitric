@@ -24,6 +24,12 @@ pub trait GameLogic {
         rng: &mut Pcg32,
         tick: u64,
     ) -> Result<(), String>;
+
+    /// 取走本 tick 逻辑层（规则/脚本）发出的事件副本，供控制面事件日志观测。
+    /// 没有可观测事件的实现用默认空集即可。
+    fn drain_observed(&mut self) -> Vec<Event> {
+        Vec::new()
+    }
 }
 
 /// 空逻辑（纯物理跑模拟用）。
