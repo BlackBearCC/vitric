@@ -75,6 +75,22 @@ impl Engine {
         Engine { rules, schema }
     }
 
+    /// 独立求值一组条件（无事件上下文）。断言系统用它：
+    /// 条件全部成立返回 true。路径写法同规则（@实体名 / e3v1 句柄）。
+    pub fn check(
+        &self,
+        world: &World,
+        conditions: &[(String, String, Value)],
+    ) -> Result<bool, RuleError> {
+        for (i, (left, op, right)) in conditions.iter().enumerate() {
+            let at = format!("check/{i}");
+            if !self.eval_condition(world, Ctx::default(), left, op, right, "<断言>", &at)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// 跑一个 tick：先跑 tick 规则，再按 FIFO 消化事件（含级联）。
     /// `inbox`：本 tick 外部产生的事件（输入、碰撞等）。
     pub fn process_tick(
