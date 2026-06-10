@@ -25,7 +25,8 @@
         "Sprite": {
           "w": 1,
           "h": 2,
-          "color": "#4da3ff"
+          "color": "#4da3ff",
+          "image": "player.png"
         }
       }
     },
@@ -56,7 +57,8 @@
         "Sprite": {
           "w": 1,
           "h": 1,
-          "color": "#ffd84d"
+          "color": "#ffd84d",
+          "image": "coin.png"
         }
       }
     },
@@ -77,7 +79,8 @@
         "Sprite": {
           "w": 1,
           "h": 1,
-          "color": "#ffd84d"
+          "color": "#ffd84d",
+          "image": "coin.png"
         }
       }
     },
@@ -98,7 +101,8 @@
         "Sprite": {
           "w": 1,
           "h": 1,
-          "color": "#ffd84d"
+          "color": "#ffd84d",
+          "image": "coin.png"
         }
       }
     }

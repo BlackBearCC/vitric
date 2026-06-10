@@ -36,6 +36,8 @@ pub struct Dispatcher {
     failures: Vec<Value>,
     /// 最近事件环形缓冲。
     events: VecDeque<(u64, Event)>,
+    /// 素材仓库（render 方法用；项目无素材则为空仓库）。
+    assets: vitric_render::Assets,
     pub ctl: LoopCtl,
 }
 
@@ -47,8 +49,20 @@ impl Dispatcher {
             failing: BTreeSet::new(),
             failures: Vec::new(),
             events: VecDeque::new(),
+            assets: vitric_render::Assets::empty(),
             ctl: LoopCtl::default(),
         }
+    }
+
+    /// 挂载项目素材目录（加载即校验，坏图/超预算立刻报错）。
+    pub fn load_assets(&mut self, dir: &std::path::Path) -> Result<(), String> {
+        self.assets = vitric_render::Assets::load_dir(dir)?;
+        Ok(())
+    }
+
+    /// 素材仓库只读访问（窗口呈现共用同一份）。
+    pub fn assets(&self) -> &vitric_render::Assets {
+        &self.assets
     }
 
     /// 主循环每 step 后调用：记录事件进环形缓冲。
@@ -243,8 +257,18 @@ impl Dispatcher {
                 Ok(json!({}))
             }
 
-            // ---- 热重载（AI 改完规则/脚本，毫秒级生效，世界状态不动）----
-            "project/reload" => logic.reload(),
+            // ---- 热重载（AI 改完规则/脚本/素材，毫秒级生效，世界状态不动）----
+            "project/reload" => {
+                let mut summary = logic.reload()?;
+                // 挂了素材目录就一起重载；失败要单独说清（规则/脚本已经换新了）
+                if let Err(e) = self.assets.reload() {
+                    if !e.contains("没有目录") {
+                        return Err(format!("规则/脚本已重载，但素材重载失败: {e}"));
+                    }
+                }
+                summary["assets"] = json!(self.assets.count());
+                Ok(summary)
+            }
 
             // ---- 快照 / 哈希 ----
             "sim/snapshot" => Ok(sim.snapshot()),
@@ -264,7 +288,7 @@ impl Dispatcher {
             "render/screenshot" => {
                 let width = params.get("width").and_then(|v| v.as_u64()).unwrap_or(320) as u32;
                 let height = params.get("height").and_then(|v| v.as_u64()).unwrap_or(240) as u32;
-                let png = vitric_render::screenshot_png(&sim.world, width, height)?;
+                let png = vitric_render::screenshot_png(&sim.world, width, height, &self.assets)?;
                 let mut result = serde_json::Map::new();
                 result.insert("width".into(), json!(width));
                 result.insert("height".into(), json!(height));

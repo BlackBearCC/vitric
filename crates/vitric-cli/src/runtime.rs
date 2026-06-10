@@ -125,6 +125,29 @@ pub fn check(dir: &Path) -> Result<Value, String> {
     let mut sim = Sim::new(project.manifest.seed);
     vitric_data::instantiate_scene(project.entry_scene(), &project.schema, &mut sim.world)
         .map_err(|r| r.to_string())?;
+    // 素材：加载即校验（坏图/超尺寸），再查场景引用的图都在
+    let assets = vitric_render::Assets::load_dir(&dir.join("assets"))?;
+    let mut missing = Vec::new();
+    for id in sim.world.query(&["Sprite"]) {
+        if let Ok(image) = sim.world.get_field(id, "Sprite.image") {
+            if let Some(name) = image.as_str().filter(|s| !s.is_empty()) {
+                if assets.image(name).is_none() {
+                    missing.push(format!(
+                        "实体 {}{} 引用了不存在的素材 {name:?}",
+                        id,
+                        sim.world.name_of(id).map(|n| format!("({n})")).unwrap_or_default(),
+                    ));
+                }
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "素材引用校验失败:\n  {}\n现有素材: [{}]",
+            missing.join("\n  "),
+            assets.names().join(", ")
+        ));
+    }
     Ok(serde_json::json!({
         "project": project.manifest.name,
         "scenes": project.scenes.keys().collect::<Vec<_>>(),
@@ -134,6 +157,10 @@ pub fn check(dir: &Path) -> Result<Value, String> {
         })).collect::<Vec<_>>(),
         "fns": runtime.scripts.fns,
         "entities": sim.world.entities().len(),
+        "assets": {
+            "count": assets.count(),
+            "decoded_kb": assets.total_bytes() / 1024,
+        },
         "initial_hash": format!("{:#018x}", sim.world.state_hash()),
     }))
 }

@@ -70,7 +70,12 @@ impl WindowedGame {
         if surface.resize(w, h).is_err() {
             return;
         }
-        let rgba = match vitric_render::render_world(&self.sim.world, size.width, size.height) {
+        let rgba = match vitric_render::render_world(
+            &self.sim.world,
+            size.width,
+            size.height,
+            self.dispatcher.assets(),
+        ) {
             Ok(buf) => buf,
             Err(e) => {
                 self.error = Some(e);

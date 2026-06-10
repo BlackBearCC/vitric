@@ -11,12 +11,21 @@
 //! - `Position` {"x", "y"} — 世界坐标，y 向上
 //! - `Camera` {"x", "y", "scale"} — 可选；取第一个，没有则原点、8 像素/单位
 
+mod assets;
+
+pub use assets::{Assets, Image};
+
 use serde_json::Value;
 
 use vitric_ecs::World;
 
 /// 渲染一帧：返回 RGBA8 像素（行优先，左上原点）。
-pub fn render_world(world: &World, width: u32, height: u32) -> Result<Vec<u8>, String> {
+pub fn render_world(
+    world: &World,
+    width: u32,
+    height: u32,
+    assets: &Assets,
+) -> Result<Vec<u8>, String> {
     if width == 0 || height == 0 || width > 4096 || height > 4096 {
         return Err(format!("分辨率 {width}x{height} 不合法（1..=4096）"));
     }
@@ -32,12 +41,6 @@ pub fn render_world(world: &World, width: u32, height: u32) -> Result<Vec<u8>, S
         let py = num(world, id, "Position.y")?;
         let sw = num(world, id, "Sprite.w")?;
         let sh = num(world, id, "Sprite.h")?;
-        let color = world
-            .get_field(id, "Sprite.color")
-            .ok()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_else(|| "#ffffff".to_string());
-        let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Sprite.color: {e}"))?;
 
         // 世界 → 屏幕（y 翻转，相机居中）
         let cx = (width as f64) / 2.0 + (px - cam_x) * scale;
@@ -48,10 +51,57 @@ pub fn render_world(world: &World, width: u32, height: u32) -> Result<Vec<u8>, S
         let x1 = (cx + half_w).ceil().min(width as f64) as i64;
         let y0 = (cy - half_h).floor().max(0.0) as i64;
         let y1 = (cy + half_h).ceil().min(height as f64) as i64;
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let i = ((y as u32 * width + x as u32) * 4) as usize;
-                buf[i..i + 4].copy_from_slice(&rgba);
+
+        let image_name = world
+            .get_field(id, "Sprite.image")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+
+        if image_name.is_empty() {
+            // 纯色块
+            let color = world
+                .get_field(id, "Sprite.color")
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| "#ffffff".to_string());
+            let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Sprite.color: {e}"))?;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y as u32 * width + x as u32) * 4) as usize;
+                    buf[i..i + 4].copy_from_slice(&rgba);
+                }
+            }
+        } else {
+            // 贴图：最近邻缩放 + alpha 混合。图不存在直接报错（不画占位符）。
+            let img = assets.image(&image_name).ok_or_else(|| {
+                format!(
+                    "实体 {id} 的 Sprite.image {image_name:?} 不在素材仓库里。\
+                     现有素材: [{}]。提示：图放进项目 assets/ 目录，路径相对 assets/ 写",
+                    assets.names().join(", ")
+                )
+            })?;
+            let span_x = 2.0 * half_w;
+            let span_y = 2.0 * half_h;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let u = ((x as f64 + 0.5) - (cx - half_w)) / span_x;
+                    let v = ((y as f64 + 0.5) - (cy - half_h)) / span_y;
+                    let sx = ((u * img.width as f64) as i64).clamp(0, img.width as i64 - 1) as usize;
+                    let sy = ((v * img.height as f64) as i64).clamp(0, img.height as i64 - 1) as usize;
+                    let s = (sy * img.width as usize + sx) * 4;
+                    let src = &img.rgba[s..s + 4];
+                    let a = src[3] as u32;
+                    if a == 0 {
+                        continue;
+                    }
+                    let i = ((y as u32 * width + x as u32) * 4) as usize;
+                    let dst = &mut buf[i..i + 4];
+                    for c in 0..3 {
+                        dst[c] = ((src[c] as u32 * a + dst[c] as u32 * (255 - a)) / 255) as u8;
+                    }
+                    dst[3] = 255;
+                }
             }
         }
     }
@@ -72,8 +122,13 @@ pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Strin
 }
 
 /// 一步到位：world → PNG。
-pub fn screenshot_png(world: &World, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let rgba = render_world(world, width, height)?;
+pub fn screenshot_png(
+    world: &World,
+    width: u32,
+    height: u32,
+    assets: &Assets,
+) -> Result<Vec<u8>, String> {
+    let rgba = render_world(world, width, height, assets)?;
     encode_png(&rgba, width, height)
 }
 
@@ -106,6 +161,11 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "#ffffff".to_string());
+        let image = world
+            .get_field(id, "Sprite.image")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
         let name = world.name_of(id).map(String::from);
 
         let dx = px - cam_x;
@@ -118,7 +178,11 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
             entry.insert("name".into(), json!(n));
         }
         entry.insert("world".into(), json!({"x": px, "y": py}));
-        entry.insert("sprite".into(), json!({"w": sw, "h": sh, "color": color}));
+        let mut sprite = json!({"w": sw, "h": sh, "color": color});
+        if !image.is_empty() {
+            sprite["image"] = json!(image);
+        }
+        entry.insert("sprite".into(), sprite);
 
         if on_screen {
             let sx = width as f64 / 2.0 + dx * scale;
@@ -271,7 +335,7 @@ mod tests {
     #[test]
     fn sprite_renders_at_screen_center() {
         let w = world_one_red_sprite();
-        let buf = render_world(&w, 64, 64).unwrap();
+        let buf = render_world(&w, 64, 64, &Assets::empty()).unwrap();
         assert_eq!(pixel(&buf, 64, 32, 32), [255, 0, 0, 255], "中心是红色精灵");
         assert_eq!(pixel(&buf, 64, 2, 2), [24, 26, 33, 255], "角落是背景");
     }
@@ -282,7 +346,7 @@ mod tests {
         let cam = w.spawn();
         // 相机右移 2 单位 → 精灵在屏幕上左移 2*8=16 像素
         w.set_component(cam, "Camera", json!({"x": 2.0, "y": 0.0, "scale": 8.0})).unwrap();
-        let buf = render_world(&w, 64, 64).unwrap();
+        let buf = render_world(&w, 64, 64, &Assets::empty()).unwrap();
         assert_eq!(pixel(&buf, 64, 32 - 16, 32), [255, 0, 0, 255]);
         assert_eq!(pixel(&buf, 64, 32 + 8, 32), [24, 26, 33, 255]);
     }
@@ -290,19 +354,59 @@ mod tests {
     #[test]
     fn same_world_same_bytes() {
         let w = world_one_red_sprite();
-        assert_eq!(render_world(&w, 128, 96).unwrap(), render_world(&w, 128, 96).unwrap());
+        assert_eq!(render_world(&w, 128, 96, &Assets::empty()).unwrap(), render_world(&w, 128, 96, &Assets::empty()).unwrap());
     }
 
     #[test]
     fn png_has_magic_and_decodes_back() {
         let w = world_one_red_sprite();
-        let data = screenshot_png(&w, 32, 32).unwrap();
+        let data = screenshot_png(&w, 32, 32, &Assets::empty()).unwrap();
         assert_eq!(&data[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], "PNG 魔数");
         let decoder = png::Decoder::new(std::io::Cursor::new(&data[..]));
         let mut reader = decoder.read_info().unwrap();
         let mut out = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut out).unwrap();
         assert_eq!((info.width, info.height), (32, 32));
+    }
+
+    #[test]
+    fn image_sprite_blits_with_alpha() {
+        // 2x2 贴图：左半红不透明，右半全透明
+        let dir = std::env::temp_dir().join(format!("vitric-blit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pixels: Vec<u8> = vec![
+            255, 0, 0, 255, /**/ 0, 0, 0, 0,
+            255, 0, 0, 255, /**/ 0, 0, 0, 0,
+        ];
+        {
+            let file = std::fs::File::create(dir.join("half.png")).unwrap();
+            let mut enc = png::Encoder::new(file, 2, 2);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header().unwrap().write_image_data(&pixels).unwrap();
+        }
+        let assets = Assets::load_dir(&dir).unwrap();
+
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(
+            e,
+            "Sprite",
+            json!({"w": 4.0, "h": 4.0, "color": "#ffffff", "image": "half.png"}),
+        )
+        .unwrap();
+        // 默认相机 scale=8：精灵占屏幕中央 32x32 像素
+        let buf = render_world(&w, 64, 64, &assets).unwrap();
+        assert_eq!(pixel(&buf, 64, 32 - 8, 32), [255, 0, 0, 255], "左半是贴图红");
+        assert_eq!(pixel(&buf, 64, 32 + 8, 32), [24, 26, 33, 255], "右半透明 → 透出背景");
+
+        // 引用不存在的图：报错并列出现有素材
+        w.set_field(e, "Sprite.image", json!("ghost.png")).unwrap();
+        let err = render_world(&w, 64, 64, &assets).unwrap_err();
+        assert!(err.contains("half.png"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -341,8 +445,8 @@ mod tests {
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(e, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "red"})).unwrap();
-        let err = render_world(&w, 32, 32).unwrap_err();
+        let err = render_world(&w, 32, 32, &Assets::empty()).unwrap_err();
         assert!(err.contains("#rrggbb"), "{err}");
-        assert!(render_world(&w, 0, 32).is_err());
+        assert!(render_world(&w, 0, 32, &Assets::empty()).is_err());
     }
 }
