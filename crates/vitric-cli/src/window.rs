@@ -212,6 +212,20 @@ impl WindowedGame {
         if event.repeat {
             return; // 自动重复不进模拟，按住的语义靠 pressed/released 对
         }
+        // F11 = 窗口命令(切无边框全屏),不进模拟输入流
+        if event.physical_key == PhysicalKey::Code(KeyCode::F11) {
+            if event.state == ElementState::Pressed {
+                if let Some(w) = &self.window {
+                    let fs = if w.fullscreen().is_some() {
+                        None
+                    } else {
+                        Some(winit::window::Fullscreen::Borderless(None))
+                    };
+                    w.set_fullscreen(fs);
+                }
+            }
+            return;
+        }
         let Some(action) = key_action(&event) else {
             return;
         };
@@ -253,9 +267,11 @@ impl ApplicationHandler for WindowedGame {
         if self.window.is_some() {
             return;
         }
+        // 默认最大化占满屏幕(保留标题栏可关);F11 切无边框全屏
         let attrs = Window::default_attributes()
             .with_title("Vitric")
-            .with_inner_size(LogicalSize::new(960.0, 540.0));
+            .with_inner_size(LogicalSize::new(960.0, 540.0))
+            .with_maximized(true);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
