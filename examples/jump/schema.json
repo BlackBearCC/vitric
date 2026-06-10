@@ -1,0 +1,99 @@
+{
+  "components": {
+    "Player": {
+      "fields": {}
+    },
+    "Goal": {
+      "fields": {}
+    },
+    "Solid": {
+      "fields": {}
+    },
+    "Position": {
+      "fields": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "Velocity": {
+      "fields": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "Collider": {
+      "fields": {
+        "w": {
+          "type": "number"
+        },
+        "h": {
+          "type": "number"
+        }
+      }
+    },
+    "Body": {
+      "fields": {
+        "gravity": {
+          "type": "number",
+          "default": -30
+        },
+        "grounded": {
+          "type": "bool",
+          "default": false
+        }
+      }
+    },
+    "Sprite": {
+      "fields": {
+        "w": {
+          "type": "number"
+        },
+        "h": {
+          "type": "number"
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        }
+      }
+    },
+    "Camera": {
+      "fields": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "scale": {
+          "type": "number",
+          "default": 8
+        }
+      }
+    },
+    "Text": {
+      "fields": {
+        "content": {
+          "type": "text",
+          "default": ""
+        },
+        "size": {
+          "type": "number",
+          "default": 1
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        }
+      }
+    }
+  }
+}

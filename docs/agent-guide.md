@@ -117,3 +117,14 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 内建系统只认这些名字：`Position{x,y}` + `Velocity{x,y}` → 每 tick 积分移动；
 `Position` + `Collider{w,h}` → AABB 碰撞发 `collision` 事件；
 `Position` + `Sprite{w,h,color}` → 渲染；`Camera{x,y,scale}` → 取景。
+
+## 平台物理
+
+- `Body{gravity, grounded}`（搭配 Velocity+Collider）：每 tick `Velocity.y += gravity * DT`（世界 y 朝上，重力填负数如 -30）；`grounded` 由引擎维护，落在 Solid 顶面时为 true——起跳规则的标准条件。
+- `Solid{}`（搭配 Position+Collider）：挡停体（地面/墙/平台）。带 Body 的实体撞上会贴边停、该轴速度清零；轴分离裁剪，单 tick 位移别超过障碍厚度（无扫掠，速度预算留余量）。
+- 起跳就是一条规则：`on input(space) if [["@hero.Body.grounded","==",true]] do set @hero.Velocity.y = 14`。完整可玩示例见 `examples/jump`（纯规则零脚本）。
+
+## 屏上文字
+
+`Text{content, size, color}` + `Position`：内嵌 8x8 点阵字体（ASCII），每字符 size×size 世界单位、整串居中于 Position，画在精灵之上。`render/describe` 直接给出 `texts[].content`——agent 不用从截图认字。
+数字状态转文字用规则的 format 模板：`{"set": "@hud.Text.content", "to": {"format": "SCORE {}", "args": ["self.Score.value"]}}`（`{}` 与 args 个数必须一致）。

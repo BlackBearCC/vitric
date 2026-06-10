@@ -58,6 +58,15 @@
           "despawn": "other"
         },
         {
+          "set": "@hud.Text.content",
+          "to": {
+            "format": "SCORE {}",
+            "args": [
+              "self.Score.value"
+            ]
+          }
+        },
+        {
           "emit": "coin-collected",
           "data": {
             "who": "self",
@@ -94,6 +103,10 @@
         {
           "set": "@player.Velocity.x",
           "to": 0
+        },
+        {
+          "set": "@hud.Text.content",
+          "to": "YOU WIN!"
         }
       ]
     }

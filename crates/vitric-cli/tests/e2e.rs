@@ -49,6 +49,9 @@ fn play_coin_run_to_victory() {
     );
     // 通关后玩家被规则停下
     assert_eq!(sim.world.get_field(player, "Velocity.x").unwrap().as_f64(), Some(0.0));
+    // HUD 文字被 format 模板更新到终局文案
+    let hud = sim.world.entity("hud").unwrap();
+    assert_eq!(sim.world.get_field(hud, "Text.content").unwrap(), &json!("YOU WIN!"));
 
     // 录像重放：从头再来必须逐校验点一致
     let rec = sim.stop_recording().unwrap();
@@ -83,7 +86,7 @@ fn check_command_reports_project_shape() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["project"], json!("coin-run"));
-    assert_eq!(report["entities"], json!(5));
+    assert_eq!(report["entities"], json!(6)); // player + camera + 3 coins + hud
     assert!(report["rules"].as_array().unwrap().iter().any(|r| r == "collect-coin"));
     assert!(report["systems"][0]["writes"].as_array().is_some());
 }

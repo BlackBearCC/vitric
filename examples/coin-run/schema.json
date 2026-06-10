@@ -129,6 +129,22 @@
           "default": false
         }
       }
+    },
+    "Text": {
+      "fields": {
+        "content": {
+          "type": "text",
+          "default": ""
+        },
+        "size": {
+          "type": "number",
+          "default": 1
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        }
+      }
     }
   }
 }

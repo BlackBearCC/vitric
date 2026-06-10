@@ -1,0 +1,141 @@
+{
+  "rules": [
+    {
+      "id": "run-left",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "left",
+          "phase": "pressed"
+        }
+      },
+      "do": [
+        {
+          "set": "@hero.Velocity.x",
+          "to": -8
+        }
+      ]
+    },
+    {
+      "id": "run-right",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "right",
+          "phase": "pressed"
+        }
+      },
+      "do": [
+        {
+          "set": "@hero.Velocity.x",
+          "to": 8
+        }
+      ]
+    },
+    {
+      "id": "stop-left",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "left",
+          "phase": "released"
+        }
+      },
+      "do": [
+        {
+          "set": "@hero.Velocity.x",
+          "to": 0
+        }
+      ]
+    },
+    {
+      "id": "stop-right",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "right",
+          "phase": "released"
+        }
+      },
+      "do": [
+        {
+          "set": "@hero.Velocity.x",
+          "to": 0
+        }
+      ]
+    },
+    {
+      "id": "jump",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "space",
+          "phase": "pressed"
+        }
+      },
+      "if": [
+        [
+          "@hero.Body.grounded",
+          "==",
+          true
+        ]
+      ],
+      "do": [
+        {
+          "set": "@hero.Velocity.y",
+          "to": 14
+        }
+      ]
+    },
+    {
+      "id": "jump-up-key",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "up",
+          "phase": "pressed"
+        }
+      },
+      "if": [
+        [
+          "@hero.Body.grounded",
+          "==",
+          true
+        ]
+      ],
+      "do": [
+        {
+          "set": "@hero.Velocity.y",
+          "to": 14
+        }
+      ]
+    },
+    {
+      "id": "reach-flag",
+      "on": {
+        "event": "collision",
+        "between": [
+          "Player",
+          "Goal"
+        ]
+      },
+      "do": [
+        {
+          "set": "@msg.Text.content",
+          "to": "YOU MADE IT!"
+        },
+        {
+          "set": "@msg.Text.color",
+          "to": "#7dff8a"
+        },
+        {
+          "despawn": "other"
+        },
+        {
+          "emit": "game-won",
+          "data": {}
+        }
+      ]
+    }
+  ]
+}

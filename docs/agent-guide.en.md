@@ -118,3 +118,14 @@ Convention event: `{"emit": "play-sound", "data": {"sound": "coin.wav"}}` plays 
 Built-in systems recognize: `Position{x,y}` + `Velocity{x,y}` → integrated motion each tick;
 `Position` + `Collider{w,h}` → AABB collision emits `collision` events;
 `Position` + `Sprite{w,h,color,image}` → rendering; `Camera{x,y,scale}` → view.
+
+## Platformer physics
+
+- `Body{gravity, grounded}` (with Velocity+Collider): each tick `Velocity.y += gravity * DT` (world y is up, so gravity is negative, e.g. -30). `grounded` is engine-maintained — true while standing on a Solid top face; it's the standard jump condition.
+- `Solid{}` (with Position+Collider): blocking geometry (ground / walls / platforms). Body entities clip to its edges and zero the blocked axis. Resolution is axis-separated with no sweep — keep per-tick displacement below obstacle thickness.
+- A jump is just a rule: `on input(space) if [["@hero.Body.grounded","==",true]] do set @hero.Velocity.y = 14`. See `examples/jump` — a playable platformer in pure rules, zero scripts.
+
+## On-screen text
+
+`Text{content, size, color}` + `Position`: built-in 8x8 bitmap font (ASCII), each glyph is size×size world units, the string is centered on Position and drawn above sprites. `render/describe` returns `texts[].content` directly — agents never OCR screenshots.
+To turn numeric state into text, use the rule format template: `{"set": "@hud.Text.content", "to": {"format": "SCORE {}", "args": ["self.Score.value"]}}` (the number of `{}` slots must match args).

@@ -1,0 +1,131 @@
+{
+  "entities": [
+    {
+      "name": "hero",
+      "components": {
+        "Player": {},
+        "Position": {
+          "x": 0,
+          "y": 3
+        },
+        "Velocity": {
+          "x": 0,
+          "y": 0
+        },
+        "Collider": {
+          "w": 1,
+          "h": 2
+        },
+        "Body": {
+          "gravity": -30,
+          "grounded": false
+        },
+        "Sprite": {
+          "w": 1,
+          "h": 2,
+          "color": "#4da3ff"
+        }
+      }
+    },
+    {
+      "name": "ground",
+      "components": {
+        "Position": {
+          "x": 10,
+          "y": -1
+        },
+        "Collider": {
+          "w": 60,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 60,
+          "h": 2,
+          "color": "#5a6b7a"
+        }
+      }
+    },
+    {
+      "name": "platform-1",
+      "components": {
+        "Position": {
+          "x": 8,
+          "y": 2
+        },
+        "Collider": {
+          "w": 4,
+          "h": 1
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 4,
+          "h": 1,
+          "color": "#5a6b7a"
+        }
+      }
+    },
+    {
+      "name": "platform-2",
+      "components": {
+        "Position": {
+          "x": 16,
+          "y": 5
+        },
+        "Collider": {
+          "w": 4,
+          "h": 1
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 4,
+          "h": 1,
+          "color": "#5a6b7a"
+        }
+      }
+    },
+    {
+      "name": "flag",
+      "components": {
+        "Goal": {},
+        "Position": {
+          "x": 16,
+          "y": 7
+        },
+        "Collider": {
+          "w": 1,
+          "h": 2
+        },
+        "Sprite": {
+          "w": 1,
+          "h": 2,
+          "color": "#ffd75e"
+        }
+      }
+    },
+    {
+      "name": "camera",
+      "components": {
+        "Camera": {
+          "x": 10,
+          "y": 4,
+          "scale": 8
+        }
+      }
+    },
+    {
+      "name": "msg",
+      "components": {
+        "Position": {
+          "x": 10,
+          "y": 12
+        },
+        "Text": {
+          "content": "REACH THE FLAG",
+          "size": 1.2,
+          "color": "#ffffff"
+        }
+      }
+    }
+  ]
+}
