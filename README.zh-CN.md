@@ -4,7 +4,7 @@
 
 **The glass-box game engine for AI agents.**
 
-![coin-run demo](docs/media/coin-run.gif)
+![glow demo](docs/media/glow.gif)
 
 *↑ 这个 demo 的每一帧都是引擎自己渲的（CPU 光栅化，无 GPU），由 AI 通过控制面操作游戏并逐帧截图拼成——这正是引擎的卖点本身。*
 

@@ -4,9 +4,9 @@ English | [中文](README.zh-CN.md)
 
 **The glass-box game engine for AI agents.**
 
-![coin-run demo](docs/media/coin-run.gif)
+![glow demo](docs/media/glow.gif)
 
-*↑ Every frame of this demo was rendered by the engine itself (CPU rasterizer, no GPU), captured frame-by-frame by an AI driving the game through the control plane — which is exactly what this engine is for.*
+*↑ AI-generated pixel art, dynamic 2D lighting, particles, camera follow — and every frame was captured headlessly by an AI driving the game through the control plane. That loop is what this engine is for.*
 
 Existing engines were designed for a human sitting in front of an editor; to an AI they are black boxes. Vitric is designed around an **agent API**: every piece of engine state is visible, operable, and verifiable, so an AI can autonomously **run the game → observe pixels and state → assert → modify → repeat** without a human in the loop.
 
