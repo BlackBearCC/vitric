@@ -11,6 +11,7 @@
 //!   --ticks <N>    跑满 N tick 后自动退出（CI/脚本用，全速不限速）
 //!   --record <文件> 退出时把录像写到文件
 
+mod audio;
 mod window;
 
 use std::path::PathBuf;
@@ -115,6 +116,11 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     }
 
     let server = ControlServer::start(port)?;
+    // 音频：无声卡环境合法降级，横幅明说
+    let (mut audio_sink, audio_status) = match audio::Audio::open(dir.join("sounds")) {
+        Ok(a) => (Some(a), "ok".to_string()),
+        Err(e) => (None, format!("disabled: {e}")),
+    };
     // 启动横幅走 stdout 单行 JSON：AI 解析端口，人也看得懂
     println!(
         "{}",
@@ -124,11 +130,12 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
             "control": format!("http://127.0.0.1:{}/rpc", server.port),
             "seed": project.manifest.seed,
             "window": windowed,
+            "audio": audio_status,
         })
     );
 
     if windowed {
-        let game = window::WindowedGame::new(sim, rt, dispatcher, server);
+        let game = window::WindowedGame::new(sim, rt, dispatcher, server, audio_sink);
         let (mut sim, error) = game.run()?;
         finish_recording(&mut sim, record_path)?;
         return match error {
@@ -163,7 +170,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
 
         if max_ticks.is_some() {
             // 有限跑：全速不睡觉
-            step_once(&mut sim, &mut rt, &mut dispatcher)?;
+            step_once(&mut sim, &mut rt, &mut dispatcher, &mut audio_sink)?;
             continue;
         }
 
@@ -173,7 +180,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         last = now;
         let mut budget = 8; // 单帧补步上限，防螺旋死亡
         while acc >= DT && budget > 0 {
-            step_once(&mut sim, &mut rt, &mut dispatcher)?;
+            step_once(&mut sim, &mut rt, &mut dispatcher, &mut audio_sink)?;
             acc -= DT;
             budget -= 1;
         }
@@ -208,10 +215,13 @@ pub fn step_once(
     sim: &mut vitric_sim::Sim,
     rt: &mut Runtime,
     dispatcher: &mut Dispatcher,
+    audio_sink: &mut Option<audio::Audio>,
 ) -> Result<(), String> {
     let report = sim.step(rt).map_err(|e| e.to_string())?;
     dispatcher.record_events(report.tick, &report.events);
-    dispatcher.record_events(report.tick, &rt.drain_observed());
+    let observed = rt.drain_observed();
+    audio::handle_sound_events(audio_sink, &observed);
+    dispatcher.record_events(report.tick, &observed);
     for failure in dispatcher.check_assertions(sim) {
         // 断言失败实时上报到 stderr（结构化一行），同时存进 assert/failures
         eprintln!("{}", serde_json::json!({"assert_failure": failure}));

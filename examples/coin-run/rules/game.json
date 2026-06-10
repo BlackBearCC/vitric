@@ -63,6 +63,12 @@
             "who": "self",
             "total": "self.Score.value"
           }
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "coin.wav"
+          }
         }
       ]
     },

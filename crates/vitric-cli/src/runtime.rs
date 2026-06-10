@@ -209,6 +209,41 @@ pub fn advance_animations(
     Ok(events)
 }
 
+/// 递归扫描规则文档里 `{"emit": "play-sound", "data": {"sound": "字面量"}}` 的音效引用。
+fn scan_sound_refs(doc: &Value, file: &str, sounds_dir: &Path, missing: &mut Vec<String>) {
+    match doc {
+        Value::Object(map) => {
+            if map.get("emit").and_then(|v| v.as_str()) == Some("play-sound") {
+                if let Some(sound) = map
+                    .get("data")
+                    .and_then(|d| d.get("sound"))
+                    .and_then(|s| s.as_str())
+                {
+                    // 引用值也可能是 "event.xxx" 这类运行时路径，只校验字面文件名
+                    let is_ref = sound.starts_with("self.")
+                        || sound.starts_with("other.")
+                        || sound.starts_with("event.")
+                        || sound.starts_with('@');
+                    if !is_ref && !sounds_dir.join(sound).exists() {
+                        missing.push(format!(
+                            "{file} 引用了不存在的音效 {sound:?}（应在项目 sounds/ 目录）"
+                        ));
+                    }
+                }
+            }
+            for v in map.values() {
+                scan_sound_refs(v, file, sounds_dir, missing);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                scan_sound_refs(v, file, sounds_dir, missing);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// `vitric check`：只验数据不开跑。返回人类/AI 可读的完整报告。
 pub fn check(dir: &Path) -> Result<Value, String> {
     let project = Project::load(dir).map_err(|r| r.to_string())?;
@@ -255,9 +290,13 @@ pub fn check(dir: &Path) -> Result<Value, String> {
             }
         }
     }
+    // 音效：规则里字面引用的 play-sound 音效文件必须存在
+    for (file, doc) in &project.rules {
+        scan_sound_refs(doc, file, &dir.join("sounds"), &mut missing);
+    }
     if !missing.is_empty() {
         return Err(format!(
-            "素材/动画引用校验失败:\n  {}\n现有素材: [{}]",
+            "素材/动画/音效引用校验失败:\n  {}\n现有素材: [{}]",
             missing.join("\n  "),
             assets.names().join(", ")
         ));

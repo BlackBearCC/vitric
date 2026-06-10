@@ -20,6 +20,7 @@ use vitric_sim::{Sim, DT};
 
 use vitric_cli::runtime::Runtime;
 
+use crate::audio::Audio;
 use crate::step_once;
 
 pub struct WindowedGame {
@@ -27,6 +28,7 @@ pub struct WindowedGame {
     pub rt: Runtime,
     pub dispatcher: Dispatcher,
     pub server: ControlServer,
+    audio: Option<Audio>,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     last: Instant,
@@ -39,12 +41,19 @@ pub struct WindowedGame {
 }
 
 impl WindowedGame {
-    pub fn new(sim: Sim, rt: Runtime, dispatcher: Dispatcher, server: ControlServer) -> Self {
+    pub fn new(
+        sim: Sim,
+        rt: Runtime,
+        dispatcher: Dispatcher,
+        server: ControlServer,
+        audio: Option<Audio>,
+    ) -> Self {
         WindowedGame {
             sim,
             rt,
             dispatcher,
             server,
+            audio,
             window: None,
             surface: None,
             last: Instant::now(),
@@ -276,7 +285,9 @@ impl ApplicationHandler for WindowedGame {
             self.last = now;
             let mut budget = 8;
             while self.acc >= DT && budget > 0 {
-                if let Err(e) = step_once(&mut self.sim, &mut self.rt, &mut self.dispatcher) {
+                if let Err(e) =
+                    step_once(&mut self.sim, &mut self.rt, &mut self.dispatcher, &mut self.audio)
+                {
                     self.error = Some(e);
                     event_loop.exit();
                     return;

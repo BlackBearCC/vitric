@@ -99,6 +99,10 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 
 `start`（tick 0，初始化/生成关卡的标准入口）、`input`、`collision`、`anim-finished`。
 
+## 音效
+
+约定事件：规则/脚本 `{"emit": "play-sound", "data": {"sound": "coin.wav"}}`，引擎播放项目 `sounds/` 目录下的文件（wav/ogg/mp3/flac）。音频是纯输出副作用不进模拟，确定性回放不受影响；无声卡环境（容器/CI）启动横幅会标 `audio: disabled` 但事件照常流动。`vitric check` 会静态校验字面引用的音效文件存在。
+
 ## 引擎约定组件
 
 内建系统只认这些名字：`Position{x,y}` + `Velocity{x,y}` → 每 tick 积分移动；

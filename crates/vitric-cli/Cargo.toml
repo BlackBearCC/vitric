@@ -20,3 +20,4 @@ vitric-control = { path = "../vitric-control" }
 winit = "0.30"
 softbuffer = "0.4"
 vitric-render = { version = "0.1.0", path = "../vitric-render" }
+rodio = "0.22.2"
