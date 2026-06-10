@@ -16,6 +16,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: 系统依赖（ALSA 头 + esbuild）
+        run: |
+          sudo apt-get update && sudo apt-get install -y libasound2-dev
+          sudo npm install -g esbuild
       - name: 全部测试
         run: cargo test --workspace
       - name: 零警告
@@ -51,6 +55,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: 系统依赖
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: 构建引擎
         run: cargo build -p vitric-cli
       - name: 装依赖并冒烟（initialize + check + start/observe/stop）

@@ -85,7 +85,7 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
   - 触发 `on`: `"tick"`（配 `each: [组件]` 逐实体） / `{"event": "collision", "between": ["Player","Coin"]}` / `{"event":"input","filter":{...}}`
   - 动作: `set/add/spawn/despawn/emit/call`
   - 路径: `self.组件.字段` / `other.…` / `@实体名.…` / `event.字段`
-- 脚本（复杂逻辑落点，JS）：
+- 脚本（复杂逻辑落点，JS 或 TS——`.ts` 文件自动经 esbuild 转译，需要 PATH 上有 esbuild 或设 ESBUILD_BIN）：
   - `vitric.system("名", {query: [...], writes: [...]}, (entities, ctx) => {...})` — writes 没声明的组件改了就报错
   - `vitric.fn("名", (args, ctx) => {...})` — 给规则 `call`
   - `ctx.random()`（确定性，别用 Math.random，会直接 throw）/ `ctx.tick` / `ctx.emit` / `ctx.spawn` / `ctx.despawn`

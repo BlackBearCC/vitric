@@ -42,10 +42,17 @@ impl Runtime {
         }
         let rules = Engine::new(all, project.schema.clone());
 
-        // 脚本
+        // 脚本（.ts 经 esbuild 转译成 JS 再进 QuickJS）
         let mut scripts = ScriptEngine::new(project.schema.clone()).map_err(|e| e.to_string())?;
         for (file, src) in &project.scripts {
-            scripts.load(file, src).map_err(|e| e.to_string())?;
+            let js;
+            let source = if file.ends_with(".ts") {
+                js = transpile_ts(file, src)?;
+                &js
+            } else {
+                src
+            };
+            scripts.load(file, source).map_err(|e| e.to_string())?;
         }
 
         Ok(Runtime {
@@ -207,6 +214,44 @@ pub fn advance_animations(
             .map_err(|e| e.to_string())?;
     }
     Ok(events)
+}
+
+/// TypeScript → JavaScript（esbuild 子进程，只剥类型不打包）。
+/// 找 esbuild 的顺序：环境变量 ESBUILD_BIN → PATH 上的 esbuild。
+fn transpile_ts(file: &str, src: &str) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let bin = std::env::var("ESBUILD_BIN").unwrap_or_else(|_| "esbuild".to_string());
+    let mut child = Command::new(&bin)
+        .args(["--loader=ts"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "{file} 是 TypeScript，需要 esbuild 转译，但启动 {bin:?} 失败: {e}。\
+                 提示：npm i -g esbuild，或设环境变量 ESBUILD_BIN 指向 esbuild 二进制；\
+                 不想装就把脚本写成 .js"
+            )
+        })?;
+    child
+        .stdin
+        .take()
+        .expect("piped")
+        .write_all(src.as_bytes())
+        .map_err(|e| format!("{file}: 喂给 esbuild 失败: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("{file}: esbuild 执行失败: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "{file} TypeScript 转译失败:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// 递归扫描规则文档里 `{"emit": "play-sound", "data": {"sound": "字面量"}}` 的音效引用。
