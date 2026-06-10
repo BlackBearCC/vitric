@@ -108,7 +108,11 @@ Entities carry an `Anim` component (schema must define `clip/prev/t/done`). **Th
 
 ## Audio
 
-Convention event: `{"emit": "play-sound", "data": {"sound": "coin.wav"}}` plays a file from the project `sounds/` dir (wav/ogg/mp3/flac). Audio is a pure output side effect — replays are unaffected. With no audio device (containers/CI) the banner says `audio: disabled` and everything else works. `vitric check` validates literal sound references.
+Convention event: `{"emit": "play-sound", "data": {"sound": "coin.wav", "volume": 0.6}}` plays a file from the project `sounds/` dir (wav/ogg/mp3/flac). `volume` is optional, 0..=1, default 1.0; out-of-range or non-number values produce a structured `audio_error` line on stderr (no crash, no silent clamping).
+
+Background music: `{"emit": "play-music", "data": {"sound": "bgm.ogg", "volume": 0.4}}` plays looped. There is a single music slot — a new play-music replaces the current track (old one stops first), and music keeps playing across ticks. `{"emit": "stop-music", "data": {}}` stops it (a no-op if nothing is playing).
+
+Audio is a pure output side effect — replays are unaffected. With no audio device (containers/CI) the banner says `audio: disabled` and everything else works. `vitric check` validates literal play-sound / play-music references.
 
 ## Runtime LLM
 

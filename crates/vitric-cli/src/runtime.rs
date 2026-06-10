@@ -285,11 +285,15 @@ fn transpile_ts(file: &str, src: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// 递归扫描规则文档里 `{"emit": "play-sound", "data": {"sound": "字面量"}}` 的音效引用。
+/// 递归扫描规则文档里 `{"emit": "play-sound"|"play-music", "data": {"sound": "字面量"}}`
+/// 的音效/音乐引用（两者共用同一套字面名规则，含路径逃逸校验）。
 fn scan_sound_refs(doc: &Value, file: &str, sounds_dir: &Path, missing: &mut Vec<String>) {
     match doc {
         Value::Object(map) => {
-            if map.get("emit").and_then(|v| v.as_str()) == Some("play-sound") {
+            if matches!(
+                map.get("emit").and_then(|v| v.as_str()),
+                Some("play-sound" | "play-music")
+            ) {
                 if let Some(sound) = map
                     .get("data")
                     .and_then(|d| d.get("sound"))
@@ -399,4 +403,46 @@ pub fn check(dir: &Path) -> Result<Value, String> {
         },
         "initial_hash": format!("{:#018x}", sim.world.state_hash()),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn scan(doc: Value) -> Vec<String> {
+        let mut missing = Vec::new();
+        // 指向一个肯定不存在的目录：所有字面引用都应报"不存在"
+        scan_sound_refs(&doc, "rules/test.json", Path::new("/nonexistent/sounds"), &mut missing);
+        missing
+    }
+
+    #[test]
+    fn scan_flags_missing_play_music_file() {
+        let missing = scan(json!({"then": [{"emit": "play-music", "data": {"sound": "bgm.ogg"}}]}));
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].contains("bgm.ogg"), "报错要带上文件名: {}", missing[0]);
+        assert!(missing[0].contains("rules/test.json"), "报错要带上来源文件: {}", missing[0]);
+    }
+
+    #[test]
+    fn scan_flags_path_traversal_in_play_music() {
+        // 路径逃逸是显式"不合法"错误，不是"文件不存在"
+        let missing =
+            scan(json!({"emit": "play-music", "data": {"sound": "../secret.ogg"}}));
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].contains("不合法"), "要点明不合法而非不存在: {}", missing[0]);
+    }
+
+    #[test]
+    fn scan_still_covers_play_sound_and_skips_runtime_refs() {
+        // play-sound 老规则照旧；运行时引用（event.* 等）不做静态校验
+        let missing = scan(json!([
+            {"emit": "play-sound", "data": {"sound": "coin.wav"}},
+            {"emit": "play-music", "data": {"sound": "event.bgm"}},
+            {"emit": "stop-music", "data": {}},
+        ]));
+        assert_eq!(missing.len(), 1, "只有 coin.wav 该被报: {missing:?}");
+        assert!(missing[0].contains("coin.wav"));
+    }
 }

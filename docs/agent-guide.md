@@ -111,7 +111,11 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 
 ## 音效
 
-约定事件：规则/脚本 `{"emit": "play-sound", "data": {"sound": "coin.wav"}}`，引擎播放项目 `sounds/` 目录下的文件（wav/ogg/mp3/flac）。音频是纯输出副作用不进模拟，确定性回放不受影响；无声卡环境（容器/CI）启动横幅会标 `audio: disabled` 但事件照常流动。`vitric check` 会静态校验字面引用的音效文件存在。
+约定事件：规则/脚本 `{"emit": "play-sound", "data": {"sound": "coin.wav", "volume": 0.6}}`，引擎播放项目 `sounds/` 目录下的文件（wav/ogg/mp3/flac）。`volume` 可选，0..=1，默认 1.0；越界或非数字会在 stderr 上报结构化 `audio_error` 行（不崩游戏，也不静默截断）。
+
+背景音乐：`{"emit": "play-music", "data": {"sound": "bgm.ogg", "volume": 0.4}}` 循环播放；全局只有一个音乐槽，再发一次 play-music 就换歌（旧的先停再起新的），音乐跨 tick 持续播。`{"emit": "stop-music", "data": {}}` 停掉当前音乐（没在播也合法）。
+
+音频是纯输出副作用不进模拟，确定性回放不受影响；无声卡环境（容器/CI）启动横幅会标 `audio: disabled` 但事件照常流动。`vitric check` 会静态校验 play-sound / play-music 字面引用的文件存在。
 
 ## 运行时 LLM
 
