@@ -117,12 +117,25 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 内建系统只认这些名字：`Position{x,y}` + `Velocity{x,y}` → 每 tick 积分移动；
 `Position` + `Collider{w,h}` → AABB 碰撞发 `collision` 事件；
 `Position` + `Sprite{w,h,color}` → 渲染；`Camera{x,y,scale}` → 取景。
+游戏感组件（Camera 的 follow/lerp、`Shake`、`Particle`）见下面「游戏感」一节。
 
 ## 平台物理
 
 - `Body{gravity, grounded}`（搭配 Velocity+Collider）：每 tick `Velocity.y += gravity * DT`（世界 y 朝上，重力填负数如 -30）；`grounded` 由引擎维护，落在 Solid 顶面时为 true——起跳规则的标准条件。
 - `Solid{}`（搭配 Position+Collider）：挡停体（地面/墙/平台）。带 Body 的实体撞上会贴边停、该轴速度清零；轴分离裁剪，单 tick 位移别超过障碍厚度（无扫掠，速度预算留余量）。
 - 起跳就是一条规则：`on input(space) if [["@hero.Body.grounded","==",true]] do set @hero.Velocity.y = 14`。完整可玩示例见 `examples/jump`（纯规则零脚本）。
+
+## 游戏感 / Game feel
+
+跟 Body/Solid 一样的约定组件：引擎认名字，字段自己在 schema 里定义；状态全在组件里，快照/回放安全。三个系统都跑在运动/物理之后、碰撞检测之前。
+
+- **相机跟随**：`Camera` 加两个可选字段 `follow`（要跟随的实体名，空串 = 不跟随）和 `lerp`（0..1，每 tick 逼近比例，1 = 硬锁定）。引擎每 tick 在运动之后把 Camera.x/y 拉向目标 Position——相机看的是本 tick 的最终位置，不滞后一帧。follow 指向不存在的实体直接报错（不静默跳过）。
+- **屏幕抖动**：相机实体挂 `Shake{amplitude, decay}`。amplitude > 0 时渲染取景叠加确定性伪随机偏移（(tick, amplitude) 的纯函数，不碰模拟的随机数流——抖屏对 gameplay 轨迹零影响）；每 tick `amplitude *= decay`（低于 0.001 归零）。偏移只作用于画面（窗口/截图），`render/describe` 和点选读的是不抖的相机。触发不需要新动作，规则 set 就行——碰撞抖一下：
+  ```json
+  {"id": "hit-shake", "on": {"event": "collision", "between": ["Player", "Enemy"]},
+   "do": [{"set": "@camera.Shake.amplitude", "to": 0.5}]}
+  ```
+- **粒子**：实体挂 `Particle{ttl}`（剩余 tick 数，整数），引擎每 tick 减 1，到 0 自动销毁（销毁顺序 = 槽位序，确定性）。五彩纸屑/尘土/爆炸 = spawn 一批 Sprite+Velocity+Particle 然后不管，不用写清扫规则。
 
 ## 屏上文字
 

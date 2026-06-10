@@ -118,12 +118,25 @@ Convention event: `{"emit": "play-sound", "data": {"sound": "coin.wav"}}` plays 
 Built-in systems recognize: `Position{x,y}` + `Velocity{x,y}` → integrated motion each tick;
 `Position` + `Collider{w,h}` → AABB collision emits `collision` events;
 `Position` + `Sprite{w,h,color,image}` → rendering; `Camera{x,y,scale}` → view.
+Game-feel components (Camera `follow`/`lerp`, `Shake`, `Particle`) are covered in the "Game feel" section below.
 
 ## Platformer physics
 
 - `Body{gravity, grounded}` (with Velocity+Collider): each tick `Velocity.y += gravity * DT` (world y is up, so gravity is negative, e.g. -30). `grounded` is engine-maintained — true while standing on a Solid top face; it's the standard jump condition.
 - `Solid{}` (with Position+Collider): blocking geometry (ground / walls / platforms). Body entities clip to its edges and zero the blocked axis. Resolution is axis-separated with no sweep — keep per-tick displacement below obstacle thickness.
 - A jump is just a rule: `on input(space) if [["@hero.Body.grounded","==",true]] do set @hero.Velocity.y = 14`. See `examples/jump` — a playable platformer in pure rules, zero scripts.
+
+## Game feel
+
+Convention components like Body/Solid: the engine recognizes the names, you define the fields in your schema; all state lives in components, so snapshots and replays are safe. All three systems run after motion/physics and before collision detection.
+
+- **Camera follow**: two optional `Camera` fields — `follow` (entity name to track, empty string = off) and `lerp` (0..1, fraction to close per tick, 1 = hard lock). Each tick, after motion, the engine moves Camera.x/y toward the target's Position — the camera sees this tick's final position, no one-frame lag. A `follow` naming a missing entity is an explicit error (never silently skipped).
+- **Screen shake**: put `Shake{amplitude, decay}` on the camera entity. While amplitude > 0, rendering adds a deterministic pseudo-random view offset (a pure function of (tick, amplitude) — it never touches the sim's RNG stream, so shaking has zero effect on the gameplay trajectory); each tick `amplitude *= decay` (snapped to 0 below 0.001). The offset affects the picture only (window/screenshots); `render/describe` and picking read the unshaken camera. No new action needed — a rule `set` triggers it. Shake on collision:
+  ```json
+  {"id": "hit-shake", "on": {"event": "collision", "between": ["Player", "Enemy"]},
+   "do": [{"set": "@camera.Shake.amplitude", "to": 0.5}]}
+  ```
+- **Particles**: put `Particle{ttl}` (ticks remaining, integer) on an entity; the engine decrements it each tick and despawns the entity at 0 (despawn order = slot order, deterministic). Confetti / dust / explosions = spawn a batch of Sprite+Velocity+Particle entities and forget them — no cleanup rules needed.
 
 ## On-screen text
 

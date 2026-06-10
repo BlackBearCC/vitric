@@ -297,12 +297,14 @@ impl GpuPresenter {
     }
 
     /// 呈现一帧。素材代次变了先重建图集（热重载素材后第一帧生效）。
+    /// `tick` 喂给屏幕抖动取景（vitric_render::camera_of）——和 CPU 路径抖得一致。
     pub fn present(
         &mut self,
         world: &World,
         assets: &Assets,
         generation: u64,
         selection: Option<vitric_ecs::EntityId>,
+        tick: u64,
     ) -> Result<(), String> {
         if generation != self.seen_generation {
             let (atlas, bind_group) = build_atlas(
@@ -329,7 +331,7 @@ impl GpuPresenter {
         }
         let (w, h) = (size.width, size.height);
 
-        let verts = build_vertices(world, w, h, &self.atlas, selection)?;
+        let verts = build_vertices(world, w, h, &self.atlas, selection, tick)?;
 
         use wgpu::CurrentSurfaceTexture as Cst;
         let frame = match self.surface.get_current_texture() {
@@ -542,8 +544,10 @@ fn build_vertices(
     height: u32,
     atlas: &Atlas,
     selection: Option<vitric_ecs::EntityId>,
+    tick: u64,
 ) -> Result<Vec<Vertex>, String> {
-    let (cam_x, cam_y, scale) = camera_of(world)?;
+    // 取景（含 Shake 抖动偏移）直接用 vitric-render 的实现——两条路径抖得逐位一致
+    let (cam_x, cam_y, scale) = vitric_render::camera_of(world, tick)?;
     let mut verts: Vec<Vertex> = Vec::new();
 
     // 精灵：按实体序（画家算法，后画盖前画）
@@ -702,23 +706,7 @@ fn tint(rgba: [u8; 4]) -> [f32; 4] {
     ]
 }
 
-// ---- 以下三个小工具镜像 vitric-render 的私有实现（组件约定的语义源头在那边）----
-
-fn camera_of(world: &World) -> Result<(f64, f64, f64), String> {
-    let cams = world.query(&["Camera"]);
-    match cams.first() {
-        None => Ok((0.0, 0.0, 8.0)),
-        Some(&id) => {
-            let x = num(world, id, "Camera.x")?;
-            let y = num(world, id, "Camera.y")?;
-            let scale = num(world, id, "Camera.scale")?;
-            if scale <= 0.0 {
-                return Err(format!("实体 {id} 的 Camera.scale 必须 > 0，拿到 {scale}"));
-            }
-            Ok((x, y, scale))
-        }
-    }
-}
+// ---- 以下两个小工具镜像 vitric-render 的私有实现（组件约定的语义源头在那边）----
 
 fn num(world: &World, id: vitric_ecs::EntityId, path: &str) -> Result<f64, String> {
     let v = world.get_field(id, path).map_err(|e| e.to_string())?;
@@ -755,7 +743,7 @@ mod tests {
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000"})).unwrap();
-        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None).unwrap();
+        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
         assert_eq!(verts.len(), 6, "一个矩形 = 两个三角形");
         // 默认相机 scale=8：2x2 精灵 → 屏幕中心 16x16 像素（24..40）
         let xs: Vec<f32> = verts.iter().map(|v| v.pos[0]).collect();
@@ -775,7 +763,7 @@ mod tests {
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 2.0})).unwrap();
         w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ffffff"})).unwrap();
-        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None).unwrap();
+        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
         // 世界 y=+2、scale 8 → 屏幕 y 上移 16 像素（y 向上 → 像素行更小）
         let y_min = verts.iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
         assert_eq!(y_min, 24.0 - 16.0);
@@ -787,12 +775,12 @@ mod tests {
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "image": "hero.png"})).unwrap();
-        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None).unwrap();
+        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
         assert_eq!(verts[0].uv, [0.25, 0.25], "左上角取图集区域起点");
         assert_eq!(verts[0].color, [1.0; 4], "贴图不染色");
 
         w.set_field(e, "Sprite.image", json!("ghost.png")).unwrap();
-        let err = build_vertices(&w, 64, 64, &fake_atlas(), None).unwrap_err();
+        let err = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap_err();
         assert!(err.contains("ghost.png") && err.contains("hero.png"), "{err}");
     }
 
@@ -806,7 +794,7 @@ mod tests {
         w.set_component(t, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(t, "Text", json!({"content": "HI", "size": 2.0, "color": "#00ff00"}))
             .unwrap();
-        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None).unwrap();
+        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
         // 精灵 6 + 两字符 12，且文字顶点在精灵之后（画家算法：后画在上）
         assert_eq!(verts.len(), 6 + 12);
         assert_eq!(verts[6].color, [0.0, 1.0, 0.0, 1.0]);
@@ -822,7 +810,7 @@ mod tests {
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000"})).unwrap();
-        let verts = build_vertices(&w, 64, 64, &fake_atlas(), Some(e)).unwrap();
+        let verts = build_vertices(&w, 64, 64, &fake_atlas(), Some(e), 0).unwrap();
         // 精灵 6 + 描边四条边 24
         assert_eq!(verts.len(), 6 + 24);
         let teal = [39.0 / 255.0, 192.0 / 255.0, 168.0 / 255.0, 1.0];
@@ -837,7 +825,7 @@ mod tests {
             w2.despawn(d).unwrap();
             (w2, d)
         };
-        let verts = build_vertices(&dead.0, 64, 64, &fake_atlas(), Some(dead.1)).unwrap();
+        let verts = build_vertices(&dead.0, 64, 64, &fake_atlas(), Some(dead.1), 0).unwrap();
         assert!(verts.is_empty());
     }
 }

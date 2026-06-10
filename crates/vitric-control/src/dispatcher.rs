@@ -369,7 +369,8 @@ impl Dispatcher {
             "render/screenshot" => {
                 let width = params.get("width").and_then(|v| v.as_u64()).unwrap_or(320) as u32;
                 let height = params.get("height").and_then(|v| v.as_u64()).unwrap_or(240) as u32;
-                let png = vitric_render::screenshot_png(&sim.world, width, height, &self.assets)?;
+                let png =
+                    vitric_render::screenshot_png(&sim.world, width, height, &self.assets, sim.tick)?;
                 let mut result = serde_json::Map::new();
                 result.insert("width".into(), json!(width));
                 result.insert("height".into(), json!(height));

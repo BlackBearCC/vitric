@@ -116,6 +116,7 @@ impl WindowedGame {
                     size.width,
                     size.height,
                     self.dispatcher.assets(),
+                    self.sim.tick,
                 ) {
                     Ok(buf) => buf,
                     Err(e) => {
@@ -132,6 +133,7 @@ impl WindowedGame {
                         size.width,
                         size.height,
                         selected,
+                        self.sim.tick,
                     );
                 }
                 let Ok(mut frame) = surface.buffer_mut() else {
@@ -150,6 +152,7 @@ impl WindowedGame {
                     self.dispatcher.assets(),
                     self.dispatcher.assets_generation(),
                     self.dispatcher.selection(),
+                    self.sim.tick,
                 ) {
                     self.error = Some(e);
                 }

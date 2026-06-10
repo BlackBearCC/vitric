@@ -10,6 +10,10 @@
 //! - `Sprite`  {"w": 数字, "h": 数字, "color": "#rrggbb"} — 有它才会被画
 //! - `Position` {"x", "y"} — 世界坐标，y 向上
 //! - `Camera` {"x", "y", "scale"} — 可选；取第一个，没有则原点、8 像素/单位
+//! - `Shake` {"amplitude", "decay"} — 挂在相机实体上的屏幕抖动；amplitude > 0 时
+//!   取景叠加确定性伪随机偏移（(tick, amplitude) 的纯函数，见 [`shake_offset`]）。
+//!   偏移只作用于画面（render_world / GPU 路径 / 选中描边）——describe / pick /
+//!   screen_to_world 读不抖的相机：语义观察和点选对的是世界本体，不是抖动后的画面
 //! - `Text` {"content", "size", "color"} — 屏上文字（内嵌 8x8 点阵，ASCII），
 //!   每字符 size×size 世界单位、整串居中于 Position，画在精灵之上
 
@@ -22,16 +26,18 @@ use serde_json::Value;
 use vitric_ecs::World;
 
 /// 渲染一帧：返回 RGBA8 像素（行优先，左上原点）。
+/// `tick` 只喂给屏幕抖动（[`camera_of`]）——同一世界同一 tick 渲出的字节逐位相同。
 pub fn render_world(
     world: &World,
     width: u32,
     height: u32,
     assets: &Assets,
+    tick: u64,
 ) -> Result<Vec<u8>, String> {
     if width == 0 || height == 0 || width > 4096 || height > 4096 {
         return Err(format!("分辨率 {width}x{height} 不合法（1..=4096）"));
     }
-    let (cam_x, cam_y, scale) = camera_of(world)?;
+    let (cam_x, cam_y, scale) = camera_of(world, tick)?;
 
     let mut buf = vec![0u8; (width * height * 4) as usize];
     // 背景：深灰蓝，区别于纯黑（纯黑常被误判为「没渲出来」）
@@ -184,6 +190,7 @@ fn glyph_of(c: char) -> [u8; 8] {
 }
 
 /// 屏幕像素 → 世界坐标（检查器拖拽、点选用）。
+/// 用不抖的相机：点选/拖拽对的是世界本体，抖动只是几帧的视觉装饰。
 pub fn screen_to_world(
     world: &World,
     width: u32,
@@ -191,7 +198,7 @@ pub fn screen_to_world(
     px: f64,
     py: f64,
 ) -> Result<(f64, f64), String> {
-    let (cam_x, cam_y, scale) = camera_of(world)?;
+    let (cam_x, cam_y, scale) = camera_base(world)?;
     Ok((
         cam_x + (px - width as f64 / 2.0) / scale,
         cam_y - (py - height as f64 / 2.0) / scale,
@@ -222,17 +229,19 @@ pub fn pick(
 }
 
 /// 在已渲染的帧上给实体画选中描边（检查器高亮，青色 2px）。
+/// `tick` 必须和这帧 `render_world` 用的同一个——描边要跟着抖动的画面走，不然抖屏时错位。
 pub fn draw_selection_outline(
     buf: &mut [u8],
     world: &World,
     width: u32,
     height: u32,
     selected: vitric_ecs::EntityId,
+    tick: u64,
 ) -> Result<(), String> {
     if !world.is_alive(selected) || !world.has_component(selected, "Sprite") {
         return Ok(()); // 选中的实体没了/不可见，描边静默跳过（选中态本身由上层管理）
     }
-    let (cam_x, cam_y, scale) = camera_of(world)?;
+    let (cam_x, cam_y, scale) = camera_of(world, tick)?;
     let x = num(world, selected, "Position.x")?;
     let y = num(world, selected, "Position.y")?;
     let w = num(world, selected, "Sprite.w")?;
@@ -284,8 +293,9 @@ pub fn screenshot_png(
     width: u32,
     height: u32,
     assets: &Assets,
+    tick: u64,
 ) -> Result<Vec<u8>, String> {
-    let rgba = render_world(world, width, height, assets)?;
+    let rgba = render_world(world, width, height, assets, tick)?;
     encode_png(&rgba, width, height)
 }
 
@@ -300,7 +310,8 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
     if width == 0 || height == 0 {
         return Err(format!("分辨率 {width}x{height} 不合法"));
     }
-    let (cam_x, cam_y, scale) = camera_of(world)?;
+    // 语义观察用不抖的相机：agent 断言的坐标不该被几帧视觉抖动晃花
+    let (cam_x, cam_y, scale) = camera_base(world)?;
     let half_w_units = width as f64 / scale / 2.0;
     let half_h_units = height as f64 / scale / 2.0;
 
@@ -473,7 +484,8 @@ fn direction_word(dx: f64, dy: f64) -> &'static str {
     }
 }
 
-fn camera_of(world: &World) -> Result<(f64, f64, f64), String> {
+/// 相机本体（不含抖动偏移）：取第一个 Camera 实体，没有则原点、8 像素/单位。
+fn camera_base(world: &World) -> Result<(f64, f64, f64), String> {
     let cams = world.query(&["Camera"]);
     match cams.first() {
         None => Ok((0.0, 0.0, 8.0)),
@@ -487,6 +499,37 @@ fn camera_of(world: &World) -> Result<(f64, f64, f64), String> {
             Ok((x, y, scale))
         }
     }
+}
+
+/// 渲染取景相机：本体 + 相机实体上 `Shake` 组件的抖动偏移。
+/// CPU 光栅化和 GPU 路径都从这里取相机——两条路径抖得逐位一致。
+pub fn camera_of(world: &World, tick: u64) -> Result<(f64, f64, f64), String> {
+    let (mut x, mut y, scale) = camera_base(world)?;
+    if let Some(&id) = world.query(&["Camera"]).first() {
+        if world.has_component(id, "Shake") {
+            let amplitude = num(world, id, "Shake.amplitude")?;
+            let (dx, dy) = shake_offset(tick, amplitude);
+            x += dx;
+            y += dy;
+        }
+    }
+    Ok((x, y, scale))
+}
+
+/// 屏幕抖动偏移（世界单位）：(tick, amplitude) 的纯函数，与模拟的 RNG 流完全无关
+/// ——抖屏永远不会扰动 gameplay 的确定性轨迹，快照里也没有额外状态要存。
+/// 实现：SplitMix64 把 tick 打散成 64 位，高/低各 32 位映射到 [-1, 1] 两轴再乘振幅。
+pub fn shake_offset(tick: u64, amplitude: f64) -> (f64, f64) {
+    if amplitude <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let mut z = tick.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    let nx = ((z >> 32) as u32 as f64) / (u32::MAX as f64) * 2.0 - 1.0;
+    let ny = (z as u32 as f64) / (u32::MAX as f64) * 2.0 - 1.0;
+    (nx * amplitude, ny * amplitude)
 }
 
 fn num(world: &World, id: vitric_ecs::EntityId, path: &str) -> Result<f64, String> {
@@ -533,7 +576,7 @@ mod tests {
     #[test]
     fn sprite_renders_at_screen_center() {
         let w = world_one_red_sprite();
-        let buf = render_world(&w, 64, 64, &Assets::empty()).unwrap();
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         assert_eq!(pixel(&buf, 64, 32, 32), [255, 0, 0, 255], "中心是红色精灵");
         assert_eq!(pixel(&buf, 64, 2, 2), [24, 26, 33, 255], "角落是背景");
     }
@@ -544,7 +587,7 @@ mod tests {
         let cam = w.spawn();
         // 相机右移 2 单位 → 精灵在屏幕上左移 2*8=16 像素
         w.set_component(cam, "Camera", json!({"x": 2.0, "y": 0.0, "scale": 8.0})).unwrap();
-        let buf = render_world(&w, 64, 64, &Assets::empty()).unwrap();
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         assert_eq!(pixel(&buf, 64, 32 - 16, 32), [255, 0, 0, 255]);
         assert_eq!(pixel(&buf, 64, 32 + 8, 32), [24, 26, 33, 255]);
     }
@@ -557,12 +600,12 @@ mod tests {
         // "I" 单字符，4 单位 → 32x32 像素，居中
         w.set_component(e, "Text", json!({"content": "I", "size": 4.0, "color": "#00ff00"}))
             .unwrap();
-        let buf = render_world(&w, 64, 64, &Assets::empty()).unwrap();
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         // "I" 的竖干在字形第 2-3 列（8x8 点阵字形偏左），取样打在竖干上
         assert_eq!(pixel(&buf, 64, 25, 32), [0, 255, 0, 255], "竖干处应是字形像素");
         assert_eq!(pixel(&buf, 64, 2, 2), [24, 26, 33, 255]);
         // 同世界同字节（文字也确定性）
-        assert_eq!(buf, render_world(&w, 64, 64, &Assets::empty()).unwrap());
+        assert_eq!(buf, render_world(&w, 64, 64, &Assets::empty(), 0).unwrap());
 
         let d = describe_world(&w, 64, 64).unwrap();
         let texts = d["texts"].as_array().unwrap();
@@ -579,7 +622,7 @@ mod tests {
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(e, "Text", json!({"content": "", "size": 4.0, "color": "#00ff00"}))
             .unwrap();
-        let buf = render_world(&w, 64, 64, &Assets::empty()).unwrap();
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         assert_eq!(pixel(&buf, 64, 32, 32), [24, 26, 33, 255], "空文本不画");
         assert_eq!(describe_world(&w, 64, 64).unwrap()["texts"].as_array().unwrap().len(), 0);
     }
@@ -587,13 +630,13 @@ mod tests {
     #[test]
     fn same_world_same_bytes() {
         let w = world_one_red_sprite();
-        assert_eq!(render_world(&w, 128, 96, &Assets::empty()).unwrap(), render_world(&w, 128, 96, &Assets::empty()).unwrap());
+        assert_eq!(render_world(&w, 128, 96, &Assets::empty(), 0).unwrap(), render_world(&w, 128, 96, &Assets::empty(), 0).unwrap());
     }
 
     #[test]
     fn png_has_magic_and_decodes_back() {
         let w = world_one_red_sprite();
-        let data = screenshot_png(&w, 32, 32, &Assets::empty()).unwrap();
+        let data = screenshot_png(&w, 32, 32, &Assets::empty(), 0).unwrap();
         assert_eq!(&data[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A], "PNG 魔数");
         let decoder = png::Decoder::new(std::io::Cursor::new(&data[..]));
         let mut reader = decoder.read_info().unwrap();
@@ -631,13 +674,13 @@ mod tests {
         )
         .unwrap();
         // 默认相机 scale=8：精灵占屏幕中央 32x32 像素
-        let buf = render_world(&w, 64, 64, &assets).unwrap();
+        let buf = render_world(&w, 64, 64, &assets, 0).unwrap();
         assert_eq!(pixel(&buf, 64, 32 - 8, 32), [255, 0, 0, 255], "左半是贴图红");
         assert_eq!(pixel(&buf, 64, 32 + 8, 32), [24, 26, 33, 255], "右半透明 → 透出背景");
 
         // 引用不存在的图：报错并列出现有素材
         w.set_field(e, "Sprite.image", json!("ghost.png")).unwrap();
-        let err = render_world(&w, 64, 64, &assets).unwrap_err();
+        let err = render_world(&w, 64, 64, &assets, 0).unwrap_err();
         assert!(err.contains("half.png"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -702,11 +745,50 @@ mod tests {
             (w, e)
         };
         let (w, e) = w_;
-        let mut buf = render_world(&w, 64, 64, &Assets::empty()).unwrap();
-        draw_selection_outline(&mut buf, &w, 64, 64, e).unwrap();
+        let mut buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        draw_selection_outline(&mut buf, &w, 64, 64, e, 0).unwrap();
         // 精灵半宽 8px + 2px 外扩 → 描边在 x=32±10
         assert_eq!(pixel(&buf, 64, 32 - 10, 32), [39, 192, 168, 255], "左描边");
         assert_eq!(pixel(&buf, 64, 32, 32), [255, 0, 0, 255], "精灵本体不被盖");
+    }
+
+    #[test]
+    fn shake_offset_is_pure_function_of_tick_and_amplitude() {
+        // 同 (tick, amplitude) → 同偏移（纯函数，没有隐藏状态）
+        assert_eq!(shake_offset(7, 0.5), shake_offset(7, 0.5));
+        // 不同 tick → 偏移变（不然抖动是冻住的）
+        assert_ne!(shake_offset(7, 0.5), shake_offset(8, 0.5));
+        // 偏移每轴不超振幅；amplitude=0 → 零偏移
+        let (dx, dy) = shake_offset(123, 0.5);
+        assert!(dx.abs() <= 0.5 && dy.abs() <= 0.5, "({dx},{dy})");
+        assert_eq!(shake_offset(123, 0.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn camera_of_applies_shake_offset_deterministically() {
+        let mut w = world_one_red_sprite();
+        let cam = w.spawn();
+        w.set_component(cam, "Camera", json!({"x": 1.0, "y": 2.0, "scale": 8.0})).unwrap();
+        w.set_component(cam, "Shake", json!({"amplitude": 0.5, "decay": 0.9})).unwrap();
+
+        let shaken = camera_of(&w, 7).unwrap();
+        assert_eq!(shaken, camera_of(&w, 7).unwrap(), "同世界同 tick 必须同取景");
+        assert_ne!(shaken, camera_of(&w, 8).unwrap(), "tick 变了偏移要变");
+        let (dx, dy) = shake_offset(7, 0.5);
+        assert_eq!(shaken, (1.0 + dx, 2.0 + dy, 8.0), "取景 = 相机本体 + shake_offset");
+
+        // 渲染整帧也确定：同 tick 逐字节相同，抖动 tick 间像素不同
+        let f7 = render_world(&w, 64, 64, &Assets::empty(), 7).unwrap();
+        assert_eq!(f7, render_world(&w, 64, 64, &Assets::empty(), 7).unwrap());
+        assert_ne!(f7, render_world(&w, 64, 64, &Assets::empty(), 8).unwrap());
+
+        // amplitude 归零 → 偏移消失，取景回到相机本体
+        w.set_field(cam, "Shake.amplitude", json!(0.0)).unwrap();
+        assert_eq!(camera_of(&w, 7).unwrap(), (1.0, 2.0, 8.0));
+        // 语义观察/点选永远读不抖的相机
+        w.set_field(cam, "Shake.amplitude", json!(0.5)).unwrap();
+        let d = describe_world(&w, 64, 64).unwrap();
+        assert_eq!(d["camera"], json!({"x": 1.0, "y": 2.0, "scale": 8.0}));
     }
 
     #[test]
@@ -715,8 +797,8 @@ mod tests {
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(e, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "red"})).unwrap();
-        let err = render_world(&w, 32, 32, &Assets::empty()).unwrap_err();
+        let err = render_world(&w, 32, 32, &Assets::empty(), 0).unwrap_err();
         assert!(err.contains("#rrggbb"), "{err}");
-        assert!(render_world(&w, 0, 32, &Assets::empty()).is_err());
+        assert!(render_world(&w, 0, 32, &Assets::empty(), 0).is_err());
     }
 }
