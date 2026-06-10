@@ -13,3 +13,4 @@ vitric-ecs = { path = "../vitric-ecs" }
 vitric-data = { path = "../vitric-data" }
 vitric-rules = { path = "../vitric-rules" }
 vitric-sim = { path = "../vitric-sim" }
+vitric-render = { path = "../vitric-render" }

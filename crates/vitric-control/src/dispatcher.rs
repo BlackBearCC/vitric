@@ -252,6 +252,25 @@ impl Dispatcher {
             }
             "sim/hash" => Ok(json!(format!("{:#018x}", sim.world.state_hash()))),
 
+            // ---- 渲染（无头截图：不需要 GPU/窗口，agent 直接拿像素）----
+            "render/screenshot" => {
+                let width = params.get("width").and_then(|v| v.as_u64()).unwrap_or(320) as u32;
+                let height = params.get("height").and_then(|v| v.as_u64()).unwrap_or(240) as u32;
+                let png = vitric_render::screenshot_png(&sim.world, width, height)?;
+                let mut result = serde_json::Map::new();
+                result.insert("width".into(), json!(width));
+                result.insert("height".into(), json!(height));
+                result.insert("bytes".into(), json!(png.len()));
+                if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                    std::fs::write(path, &png).map_err(|e| format!("写截图 {path} 失败: {e}"))?;
+                    result.insert("path".into(), json!(path));
+                }
+                if params.get("inline").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    result.insert("png_base64".into(), json!(base64(&png)));
+                }
+                Ok(Value::Object(result))
+            }
+
             // ---- 事件 ----
             "events/recent" => {
                 let since = params.get("since").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -297,7 +316,7 @@ impl Dispatcher {
                 "未知方法 {other:?}。可用方法: ping, world/entities, world/get, world/set, \
                  world/spawn, world/despawn, input/inject, sim/pause, sim/resume, sim/step, \
                  sim/speed, sim/quit, sim/snapshot, sim/restore, sim/hash, events/recent, \
-                 assert/add, assert/remove, assert/list, assert/failures"
+                 render/screenshot, assert/add, assert/remove, assert/list, assert/failures"
             )),
         }
     }
@@ -305,6 +324,21 @@ impl Dispatcher {
 
 fn err_response(message: &str) -> Value {
     json!({"ok": false, "error": message})
+}
+
+/// 标准 base64（无填充依赖，20 行自实现省一个 crate）。
+fn base64(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+    }
+    out
 }
 
 fn str_param(params: &Value, key: &str) -> Result<String, String> {

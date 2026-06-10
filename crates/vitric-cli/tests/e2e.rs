@@ -83,7 +83,7 @@ fn check_command_reports_project_shape() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["project"], json!("coin-run"));
-    assert_eq!(report["entities"], json!(4));
+    assert_eq!(report["entities"], json!(5));
     assert!(report["rules"].as_array().unwrap().iter().any(|r| r == "collect-coin"));
     assert!(report["systems"][0]["writes"].as_array().is_some());
 }
@@ -222,6 +222,13 @@ fn agent_drives_game_over_http() {
     // 断言一直健康
     let failures = rpc(port, "assert/failures", json!({}));
     assert_eq!(failures["result"].as_array().unwrap().len(), 0, "{failures}");
+
+    // 看（像素级）：无头截图，PNG 直接回传 base64
+    let shot = rpc(port, "render/screenshot", json!({"width": 320, "height": 240, "inline": true}));
+    assert_eq!(shot["ok"], json!(true), "{shot}");
+    assert_eq!(shot["result"]["width"], json!(320));
+    let b64 = shot["result"]["png_base64"].as_str().unwrap();
+    assert!(b64.starts_with("iVBORw0KGgo"), "base64 的 PNG 魔数");
 
     rpc(port, "sim/quit", json!({}));
 }

@@ -14,6 +14,7 @@ vitric.fn("celebrate", (args, ctx) => {
     ctx.spawn({
       Position: { x: ctx.random() * 40, y: 10 },
       Velocity: { x: 0, y: -(1 + ctx.random() * 3) },
+      Sprite: { w: 0.5, h: 0.5, color: "#ff6bd6" },
     });
   }
   ctx.emit("game-won", { score: args.score });
