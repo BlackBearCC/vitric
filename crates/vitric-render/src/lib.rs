@@ -16,6 +16,17 @@
 //!   screen_to_world 读不抖的相机：语义观察和点选对的是世界本体，不是抖动后的画面
 //! - `Text` {"content", "size", "color"} — 屏上文字（内嵌 8x8 点阵，ASCII），
 //!   每字符 size×size 世界单位、整串居中于 Position，画在精灵之上
+//! - `Ambient` {"color": "#rrggbb"} — 场景环境光，挂任意实体（取第一个）。
+//!   **光照的总开关**：场上没有 Ambient 实体 = 完全不跑光照（旧行为、零开销）；
+//!   有 = 整帧（精灵/文字/背景一视同仁）按下面公式打光
+//! - `Light` {"radius", "color", "intensity"} + `Position` — 点光源。radius 世界单位
+//!   （到 radius 处衰减为零），color 缺省 "#ffffff"，intensity 缺省 1.0。上限 64 盏
+//!
+//! 光照公式（CPU 与 GPU 路径必须一致，GPU 侧在 vitric-cli gpu.rs 的 WGSL 里）：
+//!   lit = min(ambient + Σ light_color·intensity·(1 - d/r)², 1.5)   （d < r 才有贡献）
+//!   out = min(scene · lit, 1.0)
+//! d 是像素到灯的距离（像素空间，取景用抖动后的相机——光跟着画面走）。
+//! 1.5 的上限允许轻微过曝（廉价的"泛光感"），乘回场景色后再夹回 1。
 
 mod assets;
 
@@ -24,6 +35,17 @@ pub use assets::{Assets, Image};
 use serde_json::Value;
 
 use vitric_ecs::World;
+
+/// 点光源数量上限。逐像素（CPU）/逐片元（GPU uniform 数组）都要遍历全部灯，
+/// 不设上限会把两条路径同时拖死；超了显式报错，不静默截断。
+pub const MAX_LIGHTS: usize = 64;
+
+/// 光照亮度上限：ambient + 各灯贡献之和每通道夹在这里（见模块文档的公式）。
+pub const LIGHT_CLAMP: f64 = 1.5;
+
+/// 清屏背景色：深灰蓝，区别于纯黑（纯黑常被误判为「没渲出来」）。
+/// GPU 路径的清屏/背景方块也用它——两条路径背景同字节。
+pub const BACKGROUND: [u8; 4] = [24, 26, 33, 255];
 
 /// 渲染一帧：返回 RGBA8 像素（行优先，左上原点）。
 /// `tick` 只喂给屏幕抖动（[`camera_of`]）——同一世界同一 tick 渲出的字节逐位相同。
@@ -40,8 +62,7 @@ pub fn render_world(
     let (cam_x, cam_y, scale) = camera_of(world, tick, height)?;
 
     let mut buf = vec![0u8; (width * height * 4) as usize];
-    // 背景：深灰蓝，区别于纯黑（纯黑常被误判为「没渲出来」）
-    fill(&mut buf, [24, 26, 33, 255]);
+    fill(&mut buf, BACKGROUND);
 
     // 按实体序绘制（确定性；后画的盖前画的）
     for id in world.query(&["Position", "Sprite"]) {
@@ -115,7 +136,153 @@ pub fn render_world(
     }
 
     draw_texts(world, &mut buf, width, height, (cam_x, cam_y, scale))?;
+
+    // 光照按 Ambient 实体的存在与否开关：没有 = 完全跳过（旧行为字节不变、零开销）。
+    // 有 = 整帧打光——精灵/文字/背景一视同仁，HUD 想保持可读自己在旁边放盏灯
+    if let Some((ambient, _)) = ambient_of(world)? {
+        let lights = collect_lights(world)?;
+        apply_lighting(&mut buf, width, height, (cam_x, cam_y, scale), ambient, &lights);
+    }
     Ok(buf)
+}
+
+/// 场景环境光：取第一个带 `Ambient` 组件的实体，返回 (0..1 通道值, 原始色串)。
+/// `None` = 场上没有 Ambient = 光照整体关闭（这是约定的总开关，不是缺省白光）。
+pub fn ambient_of(world: &World) -> Result<Option<([f64; 3], String)>, String> {
+    match world.query(&["Ambient"]).first() {
+        None => Ok(None),
+        Some(&id) => {
+            let color = world
+                .get_field(id, "Ambient.color")
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .ok_or_else(|| {
+                    format!(
+                        "实体 {id} 挂了 Ambient 但没有 color 字段。\
+                         写法: {{\"color\": \"#202838\"}}（暗色洞穴）；不想要光照就删掉 Ambient 组件"
+                    )
+                })?;
+            let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Ambient.color: {e}"))?;
+            Ok(Some((
+                [rgba[0] as f64 / 255.0, rgba[1] as f64 / 255.0, rgba[2] as f64 / 255.0],
+                color,
+            )))
+        }
+    }
+}
+
+/// 一盏点光源（`Light` + `Position` 实体的解析结果，世界坐标）。
+pub struct LightSource {
+    pub id: vitric_ecs::EntityId,
+    pub name: Option<String>,
+    pub x: f64,
+    pub y: f64,
+    /// 世界单位；到 radius 处光衰减为零。
+    pub radius: f64,
+    pub intensity: f64,
+    /// 原始色串（describe 输出用）。
+    pub color: String,
+    /// color 解析后的 0..1 通道值（未乘 intensity）。
+    pub rgb: [f64; 3],
+}
+
+/// 收集场上全部点光源（Light+Position，槽位序）。超过 [`MAX_LIGHTS`] 直接报错。
+pub fn collect_lights(world: &World) -> Result<Vec<LightSource>, String> {
+    let ids = world.query(&["Position", "Light"]);
+    if ids.len() > MAX_LIGHTS {
+        return Err(format!(
+            "场上有 {} 个点光源（Light+Position），超过上限 {MAX_LIGHTS} 盏。\
+             提示：删减/合并灯，大面积照亮改用调亮 Ambient.color",
+            ids.len()
+        ));
+    }
+    ids.into_iter()
+        .map(|id| {
+            let radius = num(world, id, "Light.radius")?;
+            if radius <= 0.0 {
+                return Err(format!("实体 {id} 的 Light.radius 必须 > 0，拿到 {radius}"));
+            }
+            let intensity = world
+                .get_field(id, "Light.intensity")
+                .ok()
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0);
+            let color = world
+                .get_field(id, "Light.color")
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| "#ffffff".to_string());
+            let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Light.color: {e}"))?;
+            Ok(LightSource {
+                id,
+                name: world.name_of(id).map(String::from),
+                x: num(world, id, "Position.x")?,
+                y: num(world, id, "Position.y")?,
+                radius,
+                intensity,
+                color,
+                rgb: [rgba[0] as f64 / 255.0, rgba[1] as f64 / 255.0, rgba[2] as f64 / 255.0],
+            })
+        })
+        .collect()
+}
+
+/// 逐像素打光（CPU 路径）。公式见模块文档；GPU 侧（gpu.rs 的 WGSL）必须保持同一公式、
+/// 同一顺序（在 sRGB 字节空间上乘）。灯参数先变换到像素空间，内循环只剩距离平方比较。
+fn apply_lighting(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    (cam_x, cam_y, scale): (f64, f64, f64),
+    ambient: [f64; 3],
+    lights: &[LightSource],
+) {
+    struct PxLight {
+        x: f64,
+        y: f64,
+        r: f64,
+        r2: f64,
+        /// 已乘 intensity 的通道值。
+        rgb: [f64; 3],
+    }
+    let px_lights: Vec<PxLight> = lights
+        .iter()
+        .map(|l| {
+            let r = l.radius * scale;
+            PxLight {
+                x: (width as f64) / 2.0 + (l.x - cam_x) * scale,
+                y: (height as f64) / 2.0 - (l.y - cam_y) * scale,
+                r,
+                r2: r * r,
+                rgb: [l.rgb[0] * l.intensity, l.rgb[1] * l.intensity, l.rgb[2] * l.intensity],
+            }
+        })
+        .collect();
+
+    for y in 0..height {
+        let fy = y as f64 + 0.5; // 像素中心——GPU 片元的 @builtin(position) 也是中心坐标
+        for x in 0..width {
+            let fx = x as f64 + 0.5;
+            let mut lit = ambient;
+            for l in &px_lights {
+                let dx = fx - l.x;
+                let dy = fy - l.y;
+                let d2 = dx * dx + dy * dy;
+                if d2 >= l.r2 {
+                    continue;
+                }
+                let f = 1.0 - d2.sqrt() / l.r;
+                let f = f * f;
+                lit[0] += l.rgb[0] * f;
+                lit[1] += l.rgb[1] * f;
+                lit[2] += l.rgb[2] * f;
+            }
+            let i = ((y * width + x) * 4) as usize;
+            for c in 0..3 {
+                buf[i + c] = (buf[i + c] as f64 * lit[c].min(LIGHT_CLAMP)).min(255.0) as u8;
+            }
+        }
+    }
 }
 
 /// 文字：`Text` {"content","size","color"} + `Position`，内嵌 8x8 点阵字体。
@@ -463,7 +630,35 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
         ));
     }
 
-    Ok(json!({
+    // 光照设置：开着就让 agent 在文字层面看见全部灯（位置/半径/颜色），不用看像素猜
+    let lighting = match ambient_of(world)? {
+        None => None,
+        Some((_, ambient_color)) => {
+            let lights = collect_lights(world)?;
+            lines.push(format!(
+                "光照开启：环境色 {ambient_color}，{} 盏点光源。",
+                lights.len()
+            ));
+            let lights_json: Vec<Value> = lights
+                .iter()
+                .map(|l| {
+                    let mut entry = serde_json::Map::new();
+                    entry.insert("id".into(), json!(l.id.to_string()));
+                    if let Some(n) = &l.name {
+                        entry.insert("name".into(), json!(n));
+                    }
+                    entry.insert("world".into(), json!({"x": l.x, "y": l.y}));
+                    entry.insert("radius".into(), json!(l.radius));
+                    entry.insert("intensity".into(), json!(l.intensity));
+                    entry.insert("color".into(), json!(l.color));
+                    Value::Object(entry)
+                })
+                .collect();
+            Some((ambient_color, lights_json))
+        }
+    };
+
+    let mut out = json!({
         "camera": {"x": cam_x, "y": cam_y, "scale": scale},
         "viewport": {"width": width, "height": height},
         "visible": visible,
@@ -471,7 +666,12 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
         "texts": texts,
         "overlaps": overlaps,
         "text": lines.join("\n"),
-    }))
+    });
+    if let Some((ambient_color, lights_json)) = lighting {
+        out["ambient"] = json!({"color": ambient_color});
+        out["lights"] = json!(lights_json);
+    }
+    Ok(out)
 }
 
 /// 屏幕九宫格方位词（输入为 0..1 的屏幕比例坐标）。
@@ -831,6 +1031,107 @@ mod tests {
         w.set_field(cam, "Shake.amplitude", json!(0.5)).unwrap();
         let d = describe_world(&w, 64, 64).unwrap();
         assert_eq!(d["camera"], json!({"x": 1.0, "y": 2.0, "scale": 8.0}));
+    }
+
+    #[test]
+    fn lighting_brightens_near_light_and_is_deterministic() {
+        // 暗环境 + 一盏白灯在原点：近灯像素比远处亮，且逐字节确定
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
+        let lamp = w.spawn();
+        w.set_component(lamp, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(lamp, "Light", json!({"radius": 4.0, "color": "#ffffff", "intensity": 1.0}))
+            .unwrap();
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        let near = pixel(&buf, 64, 32, 32);
+        let far = pixel(&buf, 64, 2, 2);
+        // 灯半径 4 单位 × scale 8 = 32px：角落在半径外 → 环境黑 = 全黑
+        assert_eq!(far, [0, 0, 0, 255], "半径外只剩环境光（纯黑）");
+        assert!(near[0] > far[0] && near[2] > far[2], "近灯应更亮: {near:?} vs {far:?}");
+        // 同世界同 tick → 字节逐位相同
+        assert_eq!(buf, render_world(&w, 64, 64, &Assets::empty(), 0).unwrap());
+    }
+
+    #[test]
+    fn no_ambient_entity_skips_lighting_entirely() {
+        // 有灯没 Ambient = 光照整体关闭：和没灯的世界渲出同样的字节（向后兼容）
+        let plain = render_world(&world_one_red_sprite(), 64, 64, &Assets::empty(), 0).unwrap();
+        let mut w = world_one_red_sprite();
+        let lamp = w.spawn();
+        w.set_component(lamp, "Position", json!({"x": 1.0, "y": 1.0})).unwrap();
+        w.set_component(lamp, "Light", json!({"radius": 4.0})).unwrap();
+        assert_eq!(plain, render_world(&w, 64, 64, &Assets::empty(), 0).unwrap());
+    }
+
+    #[test]
+    fn lighting_formula_clamps_at_1_5_and_white_ambient_is_identity() {
+        // 公式锁死：lit = min(ambient + Σ 贡献, 1.5)，out = min(scene·lit, 1)
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        // #646464 = (100,100,100)：过曝上限 1.5 → 100*1.5 = 150，数值可精确断言
+        w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#646464"})).unwrap();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#ffffff"})).unwrap();
+        // 白环境光（lit=1.0）且没灯 = 恒等变换，字节不变
+        let lit = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        assert_eq!(pixel(&lit, 64, 32, 32), [100, 100, 100, 255], "白环境光不改像素");
+        assert_eq!(pixel(&lit, 64, 2, 2), [24, 26, 33, 255], "背景也不变");
+        // 加一盏强灯：白环境 1.0 + 大贡献 → 夹到 1.5 → 100*1.5=150
+        let lamp = w.spawn();
+        w.set_component(lamp, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(lamp, "Light", json!({"radius": 100.0, "intensity": 10.0})).unwrap();
+        let lit = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        assert_eq!(pixel(&lit, 64, 32, 32), [150, 150, 150, 255], "过曝夹在 1.5 倍");
+    }
+
+    #[test]
+    fn light_cap_is_an_explicit_error() {
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#202838"})).unwrap();
+        for i in 0..65 {
+            let l = w.spawn();
+            w.set_component(l, "Position", json!({"x": i as f64, "y": 0.0})).unwrap();
+            w.set_component(l, "Light", json!({"radius": 2.0})).unwrap();
+        }
+        let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
+        assert!(err.contains("65") && err.contains("64"), "{err}");
+        // 半径非法也要显式报
+        let mut w2 = World::new();
+        let a2 = w2.spawn();
+        w2.set_component(a2, "Ambient", json!({"color": "#202838"})).unwrap();
+        let l2 = w2.spawn();
+        w2.set_component(l2, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w2.set_component(l2, "Light", json!({"radius": 0.0})).unwrap();
+        let err = render_world(&w2, 64, 64, &Assets::empty(), 0).unwrap_err();
+        assert!(err.contains("Light.radius"), "{err}");
+    }
+
+    #[test]
+    fn describe_includes_lights_and_ambient_when_active() {
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#202838"})).unwrap();
+        let lamp = w.spawn_named("torch").unwrap();
+        w.set_component(lamp, "Position", json!({"x": 3.0, "y": -1.0})).unwrap();
+        w.set_component(lamp, "Light", json!({"radius": 5.0, "color": "#ff8800", "intensity": 2.0}))
+            .unwrap();
+        let d = describe_world(&w, 64, 64).unwrap();
+        assert_eq!(d["ambient"], json!({"color": "#202838"}));
+        let lights = d["lights"].as_array().unwrap();
+        assert_eq!(lights.len(), 1);
+        assert_eq!(lights[0]["name"], json!("torch"));
+        assert_eq!(lights[0]["world"], json!({"x": 3.0, "y": -1.0}));
+        assert_eq!(lights[0]["radius"], json!(5.0));
+        assert_eq!(lights[0]["intensity"], json!(2.0));
+        assert_eq!(lights[0]["color"], json!("#ff8800"));
+        let text = d["text"].as_str().unwrap();
+        assert!(text.contains("光照开启") && text.contains("#202838") && text.contains("1 盏"), "{text}");
+        // 没 Ambient：describe 里不出现光照字段
+        let d = describe_world(&World::new(), 64, 64).unwrap();
+        assert!(d.get("ambient").is_none() && d.get("lights").is_none());
     }
 
     #[test]

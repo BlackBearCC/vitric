@@ -138,6 +138,23 @@ Convention components like Body/Solid: the engine recognizes the names, you defi
   ```
 - **Particles**: put `Particle{ttl}` (ticks remaining, integer) on an entity; the engine decrements it each tick and despawns the entity at 0 (despawn order = slot order, deterministic). Confetti / dust / explosions = spawn a batch of Sprite+Velocity+Particle entities and forget them — no cleanup rules needed.
 
+## Lighting
+
+Convention components like Body/Solid: the engine recognizes the names, you define the fields in your schema.
+
+- **The master switch is the presence of an Ambient entity.** No entity with an `Ambient` component = the lighting pass is skipped entirely (previous behavior, zero cost); one exists (first one wins) = the lighting pipeline activates and the whole frame is lit.
+- `Ambient{color}`: scene ambient base, e.g. `"#202838"` for a dark cave; `"#ffffff"` keeps unlit areas unchanged.
+- `Light{radius, color, intensity}` + `Position`: a point light. radius is in world units (light fades to zero at radius); color defaults to `"#ffffff"`, intensity to 1.0. **Hard cap: 64 lights** — exceeding it is an explicit error, never a silent truncation.
+- The formula (identical on the CPU screenshot path and the GPU window): `lit = min(ambient + Σ light_color·intensity·(1 - d/r)², 1.5)`, then `out = min(scene · lit, 1.0)`. The 1.5 ceiling allows slight over-brightening (a cheap bloom-ish pop).
+- **Everything is lit uniformly** — sprites, text, background; screen-anchored HUD text is not exempt. Keep HUDs readable by placing a light nearby or raising the ambient.
+- Lighting is deterministic: it reads only component state; identical world + tick → identical bytes. `render/screenshot` includes lighting — the agent sees what the player sees.
+- With lighting active, `render/describe` adds `ambient` (color) and a `lights` array (id/name/world pos/radius/intensity/color) plus a summary line — the full lighting setup is textually observable.
+
+```json
+{"name": "torch", "components": {"Position": {"x": 10, "y": 4},
+  "Light": {"radius": 6, "color": "#ff9040", "intensity": 1.2}}}
+```
+
 ## On-screen text
 
 `Text{content, size, color}` + `Position`: built-in 8x8 bitmap font (ASCII), each glyph is size×size world units, the string is centered on Position and drawn above sprites. `render/describe` returns `texts[].content` directly — agents never OCR screenshots.

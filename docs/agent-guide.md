@@ -137,6 +137,23 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
   ```
 - **粒子**：实体挂 `Particle{ttl}`（剩余 tick 数，整数），引擎每 tick 减 1，到 0 自动销毁（销毁顺序 = 槽位序，确定性）。五彩纸屑/尘土/爆炸 = spawn 一批 Sprite+Velocity+Particle 然后不管，不用写清扫规则。
 
+## 光照 / Lighting
+
+跟 Body/Solid 一样的约定组件：引擎认名字，字段自己在 schema 里定义。
+
+- **总开关 = Ambient 实体的存在**。场上没有带 `Ambient` 组件的实体 = 完全不跑光照（旧行为、零开销）；有一个（取第一个）= 光照管线启动，整帧打光。
+- `Ambient{color}`：场景环境光底色，如暗色洞穴 `"#202838"`；`"#ffffff"` = 无灯处保持原样。
+- `Light{radius, color, intensity}` + `Position`：点光源。radius 世界单位（到 radius 处衰减为零）；color 缺省 `"#ffffff"`、intensity 缺省 1.0。**上限 64 盏**，超了显式报错（不静默截断）。
+- 公式（CPU 截图和 GPU 窗口同一套）：`lit = min(ambient + Σ 灯色·intensity·(1 - d/r)², 1.5)`，`out = min(场景色 · lit, 1.0)`。1.5 的上限允许轻微过曝（廉价泛光感）。
+- **所有东西一视同仁被打光**——精灵、文字、背景，屏幕锚定的 HUD 也不豁免。HUD 要保持可读，自己在旁边放盏灯或调亮 Ambient。
+- 光照确定性：只读组件状态，同一世界同一 tick 渲出的字节逐位相同；`render/screenshot` 含光照——agent 截到的就是玩家看到的。
+- `render/describe` 在光照开启时多给 `ambient`（环境色）和 `lights` 数组（id/name/世界坐标/radius/intensity/color）+ 一行摘要——光照设置全部可文字化观察。
+
+```json
+{"name": "torch", "components": {"Position": {"x": 10, "y": 4},
+  "Light": {"radius": 6, "color": "#ff9040", "intensity": 1.2}}}
+```
+
 ## 屏上文字
 
 `Text{content, size, color}` + `Position`：内嵌 8x8 点阵字体（ASCII），每字符 size×size 世界单位、整串居中于 Position，画在精灵之上。`render/describe` 直接给出 `texts[].content`——agent 不用从截图认字。

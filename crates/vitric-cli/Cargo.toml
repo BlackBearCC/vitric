@@ -25,3 +25,7 @@ wgpu = "29.0.3"
 pollster = "0.4.0"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 font8x8 = "0.3"
+
+[dev-dependencies]
+# 只为单测里离线校验 WGSL（无 GPU 环境也能锁住 shader 不写炸）；版本必须跟 wgpu 同步
+naga = { version = "29.0.3", features = ["wgsl-in"] }

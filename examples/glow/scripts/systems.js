@@ -35,6 +35,7 @@ vitric.system("fireflies", { query: ["Player", "Position"], writes: [] }, (entit
       Position: { x: e.Position.x + (ctx.random() - 0.3) * 36, y: ctx.random() * 9 + 0.5 },
       Velocity: { x: (ctx.random() - 0.5) * 0.8, y: 0.5 + ctx.random() * 0.8 },
       Sprite:   { w: 0.18, h: 0.18, color: ctx.random() < 0.5 ? "#ffd75e" : "#ffeda8" },
+      Light:    { radius: 1.6, color: "#ffd75e", intensity: 0.55 },
       Particle: { ttl: 120 + Math.floor(ctx.random() * 60) },
     });
   }

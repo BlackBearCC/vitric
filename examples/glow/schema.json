@@ -166,6 +166,29 @@
           "default": false
         }
       }
+    },
+    "Light": {
+      "fields": {
+        "radius": {
+          "type": "number"
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        },
+        "intensity": {
+          "type": "number",
+          "default": 1
+        }
+      }
+    },
+    "Ambient": {
+      "fields": {
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        }
+      }
     }
   }
 }

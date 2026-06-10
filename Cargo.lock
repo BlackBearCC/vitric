@@ -2550,6 +2550,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "font8x8",
+ "naga",
  "pollster",
  "rodio",
  "serde_json",

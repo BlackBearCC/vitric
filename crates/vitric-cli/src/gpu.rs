@@ -25,12 +25,18 @@ struct Vertex {
     color: [f32; 4],
 }
 
-/// uniform：视口宽高 + "表面是不是 sRGB 格式"标志（z>0.5 时片元做 sRGB→线性，
-/// 保证最终字节和 CPU 路径的 sRGB 字节一致）。vec4 凑对齐。
+/// uniform：viewport = [宽, 高, "表面是 sRGB"标志, "光照开启"标志]（z>0.5 时片元做
+/// sRGB→线性，保证最终字节和 CPU 路径的 sRGB 字节一致；w>0.5 时片元跑光照公式）。
+/// ambient = [环境色 rgb, 灯数]；每盏灯两条 vec4：位置数组 [灯心 x_px, y_px, 半径 px, 0]、
+/// 颜色数组 [r·intensity, g·intensity, b·intensity, 0]——世界→像素的变换在 CPU 端做完，
+/// shader 只算距离。vec4 数组在 WGSL uniform（std140 风格）下天然 16 字节步长，无 padding 坑。
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Globals {
     viewport: [f32; 4],
+    ambient: [f32; 4],
+    lights_pos: [[f32; 4]; vitric_render::MAX_LIGHTS],
+    lights_color: [[f32; 4]; vitric_render::MAX_LIGHTS],
 }
 
 /// 图集里一块区域的 UV 矩形 [u0, v0, u1, v1]。
@@ -45,7 +51,12 @@ struct Atlas {
 }
 
 const WGSL: &str = r#"
-struct Globals { viewport: vec4<f32> };
+struct Globals {
+    viewport: vec4<f32>,                  // xy 视口尺寸 / z sRGB 标志 / w 光照开关
+    ambient: vec4<f32>,                   // rgb 环境色 / w 灯数
+    lights_pos: array<vec4<f32>, 64>,     // xy 灯心(像素) / z 半径(像素)
+    lights_color: array<vec4<f32>, 64>,   // rgb 已乘 intensity
+};
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(2) var atlas_samp: sampler;
@@ -83,6 +94,24 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = textureSample(atlas_tex, atlas_samp, in.uv) * in.color;
+    // 光照——与 CPU 路径同一公式（vitric-render 模块文档）：
+    //   lit = min(ambient + Σ color·intensity·(1 - d/r)², 1.5)；out = min(c·lit, 1)
+    // 必须在 sRGB 反算**之前**：CPU 是直接在 sRGB 字节上乘的，这里要在同一数值空间打光，
+    // 两条路径才长一个样。in.pos 是帧缓冲像素坐标（中心 +0.5），和 CPU 的像素中心一致。
+    if (globals.viewport.w > 0.5) {
+        var lit = globals.ambient.rgb;
+        let n = u32(globals.ambient.w);
+        for (var i = 0u; i < n; i = i + 1u) {
+            let lp = globals.lights_pos[i];
+            let d = distance(in.pos.xy, lp.xy);
+            if (d < lp.z) {
+                let f = 1.0 - d / lp.z;
+                lit = lit + globals.lights_color[i].rgb * f * f;
+            }
+        }
+        lit = min(lit, vec3<f32>(1.5));
+        c = vec4<f32>(min(c.rgb * lit, vec3<f32>(1.0)), c.a);
+    }
     // 表面是 sRGB 格式时写入值按线性解释，这里反算一次让最终字节贴齐 CPU 路径
     if (globals.viewport.z > 0.5) {
         c = vec4<f32>(srgb_to_linear(c.rgb), c.a);
@@ -164,8 +193,9 @@ impl GpuPresenter {
         };
         surface.configure(&device, &config);
 
-        // 背景色与 CPU 路径同字节 [24,26,33]；sRGB 表面的清屏色按线性解释，要先反算
-        let bg = [24.0 / 255.0, 26.0 / 255.0, 33.0 / 255.0];
+        // 背景色与 CPU 路径同字节（vitric_render::BACKGROUND）；sRGB 表面的清屏色按线性解释，要先反算
+        let [bg_r, bg_g, bg_b, _] = vitric_render::BACKGROUND;
+        let bg = [bg_r as f64 / 255.0, bg_g as f64 / 255.0, bg_b as f64 / 255.0];
         let to_linear = |c: f64| {
             if c <= 0.04045 {
                 c / 12.92
@@ -361,8 +391,7 @@ impl GpuPresenter {
         if !bytes.is_empty() {
             self.queue.write_buffer(&self.vertex_buf, 0, bytes);
         }
-        let srgb_flag = if self.config.format.is_srgb() { 1.0 } else { 0.0 };
-        let globals = Globals { viewport: [w as f32, h as f32, srgb_flag, 0.0] };
+        let globals = build_globals(world, w, h, self.config.format.is_srgb(), tick)?;
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -538,6 +567,44 @@ fn build_atlas(
 // 每帧顶点流：镜像 vitric-render 的视觉语义（同一套组件约定、同一坐标变换）
 // ---------------------------------------------------------------------------
 
+/// 攒一帧的 uniform（纯函数不碰 GPU，光照打包布局被单测锁住）。
+/// 灯参数在这里从世界坐标变换到像素空间（取景含 Shake 抖动——光跟着画面走，
+/// 和 CPU 路径的 apply_lighting 同一套变换）；shader 内循环只算距离。
+fn build_globals(
+    world: &World,
+    width: u32,
+    height: u32,
+    srgb: bool,
+    tick: u64,
+) -> Result<Globals, String> {
+    let mut g = Globals {
+        viewport: [width as f32, height as f32, if srgb { 1.0 } else { 0.0 }, 0.0],
+        ..bytemuck::Zeroable::zeroed()
+    };
+    // 光照总开关 = 场上有没有 Ambient 实体（语义源头在 vitric-render）
+    if let Some((ambient, _)) = vitric_render::ambient_of(world)? {
+        let lights = vitric_render::collect_lights(world)?;
+        let (cam_x, cam_y, scale) = vitric_render::camera_of(world, tick, height)?;
+        g.viewport[3] = 1.0;
+        g.ambient = [ambient[0] as f32, ambient[1] as f32, ambient[2] as f32, lights.len() as f32];
+        for (i, l) in lights.iter().enumerate() {
+            g.lights_pos[i] = [
+                ((width as f64) / 2.0 + (l.x - cam_x) * scale) as f32,
+                ((height as f64) / 2.0 - (l.y - cam_y) * scale) as f32,
+                (l.radius * scale) as f32,
+                0.0,
+            ];
+            g.lights_color[i] = [
+                (l.rgb[0] * l.intensity) as f32,
+                (l.rgb[1] * l.intensity) as f32,
+                (l.rgb[2] * l.intensity) as f32,
+                0.0,
+            ];
+        }
+    }
+    Ok(g)
+}
+
 fn build_vertices(
     world: &World,
     width: u32,
@@ -549,6 +616,12 @@ fn build_vertices(
     // 取景（含 Shake 抖动偏移）直接用 vitric-render 的实现——两条路径抖得逐位一致
     let (cam_x, cam_y, scale) = vitric_render::camera_of(world, tick, height)?;
     let mut verts: Vec<Vertex> = Vec::new();
+
+    // 光照开启时背景也要被照（CPU 路径是整张 buf 过公式）：清屏色没法逐像素变，
+    // 所以先铺一个全屏背景方块，让 shader 把背景和实体一起打光
+    if vitric_render::ambient_of(world)?.is_some() {
+        push_solid(&mut verts, atlas, 0.0, 0.0, width as f32, height as f32, vitric_render::BACKGROUND);
+    }
 
     // 精灵：按实体序（画家算法，后画盖前画）
     for id in world.query(&["Position", "Sprite"]) {
@@ -642,7 +715,9 @@ fn build_vertices(
         }
     }
 
-    // 选中描边：青色 2px，画在最上层（几何对齐 vitric_render::draw_selection_outline）
+    // 选中描边：青色 2px，画在最上层（几何对齐 vitric_render::draw_selection_outline）。
+    // 已知小偏差：光照开启时描边在 GPU 窗口会被一起打光（同一条管线），CPU 窗口路径
+    // 是渲完再描所以不被打光——检查器调试装饰，不进截图/断言，不值得为它开第二条管线
     if let Some(id) = selection {
         push_selection_outline(&mut verts, world, width, height, atlas, id, (cam_x, cam_y, scale));
     }
@@ -811,6 +886,70 @@ mod tests {
         let xs: Vec<f32> = verts[6..].iter().map(|v| v.pos[0]).collect();
         assert_eq!(xs.iter().cloned().fold(f32::MAX, f32::min), 16.0);
         assert_eq!(xs.iter().cloned().fold(f32::MIN, f32::max), 48.0);
+    }
+
+    #[test]
+    fn wgsl_parses_and_validates_offline() {
+        // 无 GPU 环境锁住 shader：解析 + 验证都过，uniform 布局错/语法错在 CI 就炸
+        let module = naga::front::wgsl::parse_str(WGSL).expect("WGSL 解析失败");
+        naga::valid::Validator::new(Default::default(), naga::valid::Capabilities::all())
+            .validate(&module)
+            .expect("WGSL 验证失败");
+    }
+
+    #[test]
+    fn globals_pack_lights_in_pixel_space() {
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#202838"})).unwrap();
+        let lamp = w.spawn();
+        w.set_component(lamp, "Position", json!({"x": 2.0, "y": 1.0})).unwrap();
+        w.set_component(lamp, "Light", json!({"radius": 4.0, "color": "#ff8000", "intensity": 2.0}))
+            .unwrap();
+        let g = build_globals(&w, 64, 64, false, 0).unwrap();
+        assert_eq!(g.viewport, [64.0, 64.0, 0.0, 1.0], "w 位是光照开关");
+        // ambient.rgb = #202838 / 255，.w = 灯数
+        assert_eq!(g.ambient[3], 1.0);
+        assert!((g.ambient[0] - 0x20 as f32 / 255.0).abs() < 1e-6);
+        assert!((g.ambient[2] - 0x38 as f32 / 255.0).abs() < 1e-6);
+        // 默认相机 scale=8：世界 (2,1) → 像素 (32+16, 32-8)，半径 4*8=32px
+        assert_eq!(g.lights_pos[0], [48.0, 24.0, 32.0, 0.0]);
+        // 颜色已乘 intensity=2
+        assert_eq!(g.lights_color[0][0], 2.0);
+        assert!((g.lights_color[0][1] - 2.0 * 0x80 as f32 / 255.0).abs() < 1e-6);
+        assert_eq!(g.lights_color[0][2], 0.0);
+        // sRGB 标志独立于光照
+        assert_eq!(build_globals(&w, 64, 64, true, 0).unwrap().viewport[2], 1.0);
+    }
+
+    #[test]
+    fn globals_without_ambient_keep_lighting_off() {
+        let mut w = World::new();
+        let lamp = w.spawn();
+        w.set_component(lamp, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(lamp, "Light", json!({"radius": 4.0})).unwrap();
+        let g = build_globals(&w, 64, 64, false, 0).unwrap();
+        assert_eq!(g.viewport[3], 0.0, "没 Ambient = 光照关，灯不打包");
+        assert_eq!(g.ambient, [0.0; 4]);
+        assert_eq!(g.lights_pos[0], [0.0; 4]);
+    }
+
+    #[test]
+    fn lighting_adds_fullscreen_background_quad() {
+        // 光照开启时第一个方块是全屏背景（清屏色没法被 shader 打光）
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#202838"})).unwrap();
+        let verts = build_vertices(&w, 64, 48, &fake_atlas(), None, 0).unwrap();
+        assert_eq!(verts.len(), 6);
+        let xs: Vec<f32> = verts.iter().map(|v| v.pos[0]).collect();
+        let ys: Vec<f32> = verts.iter().map(|v| v.pos[1]).collect();
+        assert_eq!(xs.iter().cloned().fold(f32::MAX, f32::min), 0.0);
+        assert_eq!(xs.iter().cloned().fold(f32::MIN, f32::max), 64.0);
+        assert_eq!(ys.iter().cloned().fold(f32::MIN, f32::max), 48.0);
+        assert_eq!(verts[0].color, tint(vitric_render::BACKGROUND));
+        // 没 Ambient：不铺背景方块（旧行为）
+        assert!(build_vertices(&World::new(), 64, 48, &fake_atlas(), None, 0).unwrap().is_empty());
     }
 
     #[test]
