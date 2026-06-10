@@ -27,7 +27,12 @@ wgpu = "29.0.3"
 pollster = "0.4.0"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 font8x8 = "0.3"
+# 运行时 LLM（src/llm.rs）的 HTTP 客户端：同步阻塞 API 正好住在单工作线程里，
+# 一个 POST 不值得拖进 tokio；默认 rustls（纯 Rust TLS），windows-gnu 交叉编译无痛
+ureq = { version = "3", features = ["json"] }
 
 [dev-dependencies]
 # 只为单测里离线校验 WGSL（无 GPU 环境也能锁住 shader 不写炸）；版本必须跟 wgpu 同步
 naga = { version = "29.0.3", features = ["wgsl-in"] }
+# LLM 测试的本地 HTTP 桩服务器（vitric-control 已在用同款，不引入新家族）
+tiny_http = "0.12"

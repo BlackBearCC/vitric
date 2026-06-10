@@ -17,6 +17,8 @@
 //!   --ticks <N>      跑满 N tick 后自动退出（CI/脚本用，全速不限速）
 //!   --record <文件>   退出时把录像写到文件
 //!   --renderer <gpu|cpu> 窗口呈现路径（默认 cpu=softbuffer；gpu=wgpu，自带开窗）
+//!
+//! 运行时 LLM 经环境变量启用：VITRIC_LLM_URL / VITRIC_LLM_KEY / VITRIC_LLM_MODEL（见 src/llm.rs）。
 
 mod audio;
 mod gpu;
@@ -25,6 +27,7 @@ mod window;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use vitric_cli::llm::{self, Llm};
 use vitric_cli::runtime::{self, Runtime};
 use vitric_sim::GameLogic;
 use vitric_control::{ControlServer, Dispatcher};
@@ -64,6 +67,8 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
         std::fs::read_to_string(rec_path).map_err(|e| format!("读取录像 {rec_path} 失败: {e}"))?;
     let rec: Recording =
         serde_json::from_str(&rec_text).map_err(|e| format!("录像解析失败: {e}"))?;
+    // 重放模式不装配 LLM：llm-ask 事件无人监听，llm-reply/llm-error 全部来自
+    // 录像的 replies 通道——重放永远不碰网络，离线逐位复现带 LLM 内容的那一局
     let (mut sim, mut rt) = Runtime::boot(&PathBuf::from(dir))?;
     sim.replay(&rec, &mut rt).map_err(|e| e.to_string())?;
     println!(
@@ -145,6 +150,8 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         Ok(a) => (Some(a), "ok".to_string()),
         Err(e) => (None, format!("disabled: {e}")),
     };
+    // 运行时 LLM：环境变量配齐才启用；没配也是合法状态（llm-ask 会收到显式 llm-error）
+    let mut llm = Llm::from_env();
     // 启动横幅走 stdout 单行 JSON：AI 解析端口，人也看得懂
     println!(
         "{}",
@@ -155,13 +162,14 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
             "seed": project.manifest.seed,
             "window": windowed,
             "audio": audio_status,
+            "llm": llm.banner(),
         })
     );
 
     if windowed {
         let title = format!("{} — Vitric", project.manifest.name);
         let game =
-            window::WindowedGame::new(sim, rt, dispatcher, server, audio_sink, renderer, title);
+            window::WindowedGame::new(sim, rt, dispatcher, server, audio_sink, llm, renderer, title);
         let (mut sim, error) = game.run()?;
         finish_recording(&mut sim, record_path)?;
         return match error {
@@ -196,7 +204,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
 
         if max_ticks.is_some() {
             // 有限跑：全速不睡觉
-            step_once(&mut sim, &mut rt, &mut dispatcher, &mut audio_sink)?;
+            step_once(&mut sim, &mut rt, &mut dispatcher, &mut audio_sink, &mut llm)?;
             continue;
         }
 
@@ -206,7 +214,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         last = now;
         let mut budget = 8; // 单帧补步上限，防螺旋死亡
         while acc >= DT && budget > 0 {
-            step_once(&mut sim, &mut rt, &mut dispatcher, &mut audio_sink)?;
+            step_once(&mut sim, &mut rt, &mut dispatcher, &mut audio_sink, &mut llm)?;
             acc -= DT;
             budget -= 1;
         }
@@ -242,11 +250,15 @@ pub fn step_once(
     rt: &mut Runtime,
     dispatcher: &mut Dispatcher,
     audio_sink: &mut Option<audio::Audio>,
+    llm: &mut Llm,
 ) -> Result<(), String> {
     let report = sim.step(rt).map_err(|e| e.to_string())?;
     dispatcher.record_events(report.tick, &report.events);
     let observed = rt.drain_observed();
     audio::handle_sound_events(audio_sink, &observed);
+    // LLM：捕获本 tick 的 llm-ask 排队发请求，再收割已完成的回复注入下一 tick
+    llm::handle_ask_events(llm, &observed, sim);
+    llm::pump_replies(llm, sim);
     dispatcher.record_events(report.tick, &observed);
     for failure in dispatcher.check_assertions(sim) {
         // 断言失败实时上报到 stderr（结构化一行），同时存进 assert/failures

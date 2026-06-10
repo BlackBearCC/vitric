@@ -5,7 +5,7 @@ use serde_json::json;
 use vitric_ecs::World;
 use vitric_rules::Event;
 
-use crate::{InputRecord, Pcg32, Recording};
+use crate::{InputRecord, Pcg32, Recording, ReplyRecord};
 
 /// 模拟频率固定 60Hz。固定步长是确定性的前提：墙钟时间永远不进模拟。
 pub const TICKS_PER_SECOND: u64 = 60;
@@ -104,6 +104,9 @@ pub struct Sim {
     pub tick: u64,
     seed: u64,
     pending_inputs: Vec<(String, String)>,
+    /// 已注入未消化的外部回复（LLM 回复等）。与 pending_inputs 同级的
+    /// 第二条录制通道：进 step 时变事件 + 进录像，进快照。
+    pending_replies: Vec<(String, serde_json::Value)>,
     recorder: Option<Recording>,
 }
 
@@ -115,6 +118,7 @@ impl Sim {
             tick: 0,
             seed,
             pending_inputs: Vec::new(),
+            pending_replies: Vec::new(),
             recorder: None,
         }
     }
@@ -122,6 +126,14 @@ impl Sim {
     /// 注入一条输入（下一次 step 生效）。phase: "pressed" | "released"。
     pub fn inject_input(&mut self, action: &str, phase: &str) {
         self.pending_inputs.push((action.to_string(), phase.to_string()));
+    }
+
+    /// 注入一条外部回复（下一次 step 变成事件，名为 `name`、data 为 `data`）。
+    /// 这是 LLM 等异步外部内容进入模拟的**唯一**正路：和输入一样被录像记录、
+    /// 重放时按原 tick 重新注入——所以带 LLM 内容的录像离线重放逐位一致。
+    /// 约定 `data` 是 JSON 对象（非对象会被 Event 丢成空对象，调用方自己保证）。
+    pub fn inject_reply(&mut self, name: &str, data: serde_json::Value) {
+        self.pending_replies.push((name.to_string(), data));
     }
 
     /// 开始录像（从当前状态起记）。
@@ -148,7 +160,7 @@ impl Sim {
     }
 
     /// 推一帧。流水线（顺序固定，这就是确定性）：
-    /// 1. 注入的输入 → input 事件（录像在此记录）
+    /// 1. 注入的输入 → input 事件，注入的外部回复 → 同名事件（录像都在此记录）
     /// 2. 内建重力：Body 实体 Velocity.y += gravity * DT
     /// 3. 内建运动系统：Position += Velocity * DT（带 Body+Collider 的实体被 Solid 挡停）
     /// 4. 游戏感内建系统（跑在运动之后，相机看的是本 tick 的最终位置）：
@@ -174,6 +186,18 @@ impl Sim {
                 });
             }
             events.push(Event::new("input", json!({"action": action, "phase": phase})));
+        }
+
+        // 1.5 外部回复（固定排在输入之后，重放按同一顺序注入才逐位一致）
+        for (name, data) in std::mem::take(&mut self.pending_replies) {
+            if let Some(rec) = &mut self.recorder {
+                rec.replies.push(ReplyRecord {
+                    tick: self.tick,
+                    name: name.clone(),
+                    data: data.clone(),
+                });
+            }
+            events.push(Event::new(&name, data));
         }
 
         // 2. 重力 + 运动
@@ -221,6 +245,10 @@ impl Sim {
             for input in rec.inputs_at(self.tick) {
                 self.inject_input(&input.action, &input.phase);
             }
+            // 外部回复从录像取（绝不重新调网络），注入顺序与录制时一致：输入在前回复在后
+            for reply in rec.replies_at(self.tick) {
+                self.inject_reply(&reply.name, reply.data.clone());
+            }
             self.step(logic)?;
             if let Some(&&(t, expected)) = cp.peek() {
                 if self.tick == t {
@@ -250,8 +278,9 @@ impl Sim {
             "seed": self.seed,
             "rng": serde_json::to_value(&self.rng).expect("rng 可序列化"),
             "world": self.world.snapshot(),
-            // 已注入未消化的输入。漏掉它，restore 后这些输入凭空消失
+            // 已注入未消化的输入/外部回复。漏掉任何一个，restore 后它们凭空消失，轨迹静默分歧
             "pending_inputs": self.pending_inputs,
+            "pending_replies": self.pending_replies,
             // 逻辑层暂存状态（脚本上一 tick 发的事件等）
             "logic": logic.snapshot_state(),
         })
@@ -274,12 +303,20 @@ impl Sim {
             snap.get("pending_inputs").cloned().ok_or("快照缺 pending_inputs")?,
         )
         .map_err(|e| format!("pending_inputs 解析失败: {e}"))?;
+        // 显式报缺：旧版快照没有 pending_replies，静默补空会掩盖版本不兼容
+        let pending_replies: Vec<(String, serde_json::Value)> = serde_json::from_value(
+            snap.get("pending_replies")
+                .cloned()
+                .ok_or("快照缺 pending_replies（旧版快照与当前版本不兼容，重新 sim/snapshot）")?,
+        )
+        .map_err(|e| format!("pending_replies 解析失败: {e}"))?;
         logic.restore_state(snap.get("logic").ok_or("快照缺 logic 状态")?)?;
         self.tick = tick;
         self.seed = seed;
         self.rng = rng;
         self.world = world;
         self.pending_inputs = pending;
+        self.pending_replies = pending_replies;
         // 时间线断了，进行中的录像必然不可重放——直接作废，不留静默损坏的录像
         self.recorder = None;
         Ok(())
@@ -759,6 +796,104 @@ mod tests {
             }
             other => panic!("错误类型不对: {other}"),
         }
+    }
+
+    #[test]
+    fn inject_reply_becomes_event_next_step_and_is_consumed() {
+        let mut sim = Sim::new(1);
+        moving_world(&mut sim);
+        sim.inject_reply("llm-reply", json!({"id": "npc-1", "text": "你好"}));
+        let mut logic = Collect(Vec::new());
+        sim.step(&mut logic).unwrap();
+        let reply: Vec<_> = logic.0.iter().filter(|e| e.name == "llm-reply").collect();
+        assert_eq!(reply.len(), 1);
+        assert_eq!(reply[0].data.get("id"), Some(&json!("npc-1")));
+        assert_eq!(reply[0].data.get("text"), Some(&json!("你好")));
+        // 消化即清空：第二步不能再出现
+        logic.0.clear();
+        sim.step(&mut logic).unwrap();
+        assert!(logic.0.iter().all(|e| e.name != "llm-reply"));
+    }
+
+    /// 把 llm-reply 的 text 写进世界的逻辑——回复内容真实影响状态哈希，
+    /// 重放时丢了回复必然分歧（这正是要锁死的不变量）。
+    struct ApplyReply;
+    impl GameLogic for ApplyReply {
+        fn on_tick(&mut self, w: &mut World, ev: Vec<Event>, _: &mut Pcg32, _: u64) -> Result<(), String> {
+            for e in ev {
+                if e.name == "llm-reply" {
+                    let m = w.entity("mover").map_err(|e| e.to_string())?;
+                    let text = e.data.get("text").cloned().unwrap_or(json!(""));
+                    w.set_component(m, "Dialogue", json!({"text": text}))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn recording_with_replies_replays_bit_identically() {
+        // 录一局：tick 30 注入一条影响世界状态的 LLM 回复
+        let mut sim = Sim::new(7);
+        moving_world(&mut sim);
+        sim.start_recording();
+        for t in 0..150 {
+            if t == 30 {
+                sim.inject_reply("llm-reply", json!({"id": "q1", "text": "宝箱在东边"}));
+            }
+            sim.step(&mut ApplyReply).unwrap();
+        }
+        let rec = sim.stop_recording().unwrap();
+        assert_eq!(rec.replies.len(), 1);
+        assert_eq!(rec.replies[0].tick, 30);
+        assert_eq!(rec.replies[0].name, "llm-reply");
+
+        // 重放：回复从录像注入（不碰网络），逐校验点一致 + 终态哈希一致
+        let mut sim2 = Sim::new(7);
+        moving_world(&mut sim2);
+        sim2.replay(&rec, &mut ApplyReply).unwrap();
+        assert_eq!(sim2.world.state_hash(), rec.final_hash);
+
+        // 反证：把回复从录像里抠掉，重放必然跑偏——回复确实是被录的状态来源
+        let mut crippled = rec.clone();
+        crippled.replies.clear();
+        let mut sim3 = Sim::new(7);
+        moving_world(&mut sim3);
+        let err = sim3.replay(&crippled, &mut ApplyReply).unwrap_err();
+        assert!(matches!(err, SimError::ReplayDiverged { .. }), "{err}");
+    }
+
+    #[test]
+    fn old_recording_without_replies_still_parses() {
+        // 旧版录像 JSON 没有 replies 字段：serde(default) 补空，语义不变
+        let text = r#"{"seed":1,"inputs":[],"checkpoints":[],"ticks":0,"final_hash":0}"#;
+        let rec: Recording = serde_json::from_str(text).unwrap();
+        assert!(rec.replies.is_empty());
+    }
+
+    #[test]
+    fn snapshot_roundtrips_pending_replies() {
+        let mut sim = Sim::new(3);
+        moving_world(&mut sim);
+        sim.inject_reply("llm-reply", json!({"id": "q1", "text": "snap"}));
+        let snap = sim.snapshot(&());
+
+        // 直接跑：回复在下一 step 生效
+        sim.step(&mut ApplyReply).unwrap();
+        let h_direct = sim.world.state_hash();
+
+        // restore 进新 sim 再跑：未消化的回复必须原样回来
+        let mut sim2 = Sim::new(0);
+        sim2.restore(&snap, &mut ()).unwrap();
+        sim2.step(&mut ApplyReply).unwrap();
+        assert_eq!(sim2.world.state_hash(), h_direct);
+
+        // 旧版快照缺 pending_replies → 显式报错，不静默补空
+        let mut old_snap = snap.clone();
+        old_snap.as_object_mut().unwrap().remove("pending_replies");
+        let err = sim2.restore(&old_snap, &mut ()).unwrap_err();
+        assert!(err.contains("pending_replies"), "{err}");
     }
 
     #[test]

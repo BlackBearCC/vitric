@@ -81,7 +81,7 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 
 引擎保证什么、不保证什么，边界说清楚：
 
-- **录像只记输入流。** 录制期间 `world/set` / `world/spawn` / `world/despawn` / `project/reload` / `sim/restore` 会被明确拒绝（改了的状态不进录像，录出来必然重放分歧），检查器拖拽也会被禁用。要在录制中影响世界，用 `input/inject`——输入会被录下来。
+- **录像只记两条外部通道：输入流 + 外部回复（LLM）。** 录制期间 `world/set` / `world/spawn` / `world/despawn` / `project/reload` / `sim/restore` 会被明确拒绝（改了的状态不进录像，录出来必然重放分歧），检查器拖拽也会被禁用。要在录制中影响世界，用 `input/inject`——输入会被录下来。LLM 回复经引擎的 inject_reply 进模拟，同样被录、重放时原 tick 重新注入（见「运行时 LLM」）。
 - **脚本必须无状态。** 跨 tick 的状态只能放组件里。`globalThis`/闭包里存的东西不进快照、热重载时清零，restore 之后必然分歧。`Math.random` / `Date.now` / `new Date()` 直接 throw 并指路 `ctx.random()` / `ctx.tick`；显式传参的 `new Date(0)` 是纯计算，放行。
 - **快照是全量的。** `sim/snapshot` 含世界、tick、随机数状态、未消化的输入、逻辑层暂存事件，restore 后继续跑和原轨迹逐位一致（有测试锁着）。
 - **确定性保证范围 = 同平台同二进制。** `Math.sin` 这类超越函数依赖系统数学库，跨平台（Linux ↔ Windows）末位可能不同；跨平台分享录像/比对哈希不在保证内。
@@ -112,6 +112,31 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 ## 音效
 
 约定事件：规则/脚本 `{"emit": "play-sound", "data": {"sound": "coin.wav"}}`，引擎播放项目 `sounds/` 目录下的文件（wav/ogg/mp3/flac）。音频是纯输出副作用不进模拟，确定性回放不受影响；无声卡环境（容器/CI）启动横幅会标 `audio: disabled` 但事件照常流动。`vitric check` 会静态校验字面引用的音效文件存在。
+
+## 运行时 LLM
+
+游戏逻辑可以在运行时向 LLM 要内容（NPC 台词、生成式描述），**不破坏确定性回放**。
+
+**配置**只认环境变量（密钥不进项目数据）：`VITRIC_LLM_URL`（OpenAI 兼容 chat/completions 端点，如 `https://api.openai.com/v1/chat/completions`）、`VITRIC_LLM_KEY`、`VITRIC_LLM_MODEL`。配齐了启动横幅标 `llm: ok (model …)`；缺任何一个标 `llm: disabled: 未配置 VITRIC_LLM_URL/KEY/MODEL`——此时提问会**立刻**收到显式的 `llm-error` 回复，不是静默没下文。
+
+**约定事件**：
+- 提问：规则/脚本 `{"emit": "llm-ask", "data": {"id": "npc-1", "prompt": "..."}}`。`id` 是游戏逻辑自选的关联键，回复原样带回，用来对回提问方。
+- 回复：引擎注入 `llm-reply {id, text}`；任何失败（未配置/网络/响应格式不对）注入 `llm-error {id, message}`。回复哪个 tick 到取决于网络快慢，规则按事件响应，别假设固定延迟。
+
+**确定性故事**：HTTP 在引擎的一个后台工作线程里排队串行执行，模拟循环从不等网络；回复经 `Sim::inject_reply` 进入模拟——这是和按键输入同级的**录制通道**：回复内容连同被消化的 tick 一起写进录像（`Recording.replies`），快照也包含未消化的回复。所以 `vitric replay` 重放带 LLM 内容的录像时，llm-ask 无人监听、回复全部从录像注入，**重放永远不碰网络**，离线逐位复现原局。
+
+NPC 对话最小写法（用 `filter: {"id": ...}` 把回复对回提问方）：
+
+```json
+{"rules": [
+  {"id": "npc-greet", "on": {"event": "input", "filter": {"action": "e", "phase": "pressed"}},
+   "do": [{"emit": "llm-ask", "data": {"id": "npc-1", "prompt": "你是玻璃镇铁匠，对路过的玩家说一句话"}}]},
+  {"id": "npc-say", "on": {"event": "llm-reply", "filter": {"id": "npc-1"}},
+   "do": [{"set": "@npc.Text.content", "to": "event.text"}]},
+  {"id": "npc-fail", "on": {"event": "llm-error"},
+   "do": [{"set": "@npc.Text.content", "to": "event.message"}]}
+]}
+```
 
 ## 引擎约定组件
 

@@ -11,7 +11,7 @@ vitric replay <project-dir> <recording>    # replay a recording, verifying deter
 vitric assets <project-dir> [--colors N] [--height H] [--palette-lock]  # harmonize all project PNGs onto one shared palette (AI-generated art → one coherent look), see docs/art-pipeline.md
 ```
 
-The first stdout line of `run` is a JSON banner containing the control-plane URL (and audio status).
+The first stdout line of `run` is a JSON banner containing the control-plane URL (plus audio and LLM status).
 
 ## Control plane (HTTP JSON-RPC)
 
@@ -82,7 +82,7 @@ Reproducing a bug: `vitric run my-game --ticks 600 --record bug.json`, then
 
 What the engine guarantees, and where the guarantee ends:
 
-- **Recordings capture the input stream only.** While recording, `world/set` / `world/spawn` / `world/despawn` / `project/reload` / `sim/restore` are explicitly rejected (out-of-band mutations don't enter the recording, so it would silently become unreplayable), and inspector dragging is disabled. To affect the world during a recording, use `input/inject` — inputs are recorded.
+- **Recordings capture exactly two external channels: the input stream and external replies (LLM).** While recording, `world/set` / `world/spawn` / `world/despawn` / `project/reload` / `sim/restore` are explicitly rejected (out-of-band mutations don't enter the recording, so it would silently become unreplayable), and inspector dragging is disabled. To affect the world during a recording, use `input/inject` — inputs are recorded. LLM replies enter through the engine's inject_reply channel, are recorded too, and are re-injected at the original tick on replay (see "Runtime LLM").
 - **Scripts must be stateless.** Cross-tick state belongs in components. Anything stashed in `globalThis` or closures is invisible to snapshots and wiped by hot reload. `Math.random` / `Date.now` / `new Date()` throw and point you to `ctx.random()` / `ctx.tick`; explicit-argument `new Date(0)` is pure computation and allowed.
 - **Snapshots are complete.** `sim/snapshot` includes the world, tick, RNG state, pending inputs, and the logic layer's carried-over events; restore-then-continue is bit-identical to the original trajectory (locked by test).
 - **The guarantee is per platform, per binary.** Transcendental functions like `Math.sin` depend on the system math library; last-bit results may differ across Linux ↔ Windows. Sharing recordings or comparing hashes across platforms is outside the guarantee.
@@ -109,6 +109,31 @@ Entities carry an `Anim` component (schema must define `clip/prev/t/done`). **Th
 ## Audio
 
 Convention event: `{"emit": "play-sound", "data": {"sound": "coin.wav"}}` plays a file from the project `sounds/` dir (wav/ogg/mp3/flac). Audio is a pure output side effect — replays are unaffected. With no audio device (containers/CI) the banner says `audio: disabled` and everything else works. `vitric check` validates literal sound references.
+
+## Runtime LLM
+
+Game logic can ask an LLM for content at runtime (NPC dialogue, generated descriptions) **without breaking deterministic replay**.
+
+**Config** is env-only (keys never live in project data): `VITRIC_LLM_URL` (an OpenAI-compatible chat/completions endpoint, e.g. `https://api.openai.com/v1/chat/completions`), `VITRIC_LLM_KEY`, `VITRIC_LLM_MODEL`. With all three set the startup banner shows `llm: ok (model …)`; with any missing it shows `llm: disabled: 未配置 VITRIC_LLM_URL/KEY/MODEL` — and asks then receive an **immediate, explicit** `llm-error` reply instead of silently going nowhere.
+
+**Convention events**:
+- Ask: rules/scripts emit `{"emit": "llm-ask", "data": {"id": "npc-1", "prompt": "..."}}`. `id` is a correlation key chosen by game logic; it comes back verbatim on the reply.
+- Reply: the engine injects `llm-reply {id, text}`; any failure (unconfigured / network / malformed response) injects `llm-error {id, message}`. The arrival tick depends on network latency — react to the event, don't assume a fixed delay.
+
+**The determinism story**: HTTP happens on one background worker thread (requests are queued and executed serially; the sim loop never waits on the network). Replies enter the sim via `Sim::inject_reply` — a recorded channel on par with key inputs: the reply content is written into the recording (`Recording.replies`) together with the tick that consumed it, and pending replies are part of snapshots. So `vitric replay` of a recording with LLM content never touches the network: llm-ask events have no listener, and every reply is re-injected from the recording, reproducing the run bit-identically offline.
+
+Minimal NPC dialogue wiring (use `filter: {"id": ...}` to route the reply back to the asker):
+
+```json
+{"rules": [
+  {"id": "npc-greet", "on": {"event": "input", "filter": {"action": "e", "phase": "pressed"}},
+   "do": [{"emit": "llm-ask", "data": {"id": "npc-1", "prompt": "You are the blacksmith of Glass Town; say one line to a passing player"}}]},
+  {"id": "npc-say", "on": {"event": "llm-reply", "filter": {"id": "npc-1"}},
+   "do": [{"set": "@npc.Text.content", "to": "event.text"}]},
+  {"id": "npc-fail", "on": {"event": "llm-error"},
+   "do": [{"set": "@npc.Text.content", "to": "event.message"}]}
+]}
+```
 
 ## Built-in events
 

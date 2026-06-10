@@ -5,12 +5,13 @@
 //! - 时间步长固定（1/60 秒），不吃墙钟；
 //! - 随机数自实现 PCG32，状态可快照；
 //! - 一切迭代顺序确定（依赖 vitric-ecs 的有序存储）；
-//! - 录像存输入 + 周期性状态哈希，重放时逐点校验，跑偏立刻定位。
+//! - 录像存输入 + 外部回复（LLM 等异步内容，见 [`Sim::inject_reply`]）
+//!   + 周期性状态哈希，重放时逐点校验，跑偏立刻定位。
 
 mod pcg;
 mod recording;
 mod sim;
 
 pub use pcg::Pcg32;
-pub use recording::{InputRecord, Recording};
+pub use recording::{InputRecord, Recording, ReplyRecord};
 pub use sim::{GameLogic, Sim, SimError, StepReport, DT, TICKS_PER_SECOND};

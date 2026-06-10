@@ -23,6 +23,7 @@ use winit::window::{Window, WindowId};
 use vitric_control::{ControlServer, Dispatcher};
 use vitric_sim::{Sim, DT};
 
+use vitric_cli::llm::Llm;
 use vitric_cli::runtime::Runtime;
 
 use crate::audio::Audio;
@@ -48,6 +49,7 @@ pub struct WindowedGame {
     pub dispatcher: Dispatcher,
     pub server: ControlServer,
     audio: Option<Audio>,
+    llm: Llm,
     renderer: Renderer,
     /// 窗口标题（项目名 — Vitric）：任务栏/切窗里游戏要有自己的名字。
     title: String,
@@ -63,12 +65,14 @@ pub struct WindowedGame {
 }
 
 impl WindowedGame {
+    #[allow(clippy::too_many_arguments)] // 装配函数，调用点只有 cmd_run 一处
     pub fn new(
         sim: Sim,
         rt: Runtime,
         dispatcher: Dispatcher,
         server: ControlServer,
         audio: Option<Audio>,
+        llm: Llm,
         renderer: Renderer,
         title: String,
     ) -> Self {
@@ -78,6 +82,7 @@ impl WindowedGame {
             dispatcher,
             server,
             audio,
+            llm,
             renderer,
             title,
             window: None,
@@ -376,9 +381,13 @@ impl ApplicationHandler for WindowedGame {
             self.last = now;
             let mut budget = 8;
             while self.acc >= DT && budget > 0 {
-                if let Err(e) =
-                    step_once(&mut self.sim, &mut self.rt, &mut self.dispatcher, &mut self.audio)
-                {
+                if let Err(e) = step_once(
+                    &mut self.sim,
+                    &mut self.rt,
+                    &mut self.dispatcher,
+                    &mut self.audio,
+                    &mut self.llm,
+                ) {
                     self.error = Some(e);
                     event_loop.exit();
                     return;
