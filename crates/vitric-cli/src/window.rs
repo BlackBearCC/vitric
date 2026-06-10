@@ -1,11 +1,16 @@
 //! 窗口呈现 — 人的驾驶舱。
 //!
-//! 呈现的就是 vitric-render 光栅化出的同一块像素（CPU 渲染，softbuffer 上屏），
-//! 所见 = agent 截图所见，逐字节一致。键盘事件映射成 input 事件注入模拟，
-//! 和控制面 `input/inject` 走同一条管道——人和 AI 是同级玩家。
+//! 两条上屏路径，由 `--renderer` 选：
+//! - cpu（默认）：vitric-render 光栅化的同一块像素经 softbuffer 上屏，
+//!   所见 = agent 截图所见，逐字节一致
+//! - gpu：wgpu 走显卡，读同一套组件约定，视觉语义对齐 CPU 路径（见 gpu.rs）；
+//!   初始化失败直接报错退出，不静默回退——用户该换 --renderer cpu 时要明说
+//!
+//! 键盘事件映射成 input 事件注入模拟，和控制面 `input/inject` 走同一条管道
+//! ——人和 AI 是同级玩家。鼠标点选/拖拽不依赖呈现路径，两边行为一致。
 
 use std::num::NonZeroU32;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
@@ -21,7 +26,21 @@ use vitric_sim::{Sim, DT};
 use vitric_cli::runtime::Runtime;
 
 use crate::audio::Audio;
+use crate::gpu::GpuPresenter;
 use crate::step_once;
+
+/// 上屏路径选择（来自 `--renderer`）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Renderer {
+    Cpu,
+    Gpu,
+}
+
+/// 已就绪的呈现器（窗口创建后才能建）。GpuPresenter 体积大，装箱压平变体差异。
+enum Presenter {
+    Cpu(softbuffer::Surface<Arc<Window>, Arc<Window>>),
+    Gpu(Box<GpuPresenter>),
+}
 
 pub struct WindowedGame {
     pub sim: Sim,
@@ -29,8 +48,9 @@ pub struct WindowedGame {
     pub dispatcher: Dispatcher,
     pub server: ControlServer,
     audio: Option<Audio>,
-    window: Option<Rc<Window>>,
-    surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
+    renderer: Renderer,
+    window: Option<Arc<Window>>,
+    presenter: Option<Presenter>,
     last: Instant,
     acc: f64,
     /// 鼠标当前位置（物理像素）。
@@ -47,6 +67,7 @@ impl WindowedGame {
         dispatcher: Dispatcher,
         server: ControlServer,
         audio: Option<Audio>,
+        renderer: Renderer,
     ) -> Self {
         WindowedGame {
             sim,
@@ -54,8 +75,9 @@ impl WindowedGame {
             dispatcher,
             server,
             audio,
+            renderer,
             window: None,
-            surface: None,
+            presenter: None,
             last: Instant::now(),
             acc: 0.0,
             cursor: (0.0, 0.0),
@@ -75,47 +97,64 @@ impl WindowedGame {
     }
 
     fn draw(&mut self) {
-        let (Some(window), Some(surface)) = (&self.window, &mut self.surface) else {
+        let (Some(window), Some(presenter)) = (&self.window, &mut self.presenter) else {
             return;
         };
         let size = window.inner_size();
-        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
-            return; // 最小化等零尺寸状态
-        };
-        if surface.resize(w, h).is_err() {
-            return;
-        }
-        let rgba = match vitric_render::render_world(
-            &self.sim.world,
-            size.width,
-            size.height,
-            self.dispatcher.assets(),
-        ) {
-            Ok(buf) => buf,
-            Err(e) => {
-                self.error = Some(e);
-                return;
+        match presenter {
+            Presenter::Cpu(surface) => {
+                let (Some(w), Some(h)) =
+                    (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+                else {
+                    return; // 最小化等零尺寸状态
+                };
+                if surface.resize(w, h).is_err() {
+                    return;
+                }
+                let rgba = match vitric_render::render_world(
+                    &self.sim.world,
+                    size.width,
+                    size.height,
+                    self.dispatcher.assets(),
+                ) {
+                    Ok(buf) => buf,
+                    Err(e) => {
+                        self.error = Some(e);
+                        return;
+                    }
+                };
+                let mut rgba = rgba;
+                // 检查器高亮：选中实体画青色描边（人点的或 AI inspect/select 设的）
+                if let Some(selected) = self.dispatcher.selection() {
+                    let _ = vitric_render::draw_selection_outline(
+                        &mut rgba,
+                        &self.sim.world,
+                        size.width,
+                        size.height,
+                        selected,
+                    );
+                }
+                let Ok(mut frame) = surface.buffer_mut() else {
+                    return;
+                };
+                // RGBA8 → softbuffer 的 0RGB u32
+                for (dst, px) in frame.iter_mut().zip(rgba.chunks_exact(4)) {
+                    *dst = ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32;
+                }
+                let _ = frame.present();
             }
-        };
-        let mut rgba = rgba;
-        // 检查器高亮：选中实体画青色描边（人点的或 AI inspect/select 设的）
-        if let Some(selected) = self.dispatcher.selection() {
-            let _ = vitric_render::draw_selection_outline(
-                &mut rgba,
-                &self.sim.world,
-                size.width,
-                size.height,
-                selected,
-            );
+            Presenter::Gpu(gpu) => {
+                // 尺寸/热重载都在 present 内部处理（resize 重配表面、代次变了重建图集）
+                if let Err(e) = gpu.present(
+                    &self.sim.world,
+                    self.dispatcher.assets(),
+                    self.dispatcher.assets_generation(),
+                    self.dispatcher.selection(),
+                ) {
+                    self.error = Some(e);
+                }
+            }
         }
-        let Ok(mut frame) = surface.buffer_mut() else {
-            return;
-        };
-        // RGBA8 → softbuffer 的 0RGB u32
-        for (dst, px) in frame.iter_mut().zip(rgba.chunks_exact(4)) {
-            *dst = ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32;
-        }
-        let _ = frame.present();
     }
 
     fn viewport(&self) -> Option<(u32, u32)> {
@@ -215,27 +254,49 @@ impl ApplicationHandler for WindowedGame {
             .with_title("Vitric")
             .with_inner_size(LogicalSize::new(960.0, 540.0));
         let window = match event_loop.create_window(attrs) {
-            Ok(w) => Rc::new(w),
+            Ok(w) => Arc::new(w),
             Err(e) => {
                 self.error = Some(format!("窗口创建失败: {e}"));
                 event_loop.exit();
                 return;
             }
         };
-        let context = match softbuffer::Context::new(window.clone()) {
-            Ok(c) => c,
-            Err(e) => {
-                self.error = Some(format!("softbuffer 上下文创建失败: {e}"));
-                event_loop.exit();
-                return;
+        match self.renderer {
+            Renderer::Cpu => {
+                let context = match softbuffer::Context::new(window.clone()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.error = Some(format!("softbuffer 上下文创建失败: {e}"));
+                        event_loop.exit();
+                        return;
+                    }
+                };
+                match softbuffer::Surface::new(&context, window.clone()) {
+                    Ok(s) => self.presenter = Some(Presenter::Cpu(s)),
+                    Err(e) => {
+                        self.error = Some(format!("softbuffer 表面创建失败: {e}"));
+                        event_loop.exit();
+                        return;
+                    }
+                }
             }
-        };
-        match softbuffer::Surface::new(&context, window.clone()) {
-            Ok(s) => self.surface = Some(s),
-            Err(e) => {
-                self.error = Some(format!("softbuffer 表面创建失败: {e}"));
-                event_loop.exit();
-                return;
+            Renderer::Gpu => {
+                // 失败 = 退出并明说出路，绝不静默换 CPU 路径跑（行为变了用户却不知道）
+                match GpuPresenter::new(
+                    window.clone(),
+                    self.dispatcher.assets(),
+                    self.dispatcher.assets_generation(),
+                ) {
+                    Ok(p) => self.presenter = Some(Presenter::Gpu(Box::new(p))),
+                    Err(e) => {
+                        self.error = Some(format!(
+                            "GPU 渲染初始化失败: {e}。\
+                             本机没有可用 GPU/驱动时请改用 --renderer cpu"
+                        ));
+                        event_loop.exit();
+                        return;
+                    }
+                }
             }
         }
         self.window = Some(window);

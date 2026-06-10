@@ -6,12 +6,14 @@
 //! - `vitric replay <项目目录> <录像.json>` 重放录像并校验确定性
 //!
 //! run 选项：
-//!   --port <N>     控制面端口（默认 6173，0=自动分配）
-//!   --speed <X>    初始倍速（默认 1.0）
-//!   --ticks <N>    跑满 N tick 后自动退出（CI/脚本用，全速不限速）
-//!   --record <文件> 退出时把录像写到文件
+//!   --port <N>       控制面端口（默认 6173，0=自动分配）
+//!   --speed <X>      初始倍速（默认 1.0）
+//!   --ticks <N>      跑满 N tick 后自动退出（CI/脚本用，全速不限速）
+//!   --record <文件>   退出时把录像写到文件
+//!   --renderer <gpu|cpu> 窗口呈现路径（默认 cpu=softbuffer；gpu=wgpu，自带开窗）
 
 mod audio;
+mod gpu;
 mod window;
 
 use std::path::PathBuf;
@@ -75,6 +77,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let mut max_ticks: Option<u64> = None;
     let mut record_path: Option<String> = None;
     let mut windowed = false;
+    let mut renderer = window::Renderer::Cpu;
     let mut i = 1;
     while i < args.len() {
         let need = |key: &str| format!("{key} 缺少参数值");
@@ -82,6 +85,16 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
             "--window" => {
                 windowed = true;
                 i += 1;
+            }
+            "--renderer" => {
+                renderer = match args.get(i + 1).ok_or(need("--renderer"))?.as_str() {
+                    "cpu" => window::Renderer::Cpu,
+                    "gpu" => window::Renderer::Gpu,
+                    other => {
+                        return Err(format!("--renderer 只认 gpu 或 cpu，拿到 {other:?}"))
+                    }
+                };
+                i += 2;
             }
             "--port" => {
                 port = args.get(i + 1).ok_or(need("--port"))?.parse().map_err(|e| format!("--port: {e}"))?;
@@ -99,8 +112,12 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
                 record_path = Some(args.get(i + 1).ok_or(need("--record"))?.clone());
                 i += 2;
             }
-            other => return Err(format!("未知选项 {other:?}。可用: --window --port --speed --ticks --record")),
+            other => return Err(format!("未知选项 {other:?}。可用: --window --renderer --port --speed --ticks --record")),
         }
+    }
+    // GPU 是窗口呈现路径，没有无头形态——选了 gpu 就等于要开窗
+    if matches!(renderer, window::Renderer::Gpu) {
+        windowed = true;
     }
 
     let dir = PathBuf::from(dir);
@@ -135,7 +152,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     );
 
     if windowed {
-        let game = window::WindowedGame::new(sim, rt, dispatcher, server, audio_sink);
+        let game = window::WindowedGame::new(sim, rt, dispatcher, server, audio_sink, renderer);
         let (mut sim, error) = game.run()?;
         finish_recording(&mut sim, record_path)?;
         return match error {

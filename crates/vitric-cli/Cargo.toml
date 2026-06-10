@@ -21,3 +21,7 @@ winit = "0.30"
 softbuffer = "0.4"
 vitric-render = { version = "0.1.0", path = "../vitric-render" }
 rodio = "0.22.2"
+wgpu = "29.0.3"
+pollster = "0.4.0"
+bytemuck = { version = "1.25.0", features = ["derive"] }
+font8x8 = "0.3"

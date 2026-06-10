@@ -38,6 +38,9 @@ pub struct Dispatcher {
     events: VecDeque<(u64, Event)>,
     /// 素材仓库（render 方法用；项目无素材则为空仓库）。
     assets: vitric_render::Assets,
+    /// 素材代次：每次（重新）加载 +1。GPU 呈现路径靠它判断图集是否需要重建——
+    /// 比较内容太贵，比较 count 又抓不住"同名换图"。
+    assets_generation: u64,
     /// 检查器选中的实体——人点的和 AI 设的是同一个状态，双向可见。
     selection: Option<EntityId>,
     /// 性能预算（0=不限）。
@@ -58,6 +61,7 @@ impl Dispatcher {
             failures: Vec::new(),
             events: VecDeque::new(),
             assets: vitric_render::Assets::empty(),
+            assets_generation: 0,
             selection: None,
             budgets: vitric_data::Budgets::default(),
             last_tick_events: 0,
@@ -82,12 +86,18 @@ impl Dispatcher {
     /// 挂载项目素材目录（加载即校验，坏图/超预算立刻报错）。
     pub fn load_assets(&mut self, dir: &std::path::Path) -> Result<(), String> {
         self.assets = vitric_render::Assets::load_dir(dir)?;
+        self.assets_generation += 1;
         Ok(())
     }
 
     /// 素材仓库只读访问（窗口呈现共用同一份）。
     pub fn assets(&self) -> &vitric_render::Assets {
         &self.assets
+    }
+
+    /// 素材代次（见字段注释）。
+    pub fn assets_generation(&self) -> u64 {
+        self.assets_generation
     }
 
     /// 主循环每 step 后调用：记录事件进环形缓冲（顺带按 tick 计数给预算用）。
@@ -330,8 +340,10 @@ impl Dispatcher {
             "project/reload" => {
                 let mut summary = logic.reload()?;
                 // 挂了素材目录就一起重载；失败要单独说清（规则/脚本已经换新了）
-                if let Err(e) = self.assets.reload() {
-                    if !e.contains("没有目录") {
+                match self.assets.reload() {
+                    Ok(()) => self.assets_generation += 1,
+                    Err(e) if e.contains("没有目录") => {} // 没挂素材目录，合法跳过
+                    Err(e) => {
                         return Err(format!("规则/脚本已重载，但素材重载失败: {e}"));
                     }
                 }
