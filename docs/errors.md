@@ -24,7 +24,7 @@
 | VD033 | entity 字段引用了不存在的实体名 | 查错误里列出的命名实体 |
 | VD034 | 实例化时实体名已被占用 | World 里已有同名实体（场景重复加载？） |
 | VD040 | 文件缺失/读不到 | 清单里列的路径必须存在 |
-| VD041 | vitric.json 清单解析失败 | 必填: name/schema/entry；可选: scenes/rules/scripts/animations/seed |
+| VD041 | vitric.json 清单解析失败 | 必填: name/schema/entry；可选: scenes/rules/scripts/animations/font/seed |
 | VD042 | entry 场景不在 scenes 列表里 | 把它加进 scenes 数组 |
 | VD050 | 动画文件缺 clips 对象 | `{"clips": {"名": {"frames": [...], "fps": 8}}}` |
 | VD051 | 动画片段解析失败 | 片段写法 `{"frames": ["a.png"], "fps": 8, "loop": true}` |

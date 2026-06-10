@@ -10,3 +10,4 @@ serde_json = { workspace = true }
 png = "0.18"
 vitric-ecs = { path = "../vitric-ecs" }
 font8x8 = "0.3"
+ab_glyph = "0.2"

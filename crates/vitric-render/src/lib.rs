@@ -18,8 +18,15 @@
 //!   取景叠加确定性伪随机偏移（(tick, amplitude) 的纯函数，见 [`shake_offset`]）。
 //!   偏移只作用于画面（render_world / GPU 路径 / 选中描边）——describe / pick /
 //!   screen_to_world 读不抖的相机：语义观察和点选对的是世界本体，不是抖动后的画面
-//! - `Text` {"content", "size", "color"} — 屏上文字（内嵌 8x8 点阵，ASCII），
-//!   每字符 size×size 世界单位、整串居中于 Position，画在精灵之上
+//! - `Text` {"content", "size", "color"} — 屏上文字，画在精灵之上、整串横向居中于
+//!   Position。两条路径，由清单 `font` 字段二选一：
+//!   * 默认（无 font）：内嵌 8x8 点阵（ASCII），每字符 size×size 世界单位、等宽、
+//!     无抗锯齿——旧行为，输出字节由测试锁死不变；
+//!   * 清单设了 `font`（TTF）：**所有** Text 改走矢量字体（[`font::FontStore`]），
+//!     size = 字形总高（ascent-descent）的世界单位数，比例字距 + 字距调整，
+//!     字体里有的字形都能画（含 CJK）。矢量文字是引擎里**唯一刻意平滑**的元素：
+//!     覆盖率抗锯齿（像素风全程最近邻不变）。竖向把字身带居中到 Position。
+//!     同平台同二进制仍逐字节确定（ab_glyph 纯 Rust 栅格化）
 //! - `Ambient` {"color": "#rrggbb"} — 场景环境光，挂任意实体（取第一个）。
 //!   **光照的总开关**：场上没有 Ambient 实体 = 完全不跑光照（旧行为、零开销）；
 //!   有 = 整帧（精灵/文字/背景一视同仁）按下面公式打光
@@ -44,8 +51,10 @@
 //! 同一场景 4K 和 720p 的光晕占画面比例一致。泛光在光照**之后**跑（先打光再发光）。
 
 mod assets;
+mod font;
 
 pub use assets::{Assets, Image};
+pub use font::{FontStore, GlyphPlacement, RasterGlyph};
 
 use serde_json::Value;
 
@@ -217,7 +226,7 @@ pub fn render_world(
         }
     }
 
-    draw_texts(world, &mut buf, width, height, (cam_x, cam_y, scale))?;
+    draw_texts(world, &mut buf, width, height, (cam_x, cam_y, scale), assets)?;
 
     // 光照按 Ambient 实体的存在与否开关：没有 = 完全跳过（旧行为字节不变、零开销）。
     // 有 = 整帧打光——精灵/文字/背景一视同仁，HUD 想保持可读自己在旁边放盏灯
@@ -520,16 +529,18 @@ fn image_of<'a>(
     })
 }
 
-/// 文字：`Text` {"content","size","color"} + `Position`，内嵌 8x8 点阵字体。
-/// 每个字符占 size×size 世界单位，整串以 Position 为中心，画在所有精灵之上。
-/// 字体只覆盖 ASCII（分数/提示/调试足够），其他字符画实心方块占位。
-/// 文字**永远直立**——`Sprite.rot` 只转精灵，不转文字（点阵字转了就不可读，HUD 保持水平）。
+/// 文字：`Text` {"content","size","color"} + `Position`，画在所有精灵之上。
+/// 两条路径（语义见模块文档的 Text 约定）：素材仓库没挂字体走内嵌 8x8 点阵
+/// （ASCII，等宽，非 ASCII 画实心方块占位——**这段字节不许变**，向后兼容由测试锁死）；
+/// 挂了字体（清单 `font`）所有 Text 走矢量路径（比例字距 + 覆盖率抗锯齿）。
+/// 文字**永远直立**——`Sprite.rot` 只转精灵，不转文字（HUD 保持水平）。
 fn draw_texts(
     world: &World,
     buf: &mut [u8],
     width: u32,
     height: u32,
     (cam_x, cam_y, scale): (f64, f64, f64),
+    assets: &Assets,
 ) -> Result<(), String> {
     for id in world.query(&["Position", "Text"]) {
         let content = world
@@ -559,13 +570,22 @@ fn draw_texts(
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        let chars: Vec<char> = content.chars().collect();
-        let n = chars.len();
         let (cx, cy) = if screen_anchored {
             ((width as f64) / 2.0 + px * scale, (height as f64) / 2.0 - py * scale)
         } else {
             ((width as f64) / 2.0 + (px - cam_x) * scale, (height as f64) / 2.0 - (py - cam_y) * scale)
         };
+
+        // 矢量路径：挂了字体所有 Text 都走这里（per-Text 覆盖不在范围内）
+        if let Some(font) = assets.font() {
+            draw_text_vector(buf, width, height, font, &content, size, scale, (cx, cy), rgba);
+            continue;
+        }
+
+        // —— 点阵路径：这段逻辑不许动——没挂字体时输出字节必须与字体功能
+        //    出现之前逐位相同（向后兼容由测试锁死）
+        let chars: Vec<char> = content.chars().collect();
+        let n = chars.len();
         let half_w = n as f64 * size * scale / 2.0;
         let half_h = size * scale / 2.0;
         let x0 = (cx - half_w).floor().max(0.0) as i64;
@@ -598,6 +618,61 @@ fn glyph_of(c: char) -> [u8; 8] {
         font8x8::legacy::BASIC_LEGACY[cp]
     } else {
         [0xff; 8]
+    }
+}
+
+/// 矢量文字：一整串按比例字距排版后逐字形栅格化（缓存）+ 覆盖率混合（抗锯齿）。
+/// 几何约定：字号 = size×scale 像素的字形总高；整串横向居中于 (cx,cy)，竖向把
+/// 字身带（ascent..descent）居中；字形落笔在整数像素（不做亚像素，缓存键才成立）。
+/// GPU 路径（vitric-cli gpu.rs）用同一套 layout/raster/取整——视觉对齐，
+/// 但不承诺与 CPU 逐字节相同（截图/断言以这里为准）。
+#[allow(clippy::too_many_arguments)]
+fn draw_text_vector(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    font: &FontStore,
+    content: &str,
+    size: f64,
+    scale: f64,
+    (cx, cy): (f64, f64),
+    rgba: [u8; 4],
+) {
+    let px_size = FontStore::px_size(size, scale);
+    let (placements, total_w) = font.layout(content, px_size);
+    let left = cx - total_w as f64 / 2.0;
+    let baseline = (cy + font.baseline_offset(px_size) as f64).round() as i64;
+    for p in &placements {
+        let g = font.raster(p.ch, px_size);
+        if g.coverage.is_empty() {
+            continue; // 空轮廓（空格等）只占 advance
+        }
+        let gx0 = (left + p.x as f64).round() as i64 + g.left as i64;
+        let gy0 = baseline + g.top as i64;
+        for row in 0..g.height as i64 {
+            let y = gy0 + row;
+            if y < 0 || y >= height as i64 {
+                continue;
+            }
+            for col in 0..g.width as i64 {
+                let x = gx0 + col;
+                if x < 0 || x >= width as i64 {
+                    continue;
+                }
+                let cov = g.coverage[(row * g.width as i64 + col) as usize] as u32;
+                if cov == 0 {
+                    continue;
+                }
+                // 覆盖率混合 = 抗锯齿。矢量文字是引擎里唯一刻意平滑的元素，
+                // 精灵贴图仍是最近邻硬边（像素风不动）
+                let i = ((y as u32 * width + x as u32) * 4) as usize;
+                let dst = &mut buf[i..i + 4];
+                for c in 0..3 {
+                    dst[c] = ((rgba[c] as u32 * cov + dst[c] as u32 * (255 - cov)) / 255) as u8;
+                }
+                dst[3] = 255;
+            }
+        }
     }
 }
 
@@ -1639,6 +1714,125 @@ mod tests {
         let d = describe_world(&world_bright_sprite(None), 64, 64).unwrap();
         assert!(d.get("bloom").is_none());
         assert!(!d["text"].as_str().unwrap().contains("泛光"));
+    }
+
+    /// 测试用 TTF：book 示例 vendored 的 DejaVu Sans（Bitstream Vera 许可，
+    /// 见 examples/book/fonts/LICENSE）。
+    fn test_font_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/book/fonts/DejaVuSans.ttf")
+    }
+
+    fn assets_with_font() -> Assets {
+        let mut a = Assets::empty();
+        a.load_font(&test_font_path()).unwrap();
+        a
+    }
+
+    fn world_with_text(content: &str) -> World {
+        let mut w = World::new();
+        let e = w.spawn_named("label").unwrap();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Text", json!({"content": content, "size": 3.0, "color": "#00ff00"}))
+            .unwrap();
+        w
+    }
+
+    /// 收集所有非背景像素的坐标。
+    fn non_background(buf: &[u8], width: u32, height: u32) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                if pixel(buf, width, x, y) != BACKGROUND {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn no_font_keeps_bitmap_path_byte_identical() {
+        // 素材仓库不挂字体 = 点阵旧行为：与 Assets::empty() 渲出的字节逐位相同
+        let w = world_with_text("SCORE 42");
+        let dir = std::env::temp_dir().join(format!("vitric-nofont-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let loaded = Assets::load_dir(&dir).unwrap();
+        assert!(loaded.font().is_none());
+        assert_eq!(
+            render_world(&w, 96, 64, &Assets::empty(), 0).unwrap(),
+            render_world(&w, 96, 64, &loaded, 0).unwrap(),
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn vector_font_renders_near_position_and_is_deterministic() {
+        let w = world_with_text("Hi");
+        let assets = assets_with_font();
+        let buf = render_world(&w, 96, 96, &assets, 0).unwrap();
+        let hits = non_background(&buf, 96, 96);
+        assert!(!hits.is_empty(), "矢量文字应画出像素");
+        // size=3、scale=8 → 字号 24px：所有文字像素都该落在 Position（屏幕中心）附近
+        // 的包围盒里（横向按两字符比例宽放余量，竖向按字号一半放余量）
+        for &(x, y) in &hits {
+            assert!((24..=72).contains(&x) && (30..=66).contains(&y), "({x},{y}) 跑出文字包围盒");
+        }
+        // 字形内部应有满覆盖像素 = 精确的 Text.color（抗锯齿只在边缘）
+        assert!(
+            hits.iter().any(|&(x, y)| pixel(&buf, 96, x, y) == [0, 255, 0, 255]),
+            "应存在满覆盖像素"
+        );
+        // 确定性：同世界同 tick → 字节逐位相同（缓存命中与否不影响输出）
+        assert_eq!(buf, render_world(&w, 96, 96, &assets, 0).unwrap());
+        // 比例字距："iii" 比 "WWW" 窄（点阵等宽做不到这一点）
+        let font = assets.font().unwrap();
+        let (_, narrow) = font.layout("iii", 24);
+        let (_, wide) = font.layout("WWW", 24);
+        assert!(narrow < wide, "比例字距: iii({narrow}) 应窄于 WWW({wide})");
+    }
+
+    #[test]
+    fn vector_font_renders_cjk_with_nonempty_coverage() {
+        // CJK 字符走矢量路径必须画出东西：字体含该字形就是真字，不含（如 DejaVu）
+        // 就是该字体的 .notdef 豆腐块——明确可见，不是静默消失
+        let assets = assets_with_font();
+        let g = assets.font().unwrap().raster('中', 24);
+        assert!(!g.coverage.is_empty(), "CJK 字符栅格化覆盖率不应为空");
+        assert!(g.coverage.iter().any(|&c| c > 0));
+        let w = world_with_text("中文");
+        let buf = render_world(&w, 96, 96, &assets, 0).unwrap();
+        assert!(!non_background(&buf, 96, 96).is_empty(), "CJK 文字应有可见像素");
+    }
+
+    #[test]
+    fn font_missing_or_corrupt_is_an_explicit_error_naming_the_path() {
+        let mut a = Assets::empty();
+        let err = a.load_font(std::path::Path::new("/nonexistent/ghost.ttf")).unwrap_err();
+        assert!(err.contains("/nonexistent/ghost.ttf"), "{err}");
+        // 损坏的字体：能读到字节但解析失败，同样点名路径
+        let dir = std::env::temp_dir().join(format!("vitric-badfont-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("bad.ttf");
+        std::fs::write(&bad, b"definitely not a font").unwrap();
+        let err = a.load_font(&bad).unwrap_err();
+        assert!(err.contains("bad.ttf"), "{err}");
+        assert!(a.font().is_none(), "加载失败不应留下半个字体");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn assets_reload_keeps_the_font() {
+        let dir = std::env::temp_dir().join(format!("vitric-fontreload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut a = Assets::load_dir(&dir).unwrap();
+        a.load_font(&test_font_path()).unwrap();
+        a.reload().unwrap();
+        assert!(a.font().is_some(), "热重载不能把字体弄丢");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

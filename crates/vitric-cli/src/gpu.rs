@@ -9,6 +9,14 @@
 //! 每帧 CPU 端按实体序攒一份顶点流（像素坐标 + 图集 UV + 染色），
 //! 一条管线、一个绑定组、一次 draw 画完。素材热重载靠代次号触发图集重建。
 //!
+//! 矢量字体（清单 `font`，见 vitric-render::FontStore）走**第二张动态字形图集**：
+//! 1024x1024 RGBA（白底 + 覆盖率当 alpha——shader 不用改，染色乘法即抗锯齿混合），
+//! 货架打包，新 (字符, 像素字号) 出现时懒栅格化 + queue.write_texture 增量上传。
+//! 同一条管线、第二个绑定组：先画精灵流（主图集），再画字形流（字形图集）。
+//! 排版/栅格化/取整全部复用 vitric-render 的 FontStore——与 CPU 路径视觉对齐，
+//! 但不承诺逐字节相同（覆盖率混合发生在 GPU 混合阶段）；截图/断言永远以 CPU 为准。
+//! 图集满了显式报错（提示减少不同字号），不静默丢字。
+//!
 //! 泛光（Bloom 实体存在时）把单 pass 拆成多 pass：
 //!   1. 场景 pass：同一条顶点流渲进离屏纹理（Rgba8Unorm，光照照常在这里跑）
 //!   2. 下采样+阈值 pass：场景 → 半分辨率（亮部提取）
@@ -64,6 +72,176 @@ struct Atlas {
     /// 白块中心点 UV（四角同 UV → 平采样，永不渗色）。
     white: [f32; 2],
     glyphs: [UvRect; 128],
+}
+
+/// 动态字形图集的边长（像素）。1024²·RGBA = 4MB 显存，装得下几百个常用字号字形；
+/// 满了显式报错（见 [`GlyphAtlas::alloc_rect`]），不静默丢字。
+const GLYPH_ATLAS_SIZE: u32 = 1024;
+
+/// 一次待执行的字形像素上传（[`GlyphAtlas`] 攒，present 里 write_texture 消化）。
+/// 像素是 RGBA：白底 + 覆盖率当 alpha——主 shader 的 `采样色 × 染色` 直接得到
+/// 与 CPU 路径同公式的覆盖率混合（抗锯齿），不需要第二条管线。
+struct GlyphUpload {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    pixels: Vec<u8>,
+}
+
+/// 动态字形图集（纯簿记，不碰 GPU——可单测）：货架打包 + (字符, 像素字号) → UV 缓存
+/// + 待上传队列。字形按需出现：栅格化一次、上传一次、之后永远命中缓存。
+struct GlyphAtlas {
+    size: u32,
+    /// 货架游标（当前行起点 x / 行顶 y / 行高）。
+    x: u32,
+    y: u32,
+    row_h: u32,
+    map: std::collections::BTreeMap<(char, u32), UvRect>,
+    /// 白块中心点 UV（字体模式下选中描边的纯色来源——描边和字形同一个绑定组）。
+    white: [f32; 2],
+    pending: Vec<GlyphUpload>,
+}
+
+impl GlyphAtlas {
+    fn new(size: u32) -> GlyphAtlas {
+        let mut a = GlyphAtlas {
+            size,
+            x: 0,
+            y: 0,
+            row_h: 0,
+            map: std::collections::BTreeMap::new(),
+            white: [0.0; 2],
+            pending: Vec::new(),
+        };
+        let (ox, oy) = a.alloc_rect(2, 2).expect("空图集必然放得下 2x2 白块");
+        a.white = [(ox as f32 + 1.0) / size as f32, (oy as f32 + 1.0) / size as f32];
+        a.pending.push(GlyphUpload { x: ox, y: oy, w: 2, h: 2, pixels: vec![255u8; 2 * 2 * 4] });
+        a
+    }
+
+    /// 货架打包一块 w×h（右/下各留 1px 空隙）。满了/单块过大都显式报错。
+    fn alloc_rect(&mut self, w: u32, h: u32) -> Result<(u32, u32), String> {
+        let (bw, bh) = (w + 1, h + 1);
+        if bw > self.size || bh > self.size {
+            return Err(format!(
+                "字形 {w}x{h} 超过字形图集边长 {0}。提示：Text.size×相机 scale 太大了，调小字号",
+                self.size
+            ));
+        }
+        if self.x + bw > self.size {
+            self.x = 0;
+            self.y += self.row_h;
+            self.row_h = 0;
+        }
+        if self.y + bh > self.size {
+            return Err(format!(
+                "字形图集 {0}x{0} 已满（游戏用了太多不同的 字符×字号 组合）。\
+                 提示：减少不同的 Text.size 取值/相机缩放档位，字形按 (字符,像素字号) 缓存",
+                self.size
+            ));
+        }
+        let pos = (self.x, self.y);
+        self.row_h = self.row_h.max(bh);
+        self.x += bw;
+        Ok(pos)
+    }
+
+    /// 一个 (字符, 像素字号) 的 UV：命中缓存直接给；首次出现栅格化 + 排队上传。
+    /// 空轮廓字形（空格等）不该走到这里（调用方先看 coverage 跳过）。
+    fn glyph_uv(
+        &mut self,
+        font: &vitric_render::FontStore,
+        ch: char,
+        px: u32,
+    ) -> Result<UvRect, String> {
+        if let Some(uv) = self.map.get(&(ch, px)) {
+            return Ok(*uv);
+        }
+        let g = font.raster(ch, px);
+        let (ox, oy) = self.alloc_rect(g.width, g.height)?;
+        let mut pixels = Vec::with_capacity((g.width * g.height * 4) as usize);
+        for &cov in &g.coverage {
+            pixels.extend_from_slice(&[255, 255, 255, cov]);
+        }
+        self.pending.push(GlyphUpload { x: ox, y: oy, w: g.width, h: g.height, pixels });
+        let s = self.size as f32;
+        let uv = [
+            ox as f32 / s,
+            oy as f32 / s,
+            (ox + g.width) as f32 / s,
+            (oy + g.height) as f32 / s,
+        ];
+        self.map.insert((ch, px), uv);
+        Ok(uv)
+    }
+}
+
+/// 字形图集的 GPU 侧：常驻纹理 + 绑定组（与主图集**同一布局、同一管线**，
+/// 只是换一张纹理）+ 纯簿记的 [`GlyphAtlas`]。
+struct GlyphTexture {
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    atlas: GlyphAtlas,
+}
+
+impl GlyphTexture {
+    fn new(
+        device: &wgpu::Device,
+        bind_layout: &wgpu::BindGroupLayout,
+        globals_buf: &wgpu::Buffer,
+        sampler: &wgpu::Sampler,
+    ) -> GlyphTexture {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("vitric-glyphs"),
+            size: wgpu::Extent3d {
+                width: GLYPH_ATLAS_SIZE,
+                height: GLYPH_ATLAS_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm, // 非 sRGB：与主图集同一字节空间
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vitric-glyphs-bind"),
+            layout: bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+            ],
+        });
+        GlyphTexture { texture, bind_group, atlas: GlyphAtlas::new(GLYPH_ATLAS_SIZE) }
+    }
+
+    /// 消化本帧新出现的字形（增量上传，已有内容不动）。
+    fn flush_uploads(&mut self, queue: &wgpu::Queue) {
+        for up in self.atlas.pending.drain(..) {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: up.x, y: up.y, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &up.pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(up.w * 4),
+                    rows_per_image: Some(up.h),
+                },
+                wgpu::Extent3d { width: up.w, height: up.h, depth_or_array_layers: 1 },
+            );
+        }
+    }
 }
 
 const WGSL: &str = r#"
@@ -250,6 +428,8 @@ pub struct GpuPresenter {
     globals_buf: wgpu::Buffer,
     sampler: wgpu::Sampler,
     atlas: Atlas,
+    /// 矢量字体的动态字形图集（纹理 + 绑定组 + 簿记）。None = 项目没挂字体。
+    glyphs: Option<GlyphTexture>,
     /// 已见过的素材代次——和 Dispatcher::assets_generation 比，变了就重建图集。
     seen_generation: u64,
     /// 顶点缓冲按需扩容（容量字节数）。
@@ -387,6 +567,11 @@ impl GpuPresenter {
         });
         let (atlas, bind_group) =
             build_atlas(&device, &queue, &bind_layout, &globals_buf, &sampler, assets)?;
+        // 项目挂了矢量字体才建字形图集（没挂 = 零开销，点阵字形已在主图集里）
+        let glyphs = assets
+            .font()
+            .is_some()
+            .then(|| GlyphTexture::new(&device, &bind_layout, &globals_buf, &sampler));
 
         const INITIAL_VB: u64 = 64 * 1024;
         let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -407,6 +592,7 @@ impl GpuPresenter {
             globals_buf,
             sampler,
             atlas,
+            glyphs,
             seen_generation: generation,
             vertex_buf,
             vertex_cap: INITIAL_VB,
@@ -439,6 +625,10 @@ impl GpuPresenter {
             )?;
             self.atlas = atlas;
             self.bind_group = bind_group;
+            // 字体可能也被热重载换了/挂上/摘掉：字形图集整个重建（按新字体重新栅格化）
+            self.glyphs = assets.font().is_some().then(|| {
+                GlyphTexture::new(&self.device, &self.bind_layout, &self.globals_buf, &self.sampler)
+            });
             self.seen_generation = generation;
         }
 
@@ -453,7 +643,29 @@ impl GpuPresenter {
         }
         let (w, h) = (size.width, size.height);
 
-        let verts = build_vertices(world, w, h, &self.atlas, selection, tick)?;
+        // 顶点流：没挂字体 = 老的单流单 draw；挂了字体 = 精灵流（主图集）+
+        // 字形流（字形图集，含选中描边——它用字形图集的白块），按 glyph_from 切两段
+        let (verts, glyph_from) = if let Some(font) = assets.font() {
+            let gt = self.glyphs.as_mut().ok_or(
+                "内部不一致：素材仓库挂了字体但字形图集未建（素材代次没推进？）",
+            )?;
+            let mut verts = build_scene_vertices(world, w, h, &self.atlas, tick)?;
+            let split = verts.len();
+            let cam = vitric_render::camera_of(world, tick, h)?;
+            push_ttf_texts(&mut verts, world, w, h, font, &mut gt.atlas, cam)?;
+            if let Some(id) = selection {
+                push_selection_outline(&mut verts, world, w, h, gt.atlas.white, id, cam);
+            }
+            (verts, split)
+        } else {
+            let verts = build_vertices(world, w, h, &self.atlas, selection, tick)?;
+            let split = verts.len();
+            (verts, split)
+        };
+        // 本帧新字形增量上传（write_texture 在 submit 前排队，draw 时必然就绪）
+        if let Some(gt) = self.glyphs.as_mut() {
+            gt.flush_uploads(&self.queue);
+        }
 
         use wgpu::CurrentSurfaceTexture as Cst;
         let frame = match self.surface.get_current_texture() {
@@ -515,9 +727,8 @@ impl GpuPresenter {
                 });
                 if !verts.is_empty() {
                     pass.set_pipeline(&self.pipeline);
-                    pass.set_bind_group(0, &self.bind_group, &[]);
                     pass.set_vertex_buffer(0, self.vertex_buf.slice(..bytes.len() as u64));
-                    pass.draw(0..verts.len() as u32, 0..1);
+                    draw_split(&mut pass, &self.bind_group, self.glyphs.as_ref(), verts.len(), glyph_from);
                 }
             }
             Some(b) => {
@@ -575,9 +786,8 @@ impl GpuPresenter {
                     });
                     if !verts.is_empty() {
                         pass.set_pipeline(&pipes.scene_pipeline);
-                        pass.set_bind_group(0, &self.bind_group, &[]);
                         pass.set_vertex_buffer(0, self.vertex_buf.slice(..bytes.len() as u64));
-                        pass.draw(0..verts.len() as u32, 0..1);
+                        draw_split(&mut pass, &self.bind_group, self.glyphs.as_ref(), verts.len(), glyph_from);
                     }
                 }
                 // 下采样+阈值 + 模糊 ×6（全屏三角形，目标在 post_views 里排好了）
@@ -1139,12 +1349,53 @@ fn build_globals(
     Ok(g)
 }
 
+/// 一段顶点流按 glyph_from 切两个 draw：前段绑主图集，后段绑字形图集
+/// （没挂字体时 glyph_from == len，第二段为空，行为与单 draw 完全一致）。
+fn draw_split(
+    pass: &mut wgpu::RenderPass<'_>,
+    main_bind: &wgpu::BindGroup,
+    glyphs: Option<&GlyphTexture>,
+    len: usize,
+    glyph_from: usize,
+) {
+    if glyph_from > 0 {
+        pass.set_bind_group(0, main_bind, &[]);
+        pass.draw(0..glyph_from as u32, 0..1);
+    }
+    if glyph_from < len {
+        let gt = glyphs.expect("有字形顶点必有字形图集（present 里建流时校验过）");
+        pass.set_bind_group(0, &gt.bind_group, &[]);
+        pass.draw(glyph_from as u32..len as u32, 0..1);
+    }
+}
+
+/// 老的单流路径（没挂字体）：背景/精灵/点阵文字/描边全在主图集一段流里。
 fn build_vertices(
     world: &World,
     width: u32,
     height: u32,
     atlas: &Atlas,
     selection: Option<vitric_ecs::EntityId>,
+    tick: u64,
+) -> Result<Vec<Vertex>, String> {
+    let (cam_x, cam_y, scale) = vitric_render::camera_of(world, tick, height)?;
+    let mut verts = build_scene_vertices(world, width, height, atlas, tick)?;
+    push_bitmap_texts(&mut verts, world, width, height, atlas, (cam_x, cam_y, scale))?;
+    // 选中描边：青色 2px，画在最上层（几何对齐 vitric_render::draw_selection_outline）。
+    // 已知小偏差：光照开启时描边在 GPU 窗口会被一起打光（同一条管线），CPU 窗口路径
+    // 是渲完再描所以不被打光——检查器调试装饰，不进截图/断言，不值得为它开第二条管线
+    if let Some(id) = selection {
+        push_selection_outline(&mut verts, world, width, height, atlas.white, id, (cam_x, cam_y, scale));
+    }
+    Ok(verts)
+}
+
+/// 背景（光照开启时）+ 精灵流（主图集）。文字/描边由调用方按路径拼接。
+fn build_scene_vertices(
+    world: &World,
+    width: u32,
+    height: u32,
+    atlas: &Atlas,
     tick: u64,
 ) -> Result<Vec<Vertex>, String> {
     // 取景（含 Shake 抖动偏移）直接用 vitric-render 的实现——两条路径抖得逐位一致
@@ -1154,7 +1405,7 @@ fn build_vertices(
     // 光照开启时背景也要被照（CPU 路径是整张 buf 过公式）：清屏色没法逐像素变，
     // 所以先铺一个全屏背景方块，让 shader 把背景和实体一起打光
     if vitric_render::ambient_of(world)?.is_some() {
-        push_solid(&mut verts, atlas, 0.0, 0.0, width as f32, height as f32, vitric_render::BACKGROUND);
+        push_solid(&mut verts, atlas.white, 0.0, 0.0, width as f32, height as f32, vitric_render::BACKGROUND);
     }
 
     // 精灵：按实体序（画家算法，后画盖前画）
@@ -1210,9 +1461,19 @@ fn build_vertices(
             push_quad_corners(&mut verts, corners, *uv, [1.0; 4]);
         }
     }
+    Ok(verts)
+}
 
-    // 文字：每字符一个字形方块，整串居中于 Position，画在精灵之上。
-    // 永远直立——Sprite.rot 只转精灵，不转文字（与 CPU 路径同语义）
+/// 点阵文字流（没挂字体的老路径）：每字符一个主图集字形方块，整串居中于 Position，
+/// 画在精灵之上。永远直立——Sprite.rot 只转精灵，不转文字（与 CPU 路径同语义）。
+fn push_bitmap_texts(
+    verts: &mut Vec<Vertex>,
+    world: &World,
+    width: u32,
+    height: u32,
+    atlas: &Atlas,
+    (cam_x, cam_y, scale): (f64, f64, f64),
+) -> Result<(), String> {
     for id in world.query(&["Position", "Text"]) {
         let content = world
             .get_field(id, "Text.content")
@@ -1256,21 +1517,77 @@ fn build_vertices(
             let x1 = (left + (i + 1) as f64 * char_w) as f32;
             let cp = c as usize;
             if cp < 128 {
-                push_quad(&mut verts, x0, y0, x1, y1, atlas.glyphs[cp], tint(rgba));
+                push_quad(verts, x0, y0, x1, y1, atlas.glyphs[cp], tint(rgba));
             } else {
                 // 非 ASCII：实心方块占位，同 CPU 路径
-                push_solid(&mut verts, atlas, x0, y0, x1, y1, rgba);
+                push_solid(verts, atlas.white, x0, y0, x1, y1, rgba);
             }
         }
     }
+    Ok(())
+}
 
-    // 选中描边：青色 2px，画在最上层（几何对齐 vitric_render::draw_selection_outline）。
-    // 已知小偏差：光照开启时描边在 GPU 窗口会被一起打光（同一条管线），CPU 窗口路径
-    // 是渲完再描所以不被打光——检查器调试装饰，不进截图/断言，不值得为它开第二条管线
-    if let Some(id) = selection {
-        push_selection_outline(&mut verts, world, width, height, atlas, id, (cam_x, cam_y, scale));
+/// 矢量文字流（挂了字体）：排版/栅格化/取整全走 vitric_render::FontStore——
+/// 与 CPU 路径（draw_text_vector）同一套几何，每字形一个字形图集方块。
+/// 新 (字符, 像素字号) 在这里懒分配 + 排进上传队列；图集满了显式报错。
+fn push_ttf_texts(
+    verts: &mut Vec<Vertex>,
+    world: &World,
+    width: u32,
+    height: u32,
+    font: &vitric_render::FontStore,
+    glyph_atlas: &mut GlyphAtlas,
+    (cam_x, cam_y, scale): (f64, f64, f64),
+) -> Result<(), String> {
+    use vitric_render::FontStore;
+    for id in world.query(&["Position", "Text"]) {
+        let content = world
+            .get_field(id, "Text.content")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        if content.is_empty() {
+            continue;
+        }
+        let size = num(world, id, "Text.size")?;
+        if size <= 0.0 {
+            continue;
+        }
+        let color = world
+            .get_field(id, "Text.color")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "#ffffff".to_string());
+        let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Text.color: {e}"))?;
+        let px = num(world, id, "Position.x")?;
+        let py = num(world, id, "Position.y")?;
+        let screen_anchored = world
+            .get_field(id, "Text.screen")
+            .ok()
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let (cx, cy) = if screen_anchored {
+            ((width as f64) / 2.0 + px * scale, (height as f64) / 2.0 - py * scale)
+        } else {
+            ((width as f64) / 2.0 + (px - cam_x) * scale, (height as f64) / 2.0 - (py - cam_y) * scale)
+        };
+
+        let px_size = FontStore::px_size(size, scale);
+        let (placements, total_w) = font.layout(&content, px_size);
+        let left = cx - total_w as f64 / 2.0;
+        let baseline = (cy + font.baseline_offset(px_size) as f64).round();
+        for p in &placements {
+            let g = font.raster(p.ch, px_size);
+            if g.coverage.is_empty() {
+                continue; // 空轮廓（空格等）只占 advance，不进图集
+            }
+            let uv = glyph_atlas.glyph_uv(font, p.ch, px_size)?;
+            let x0 = ((left + p.x as f64).round() + g.left as f64) as f32;
+            let y0 = (baseline + g.top as f64) as f32;
+            push_quad(verts, x0, y0, x0 + g.width as f32, y0 + g.height as f32, uv, tint(rgba));
+        }
     }
-    Ok(verts)
+    Ok(())
 }
 
 fn push_selection_outline(
@@ -1278,7 +1595,8 @@ fn push_selection_outline(
     world: &World,
     width: u32,
     height: u32,
-    atlas: &Atlas,
+    // 白块中心点 UV：点阵路径给主图集的，字体路径给字形图集的（描边跟字形同一绑定组）
+    white: [f32; 2],
     id: vitric_ecs::EntityId,
     (cam_x, cam_y, scale): (f64, f64, f64),
 ) {
@@ -1316,15 +1634,15 @@ fn push_selection_outline(
     }
     const TEAL: [u8; 4] = [39, 192, 168, 255];
     // 四条 2px 边（覆盖范围 = CPU 双圈 put 的并集）
-    push_solid(verts, atlas, x0, y0, x1 + 1.0, y0 + 2.0, TEAL); // 上
-    push_solid(verts, atlas, x0, y1 - 1.0, x1 + 1.0, y1 + 1.0, TEAL); // 下
-    push_solid(verts, atlas, x0, y0, x0 + 2.0, y1 + 1.0, TEAL); // 左
-    push_solid(verts, atlas, x1 - 1.0, y0, x1 + 1.0, y1 + 1.0, TEAL); // 右
+    push_solid(verts, white, x0, y0, x1 + 1.0, y0 + 2.0, TEAL); // 上
+    push_solid(verts, white, x0, y1 - 1.0, x1 + 1.0, y1 + 1.0, TEAL); // 下
+    push_solid(verts, white, x0, y0, x0 + 2.0, y1 + 1.0, TEAL); // 左
+    push_solid(verts, white, x1 - 1.0, y0, x1 + 1.0, y1 + 1.0, TEAL); // 右
 }
 
-/// 纯色矩形：采样白块中心（四角同 UV），颜色全靠染色。
-fn push_solid(verts: &mut Vec<Vertex>, atlas: &Atlas, x0: f32, y0: f32, x1: f32, y1: f32, rgba: [u8; 4]) {
-    let [u, v] = atlas.white;
+/// 纯色矩形：采样白块中心点（四角同 UV），颜色全靠染色。
+fn push_solid(verts: &mut Vec<Vertex>, white: [f32; 2], x0: f32, y0: f32, x1: f32, y1: f32, rgba: [u8; 4]) {
+    let [u, v] = white;
     push_quad(verts, x0, y0, x1, y1, [u, v, u, v], tint(rgba));
 }
 
@@ -1602,6 +1920,80 @@ mod tests {
         assert_eq!(verts[0].color, tint(vitric_render::BACKGROUND));
         // 没 Ambient：不铺背景方块（旧行为）
         assert!(build_vertices(&World::new(), 64, 48, &fake_atlas(), None, 0).unwrap().is_empty());
+    }
+
+    fn test_font() -> vitric_render::FontStore {
+        vitric_render::FontStore::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../examples/book/fonts/DejaVuSans.ttf"),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn glyph_atlas_shelf_packs_rows_and_reports_full_explicitly() {
+        // 16x16 小图集：白块(2x2+1px 空隙)在 (0,0)，row_h=3
+        let mut a = GlyphAtlas::new(16);
+        assert_eq!(a.pending.len(), 1, "白块在待上传队列里");
+        assert_eq!(a.alloc_rect(8, 8).unwrap(), (3, 0), "同行白块右侧");
+        // 放不下第二个 8x8（x=12+9>16）→ 换行到 y=9，但 9+9>16 → 显式报满
+        let err = a.alloc_rect(8, 8).unwrap_err();
+        assert!(err.contains("已满") && err.contains("字号"), "{err}");
+        // 单块超边长：另一种显式错误（不是包装成"满"）
+        let err = a.alloc_rect(20, 4).unwrap_err();
+        assert!(err.contains("超过"), "{err}");
+        // 换行确实发生过：下一块小的落在第二行
+        assert_eq!(a.alloc_rect(2, 2).unwrap(), (0, 9));
+    }
+
+    #[test]
+    fn glyph_uv_is_uploaded_once_then_cached() {
+        let font = test_font();
+        let mut a = GlyphAtlas::new(1024);
+        let base = a.pending.len(); // 白块
+        let uv1 = a.glyph_uv(&font, 'A', 24).unwrap();
+        assert_eq!(a.pending.len(), base + 1, "首次出现 → 一次上传");
+        let up = a.pending.last().unwrap();
+        assert_eq!(up.pixels.len(), (up.w * up.h * 4) as usize, "RGBA 像素量对得上");
+        assert!(up.pixels.chunks_exact(4).all(|p| p[..3] == [255, 255, 255]), "白底+覆盖率 alpha");
+        // 同键再来：命中缓存，不再上传
+        let uv2 = a.glyph_uv(&font, 'A', 24).unwrap();
+        assert_eq!(uv1, uv2);
+        assert_eq!(a.pending.len(), base + 1, "缓存命中不产生新上传");
+        // 同字符不同字号是另一个字形
+        let uv3 = a.glyph_uv(&font, 'A', 32).unwrap();
+        assert_ne!(uv1, uv3);
+        assert_eq!(a.pending.len(), base + 2);
+        // CJK：DejaVu 没有的字形落到 .notdef 豆腐块——也得占位可见，不静默丢
+        a.glyph_uv(&font, '中', 24).unwrap();
+        assert_eq!(a.pending.len(), base + 3);
+    }
+
+    #[test]
+    fn ttf_text_quads_follow_proportional_layout() {
+        let font = test_font();
+        let mut a = GlyphAtlas::new(1024);
+        let mut w = World::new();
+        let t = w.spawn();
+        w.set_component(t, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(t, "Text", json!({"content": "Hi", "size": 2.0, "color": "#00ff00"}))
+            .unwrap();
+        let mut verts = Vec::new();
+        push_ttf_texts(&mut verts, &w, 64, 64, &font, &mut a, (0.0, 0.0, 8.0)).unwrap();
+        assert_eq!(verts.len(), 12, "两个非空字形 = 两个方块");
+        assert_eq!(verts[0].color, [0.0, 1.0, 0.0, 1.0]);
+        // 与 CPU 路径同一套排版：总宽来自 layout(px=16)，整串横向居中于屏幕中心 32
+        let (_, total_w) = font.layout("Hi", 16);
+        let left = 32.0 - total_w / 2.0;
+        let xs: Vec<f32> = verts.iter().map(|v| v.pos[0]).collect();
+        let x_min = xs.iter().cloned().fold(f32::MAX, f32::min);
+        let x_max = xs.iter().cloned().fold(f32::MIN, f32::max);
+        assert!(x_min >= left - 1.5 && x_max <= left + total_w + 1.5, "字形落在排版包络内: {x_min}..{x_max} vs {left}+{total_w}");
+        // 空格只占 advance 不出方块
+        w.set_field(t, "Text.content", json!(" ")).unwrap();
+        let mut sp = Vec::new();
+        push_ttf_texts(&mut sp, &w, 64, 64, &font, &mut a, (0.0, 0.0, 8.0)).unwrap();
+        assert!(sp.is_empty());
     }
 
     #[test]

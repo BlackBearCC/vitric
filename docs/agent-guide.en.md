@@ -89,7 +89,7 @@ What the engine guarantees, and where the guarantee ends:
 
 ## The data language
 
-- `vitric.json` manifest: name / schema / entry / scenes / rules / scripts / animations / budgets / seed
+- `vitric.json` manifest: name / schema / entry / scenes / rules / scripts / animations / budgets / font / seed
 - `schema.json`: component fields (number/int/bool/text/vec2/entity/enum/list + default/required/min/max)
 - Scenes: entity arrays; missing fields auto-filled from defaults
 - Rules (the front door for gameplay): `{"id", "on", "if": [[lhs,op,rhs]...], "do": [actions...]}`
@@ -189,5 +189,12 @@ Convention components like Body/Solid: the engine recognizes the names, you defi
 
 ## On-screen text
 
-`Text{content, size, color}` + `Position`: built-in 8x8 bitmap font (ASCII), each glyph is size×size world units, the string is centered on Position and drawn above sprites. `render/describe` returns `texts[].content` directly — agents never OCR screenshots.
+`Text{content, size, color}` + `Position`: the string is centered on Position and drawn above sprites. `render/describe` returns `texts[].content` directly — agents never OCR screenshots.
 To turn numeric state into text, use the rule format template: `{"set": "@hud.Text.content", "to": {"format": "SCORE {}", "args": ["self.Score.value"]}}` (the number of `{}` slots must match args).
+
+Two rendering paths, chosen by the manifest `font` field:
+
+- **Default (no font)**: the built-in 8x8 bitmap font (ASCII), each glyph size×size world units, monospaced, hard pixel edges — right for pixel-art games. Output bytes are bit-identical to before this feature existed (locked by tests). Non-ASCII characters render as solid placeholder blocks.
+- **`"font": "fonts/myfont.ttf"` in the manifest (path relative to the project root)**: **all** Text components switch to the TTF vector font — proportional advances + kerning, size = glyph height in world units (pixel height = size × camera scale), and any glyph the font contains renders (**including Chinese/CJK, provided the font itself has CJK glyphs** — Latin fonts like DejaVu don't; missing glyphs render the font's .notdef tofu box, so use e.g. Noto Sans SC for Chinese). Vector text is coverage-anti-aliased — the one intentionally smooth element in the engine; sprites stay nearest-neighbor crisp. Use this for hand-drawn/HD styles and runtime LLM replies in Chinese (see examples/book).
+- Missing/corrupt font file: `vitric check` and boot both fail with an explicit error naming the path — text never silently disappears at runtime.
+- Determinism is unchanged: CPU screenshots (render/screenshot) stay byte-identical per platform/binary and remain assertable; the GPU window matches visually but not byte-exactly (the CPU path stays the source of truth).

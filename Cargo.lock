@@ -3000,6 +3000,7 @@ dependencies = [
 name = "vitric-render"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "font8x8",
  "png",
  "serde_json",

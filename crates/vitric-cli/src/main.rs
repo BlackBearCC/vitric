@@ -137,6 +137,10 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let (mut sim, mut rt) = Runtime::boot(&dir)?;
     let mut dispatcher = Dispatcher::new(project.schema.clone());
     dispatcher.load_assets(&dir.join("assets"))?;
+    // 清单挂了 font：启动期加载（缺失/损坏立刻报错），所有 Text 走矢量路径
+    if let Some(font_rel) = &project.manifest.font {
+        dispatcher.load_font(&dir.join(font_rel))?;
+    }
     dispatcher.set_budgets(project.manifest.budgets.clone());
     dispatcher.ctl.speed = speed;
 

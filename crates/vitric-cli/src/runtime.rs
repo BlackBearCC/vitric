@@ -340,7 +340,12 @@ pub fn check(dir: &Path) -> Result<Value, String> {
     vitric_data::instantiate_scene(project.entry_scene(), &project.schema, &mut sim.world)
         .map_err(|r| r.to_string())?;
     // 素材：加载即校验（坏图/超尺寸），再查场景引用的图都在
-    let assets = vitric_render::Assets::load_dir(&dir.join("assets"))?;
+    let mut assets = vitric_render::Assets::load_dir(&dir.join("assets"))?;
+    // 字体：清单挂了 font 就在 check 期真的解析一遍（存在性 Project::load 已查，
+    // 这里抓"文件在但不是合法 TTF"）
+    if let Some(font_rel) = &project.manifest.font {
+        assets.load_font(&dir.join(font_rel))?;
+    }
     let mut missing = Vec::new();
     for id in sim.world.query(&["Sprite"]) {
         if let Ok(image) = sim.world.get_field(id, "Sprite.image") {
@@ -401,6 +406,8 @@ pub fn check(dir: &Path) -> Result<Value, String> {
             "count": assets.count(),
             "decoded_kb": assets.total_bytes() / 1024,
         },
+        // 文字渲染路径可观察：挂了字体报路径，没挂明说是点阵
+        "font": project.manifest.font.clone().unwrap_or_else(|| "内嵌 8x8 点阵".to_string()),
         "initial_hash": format!("{:#018x}", sim.world.state_hash()),
     }))
 }

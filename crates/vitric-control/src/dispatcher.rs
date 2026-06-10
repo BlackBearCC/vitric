@@ -90,6 +90,15 @@ impl Dispatcher {
         Ok(())
     }
 
+    /// 挂载清单 `font` 字段的 TTF 字体（缺失/损坏立刻报错——启动期失败，
+    /// 不是跑起来文字消失）。挂上后所有 Text 走矢量路径。
+    pub fn load_font(&mut self, path: &std::path::Path) -> Result<(), String> {
+        self.assets.load_font(path)?;
+        // 字体变化也要触发 GPU 侧重建（字形图集按字体栅格化）
+        self.assets_generation += 1;
+        Ok(())
+    }
+
     /// 素材仓库只读访问（窗口呈现共用同一份）。
     pub fn assets(&self) -> &vitric_render::Assets {
         &self.assets

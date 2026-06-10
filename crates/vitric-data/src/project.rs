@@ -35,6 +35,12 @@ pub struct ProjectManifest {
     /// 动画定义文件（可选）。
     #[serde(default)]
     pub animations: Option<String>,
+    /// TTF 矢量字体（可选，路径相对项目根目录，如 "fonts/myfont.ttf"）。
+    /// 设了它，所有 Text 组件改用该字体渲染（比例字距 + 抗锯齿，支持字体里有的
+    /// 任意字形——含 CJK）；不设 = 维持内嵌 8x8 点阵字体的旧行为（输出字节不变）。
+    /// 文件不存在在加载期报错（VD040）；文件损坏在 check/启动时显式报错。
+    #[serde(default)]
+    pub font: Option<String>,
     /// 性能预算（可选）。超了不是默默卡顿，是显式上报。
     #[serde(default)]
     pub budgets: Budgets,
@@ -114,7 +120,7 @@ impl Project {
                     "VD041",
                     "vitric.json",
                     format!("清单解析失败: {e}"),
-                    "必填字段: name(文本)、schema(路径)、entry(路径)。可选: scenes/rules/scripts(路径数组)、seed(整数)",
+                    "必填字段: name(文本)、schema(路径)、entry(路径)。可选: scenes/rules/scripts(路径数组)、font(TTF 路径)、seed(整数)",
                 );
                 return Err(report);
             }
@@ -172,6 +178,19 @@ impl Project {
             match fs::read_to_string(root.join(rel)) {
                 Ok(src) => scripts.push((rel.clone(), src)),
                 Err(e) => report.push("VD040", rel, format!("读取失败: {e}"), "清单 scripts 列表里的文件必须存在"),
+            }
+        }
+
+        // 字体：只查文件存在（解析/损坏校验在 vitric-render 的 FontStore::load，
+        // 那边认识 TTF；这里和 scenes/rules 一样只管"清单指的文件必须在"）
+        if let Some(rel) = &manifest.font {
+            if !root.join(rel).is_file() {
+                report.push(
+                    "VD040",
+                    rel.as_str(),
+                    "字体文件不存在".to_string(),
+                    "清单 font 字段指向的 TTF 文件必须存在（路径相对项目根目录）",
+                );
             }
         }
 
@@ -274,6 +293,33 @@ mod tests {
         assert_eq!(p.manifest.name, "demo");
         assert_eq!(p.manifest.seed, 7);
         assert!(p.entry_scene().doc.get("entities").is_some());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_font_file_is_an_explicit_error_naming_the_path() {
+        let dir = temp_project("font");
+        write(
+            &dir.join("vitric.json"),
+            r#"{"name":"demo","schema":"schema.json","entry":"scenes/main.json",
+                "scenes":["scenes/main.json"],"font":"fonts/ghost.ttf"}"#,
+        );
+        write(
+            &dir.join("schema.json"),
+            r#"{"components":{"Position":{"fields":{"x":{"type":"number"},"y":{"type":"number"}}}}}"#,
+        );
+        write(&dir.join("scenes/main.json"), r#"{"entities":[]}"#);
+        let err = Project::load(&dir).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("VD040") && text.contains("fonts/ghost.ttf"), "{text}");
+        // 不写 font 字段 = 合法（点阵字体旧行为）
+        write(
+            &dir.join("vitric.json"),
+            r#"{"name":"demo","schema":"schema.json","entry":"scenes/main.json",
+                "scenes":["scenes/main.json"]}"#,
+        );
+        let p = Project::load(&dir).unwrap();
+        assert!(p.manifest.font.is_none());
         fs::remove_dir_all(&dir).unwrap();
     }
 

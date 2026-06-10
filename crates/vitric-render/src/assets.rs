@@ -12,14 +12,17 @@ pub struct Image {
 /// 单张图片的边长上限。超了不是警告是错误——显存膨胀这类事故要在导入时拦死。
 const MAX_DIMENSION: u32 = 2048;
 
-/// 素材仓库：项目 `assets/` 目录下的全部 PNG，键是相对路径（正斜杠）。
+/// 素材仓库：项目 `assets/` 目录下的全部 PNG，键是相对路径（正斜杠）；
+/// 外加可选的 TTF 字体（清单 `font` 字段，见 [`crate::FontStore`]）。
 ///
-/// 加载即校验：解码失败、超尺寸预算都在 `vitric check` / 启动时暴露，
+/// 加载即校验：解码失败、超尺寸预算、字体损坏都在 `vitric check` / 启动时暴露，
 /// 不存在"游戏跑起来图突然不见了"。
 #[derive(Debug, Default)]
 pub struct Assets {
     root: Option<PathBuf>,
     images: BTreeMap<String, Image>,
+    /// 矢量字体（None = 用内嵌 8x8 点阵，旧行为字节不变）。
+    font: Option<crate::FontStore>,
 }
 
 impl Assets {
@@ -30,7 +33,8 @@ impl Assets {
 
     /// 从项目 assets 目录加载全部 PNG（递归）。目录不存在 = 空仓库（合法：纯色块游戏）。
     pub fn load_dir(dir: &Path) -> Result<Assets, String> {
-        let mut assets = Assets { root: Some(dir.to_path_buf()), images: BTreeMap::new() };
+        let mut assets =
+            Assets { root: Some(dir.to_path_buf()), images: BTreeMap::new(), font: None };
         if !dir.exists() {
             return Ok(assets);
         }
@@ -62,10 +66,27 @@ impl Assets {
     }
 
     /// 重新从磁盘加载（热重载素材）。失败保持旧内容。
+    /// 字体跟着图一起重读（路径不变）——字体文件被换了也是热重载的一部分。
     pub fn reload(&mut self) -> Result<(), String> {
         let root = self.root.clone().ok_or("素材仓库没有目录，无法重载")?;
-        *self = Assets::load_dir(&root)?;
+        let mut fresh = Assets::load_dir(&root)?;
+        if let Some(font_path) = self.font.as_ref().map(|f| f.path().to_path_buf()) {
+            fresh.load_font(&font_path)?;
+        }
+        *self = fresh;
         Ok(())
+    }
+
+    /// 挂载 TTF 字体（清单 `font` 字段）。缺失/损坏显式报错并点名路径。
+    /// 挂上之后所有 Text 组件改走矢量路径（见 lib.rs 模块文档的 Text 约定）。
+    pub fn load_font(&mut self, path: &Path) -> Result<(), String> {
+        self.font = Some(crate::FontStore::load(path)?);
+        Ok(())
+    }
+
+    /// 矢量字体（None = 点阵旧行为）。CPU 光栅化和 GPU 字形图集共用这一份。
+    pub fn font(&self) -> Option<&crate::FontStore> {
+        self.font.as_ref()
     }
 
     pub fn image(&self, name: &str) -> Option<&Image> {

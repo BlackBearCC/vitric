@@ -11,5 +11,6 @@
   "scripts": [
     "scripts/systems.js"
   ],
+  "font": "fonts/DejaVuSans.ttf",
   "seed": 1
 }
