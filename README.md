@@ -2,6 +2,10 @@
 
 **The glass-box game engine for AI agents.**
 
+![coin-run demo](docs/media/coin-run.gif)
+
+*↑ 这个 demo 的每一帧都是引擎自己渲的（CPU 光栅化，无 GPU），由 AI 通过控制面操作游戏并逐帧截图拼成——这正是引擎的卖点本身。*
+
 现有引擎为"人坐在编辑器前"设计，对 AI 是黑盒；Vitric 以 agent API 为中心——引擎的一切状态对 AI 可见、可操作、可验证，AI 能自主地**运行游戏 → 观察画面和状态 → 跑断言 → 修改 → 重来**，整个闭环不需要人插手。
 
 ## 现在就能跑
