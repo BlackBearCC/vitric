@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: 测试（Linux）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 全部测试
+        run: cargo test --workspace
+      - name: 零警告
+        run: |
+          cargo build --workspace 2>&1 | tee /tmp/build.log
+          ! grep -q "^warning" /tmp/build.log
+
+  windows-build:
+    name: 交叉编译（Windows exe）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: 装 MinGW
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: 构建 vitric.exe
+        run: cargo build --release --target x86_64-pc-windows-gnu -p vitric-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vitric-windows-x64
+          path: target/x86_64-pc-windows-gnu/release/vitric.exe
+
+  mcp:
+    name: MCP server 冒烟
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 构建引擎
+        run: cargo build -p vitric-cli
+      - name: 装依赖并冒烟（initialize + check + start/observe/stop）
+        working-directory: mcp
+        run: |
+          npm install --no-fund --no-audit
+          node ../scripts/mcp-smoke.mjs

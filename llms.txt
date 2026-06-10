@@ -1,0 +1,30 @@
+# Vitric
+
+> The glass-box game engine for AI agents。引擎一切状态对 AI 可见、可操作、可验证：声明式数据层（强 schema JSON）+ 规则引擎（当X则Y）+ JS 脚本（读写声明强制）+ 确定性模拟（录像逐帧重放）+ HTTP 控制面（查改状态/注输入/时间控制/断言/语义观察/截图）+ MCP server。
+
+写 Vitric 游戏 = 写数据：vitric.json 清单、schema.json 组件定义、scenes/*.json 实体摆放、rules/*.json 玩法规则、scripts/*.js 复杂逻辑、animations.json 动画片段。改完先 `vitric check`（错误带路径+错误码+修复提示），跑 `vitric run`，通过控制面自主验证。
+
+## 核心文档
+
+- [Agent 操作指南](docs/agent-guide.md): 三个 CLI 命令、控制面全部方法、数据语言语法、引擎约定组件、典型闭环——一页纸说完
+- [错误码目录](docs/errors.md): 全部 VD/VR 错误码与修法
+- [README](README.md): 定位、快速上手、架构
+- [设计稿](docs/AI原生游戏引擎-设计稿.md): 完整设计决策与理由
+
+## 示例
+
+- [examples/coin-run](examples/coin-run/vitric.json): 吃金币——规则/脚本/动画/贴图全覆盖
+- [examples/cave-gen](examples/cave-gen/vitric.json): 配方生成关卡——改 seed 整关重生成
+
+## 集成
+
+- [MCP server](mcp/index.js): 12 个工具，任何 MCP 客户端开箱即用
+- 仓库内置 Claude Code skill（.claude/skills/vitric/）
+
+## 关键约定（写代码前必知）
+
+- 一切迭代有序、随机走 ctx.random()（Math.random/Date.now 被禁）→ 同种子同输入逐帧相同
+- 脚本系统必须声明 query/writes，越权写报错
+- 引擎独占 Sprite.image 写权（有 Anim 组件时），换动画改 Anim.clip
+- 内建事件: start / input / collision / anim-finished
+- 内建组件约定: Position+Velocity=移动, Position+Collider=碰撞, Position+Sprite=渲染, Camera=取景
