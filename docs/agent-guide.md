@@ -30,6 +30,7 @@ vitric replay <项目目录> <录像.json>      # 重放录像并逐校验点验
 | `inspect/selection` | — | **人指哪你看哪**：窗口里人点选的实体（青色描边高亮），完整组件回传 |
 | `inspect/select` | `entity`（null 清空） | 反向指给人看：你选中的实体在窗口里高亮 |
 | `sim/hash` | — | 世界状态哈希（断言两次运行一致就比它） |
+| `perf/stats` | — | 实体数/单 tick 事件数/素材解码内存/预算配置。清单 `budgets` 设上限后超标会进 assert/failures（kind=budget） |
 
 ### 动
 

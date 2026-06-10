@@ -107,6 +107,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let (mut sim, mut rt) = Runtime::boot(&dir)?;
     let mut dispatcher = Dispatcher::new(project.schema.clone());
     dispatcher.load_assets(&dir.join("assets"))?;
+    dispatcher.set_budgets(project.manifest.budgets.clone());
     dispatcher.ctl.speed = speed;
 
     if record_path.is_some() {

@@ -40,6 +40,12 @@ pub struct Dispatcher {
     assets: vitric_render::Assets,
     /// 检查器选中的实体——人点的和 AI 设的是同一个状态，双向可见。
     selection: Option<EntityId>,
+    /// 性能预算（0=不限）。
+    budgets: vitric_data::Budgets,
+    /// 最近一次 step 的事件数（预算检查用）。
+    last_tick_events: u64,
+    /// 事件计数对应的 tick。
+    events_count_tick: u64,
     pub ctl: LoopCtl,
 }
 
@@ -53,8 +59,15 @@ impl Dispatcher {
             events: VecDeque::new(),
             assets: vitric_render::Assets::empty(),
             selection: None,
+            budgets: vitric_data::Budgets::default(),
+            last_tick_events: 0,
+            events_count_tick: u64::MAX,
             ctl: LoopCtl::default(),
         }
+    }
+
+    pub fn set_budgets(&mut self, budgets: vitric_data::Budgets) {
+        self.budgets = budgets;
     }
 
     /// 检查器选中态（窗口点选写、AI inspect/select 写，双方都读这里）。
@@ -77,8 +90,13 @@ impl Dispatcher {
         &self.assets
     }
 
-    /// 主循环每 step 后调用：记录事件进环形缓冲。
+    /// 主循环每 step 后调用：记录事件进环形缓冲（顺带按 tick 计数给预算用）。
     pub fn record_events(&mut self, tick: u64, events: &[Event]) {
+        if tick != self.events_count_tick {
+            self.events_count_tick = tick;
+            self.last_tick_events = 0;
+        }
+        self.last_tick_events += events.len() as u64;
         for e in events {
             if self.events.len() == EVENT_LOG_CAP {
                 self.events.pop_front();
@@ -114,6 +132,30 @@ impl Dispatcher {
                     "id": id, "tick": sim.tick,
                     "kind": "violated", "conditions": conds.iter()
                         .map(|(l, o, r)| json!([l, o, r])).collect::<Vec<_>>(),
+                });
+                self.failures.push(record.clone());
+                fresh.push(record);
+            }
+        }
+
+        // 性能预算：超了不是默默卡顿，是和断言同级的显式失败
+        let entities = sim.world.entities().len() as u64;
+        let budget_checks = [
+            ("budget:max_entities", self.budgets.max_entities, entities,
+             "实体数超预算。提示：检查是否有规则/脚本在无限 spawn，或上调清单 budgets.max_entities"),
+            ("budget:max_events_per_tick", self.budgets.max_events_per_tick, self.last_tick_events,
+             "单 tick 事件数超预算，疑似事件风暴。提示：查 events/recent 看是什么事件在刷屏"),
+        ];
+        for (id, limit, actual, hint) in budget_checks {
+            if limit == 0 {
+                continue;
+            }
+            if actual <= limit {
+                self.failing.remove(id);
+            } else if self.failing.insert(id.to_string()) {
+                let record = json!({
+                    "id": id, "tick": sim.tick, "kind": "budget",
+                    "limit": limit, "actual": actual, "hint": hint,
                 });
                 self.failures.push(record.clone());
                 fresh.push(record);
@@ -315,6 +357,18 @@ impl Dispatcher {
                 Ok(Value::Object(result))
             }
 
+            // ---- 性能观测 ----
+            "perf/stats" => Ok(json!({
+                "tick": sim.tick,
+                "entities": sim.world.entities().len(),
+                "events_last_tick": self.last_tick_events,
+                "assets": {"count": self.assets.count(), "decoded_kb": self.assets.total_bytes() / 1024},
+                "budgets": {
+                    "max_entities": self.budgets.max_entities,
+                    "max_events_per_tick": self.budgets.max_events_per_tick,
+                },
+            })),
+
             // ---- 检查器（人指哪 AI 看哪，反向也行）----
             "inspect/selection" => match self.selection.filter(|&id| sim.world.is_alive(id)) {
                 Some(id) => Ok(json!({"selected": entity_json(&sim.world, id)})),
@@ -375,7 +429,7 @@ impl Dispatcher {
                 "未知方法 {other:?}。可用方法: ping, world/entities, world/get, world/set, \
                  world/spawn, world/despawn, input/inject, sim/pause, sim/resume, sim/step, \
                  sim/speed, sim/quit, sim/snapshot, sim/restore, sim/hash, project/reload, \
-                 inspect/selection, inspect/select, events/recent, render/describe, \
+                 inspect/selection, inspect/select, events/recent, perf/stats, render/describe, \
                  render/screenshot, assert/add, assert/remove, assert/list, assert/failures"
             )),
         }
@@ -622,6 +676,28 @@ mod tests {
         );
         let e = call_err(&mut d, &mut sim, "input/inject", json!({"action": "x", "phase": "held"}));
         assert!(e.contains("pressed"), "{e}");
+    }
+
+    #[test]
+    fn budget_violation_reports_once_like_assertion() {
+        let (mut d, mut sim) = setup();
+        d.set_budgets(serde_json::from_value(json!({"max_entities": 2})).unwrap());
+        // 1 个实体：健康
+        assert!(d.check_assertions(&sim).is_empty());
+        // 撑爆预算
+        sim.world.spawn();
+        sim.world.spawn();
+        let fresh = d.check_assertions(&sim);
+        assert_eq!(fresh.len(), 1, "{fresh:?}");
+        assert_eq!(fresh[0]["kind"], json!("budget"));
+        assert_eq!(fresh[0]["limit"], json!(2));
+        assert_eq!(fresh[0]["actual"], json!(3));
+        // 持续超标不重复报（去抖）
+        assert!(d.check_assertions(&sim).is_empty());
+        // perf/stats 可观测
+        let stats = call(&mut d, &mut sim, "perf/stats", json!({}));
+        assert_eq!(stats["entities"], json!(3));
+        assert_eq!(stats["budgets"]["max_entities"], json!(2));
     }
 
     #[test]

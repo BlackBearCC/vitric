@@ -35,9 +35,23 @@ pub struct ProjectManifest {
     /// 动画定义文件（可选）。
     #[serde(default)]
     pub animations: Option<String>,
+    /// 性能预算（可选）。超了不是默默卡顿，是显式上报。
+    #[serde(default)]
+    pub budgets: Budgets,
     /// 世界随机种子；同种子同输入 = 同结果。
     #[serde(default = "default_seed")]
     pub seed: u64,
+}
+
+/// 性能预算。0 = 不限。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Budgets {
+    /// 存活实体数上限。
+    #[serde(default)]
+    pub max_entities: u64,
+    /// 单 tick 事件数上限（事件风暴探测）。
+    #[serde(default)]
+    pub max_events_per_tick: u64,
 }
 
 /// 一个动画片段：帧图序列 + 播放速率。
