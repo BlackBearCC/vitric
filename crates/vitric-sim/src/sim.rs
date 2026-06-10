@@ -36,6 +36,17 @@ pub trait GameLogic {
     fn reload(&mut self) -> Result<serde_json::Value, String> {
         Err("该运行时不支持热重载".to_string())
     }
+
+    /// 逻辑层跨 tick 暂存的自有状态（如还没消化的事件）。
+    /// 不进快照的状态 = restore 后轨迹静默分歧，有暂存状态的实现必须实现这对钩子。
+    fn snapshot_state(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    /// 与 [`GameLogic::snapshot_state`] 配对恢复。
+    fn restore_state(&mut self, _snap: &serde_json::Value) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// 空逻辑（纯物理跑模拟用）。
@@ -120,6 +131,12 @@ impl Sim {
             checkpoints: vec![(self.tick, self.world.state_hash())],
             ..Default::default()
         });
+    }
+
+    /// 是否正在录像。录像只记输入流：录制期间任何绕过输入的状态修改
+    /// （RPC 改世界、检查器拖拽、restore）都会让录像不可重放，调用方必须先查这个再动手。
+    pub fn is_recording(&self) -> bool {
+        self.recorder.is_some()
     }
 
     /// 结束录像。
@@ -216,17 +233,25 @@ impl Sim {
     }
 
     /// 模拟器整体快照（世界 + 时间 + 随机数状态）。
-    pub fn snapshot(&self) -> serde_json::Value {
+    pub fn snapshot(&self, logic: &dyn GameLogic) -> serde_json::Value {
         json!({
             "tick": self.tick,
             "seed": self.seed,
             "rng": serde_json::to_value(&self.rng).expect("rng 可序列化"),
             "world": self.world.snapshot(),
+            // 已注入未消化的输入。漏掉它，restore 后这些输入凭空消失
+            "pending_inputs": self.pending_inputs,
+            // 逻辑层暂存状态（脚本上一 tick 发的事件等）
+            "logic": logic.snapshot_state(),
         })
     }
 
     /// 从快照恢复。
-    pub fn restore(&mut self, snap: &serde_json::Value) -> Result<(), String> {
+    pub fn restore(
+        &mut self,
+        snap: &serde_json::Value,
+        logic: &mut dyn GameLogic,
+    ) -> Result<(), String> {
         let tick = snap.get("tick").and_then(|v| v.as_u64()).ok_or("快照缺 tick")?;
         let seed = snap.get("seed").and_then(|v| v.as_u64()).ok_or("快照缺 seed")?;
         let rng: Pcg32 = serde_json::from_value(snap.get("rng").cloned().ok_or("快照缺 rng")?)
@@ -234,11 +259,18 @@ impl Sim {
         let world_snap = snap.get("world").ok_or("快照缺 world")?;
         let mut world = World::new();
         world.restore(world_snap).map_err(|e| e.to_string())?;
+        let pending: Vec<(String, String)> = serde_json::from_value(
+            snap.get("pending_inputs").cloned().ok_or("快照缺 pending_inputs")?,
+        )
+        .map_err(|e| format!("pending_inputs 解析失败: {e}"))?;
+        logic.restore_state(snap.get("logic").ok_or("快照缺 logic 状态")?)?;
         self.tick = tick;
         self.seed = seed;
         self.rng = rng;
         self.world = world;
-        self.pending_inputs.clear();
+        self.pending_inputs = pending;
+        // 时间线断了，进行中的录像必然不可重放——直接作废，不留静默损坏的录像
+        self.recorder = None;
         Ok(())
     }
 
@@ -433,6 +465,21 @@ mod tests {
     }
 
     #[test]
+    fn restore_invalidates_in_progress_recording() {
+        // 回归：录像中途 restore，checkpoints 已错位，留着只会产出静默损坏的录像
+        let mut sim = Sim::new(7);
+        moving_world(&mut sim);
+        let snap = sim.snapshot(&());
+        sim.start_recording();
+        for _ in 0..10 {
+            sim.step(&mut ()).unwrap();
+        }
+        sim.restore(&snap, &mut ()).unwrap();
+        assert!(!sim.is_recording(), "restore 后录像必须作废");
+        assert!(sim.stop_recording().is_none());
+    }
+
+    #[test]
     fn snapshot_restore_resumes_identically() {
         let mut sim = Sim::new(3);
         moving_world(&mut sim);
@@ -440,7 +487,7 @@ mod tests {
             let _ = sim.rng.next_u32();
             sim.step(&mut ()).unwrap();
         }
-        let snap = sim.snapshot();
+        let snap = sim.snapshot(&());
 
         // 继续跑 50 tick
         for _ in 0..50 {
@@ -451,7 +498,7 @@ mod tests {
 
         // 从快照恢复再跑 50 tick：必须一模一样
         let mut sim2 = Sim::new(0); // 故意用错种子，restore 必须完整覆盖
-        sim2.restore(&snap).unwrap();
+        sim2.restore(&snap, &mut ()).unwrap();
         for _ in 0..50 {
             let _ = sim2.rng.next_u32();
             sim2.step(&mut ()).unwrap();

@@ -139,6 +139,37 @@ impl GameLogic for Runtime {
             "fns": self.scripts.fns.clone(),
         }))
     }
+
+    /// carryover（脚本上一 tick 发的、还没进规则的事件）是跨 tick 状态，
+    /// 不进快照的话 restore 后第一个 tick 的事件流就和原轨迹不一样了。
+    fn snapshot_state(&self) -> Value {
+        json!({
+            "carryover": self
+                .carryover
+                .iter()
+                .map(|e| json!({"name": e.name, "data": e.data}))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn restore_state(&mut self, snap: &Value) -> Result<(), String> {
+        let items = snap
+            .get("carryover")
+            .and_then(|v| v.as_array())
+            .ok_or("快照的 logic 状态缺 carryover（旧版快照与当前版本不兼容，重新 sim/snapshot）")?;
+        let mut carryover = Vec::with_capacity(items.len());
+        for (i, item) in items.iter().enumerate() {
+            let name = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("carryover[{i}] 缺 name"))?;
+            let data = item.get("data").cloned().unwrap_or(json!({}));
+            carryover.push(Event::new(name, data));
+        }
+        self.carryover = carryover;
+        self.observed.clear();
+        Ok(())
+    }
 }
 
 /// 动画系统：每 tick 推帧。状态全在 Anim 组件里（快照/回放安全）：
@@ -269,10 +300,17 @@ fn scan_sound_refs(doc: &Value, file: &str, sounds_dir: &Path, missing: &mut Vec
                         || sound.starts_with("other.")
                         || sound.starts_with("event.")
                         || sound.starts_with('@');
-                    if !is_ref && !sounds_dir.join(sound).exists() {
-                        missing.push(format!(
-                            "{file} 引用了不存在的音效 {sound:?}（应在项目 sounds/ 目录）"
-                        ));
+                    if !is_ref {
+                        // 与运行时同一条规则：不许逃出 sounds/ 目录
+                        if sound.contains("..") || sound.starts_with('/') || sound.contains('\\') {
+                            missing.push(format!(
+                                "{file} 的音效名 {sound:?} 不合法：只能是 sounds/ 目录内的相对文件名"
+                            ));
+                        } else if !sounds_dir.join(sound).exists() {
+                            missing.push(format!(
+                                "{file} 引用了不存在的音效 {sound:?}（应在项目 sounds/ 目录）"
+                            ));
+                        }
                     }
                 }
             }

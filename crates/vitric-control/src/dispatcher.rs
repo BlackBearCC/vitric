@@ -184,6 +184,16 @@ impl Dispatcher {
         sim: &mut Sim,
         logic: &mut dyn GameLogic,
     ) -> Result<Value, String> {
+        // 录像只记输入流。这些方法绕过输入直接改世界/规则，录制中放行的话
+        // 录出来的录像必然重放分歧，还会把排查方向误导到"非确定性"上——明确拒绝。
+        const BREAKS_RECORDING: &[&str] =
+            &["world/set", "world/spawn", "world/despawn", "project/reload", "sim/restore"];
+        if sim.is_recording() && BREAKS_RECORDING.contains(&method) {
+            return Err(format!(
+                "正在录像：{method} 不走输入流，改了的状态不会进录像，录像会变得不可重放。\
+                 要改状态请改用 input/inject（输入会被录下来），或先结束录制"
+            ));
+        }
         match method {
             "ping" => Ok(json!({
                 "tick": sim.tick,
@@ -223,14 +233,19 @@ impl Dispatcher {
                 } else {
                     set_in_value(&mut after, &path[comp.len() + 1..], value)?;
                 }
-                if let Some(cschema) = self.checker.schema.component(comp) {
-                    let mut report = vitric_data::ValidationReport::default();
-                    let normalized = cschema.normalize(&after, &format!("world/set/{comp}"), &mut report);
-                    if !report.ok() {
-                        return Err(format!("修改未通过 schema 校验:\n{report}"));
-                    }
-                    after = normalized;
+                // 和 world/spawn 同一部法律：schema 外的组件直接拒，不存在静默跳过校验的后门
+                let cschema = self.checker.schema.component(comp).ok_or_else(|| {
+                    format!(
+                        "未知组件 {comp:?}。schema 定义的组件: [{}]",
+                        self.checker.schema.components.keys().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                })?;
+                let mut report = vitric_data::ValidationReport::default();
+                let normalized = cschema.normalize(&after, &format!("world/set/{comp}"), &mut report);
+                if !report.ok() {
+                    return Err(format!("修改未通过 schema 校验:\n{report}"));
                 }
+                after = normalized;
                 sim.world.set_component(id, comp, after).map_err(|e| e.to_string())?;
                 Ok(json!({"entity": id.to_string()}))
             }
@@ -325,10 +340,10 @@ impl Dispatcher {
             }
 
             // ---- 快照 / 哈希 ----
-            "sim/snapshot" => Ok(sim.snapshot()),
+            "sim/snapshot" => Ok(sim.snapshot(logic)),
             "sim/restore" => {
                 let snap = params.get("snapshot").ok_or("缺少 snapshot 参数")?;
-                sim.restore(snap)?;
+                sim.restore(snap, logic)?;
                 Ok(json!({"tick": sim.tick}))
             }
             "sim/hash" => Ok(json!(format!("{:#018x}", sim.world.state_hash()))),
@@ -599,6 +614,28 @@ mod tests {
         let got = call(&mut d, &mut sim, "world/get", json!({"entity": "@player"}));
         assert_eq!(got["name"], json!("player"));
         assert_eq!(got["components"]["Health"]["hp"], json!(100));
+    }
+
+    #[test]
+    fn recording_rejects_out_of_band_mutation() {
+        // 回归：录像只记输入流，录制中放行 world/set 等于产出天生不可重放的录像
+        let (mut d, mut sim) = setup();
+        sim.start_recording();
+        let e = call_err(&mut d, &mut sim, "world/set", json!({"entity": "@player", "path": "Health.hp", "value": 50}));
+        assert!(e.contains("录像"), "{e}");
+        let e = call_err(&mut d, &mut sim, "world/spawn", json!({"components": {"Health": {}}}));
+        assert!(e.contains("录像"), "{e}");
+        let snap = sim.snapshot(&());
+        let e = call_err(&mut d, &mut sim, "sim/restore", json!({"snapshot": snap}));
+        assert!(e.contains("录像"), "{e}");
+        // 输入走录像流，照常放行
+        call(&mut d, &mut sim, "input/inject", json!({"action": "right"}));
+        // 世界没被污染
+        let p = sim.world.entity("player").unwrap();
+        assert_eq!(sim.world.get_field(p, "Health.hp").unwrap(), &json!(100));
+        // 停止录制后恢复可改
+        sim.stop_recording();
+        call(&mut d, &mut sim, "world/set", json!({"entity": "@player", "path": "Health.hp", "value": 50}));
     }
 
     #[test]

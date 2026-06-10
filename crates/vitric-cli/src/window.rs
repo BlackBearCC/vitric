@@ -146,6 +146,13 @@ impl WindowedGame {
 
     /// 拖拽：把选中实体的 Position 写回数据层——人的微调 AI 立刻可见。
     fn mouse_drag(&mut self) {
+        // 录像只记输入流，拖拽写 Position 不会进录像，会让录像不可重放——录制中禁用
+        if self.sim.is_recording() {
+            if self.drag.take().is_some() {
+                eprintln!("[vitric] 正在录像，检查器拖拽已禁用（拖动不进录像，会让录像不可重放）");
+            }
+            return;
+        }
         let Some((id, off_x, off_y)) = self.drag else { return };
         if !self.sim.world.is_alive(id) {
             self.drag = None;
