@@ -35,7 +35,6 @@ impl ControlServer {
         let thread = std::thread::spawn(move || {
             for mut http_req in server.incoming_requests() {
                 let mut body = String::new();
-                use std::io::Read;
                 if http_req.as_reader().read_to_string(&mut body).is_err() {
                     respond_json(http_req, 400, json!({"ok": false, "error": "请求体读取失败"}));
                     continue;
