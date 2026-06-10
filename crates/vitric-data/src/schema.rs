@@ -167,6 +167,34 @@ impl FieldType {
     }
 }
 
+impl FieldType {
+    /// 统一数值表示：number 字段一律存成浮点形态（5 → 5.0）。
+    /// 没有这一步，同一个值会因写入方不同（场景 JSON / JS 往返 / 规则动作）
+    /// 在世界里出现 int/float 两种形态，状态哈希和相等判断都会被表示差异干扰。
+    pub fn canonicalize(&self, value: &Value) -> Value {
+        match self {
+            FieldType::Number => match value.as_f64() {
+                Some(f) => json!(f),
+                None => value.clone(),
+            },
+            FieldType::Vec2 => {
+                let (Some(x), Some(y)) = (
+                    value.get("x").and_then(Value::as_f64),
+                    value.get("y").and_then(Value::as_f64),
+                ) else {
+                    return value.clone();
+                };
+                json!({ "x": x, "y": y })
+            }
+            FieldType::List(inner) => match value.as_array() {
+                Some(arr) => Value::Array(arr.iter().map(|v| inner.canonicalize(v)).collect()),
+                None => value.clone(),
+            },
+            _ => value.clone(),
+        }
+    }
+}
+
 fn value_type(v: &Value) -> String {
     match v {
         Value::Null => "null".into(),
@@ -202,7 +230,8 @@ pub struct FieldDef {
 
 impl FieldDef {
     pub fn effective_default(&self) -> Value {
-        self.default.clone().unwrap_or_else(|| self.ty.zero())
+        let v = self.default.clone().unwrap_or_else(|| self.ty.zero());
+        self.ty.canonicalize(&v)
     }
 
     fn check_range(&self, value: &Value, path: &str, report: &mut ValidationReport) {
@@ -273,7 +302,7 @@ impl ComponentSchema {
                 Some(v) => {
                     fdef.ty.check(v, &fpath, report);
                     fdef.check_range(v, &fpath, report);
-                    out.insert(fname.clone(), v.clone());
+                    out.insert(fname.clone(), fdef.ty.canonicalize(v));
                 }
                 None if fdef.required => {
                     report.push(
@@ -397,7 +426,8 @@ mod tests {
         let mut report = ValidationReport::default();
         let v = s.component("Position").unwrap().normalize(&json!({"x": 5}), "p", &mut report);
         assert!(report.ok(), "{report}");
-        assert_eq!(v, json!({"x": 5, "y": 0}));
+        // number 字段统一存浮点形态：表示唯一，状态哈希不受写入方影响
+        assert_eq!(v, json!({"x": 5.0, "y": 0.0}));
     }
 
     #[test]

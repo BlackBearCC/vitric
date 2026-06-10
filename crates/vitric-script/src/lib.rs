@@ -197,6 +197,9 @@ impl ScriptEngine {
                 ),
             });
         }
+        // 两遍走：先全量校验攒齐变更，确认整批合法再落地。
+        // 第 N 个实体非法时世界保持原样，不留半改状态（commit-on-success）。
+        let mut pending: Vec<(vitric_ecs::EntityId, String, Value)> = Vec::new();
         for (i, (&id, ret)) in ids.iter().zip(returned).enumerate() {
             let ret_obj = ret.as_object().ok_or_else(|| ScriptError::Op {
                 location: location.clone(),
@@ -215,7 +218,9 @@ impl ScriptEngine {
             for comp in &decl.query {
                 let before = world.get_component(id, comp).expect("query 已筛选").clone();
                 let after = ret_obj.get(comp).cloned().unwrap_or(Value::Null);
-                if before == after {
+                // JSON 经 JS 往返会丢小数点形态（0.0 → 0），必须按数值语义比，
+                // 否则只读系统会被误判成越权写
+                if json_semantic_eq(&before, &after) {
                     continue;
                 }
                 if !decl.writes.contains(comp) {
@@ -227,13 +232,16 @@ impl ScriptEngine {
                 }
                 // 写回也过 schema：脚本和场景文件遵守同一套法律
                 let normalized = self.normalize(comp, &after, &location)?;
-                world
-                    .set_component(id, comp, normalized)
-                    .map_err(|e| ScriptError::Op {
-                        location: location.clone(),
-                        message: e.to_string(),
-                    })?;
+                pending.push((id, comp.clone(), normalized));
             }
+        }
+        for (id, comp, normalized) in pending {
+            world
+                .set_component(id, &comp, normalized)
+                .map_err(|e| ScriptError::Op {
+                    location: location.clone(),
+                    message: e.to_string(),
+                })?;
         }
 
         // 出：操作流
@@ -384,6 +392,33 @@ impl ScriptEngine {
     }
 }
 
+/// 数值按语义比（5.0 == 5），其余结构递归。JS 的 JSON.stringify 不保留
+/// 整值浮点的小数点，往返后表示必然漂移，按表示比会满屏假阳性。
+fn json_semantic_eq(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            if let (Some(ix), Some(iy)) = (x.as_i64(), y.as_i64()) {
+                return ix == iy;
+            }
+            if let (Some(ux), Some(uy)) = (x.as_u64(), y.as_u64()) {
+                return ux == uy;
+            }
+            match (x.as_f64(), y.as_f64()) {
+                (Some(fx), Some(fy)) => fx == fy,
+                _ => x == y,
+            }
+        }
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(va, vb)| json_semantic_eq(va, vb))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len()
+                && x.iter().all(|(k, va)| y.get(k).is_some_and(|vb| json_semantic_eq(va, vb)))
+        }
+        _ => a == b,
+    }
+}
+
 fn to_string_vec(v: &Value) -> Vec<String> {
     v.as_array()
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
@@ -492,6 +527,48 @@ mod tests {
     }
 
     #[test]
+    fn readonly_system_with_whole_valued_floats_is_not_a_write() {
+        // 回归：世界里存 0.0/5.0，JS 往返变成 0/5，表示不同但语义相同。
+        // 一个什么都不改的系统绝不能被误判成越权写（曾导致正常项目随机停机）。
+        let mut eng = engine_with(
+            r#"
+            vitric.system("observer", {query: ["Position", "Velocity"], writes: ["Velocity"]}, () => {});
+            "#,
+        );
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 5.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Velocity", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let mut rng = Pcg32::new(1);
+        eng.run_systems(&mut w, &mut rng, 0).unwrap();
+        assert_eq!(w.get_field(e, "Position.x").unwrap().as_f64(), Some(5.0));
+    }
+
+    #[test]
+    fn failed_validation_leaves_world_untouched_even_with_earlier_valid_writes() {
+        // 写回必须整批成功才落地：第二个实体越权时，第一个实体的合法写也不能漏进世界
+        let mut eng = engine_with(
+            r#"
+            vitric.system("mixed", {query: ["Position", "Velocity"], writes: ["Velocity"]}, (entities) => {
+                entities[0].Velocity.x = 77;
+                if (entities.length > 1) { entities[1].Position.x = 999; }
+            });
+            "#,
+        );
+        let mut w = World::new();
+        let a = w.spawn();
+        w.set_component(a, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(a, "Velocity", json!({"x": 1.0, "y": 0.0})).unwrap();
+        let b = w.spawn();
+        w.set_component(b, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(b, "Velocity", json!({"x": 2.0, "y": 0.0})).unwrap();
+        let mut rng = Pcg32::new(1);
+        let err = eng.run_systems(&mut w, &mut rng, 0).unwrap_err();
+        assert!(matches!(err, ScriptError::UndeclaredWrite { .. }), "{err}");
+        assert_eq!(w.get_field(a, "Velocity.x").unwrap().as_f64(), Some(1.0), "半改状态泄漏");
+    }
+
+    #[test]
     fn writes_must_be_subset_of_query() {
         let mut eng = ScriptEngine::new(schema()).unwrap();
         let err = eng
@@ -518,6 +595,36 @@ mod tests {
         let mut rng = Pcg32::new(1);
         let err = eng.run_systems(&mut w, &mut rng, 0).unwrap_err();
         assert!(err.to_string().contains("ctx.random"), "要指路正确用法: {err}");
+    }
+
+    #[test]
+    fn new_date_is_poisoned_but_explicit_date_is_allowed() {
+        // 回归：曾只毒化 Date.now，new Date().getTime() 照样泄漏墙钟进世界状态
+        let mut eng = engine_with(
+            r#"
+            vitric.system("clock", {query: ["Position"], writes: ["Position"]}, (entities) => {
+                for (const e of entities) { e.Position.x = new Date().getTime(); }
+            });
+            "#,
+        );
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let mut rng = Pcg32::new(1);
+        let err = eng.run_systems(&mut w, &mut rng, 0).unwrap_err();
+        assert!(err.to_string().contains("ctx.tick"), "要指路正确用法: {err}");
+
+        // 显式传参是纯计算，必须放行
+        let mut eng2 = ScriptEngine::new(schema()).unwrap();
+        eng2.load(
+            "ok.js",
+            r#"
+            const epoch = new Date(0);
+            if (epoch.getTime() !== 0) throw new Error("显式 Date 坏了");
+            vitric.system("noop", {query: ["Position"], writes: []}, () => {});
+            "#,
+        )
+        .unwrap();
     }
 
     #[test]

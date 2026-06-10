@@ -44,8 +44,22 @@ globalThis.vitric = {
 Math.random = function () {
   throw new Error("Math.random 在 Vitric 里禁用（会破坏确定性回放）。改用系统/函数回调里的 ctx.random()");
 };
-Date.now = function () {
-  throw new Error("Date.now 在 Vitric 里禁用（会破坏确定性回放）。改用 ctx.tick（60 tick = 1 秒）");
+// Date 整体替换：无参构造 = 读墙钟，和 Date.now 一样会击穿确定性回放。
+// 显式传参的构造（new Date(0)）是纯计算，放行。
+const __RealDate = Date;
+function __clockError(what) {
+  return new Error(what + " 在 Vitric 里禁用（会破坏确定性回放）。改用 ctx.tick（60 tick = 1 秒）");
+}
+globalThis.Date = function Date(...args) {
+  if (new.target === undefined) throw __clockError("Date()");
+  if (args.length === 0) throw __clockError("new Date()");
+  return new __RealDate(...args);
+};
+globalThis.Date.prototype = __RealDate.prototype;
+globalThis.Date.parse = __RealDate.parse.bind(__RealDate);
+globalThis.Date.UTC = __RealDate.UTC.bind(__RealDate);
+globalThis.Date.now = function () {
+  throw __clockError("Date.now");
 };
 
 // ---- PCG32（与 Rust 侧 vitric_sim::Pcg32 完全同一算法，随机流跨语言连续）----
