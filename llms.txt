@@ -6,7 +6,8 @@
 
 ## 核心文档
 
-- [Agent 操作指南](docs/agent-guide.md): 三个 CLI 命令、控制面全部方法、数据语言语法、引擎约定组件、典型闭环——一页纸说完
+- [Agent Guide (English)](docs/agent-guide.en.md): CLI commands, every control-plane method, data language syntax, engine conventions — one page
+- [Agent 操作指南（中文）](docs/agent-guide.md): 同上中文版
 - [错误码目录](docs/errors.md): 全部 VD/VR 错误码与修法
 - [README](README.md): 定位、快速上手、架构
 - [设计稿](docs/AI原生游戏引擎-设计稿.md): 完整设计决策与理由

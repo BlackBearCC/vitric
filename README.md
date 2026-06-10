@@ -35,7 +35,7 @@ rpc '{"method":"render/screenshot","params":{"path":"shot.png"}}'  # headless sc
 rpc '{"method":"events/recent"}'                                   # the full causal chain: collision → coin-collected → game-won
 ```
 
-Full method reference: [docs/agent-guide.md](docs/agent-guide.md) (Chinese; English version coming).
+Full method reference: [docs/agent-guide.en.md](docs/agent-guide.en.md) ([中文](docs/agent-guide.md)).
 
 ## What makes it AI-native
 
