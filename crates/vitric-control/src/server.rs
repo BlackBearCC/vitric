@@ -1,4 +1,4 @@
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::thread::JoinHandle;
 
 use serde_json::{json, Value};
@@ -71,11 +71,8 @@ impl ControlServer {
     /// 主循环每帧调用：取走当前积压的全部请求。
     pub fn drain(&self) -> Vec<PendingRequest> {
         let mut out = Vec::new();
-        loop {
-            match self.inbox.try_recv() {
-                Ok(req) => out.push(req),
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-            }
+        while let Ok(req) = self.inbox.try_recv() {
+            out.push(req);
         }
         out
     }

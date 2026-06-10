@@ -170,7 +170,7 @@ impl Sim {
         // 5. 时间前进 + 录像校验点
         self.tick += 1;
         if let Some(rec) = &mut self.recorder {
-            if self.tick % CHECKPOINT_INTERVAL == 0 {
+            if self.tick.is_multiple_of(CHECKPOINT_INTERVAL) {
                 rec.checkpoints.push((self.tick, self.world.state_hash()));
             }
         }
