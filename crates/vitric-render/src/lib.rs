@@ -25,12 +25,23 @@
 //!   有 = 整帧（精灵/文字/背景一视同仁）按下面公式打光
 //! - `Light` {"radius", "color", "intensity"} + `Position` — 点光源。radius 世界单位
 //!   （到 radius 处衰减为零），color 缺省 "#ffffff"，intensity 缺省 1.0。上限 64 盏
+//! - `Bloom` {"threshold", "strength"} — 全屏泛光后效，挂任意实体（取第一个，同 Ambient）。
+//!   **泛光的总开关**：场上没有 Bloom 实体 = 完全不跑泛光（旧行为字节不变、零开销）。
+//!   threshold ∈ [0,1]：通道值超过 threshold·255 的部分才进泛光；strength ≥ 0：叠加倍率。
+//!   两个字段都必填（缺了/不是数字显式报错，不静默给缺省值）
 //!
 //! 光照公式（CPU 与 GPU 路径必须一致，GPU 侧在 vitric-cli gpu.rs 的 WGSL 里）：
 //!   lit = min(ambient + Σ light_color·intensity·(1 - d/r)², 1.5)   （d < r 才有贡献）
 //!   out = min(scene · lit, 1.0)
 //! d 是像素到灯的距离（像素空间，取景用抖动后的相机——光跟着画面走）。
 //! 1.5 的上限允许轻微过曝（廉价的"泛光感"），乘回场景色后再夹回 1。
+//!
+//! 泛光公式（CPU 是真相源——截图/断言以这条路径为准；GPU 侧求视觉一致，差异见 gpu.rs）：
+//!   bright = max(scene - threshold·255, 0)       （逐通道提亮部）
+//!   blurred = 盒式模糊(bright) 水平+垂直可分离，迭代 3 次（近似高斯）
+//!   out = min(scene + blurred · strength, 255)    （加法合成）
+//! 模糊半径 = [`bloom_radius_px`]：视口高/90、下限 2 像素——半径跟分辨率成比例，
+//! 同一场景 4K 和 720p 的光晕占画面比例一致。泛光在光照**之后**跑（先打光再发光）。
 
 mod assets;
 
@@ -214,6 +225,12 @@ pub fn render_world(
         let lights = collect_lights(world)?;
         apply_lighting(&mut buf, width, height, (cam_x, cam_y, scale), ambient, &lights);
     }
+
+    // 泛光按 Bloom 实体的存在与否开关：没有 = 完全跳过（旧行为字节不变、零开销）。
+    // 在光照之后跑——亮部是打完光的亮部，灯照亮的东西才会晕开
+    if let Some(bloom) = bloom_of(world)? {
+        apply_bloom(&mut buf, width, height, &bloom);
+    }
     Ok(buf)
 }
 
@@ -351,6 +368,126 @@ fn apply_lighting(
             let i = ((y * width + x) * 4) as usize;
             for c in 0..3 {
                 buf[i + c] = (buf[i + c] as f64 * lit[c].min(LIGHT_CLAMP)).min(255.0) as u8;
+            }
+        }
+    }
+}
+
+/// 泛光参数（`Bloom` 组件的解析结果）。
+pub struct BloomParams {
+    /// 0..=1：通道值超过 threshold·255 的部分进泛光。
+    pub threshold: f64,
+    /// ≥ 0：模糊后的亮部按这个倍率加回场景。
+    pub strength: f64,
+}
+
+/// 泛光设置：取第一个带 `Bloom` 组件的实体（同 Ambient/Camera 的约定）。
+/// `None` = 场上没有 Bloom = 泛光整体关闭（总开关，不是缺省参数）。
+/// 字段缺失/不是数字/越界都显式报错——后效参数写错了静默跳过比报错更难排查。
+pub fn bloom_of(world: &World) -> Result<Option<BloomParams>, String> {
+    match world.query(&["Bloom"]).first() {
+        None => Ok(None),
+        Some(&id) => {
+            let field = |name: &str| -> Result<f64, String> {
+                world
+                    .get_field(id, &format!("Bloom.{name}"))
+                    .ok()
+                    .and_then(Value::as_f64)
+                    .ok_or_else(|| {
+                        format!(
+                            "实体 {id} 挂了 Bloom 但 {name} 缺失或不是数字。\
+                             写法: {{\"threshold\": 0.6, \"strength\": 0.8}}；\
+                             不想要泛光就删掉 Bloom 组件"
+                        )
+                    })
+            };
+            let threshold = field("threshold")?;
+            if !(0.0..=1.0).contains(&threshold) {
+                return Err(format!(
+                    "实体 {id} 的 Bloom.threshold 必须在 0..=1，拿到 {threshold}。\
+                     0 = 全画面发光，1 = 什么都不发光"
+                ));
+            }
+            let strength = field("strength")?;
+            if strength < 0.0 {
+                return Err(format!(
+                    "实体 {id} 的 Bloom.strength 必须 ≥ 0，拿到 {strength}"
+                ));
+            }
+            Ok(Some(BloomParams { threshold, strength }))
+        }
+    }
+}
+
+/// 泛光模糊半径（像素）：视口高/90、下限 2——跟分辨率成比例，光晕占画面比例
+/// 与分辨率无关。CPU 全分辨率模糊直接用这个值；GPU 半分辨率 ping-pong 用它的一半
+/// （见 gpu.rs，语义源头在这里）。
+pub fn bloom_radius_px(viewport_h: u32) -> u32 {
+    (viewport_h / 90).max(2)
+}
+
+/// 全屏泛光后效（CPU 路径，公式见模块文档）。确定性：纯 f32 算术、固定遍历顺序、
+/// 无并行——同一输入逐字节同输出。效率：可分离盒式模糊（每像素每方向只加减 2 次的
+/// 滑动窗口）、亮部/暂存两个平面共享一次分配。
+fn apply_bloom(buf: &mut [u8], width: u32, height: u32, bloom: &BloomParams) {
+    let (w, h) = (width as usize, height as usize);
+    let n = w * h;
+    let thr = (bloom.threshold * 255.0) as f32;
+
+    // 一次分配：前半 = 亮部平面（RGB f32），后半 = 模糊暂存
+    let mut planes = vec![0f32; n * 3 * 2];
+    let (a, b) = planes.split_at_mut(n * 3);
+    for i in 0..n {
+        for c in 0..3 {
+            a[i * 3 + c] = (buf[i * 4 + c] as f32 - thr).max(0.0);
+        }
+    }
+
+    // 3 次迭代的可分离盒式模糊（H 写进暂存、V 写回亮部平面），近似高斯
+    let r = bloom_radius_px(height) as usize;
+    for _ in 0..3 {
+        box_blur_pass(a, b, w, h, r, true);
+        box_blur_pass(b, a, w, h, r, false);
+    }
+
+    // 加法合成：out = min(scene + blurred·strength, 255)
+    let s = bloom.strength as f32;
+    for i in 0..n {
+        for c in 0..3 {
+            let v = buf[i * 4 + c] as f32 + a[i * 3 + c] * s;
+            buf[i * 4 + c] = v.min(255.0) as u8;
+        }
+    }
+}
+
+/// 盒式模糊单方向一趟（`horizontal` 选轴）：窗口 2r+1，越界采样取边缘像素
+/// （clamp-to-edge，GPU 侧 WGSL 的 clamp 同语义）。滑动窗口：每步加新减旧，
+/// f32 累加顺序固定 → 确定性。
+fn box_blur_pass(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: usize, horizontal: bool) {
+    let norm = 1.0 / (2 * r + 1) as f32;
+    // 统一成"沿 len 轴扫，跨 lanes 条线"：水平 = 每行一条线（步长 3），
+    // 垂直 = 每列一条线（步长 3w）
+    let (lanes, len, lane_stride, step) = if horizontal {
+        (h, w, w * 3, 3usize)
+    } else {
+        (w, h, 3usize, w * 3)
+    };
+    let ri = r as i64;
+    let last = (len - 1) as i64;
+    for lane in 0..lanes {
+        let base = lane * lane_stride;
+        for c in 0..3 {
+            // 起始窗口：样本 -r..=r（越界 clamp 到边缘）
+            let mut sum = 0f32;
+            for k in -ri..=ri {
+                sum += src[base + k.clamp(0, last) as usize * step + c];
+            }
+            dst[base + c] = sum * norm;
+            for x in 1..len {
+                let add = (x as i64 + ri).min(last) as usize;
+                let sub = (x as i64 - 1 - ri).max(0) as usize;
+                sum += src[base + add * step + c] - src[base + sub * step + c];
+                dst[base + x * step + c] = sum * norm;
             }
         }
     }
@@ -783,6 +920,15 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
         }
     };
 
+    // 泛光设置：开着就把参数文字化——agent 看 describe 就知道后效怎么配的，不用猜像素
+    let bloom = bloom_of(world)?;
+    if let Some(b) = &bloom {
+        lines.push(format!(
+            "泛光开启：threshold {}，strength {}。",
+            b.threshold, b.strength
+        ));
+    }
+
     let mut out = json!({
         "camera": {"x": cam_x, "y": cam_y, "scale": scale},
         "viewport": {"width": width, "height": height},
@@ -795,6 +941,9 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
     if let Some((ambient_color, lights_json)) = lighting {
         out["ambient"] = json!({"color": ambient_color});
         out["lights"] = json!(lights_json);
+    }
+    if let Some(b) = &bloom {
+        out["bloom"] = json!({"threshold": b.threshold, "strength": b.strength});
     }
     Ok(out)
 }
@@ -1398,6 +1547,98 @@ mod tests {
         // 没 Ambient：describe 里不出现光照字段
         let d = describe_world(&World::new(), 64, 64).unwrap();
         assert!(d.get("ambient").is_none() && d.get("lights").is_none());
+    }
+
+    /// 泛光测试场景：中央 2x2 纯白精灵（亮部），可选挂 Bloom。
+    fn world_bright_sprite(bloom: Option<(f64, f64)>) -> World {
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ffffff"})).unwrap();
+        if let Some((threshold, strength)) = bloom {
+            let b = w.spawn();
+            w.set_component(b, "Bloom", json!({"threshold": threshold, "strength": strength}))
+                .unwrap();
+        }
+        w
+    }
+
+    #[test]
+    fn bloom_halo_brightens_outside_sprite_and_scales_with_strength() {
+        // 白精灵占屏幕中央 24..40：精灵矩形**之外**的像素要被光晕照亮
+        let plain = render_world(&world_bright_sprite(None), 64, 64, &Assets::empty(), 0).unwrap();
+        let lit = render_world(&world_bright_sprite(Some((0.5, 1.0))), 64, 64, &Assets::empty(), 0)
+            .unwrap();
+        // 紧贴精灵右缘外侧（半径 2px、3 次迭代 → 扩散约 6px）：无泛光时是背景
+        let halo = pixel(&lit, 64, 42, 32);
+        let bg = pixel(&plain, 64, 42, 32);
+        assert_eq!(bg, BACKGROUND, "对照组：泛光关时精灵外是背景");
+        assert!(halo[0] > bg[0] && halo[1] > bg[1] && halo[2] > bg[2], "光晕该比背景亮: {halo:?}");
+        // 远角不受影响（光晕是局部的）
+        assert_eq!(pixel(&lit, 64, 2, 2), BACKGROUND, "远处仍是背景");
+        // strength 越大光晕越亮
+        let stronger =
+            render_world(&world_bright_sprite(Some((0.5, 3.0))), 64, 64, &Assets::empty(), 0)
+                .unwrap();
+        assert!(pixel(&stronger, 64, 42, 32)[0] > halo[0], "strength 大光晕更亮");
+        // 确定性：同世界同 tick → 字节逐位相同
+        assert_eq!(
+            lit,
+            render_world(&world_bright_sprite(Some((0.5, 1.0))), 64, 64, &Assets::empty(), 0)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn bloom_threshold_one_changes_nothing() {
+        // threshold=1.0：没有通道能超过 255 → 亮部全零 → 字节与无 Bloom 实体逐位相同
+        let plain = render_world(&world_bright_sprite(None), 64, 64, &Assets::empty(), 0).unwrap();
+        let capped =
+            render_world(&world_bright_sprite(Some((1.0, 2.0))), 64, 64, &Assets::empty(), 0)
+                .unwrap();
+        assert_eq!(plain, capped);
+        // strength=0 同理：加 0 不改字节（u8→f32→u8 往返精确）
+        let zero = render_world(&world_bright_sprite(Some((0.5, 0.0))), 64, 64, &Assets::empty(), 0)
+            .unwrap();
+        assert_eq!(plain, zero);
+    }
+
+    #[test]
+    fn bloom_radius_is_resolution_proportional_with_floor() {
+        assert_eq!(bloom_radius_px(64), 2, "小视口踩下限 2");
+        assert_eq!(bloom_radius_px(180), 2);
+        assert_eq!(bloom_radius_px(720), 8, "720/90 = 8");
+        assert_eq!(bloom_radius_px(2160), 24, "4K 半径按比例放大");
+    }
+
+    #[test]
+    fn bloom_params_are_validated_explicitly() {
+        // threshold 越界
+        let mut w = World::new();
+        let b = w.spawn();
+        w.set_component(b, "Bloom", json!({"threshold": 1.5, "strength": 1.0})).unwrap();
+        let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
+        assert!(err.contains("Bloom.threshold"), "{err}");
+        // strength 为负
+        w.set_component(b, "Bloom", json!({"threshold": 0.5, "strength": -1.0})).unwrap();
+        let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
+        assert!(err.contains("Bloom.strength"), "{err}");
+        // 字段缺失：显式报错并给写法
+        w.set_component(b, "Bloom", json!({"threshold": 0.5})).unwrap();
+        let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
+        assert!(err.contains("strength") && err.contains("threshold"), "{err}");
+    }
+
+    #[test]
+    fn describe_includes_bloom_when_active() {
+        let w = world_bright_sprite(Some((0.6, 0.8)));
+        let d = describe_world(&w, 64, 64).unwrap();
+        assert_eq!(d["bloom"], json!({"threshold": 0.6, "strength": 0.8}));
+        assert!(d["text"].as_str().unwrap().contains("泛光开启"), "{}", d["text"]);
+        // 没 Bloom：describe 里不出现泛光字段
+        let d = describe_world(&world_bright_sprite(None), 64, 64).unwrap();
+        assert!(d.get("bloom").is_none());
+        assert!(!d["text"].as_str().unwrap().contains("泛光"));
     }
 
     #[test]

@@ -150,6 +150,7 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 - **所有东西一视同仁被打光**——精灵、文字、背景，屏幕锚定的 HUD 也不豁免。HUD 要保持可读，自己在旁边放盏灯或调亮 Ambient。
 - 光照确定性：只读组件状态，同一世界同一 tick 渲出的字节逐位相同；`render/screenshot` 含光照——agent 截到的就是玩家看到的。
 - `render/describe` 在光照开启时多给 `ambient`（环境色）和 `lights` 数组（id/name/世界坐标/radius/intensity/color）+ 一行摘要——光照设置全部可文字化观察。
+- **泛光（Bloom）**：挂一个带 `Bloom{threshold, strength}` 组件的实体（取第一个，同 Ambient）就开启全屏泛光后效——亮处向四周晕开光圈，配合点光源就是"真的在发光"。threshold ∈ [0,1]：通道值超过 threshold·255 的部分进泛光；strength ≥ 0：叠加倍率。两个字段必填。公式：`bright = max(场景色 - threshold·255, 0)`，盒式模糊（水平/垂直可分离、3 次迭代近似高斯），`out = min(场景色 + blurred·strength, 255)`。模糊半径 = 视口高/90、下限 2 像素——光晕占画面比例与分辨率无关。泛光在光照之后跑；没有 Bloom 实体 = 完全不跑（零开销，字节不变）。开启时 `render/describe` 多给 `bloom` 字段 + 一行摘要。
 
 ```json
 {"name": "torch", "components": {"Position": {"x": 10, "y": 4},

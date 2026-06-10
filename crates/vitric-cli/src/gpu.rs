@@ -8,6 +8,22 @@
 //! 结构：启动时把全部素材 + 8x8 点阵字体 + 1x1 白块打进**一张图集**，
 //! 每帧 CPU 端按实体序攒一份顶点流（像素坐标 + 图集 UV + 染色），
 //! 一条管线、一个绑定组、一次 draw 画完。素材热重载靠代次号触发图集重建。
+//!
+//! 泛光（Bloom 实体存在时）把单 pass 拆成多 pass：
+//!   1. 场景 pass：同一条顶点流渲进离屏纹理（Rgba8Unorm，光照照常在这里跑）
+//!   2. 下采样+阈值 pass：场景 → 半分辨率（亮部提取）
+//!   3. 盒式模糊 ×6：半分辨率 ping-pong，水平/垂直交替 3 轮
+//!   4. 合成 pass：场景 + 泛光·strength → 表面（sRGB 反算只在这最后一步做）
+//!
+//! 没有 Bloom 实体时完全走老的单 pass 直渲表面——零额外开销，字节不变。
+//!
+//! 与 CPU 真相源（vitric-render::apply_bloom）的已知差异（视觉一致优先，不逐字节）：
+//! - GPU 模糊在**半分辨率**跑（半径取 CPU 的一半，下限 1）——省 4 倍带宽，光晕
+//!   空间尺度一致；合成时双线性放大回全分辨率（CPU 全程全分辨率）
+//! - 下采样取最近邻单点（CPU 没有下采样这一步）
+//! - 中间结果存 8 位 Unorm（CPU 全程 f32）——每 pass 量化一次
+//!
+//! 截图/断言永远以 CPU 路径为准，这里只负责"窗口里看起来一样"。
 
 use std::sync::Arc;
 
@@ -120,6 +136,107 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// 泛光下采样/阈值/盒式模糊共用一个 shader：radius=0 + threshold≥0 + 倍率 2 = 下采样提亮部；
+/// radius>0 + threshold<0 + 倍率 1 = 单方向盒式模糊。全屏三角形顶点流，textureLoad 整数
+/// 采样 + 手动 clamp——越界取边缘像素，与 CPU 路径的 clamp-to-edge 同语义。
+const WGSL_BLOOM: &str = r#"
+struct Post {
+    params: vec4<f32>,   // x 阈值(0..1，<0 = 不做阈值) / y 模糊半径(像素) / zw 模糊方向
+    params2: vec4<f32>,  // x 采样坐标倍率（下采样 pass 为 2，其余 1）
+};
+@group(0) @binding(0) var<uniform> post: Post;
+@group(0) @binding(1) var src: texture_2d<f32>;
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
+    // 全屏三角形（3 个顶点盖满裁剪空间，不需要顶点缓冲）
+    var out: VsOut;
+    let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    out.uv = uv;
+    out.pos = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(src));
+    let r = i32(post.params.y);
+    let dir = vec2<i32>(vec2<f32>(post.params.z, post.params.w));
+    let scale = i32(post.params2.x);
+    let base = vec2<i32>(in.pos.xy) * scale;
+    var sum = vec3<f32>(0.0);
+    for (var k: i32 = -r; k <= r; k = k + 1) {
+        let p = clamp(base + dir * k, vec2<i32>(0), dims - vec2<i32>(1));
+        var c = textureLoad(src, p, 0).rgb;
+        if (post.params.x >= 0.0) {
+            // 亮部提取：max(scene - threshold, 0)。纹理值 0..1，阈值直接用 0..1
+            //（CPU 在 0..255 字节域做同一减法，数值等价）
+            c = max(c - vec3<f32>(post.params.x), vec3<f32>(0.0));
+        }
+        sum = sum + c;
+    }
+    return vec4<f32>(sum / f32(2 * r + 1), 1.0);
+}
+"#;
+
+/// 泛光合成：场景 + 模糊亮部·strength，夹回 1。sRGB 表面的反算只在这最后一步做
+/// （场景 pass 写的是原始字节空间的离屏纹理）。泛光纹理是半分辨率，用双线性采样
+/// 放大——比最近邻平滑，光晕不出马赛克（与 CPU 的全分辨率模糊视觉对齐）。
+const WGSL_COMPOSITE: &str = r#"
+struct Comp {
+    params: vec4<f32>,   // x strength / y "表面是 sRGB"标志
+};
+@group(0) @binding(0) var<uniform> comp: Comp;
+@group(0) @binding(1) var scene_tex: texture_2d<f32>;
+@group(0) @binding(2) var bloom_tex: texture_2d<f32>;
+@group(0) @binding(3) var bloom_samp: sampler;
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
+    var out: VsOut;
+    let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    out.uv = uv;
+    out.pos = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+    return out;
+}
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let scene = textureLoad(scene_tex, vec2<i32>(in.pos.xy), 0).rgb;
+    let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
+    // out = min(scene + bloom·strength, 1) —— 与 CPU 路径同一加法合成公式
+    var c = min(scene + bloom * comp.params.x, vec3<f32>(1.0));
+    if (comp.params.y > 0.5) {
+        c = srgb_to_linear(c);
+    }
+    return vec4<f32>(c, 1.0);
+}
+"#;
+
+/// 泛光后效 pass 的 uniform（下采样/模糊/合成三种 pass 共用布局，字段含义见 WGSL 注释）。
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct PostParams {
+    params: [f32; 4],
+    params2: [f32; 4],
+}
+
 pub struct GpuPresenter {
     // surface 持有窗口句柄引用，window 放前面只是顺手；'static 因为传的是 Arc<Window>
     surface: wgpu::Surface<'static>,
@@ -140,6 +257,12 @@ pub struct GpuPresenter {
     vertex_cap: u64,
     /// 背景清屏色（按表面格式换算好的线性/原始值）。
     clear: wgpu::Color,
+    /// 主 shader 模块留着——泛光的离屏场景管线懒建时复用，不重新编译。
+    scene_shader: wgpu::ShaderModule,
+    /// 泛光管线组：第一次场上出现 Bloom 实体时懒建（不开泛光永远不建，零开销）。
+    bloom_pipes: Option<BloomPipelines>,
+    /// 泛光离屏纹理组：窗口尺寸变了重建（管线组不动）。
+    bloom_targets: Option<BloomTargets>,
     window: Arc<Window>,
 }
 
@@ -245,41 +368,7 @@ impl GpuPresenter {
                 },
             ],
         });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("vitric-pipeline-layout"),
-            bind_group_layouts: &[Some(&bind_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vitric-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    // 标准 src-alpha 混合，对齐 CPU 路径的逐像素 alpha 混合
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None, // 画家算法：按实体序后画盖前画，不要深度
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = create_scene_pipeline(&device, &shader, &bind_layout, format);
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vitric-nearest"),
@@ -322,6 +411,9 @@ impl GpuPresenter {
             vertex_buf,
             vertex_cap: INITIAL_VB,
             clear,
+            scene_shader: shader,
+            bloom_pipes: None,
+            bloom_targets: None,
             window,
         })
     }
@@ -391,40 +483,482 @@ impl GpuPresenter {
         if !bytes.is_empty() {
             self.queue.write_buffer(&self.vertex_buf, 0, bytes);
         }
-        let globals = build_globals(world, w, h, self.config.format.is_srgb(), tick)?;
+        // 泛光开关 = 场上有没有 Bloom 实体（语义源头在 vitric-render，参数校验也在那边）。
+        // 开了泛光时场景 pass 渲进非 sRGB 的离屏纹理，sRGB 反算挪到合成 pass 做
+        let bloom = vitric_render::bloom_of(world)?;
+        let surface_srgb = self.config.format.is_srgb();
+        let globals =
+            build_globals(world, w, h, scene_pass_srgb(surface_srgb, bloom.is_some()), tick)?;
         self.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder =
             self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("vitric-frame"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            if !verts.is_empty() {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.bind_group, &[]);
-                pass.set_vertex_buffer(0, self.vertex_buf.slice(..bytes.len() as u64));
-                pass.draw(0..verts.len() as u32, 0..1);
+        match &bloom {
+            None => {
+                // 老路径原样保留：单 pass 直渲表面，没有任何额外纹理/pass 开销
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("vitric-frame"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(self.clear),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                if !verts.is_empty() {
+                    pass.set_pipeline(&self.pipeline);
+                    pass.set_bind_group(0, &self.bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.vertex_buf.slice(..bytes.len() as u64));
+                    pass.draw(0..verts.len() as u32, 0..1);
+                }
+            }
+            Some(b) => {
+                // 多 pass 结构见模块文档。管线组懒建一次；纹理组随窗口尺寸重建
+                if self.bloom_pipes.is_none() {
+                    self.bloom_pipes = Some(BloomPipelines::new(
+                        &self.device,
+                        &self.scene_shader,
+                        &self.bind_layout,
+                        self.config.format,
+                    ));
+                }
+                let pipes = self.bloom_pipes.as_ref().expect("上面刚建过");
+                if self.bloom_targets.as_ref().map(|t| t.size) != Some((w, h)) {
+                    self.bloom_targets = Some(BloomTargets::new(&self.device, pipes, (w, h)));
+                }
+                let targets = self.bloom_targets.as_ref().expect("上面刚建过");
+
+                // 每帧写小 uniform（参数可能被规则/脚本改，纹理绑定不变）
+                for (buf, p) in
+                    targets.post_bufs.iter().zip(bloom_pass_params(h, b.threshold))
+                {
+                    self.queue.write_buffer(buf, 0, bytemuck::bytes_of(&p));
+                }
+                let comp = PostParams {
+                    params: [b.strength as f32, if surface_srgb { 1.0 } else { 0.0 }, 0.0, 0.0],
+                    params2: [0.0; 4],
+                };
+                self.queue.write_buffer(&targets.composite_buf, 0, bytemuck::bytes_of(&comp));
+
+                // 场景 pass → 离屏（清屏色用原始字节值：离屏纹理永远是非 sRGB 格式）
+                {
+                    let [r, g, bl, _] = vitric_render::BACKGROUND;
+                    let clear_raw = wgpu::Color {
+                        r: r as f64 / 255.0,
+                        g: g as f64 / 255.0,
+                        b: bl as f64 / 255.0,
+                        a: 1.0,
+                    };
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("vitric-bloom-scene"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &targets.scene_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(clear_raw),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    if !verts.is_empty() {
+                        pass.set_pipeline(&pipes.scene_pipeline);
+                        pass.set_bind_group(0, &self.bind_group, &[]);
+                        pass.set_vertex_buffer(0, self.vertex_buf.slice(..bytes.len() as u64));
+                        pass.draw(0..verts.len() as u32, 0..1);
+                    }
+                }
+                // 下采样+阈值 + 模糊 ×6（全屏三角形，目标在 post_views 里排好了）
+                for (i, (bind, dst)) in
+                    targets.post_binds.iter().zip(&targets.post_views).enumerate()
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some(if i == 0 { "vitric-bloom-bright" } else { "vitric-bloom-blur" }),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: dst,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(&pipes.post_pipeline);
+                    pass.set_bind_group(0, bind, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                // 合成 pass → 表面（sRGB 反算在这里做，全屏三角形盖满，清屏色无所谓）
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("vitric-bloom-composite"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(self.clear),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(&pipes.composite_pipeline);
+                    pass.set_bind_group(0, &targets.composite_bind, &[]);
+                    pass.draw(0..3, 0..1);
+                }
             }
         }
         self.queue.submit([encoder.finish()]);
         frame.present();
         Ok(())
     }
+}
+
+/// 场景 pass 要不要在 shader 里做 sRGB 反算：泛光开启时不做（场景写进非 sRGB 离屏纹理，
+/// 反算挪到合成 pass）；关闭时维持老行为（直渲表面，表面是 sRGB 才反算）。
+/// 拆成纯函数：pass 选择逻辑无 GPU 也可单测。
+fn scene_pass_srgb(surface_srgb: bool, bloom_active: bool) -> bool {
+    surface_srgb && !bloom_active
+}
+
+/// 泛光 7 个后效 pass 的参数（纯函数无 GPU，被单测锁住）：
+/// [0] 下采样+阈值（radius 0、采样倍率 2——半分辨率像素映射回全分辨率场景），
+/// [1..=6] 盒式模糊 H/V 交替 3 轮，半径 = CPU 半径的一半（下限 1，因为在半分辨率上跑，
+/// 空间尺度与 CPU 全分辨率模糊一致），threshold 置 -1 表示不再做阈值。
+fn bloom_pass_params(viewport_h: u32, threshold: f64) -> [PostParams; 7] {
+    let r_half = (vitric_render::bloom_radius_px(viewport_h) / 2).max(1) as f32;
+    let mut out = [PostParams { params: [0.0; 4], params2: [0.0; 4] }; 7];
+    out[0] = PostParams {
+        params: [threshold as f32, 0.0, 0.0, 0.0],
+        params2: [2.0, 0.0, 0.0, 0.0],
+    };
+    for i in 0..6 {
+        // 偶数下标水平、奇数垂直（从 0 数）：H→V 为一轮完整可分离模糊
+        let dir = if i % 2 == 0 { [1.0, 0.0] } else { [0.0, 1.0] };
+        out[i + 1] = PostParams {
+            params: [-1.0, r_half, dir[0], dir[1]],
+            params2: [1.0, 0.0, 0.0, 0.0],
+        };
+    }
+    out
+}
+
+/// 泛光中间纹理的半分辨率尺寸（下限 1，极小窗口不归零）。
+fn half_dims(w: u32, h: u32) -> (u32, u32) {
+    ((w / 2).max(1), (h / 2).max(1))
+}
+
+/// 泛光管线组：与窗口尺寸无关的部分，懒建一次后常驻。
+struct BloomPipelines {
+    /// 主 shader 渲进离屏 Rgba8Unorm 的变体（直渲表面那条管线照旧在 GpuPresenter.pipeline）。
+    scene_pipeline: wgpu::RenderPipeline,
+    post_layout: wgpu::BindGroupLayout,
+    post_pipeline: wgpu::RenderPipeline,
+    composite_layout: wgpu::BindGroupLayout,
+    composite_pipeline: wgpu::RenderPipeline,
+    /// 双线性采样器：合成时把半分辨率泛光纹理平滑放大（见 WGSL_COMPOSITE 注释）。
+    linear_sampler: wgpu::Sampler,
+}
+
+impl BloomPipelines {
+    fn new(
+        device: &wgpu::Device,
+        scene_shader: &wgpu::ShaderModule,
+        scene_bind_layout: &wgpu::BindGroupLayout,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        let scene_pipeline =
+            create_scene_pipeline(device, scene_shader, scene_bind_layout, BLOOM_FORMAT);
+
+        let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let texture_entry = |binding: u32, filterable: bool| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+
+        let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vitric-bloom-post-bind"),
+            entries: &[uniform_entry(0), texture_entry(1, false)],
+        });
+        let post_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vitric-bloom-post"),
+            source: wgpu::ShaderSource::Wgsl(WGSL_BLOOM.into()),
+        });
+        let post_pipeline =
+            create_fullscreen_pipeline(device, &post_shader, &post_layout, BLOOM_FORMAT, "post");
+
+        let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vitric-bloom-composite-bind"),
+            entries: &[
+                uniform_entry(0),
+                texture_entry(1, false),
+                texture_entry(2, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vitric-bloom-composite"),
+            source: wgpu::ShaderSource::Wgsl(WGSL_COMPOSITE.into()),
+        });
+        let composite_pipeline = create_fullscreen_pipeline(
+            device,
+            &composite_shader,
+            &composite_layout,
+            surface_format,
+            "composite",
+        );
+
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("vitric-bloom-linear"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        BloomPipelines {
+            scene_pipeline,
+            post_layout,
+            post_pipeline,
+            composite_layout,
+            composite_pipeline,
+            linear_sampler,
+        }
+    }
+}
+
+/// 泛光离屏纹理组：随窗口尺寸重建（present 里比对 size 触发）。
+struct BloomTargets {
+    size: (u32, u32),
+    scene_view: wgpu::TextureView,
+    /// 7 个后效 pass 的 uniform / 绑定组 / 目标视图（下标对齐 bloom_pass_params）。
+    post_bufs: Vec<wgpu::Buffer>,
+    post_binds: Vec<wgpu::BindGroup>,
+    post_views: Vec<wgpu::TextureView>,
+    composite_buf: wgpu::Buffer,
+    composite_bind: wgpu::BindGroup,
+}
+
+impl BloomTargets {
+    fn new(device: &wgpu::Device, pipes: &BloomPipelines, (w, h): (u32, u32)) -> Self {
+        let make_tex = |label: &str, tw: u32, th: u32| {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: tw, height: th, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: BLOOM_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            tex.create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let scene_view = make_tex("vitric-bloom-scene", w, h);
+        let (hw, hh) = half_dims(w, h);
+        let ping_view = make_tex("vitric-bloom-ping", hw, hh);
+        let pong_view = make_tex("vitric-bloom-pong", hw, hh);
+
+        let make_buf = |label: &str| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: std::mem::size_of::<PostParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+
+        // pass 链：下采样(scene→ping)，然后 H/V 交替（ping→pong→ping…），3 轮后落在 ping。
+        // 源/目标视图的排布必须与 bloom_pass_params 的方向序一致
+        let mut post_bufs = Vec::with_capacity(7);
+        let mut post_binds = Vec::with_capacity(7);
+        let mut post_views = Vec::with_capacity(7);
+        for i in 0..7usize {
+            let buf = make_buf("vitric-bloom-post-params");
+            let src = match i {
+                0 => &scene_view,
+                odd if odd % 2 == 1 => &ping_view,
+                _ => &pong_view,
+            };
+            post_binds.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vitric-bloom-post-bind"),
+                layout: &pipes.post_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(src),
+                    },
+                ],
+            }));
+            post_views.push(if i % 2 == 0 { ping_view.clone() } else { pong_view.clone() });
+            post_bufs.push(buf);
+        }
+
+        let composite_buf = make_buf("vitric-bloom-composite-params");
+        let composite_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vitric-bloom-composite-bind"),
+            layout: &pipes.composite_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: composite_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    // 模糊链 3 轮 H/V 后的最终结果在 ping（见上面 pass 链注释）
+                    resource: wgpu::BindingResource::TextureView(&ping_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&pipes.linear_sampler),
+                },
+            ],
+        });
+
+        BloomTargets {
+            size: (w, h),
+            scene_view,
+            post_bufs,
+            post_binds,
+            post_views,
+            composite_buf,
+            composite_bind,
+        }
+    }
+}
+
+/// 泛光全部离屏纹理的格式：非 sRGB——所有中间计算都在原始字节空间，
+/// 和 CPU 路径同一数值域（sRGB 反算只在最后的合成 pass 做一次）。
+const BLOOM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// 主 2D 管线（顶点流 + 图集 + 光照 shader）。直渲表面和泛光的离屏场景 pass
+/// 用同一个 shader、同一套顶点布局，只有目标格式不同——抽出来建两次。
+fn create_scene_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    bind_layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("vitric-pipeline-layout"),
+        bind_group_layouts: &[Some(bind_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("vitric-pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                // 标准 src-alpha 混合，对齐 CPU 路径的逐像素 alpha 混合
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None, // 画家算法：按实体序后画盖前画，不要深度
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// 后效管线（泛光模糊/合成共用骨架）：全屏三角形、无顶点缓冲、无混合（直接覆盖）。
+fn create_fullscreen_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    bind_layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+    label: &str,
+) -> wgpu::RenderPipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &[Some(bind_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -976,10 +1510,43 @@ mod tests {
     #[test]
     fn wgsl_parses_and_validates_offline() {
         // 无 GPU 环境锁住 shader：解析 + 验证都过，uniform 布局错/语法错在 CI 就炸
-        let module = naga::front::wgsl::parse_str(WGSL).expect("WGSL 解析失败");
-        naga::valid::Validator::new(Default::default(), naga::valid::Capabilities::all())
-            .validate(&module)
-            .expect("WGSL 验证失败");
+        for (name, src) in [("scene", WGSL), ("bloom", WGSL_BLOOM), ("composite", WGSL_COMPOSITE)] {
+            let module = naga::front::wgsl::parse_str(src)
+                .unwrap_or_else(|e| panic!("WGSL({name}) 解析失败: {e}"));
+            naga::valid::Validator::new(Default::default(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("WGSL({name}) 验证失败: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn bloom_pass_params_pack_downsample_then_alternating_blur() {
+        let p = bloom_pass_params(720, 0.6);
+        assert_eq!(p.len(), 7, "1 下采样 + 3 轮 H/V");
+        // [0] 下采样+阈值：radius 0、采样倍率 2、阈值原样
+        assert_eq!(p[0].params, [0.6, 0.0, 0.0, 0.0]);
+        assert_eq!(p[0].params2[0], 2.0);
+        // 模糊 pass：阈值关（-1）、半径 = CPU 半径(720/90=8) 的一半 = 4、倍率 1、方向 H/V 交替
+        for (i, pp) in p[1..].iter().enumerate() {
+            assert_eq!(pp.params[0], -1.0, "pass {i} 不再做阈值");
+            assert_eq!(pp.params[1], 4.0, "半分辨率半径减半");
+            assert_eq!(pp.params2[0], 1.0);
+            let expect_dir = if i % 2 == 0 { [1.0, 0.0] } else { [0.0, 1.0] };
+            assert_eq!([pp.params[2], pp.params[3]], expect_dir, "pass {i} 方向交替");
+        }
+        // 小视口：CPU 半径踩下限 2 → GPU 半分辨率半径 1（下限）
+        assert_eq!(bloom_pass_params(64, 0.5)[1].params[1], 1.0);
+    }
+
+    #[test]
+    fn bloom_half_dims_and_scene_pass_srgb_selection() {
+        assert_eq!(half_dims(1280, 720), (640, 360));
+        assert_eq!(half_dims(1, 1), (1, 1), "极小窗口不归零");
+        // 泛光开启时场景 pass 永不做 sRGB 反算（反算挪到合成 pass）
+        assert!(scene_pass_srgb(true, false), "无泛光 + sRGB 表面 = 老行为");
+        assert!(!scene_pass_srgb(true, true));
+        assert!(!scene_pass_srgb(false, false));
+        assert!(!scene_pass_srgb(false, true));
     }
 
     #[test]

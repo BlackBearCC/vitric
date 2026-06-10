@@ -189,6 +189,16 @@
           "default": "#ffffff"
         }
       }
+    },
+    "Bloom": {
+      "fields": {
+        "threshold": {
+          "type": "number"
+        },
+        "strength": {
+          "type": "number"
+        }
+      }
     }
   }
 }

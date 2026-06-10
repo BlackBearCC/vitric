@@ -151,6 +151,7 @@ Convention components like Body/Solid: the engine recognizes the names, you defi
 - **Everything is lit uniformly** — sprites, text, background; screen-anchored HUD text is not exempt. Keep HUDs readable by placing a light nearby or raising the ambient.
 - Lighting is deterministic: it reads only component state; identical world + tick → identical bytes. `render/screenshot` includes lighting — the agent sees what the player sees.
 - With lighting active, `render/describe` adds `ambient` (color) and a `lights` array (id/name/world pos/radius/intensity/color) plus a summary line — the full lighting setup is textually observable.
+- **Bloom**: put a `Bloom{threshold, strength}` component on any entity (first one wins, like Ambient) to enable the full-screen bloom post-effect — bright areas haze outward into a glow halo; combined with point lights things actually *glow*. threshold ∈ [0,1]: the part of each channel above threshold·255 feeds the bloom; strength ≥ 0: additive multiplier. Both fields are required. Formula: `bright = max(scene - threshold·255, 0)`, separable box blur (3 iterations, approximates gaussian), `out = min(scene + blurred·strength, 255)`. Blur radius = viewport height / 90, floor 2 px — the halo scales with resolution. Bloom runs after lighting; no Bloom entity = the pass is skipped entirely (zero cost, byte-identical). When active, `render/describe` adds a `bloom` field plus a summary line.
 
 ```json
 {"name": "torch", "components": {"Position": {"x": 10, "y": 4},

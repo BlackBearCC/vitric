@@ -2292,6 +2292,10 @@
       "components": {
         "Ambient": {
           "color": "#3a4060"
+        },
+        "Bloom": {
+          "threshold": 0.55,
+          "strength": 0.9
         }
       }
     }
