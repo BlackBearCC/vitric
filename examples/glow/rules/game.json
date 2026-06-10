@@ -1,6 +1,21 @@
 {
   "rules": [
     {
+      "id": "bgm",
+      "on": {
+        "event": "start"
+      },
+      "do": [
+        {
+          "emit": "play-music",
+          "data": {
+            "sound": "bgm.wav",
+            "volume": 0.35
+          }
+        }
+      ]
+    },
+    {
       "id": "run-left",
       "on": {
         "event": "input",
