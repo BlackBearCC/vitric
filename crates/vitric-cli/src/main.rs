@@ -159,7 +159,9 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     );
 
     if windowed {
-        let game = window::WindowedGame::new(sim, rt, dispatcher, server, audio_sink, renderer);
+        let title = format!("{} — Vitric", project.manifest.name);
+        let game =
+            window::WindowedGame::new(sim, rt, dispatcher, server, audio_sink, renderer, title);
         let (mut sim, error) = game.run()?;
         finish_recording(&mut sim, record_path)?;
         return match error {

@@ -49,6 +49,8 @@ pub struct WindowedGame {
     pub server: ControlServer,
     audio: Option<Audio>,
     renderer: Renderer,
+    /// 窗口标题（项目名 — Vitric）：任务栏/切窗里游戏要有自己的名字。
+    title: String,
     window: Option<Arc<Window>>,
     presenter: Option<Presenter>,
     last: Instant,
@@ -68,6 +70,7 @@ impl WindowedGame {
         server: ControlServer,
         audio: Option<Audio>,
         renderer: Renderer,
+        title: String,
     ) -> Self {
         WindowedGame {
             sim,
@@ -76,6 +79,7 @@ impl WindowedGame {
             server,
             audio,
             renderer,
+            title,
             window: None,
             presenter: None,
             last: Instant::now(),
@@ -269,7 +273,7 @@ impl ApplicationHandler for WindowedGame {
         }
         // 默认最大化占满屏幕(保留标题栏可关);F11 切无边框全屏
         let attrs = Window::default_attributes()
-            .with_title("Vitric")
+            .with_title(self.title.as_str())
             .with_inner_size(LogicalSize::new(960.0, 540.0))
             .with_maximized(true);
         let window = match event_loop.create_window(attrs) {
