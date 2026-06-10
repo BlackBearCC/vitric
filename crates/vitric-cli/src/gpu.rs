@@ -547,7 +547,7 @@ fn build_vertices(
     tick: u64,
 ) -> Result<Vec<Vertex>, String> {
     // 取景（含 Shake 抖动偏移）直接用 vitric-render 的实现——两条路径抖得逐位一致
-    let (cam_x, cam_y, scale) = vitric_render::camera_of(world, tick)?;
+    let (cam_x, cam_y, scale) = vitric_render::camera_of(world, tick, height)?;
     let mut verts: Vec<Vertex> = Vec::new();
 
     // 精灵：按实体序（画家算法，后画盖前画）

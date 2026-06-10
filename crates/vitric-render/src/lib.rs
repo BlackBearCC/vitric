@@ -37,7 +37,7 @@ pub fn render_world(
     if width == 0 || height == 0 || width > 4096 || height > 4096 {
         return Err(format!("分辨率 {width}x{height} 不合法（1..=4096）"));
     }
-    let (cam_x, cam_y, scale) = camera_of(world, tick)?;
+    let (cam_x, cam_y, scale) = camera_of(world, tick, height)?;
 
     let mut buf = vec![0u8; (width * height * 4) as usize];
     // 背景：深灰蓝，区别于纯黑（纯黑常被误判为「没渲出来」）
@@ -207,7 +207,7 @@ pub fn screen_to_world(
     px: f64,
     py: f64,
 ) -> Result<(f64, f64), String> {
-    let (cam_x, cam_y, scale) = camera_base(world)?;
+    let (cam_x, cam_y, scale) = camera_base(world, height)?;
     Ok((
         cam_x + (px - width as f64 / 2.0) / scale,
         cam_y - (py - height as f64 / 2.0) / scale,
@@ -250,7 +250,7 @@ pub fn draw_selection_outline(
     if !world.is_alive(selected) || !world.has_component(selected, "Sprite") {
         return Ok(()); // 选中的实体没了/不可见，描边静默跳过（选中态本身由上层管理）
     }
-    let (cam_x, cam_y, scale) = camera_of(world, tick)?;
+    let (cam_x, cam_y, scale) = camera_of(world, tick, height)?;
     let x = num(world, selected, "Position.x")?;
     let y = num(world, selected, "Position.y")?;
     let w = num(world, selected, "Sprite.w")?;
@@ -320,7 +320,7 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
         return Err(format!("分辨率 {width}x{height} 不合法"));
     }
     // 语义观察用不抖的相机：agent 断言的坐标不该被几帧视觉抖动晃花
-    let (cam_x, cam_y, scale) = camera_base(world)?;
+    let (cam_x, cam_y, scale) = camera_base(world, height)?;
     let half_w_units = width as f64 / scale / 2.0;
     let half_h_units = height as f64 / scale / 2.0;
 
@@ -498,13 +498,23 @@ fn direction_word(dx: f64, dy: f64) -> &'static str {
 }
 
 /// 相机本体（不含抖动偏移）：取第一个 Camera 实体，没有则原点、8 像素/单位。
-fn camera_base(world: &World) -> Result<(f64, f64, f64), String> {
+/// 可选 `view_h`（竖向可视世界高度，单位数）> 0 时按视口高度反推像素密度——
+/// 内容占屏比例与分辨率无关，4K 和 720p 看到同样大的世界；否则用 scale（像素/单位）。
+fn camera_base(world: &World, viewport_h: u32) -> Result<(f64, f64, f64), String> {
     let cams = world.query(&["Camera"]);
     match cams.first() {
         None => Ok((0.0, 0.0, 8.0)),
         Some(&id) => {
             let x = num(world, id, "Camera.x")?;
             let y = num(world, id, "Camera.y")?;
+            let view_h = world
+                .get_field(id, "Camera.view_h")
+                .ok()
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            if view_h > 0.0 {
+                return Ok((x, y, viewport_h as f64 / view_h));
+            }
             let scale = num(world, id, "Camera.scale")?;
             if scale <= 0.0 {
                 return Err(format!("实体 {id} 的 Camera.scale 必须 > 0，拿到 {scale}"));
@@ -516,8 +526,8 @@ fn camera_base(world: &World) -> Result<(f64, f64, f64), String> {
 
 /// 渲染取景相机：本体 + 相机实体上 `Shake` 组件的抖动偏移。
 /// CPU 光栅化和 GPU 路径都从这里取相机——两条路径抖得逐位一致。
-pub fn camera_of(world: &World, tick: u64) -> Result<(f64, f64, f64), String> {
-    let (mut x, mut y, scale) = camera_base(world)?;
+pub fn camera_of(world: &World, tick: u64, viewport_h: u32) -> Result<(f64, f64, f64), String> {
+    let (mut x, mut y, scale) = camera_base(world, viewport_h)?;
     if let Some(&id) = world.query(&["Camera"]).first() {
         if world.has_component(id, "Shake") {
             let amplitude = num(world, id, "Shake.amplitude")?;
@@ -778,15 +788,34 @@ mod tests {
     }
 
     #[test]
+    fn view_h_makes_zoom_resolution_independent() {
+        // view_h=8:不管视口多少像素,竖向永远看到 8 个世界单位——内容占屏比例恒定
+        let mut w = world_one_red_sprite();
+        let cam = w.spawn();
+        w.set_component(cam, "Camera", json!({"x": 0.0, "y": 0.0, "scale": 8.0, "view_h": 8.0}))
+            .unwrap();
+        assert_eq!(camera_of(&w, 0, 80).unwrap().2, 10.0, "80px/8单位=10像素每单位");
+        assert_eq!(camera_of(&w, 0, 160).unwrap().2, 20.0, "分辨率翻倍像素密度翻倍");
+        // 2x2 的精灵在 view_h=8 下永远占竖向 1/4,与分辨率无关
+        for vh in [64u32, 128] {
+            let buf = render_world(&w, vh, vh, &Assets::empty(), 0).unwrap();
+            let bg = [24, 26, 33, 255];
+            let top = (vh as f64 * (0.5 - 1.0 / 8.0)) as u32; // 精灵上缘
+            assert_eq!(pixel(&buf, vh, vh / 2, top + 1), [255, 0, 0, 255]);
+            assert_eq!(pixel(&buf, vh, vh / 2, top - 1), bg);
+        }
+    }
+
+    #[test]
     fn camera_of_applies_shake_offset_deterministically() {
         let mut w = world_one_red_sprite();
         let cam = w.spawn();
         w.set_component(cam, "Camera", json!({"x": 1.0, "y": 2.0, "scale": 8.0})).unwrap();
         w.set_component(cam, "Shake", json!({"amplitude": 0.5, "decay": 0.9})).unwrap();
 
-        let shaken = camera_of(&w, 7).unwrap();
-        assert_eq!(shaken, camera_of(&w, 7).unwrap(), "同世界同 tick 必须同取景");
-        assert_ne!(shaken, camera_of(&w, 8).unwrap(), "tick 变了偏移要变");
+        let shaken = camera_of(&w, 7, 64).unwrap();
+        assert_eq!(shaken, camera_of(&w, 7, 64).unwrap(), "同世界同 tick 必须同取景");
+        assert_ne!(shaken, camera_of(&w, 8, 64).unwrap(), "tick 变了偏移要变");
         let (dx, dy) = shake_offset(7, 0.5);
         assert_eq!(shaken, (1.0 + dx, 2.0 + dy, 8.0), "取景 = 相机本体 + shake_offset");
 
@@ -797,7 +826,7 @@ mod tests {
 
         // amplitude 归零 → 偏移消失，取景回到相机本体
         w.set_field(cam, "Shake.amplitude", json!(0.0)).unwrap();
-        assert_eq!(camera_of(&w, 7).unwrap(), (1.0, 2.0, 8.0));
+        assert_eq!(camera_of(&w, 7, 64).unwrap(), (1.0, 2.0, 8.0));
         // 语义观察/点选永远读不抖的相机
         w.set_field(cam, "Shake.amplitude", json!(0.5)).unwrap();
         let d = describe_world(&w, 64, 64).unwrap();

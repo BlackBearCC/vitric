@@ -91,6 +91,10 @@
         "lerp": {
           "type": "number",
           "default": 0.12
+        },
+        "view_h": {
+          "type": "number",
+          "default": 0
         }
       }
     },

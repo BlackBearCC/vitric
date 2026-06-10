@@ -1,6 +1,1384 @@
 {
   "entities": [
     {
+      "components": {
+        "Position": {
+          "x": -5.5,
+          "y": 3.0
+        },
+        "Sprite": {
+          "w": 9.2,
+          "h": 8.0,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 3.8,
+          "y": 3.0
+        },
+        "Sprite": {
+          "w": 9.7,
+          "h": 8.0,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 8.1,
+          "y": 2.4
+        },
+        "Sprite": {
+          "w": 9.8,
+          "h": 6.9,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 18.6,
+          "y": 3.3
+        },
+        "Sprite": {
+          "w": 6.5,
+          "h": 8.6,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 25.9,
+          "y": 2.0
+        },
+        "Sprite": {
+          "w": 8.2,
+          "h": 6.0,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 34.3,
+          "y": 1.5
+        },
+        "Sprite": {
+          "w": 6.9,
+          "h": 5.1,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 41.1,
+          "y": 3.3
+        },
+        "Sprite": {
+          "w": 9.1,
+          "h": 8.7,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 48.6,
+          "y": 3.1
+        },
+        "Sprite": {
+          "w": 6.6,
+          "h": 8.2,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 58.5,
+          "y": 1.8
+        },
+        "Sprite": {
+          "w": 6.0,
+          "h": 5.5,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 67.5,
+          "y": 1.9
+        },
+        "Sprite": {
+          "w": 6.9,
+          "h": 5.8,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 75.9,
+          "y": 3.2
+        },
+        "Sprite": {
+          "w": 7.2,
+          "h": 8.5,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 83.8,
+          "y": 2.6
+        },
+        "Sprite": {
+          "w": 8.7,
+          "h": 7.2,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 88.8,
+          "y": 3.4
+        },
+        "Sprite": {
+          "w": 8.8,
+          "h": 8.8,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 99.9,
+          "y": 3.3
+        },
+        "Sprite": {
+          "w": 7.2,
+          "h": 8.6,
+          "color": "#232c33"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": -4.8,
+          "y": 3.4
+        },
+        "Sprite": {
+          "w": 8.9,
+          "h": 8.8,
+          "color": "#1d242b"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 4.4,
+          "y": 3.8
+        },
+        "Sprite": {
+          "w": 11.6,
+          "h": 9.5,
+          "color": "#1d242b"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 15.0,
+          "y": 4.7
+        },
+        "Sprite": {
+          "w": 10.0,
+          "h": 11.4,
+          "color": "#1d242b"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 27.9,
+          "y": 5.0
+        },
+        "Sprite": {
+          "w": 10.9,
+          "h": 12.1,
+          "color": "#1d242b"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 38.9,
+          "y": 4.2
+        },
+        "Sprite": {
+          "w": 12.2,
+          "h": 10.4,
+          "color": "#1d242b"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 48.3,
+          "y": 5.4
+        },
+        "Sprite": {
+          "w": 8.1,
+          "h": 12.9,
+          "color": "#1d242b"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 63.5,
+          "y": 5.1
+        },
+        "Sprite": {
+          "w": 8.1,
+          "h": 12.2,
+          "color": "#1d242b"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 74.7,
+          "y": 3.9
+        },
+        "Sprite": {
+          "w": 11.5,
+          "h": 9.8,
+          "color": "#1d242b"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 81.1,
+          "y": 3.1
+        },
+        "Sprite": {
+          "w": 9.1,
+          "h": 8.2,
+          "color": "#1d242b"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 97.7,
+          "y": 3.5
+        },
+        "Sprite": {
+          "w": 12.5,
+          "h": 9.0,
+          "color": "#1d242b"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 53.2,
+          "y": 15.5
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 24.8,
+          "y": 15.1
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 42.7,
+          "y": 8.9
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#6a738f"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 43.1,
+          "y": 10.9
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": -7.5,
+          "y": 15.6
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#8a93b8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 4.2,
+          "y": 12.1
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 52.4,
+          "y": 10.7
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#6a738f"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 27.1,
+          "y": 10.5
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 10.8,
+          "y": 14.4
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#6a738f"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 0.1,
+          "y": 13.5
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 1.0,
+          "y": 8.4
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#6a738f"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 26.3,
+          "y": 11.2
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#8a93b8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 40.4,
+          "y": 10.8
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 21.0,
+          "y": 11.4
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#8a93b8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 56.6,
+          "y": 13.1
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 12.7,
+          "y": 9.7
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#6a738f"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 28.4,
+          "y": 9.1
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": -2.7,
+          "y": 11.5
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#8a93b8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": -6.0,
+          "y": 11.4
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#8a93b8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 20.8,
+          "y": 16.0
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#8a93b8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 56.4,
+          "y": 11.6
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 36.8,
+          "y": 10.5
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 9.8,
+          "y": 11.2
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#8a93b8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": -2.3,
+          "y": 14.6
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#6a738f"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 55.3,
+          "y": 13.0
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 49.0,
+          "y": 9.4
+        },
+        "Sprite": {
+          "w": 0.14,
+          "h": 0.14,
+          "color": "#aab3d8"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": -4,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": -4,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": -2,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": -2,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 2,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 2,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 4,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 4,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 6,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 6,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 8,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 8,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 10,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 10,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 12,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 12,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 14,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 14,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 16,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 16,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 18,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 18,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 20,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 20,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 22,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 22,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 24,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 24,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 26,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 26,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 28,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 28,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 30,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 30,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 32,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 32,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 34,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 34,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 36,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 36,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 38,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 38,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 40,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 40,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 42,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 42,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 44,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 44,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 46,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 46,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 48,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 48,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 50,
+          "y": -3
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
+      "components": {
+        "Position": {
+          "x": 50,
+          "y": -5
+        },
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "image": "tile-dirt.png"
+        }
+      }
+    },
+    {
       "name": "hero",
       "components": {
         "Player": {},
@@ -849,9 +2227,9 @@
         "Camera": {
           "x": 0,
           "y": 3,
-          "scale": 22,
           "follow": "hero",
-          "lerp": 0.12
+          "lerp": 0.12,
+          "view_h": 18
         },
         "Shake": {
           "amplitude": 0,
