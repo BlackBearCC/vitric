@@ -1,0 +1,15 @@
+{
+  "name": "vitric-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for the Vitric game engine — gives any MCP client full control of a running game: observe, mutate, step time, assert, screenshot.",
+  "type": "module",
+  "bin": { "vitric-mcp": "index.js" },
+  "main": "index.js",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/BlackBearCC/vitric" },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  }
+}
