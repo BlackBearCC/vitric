@@ -1,0 +1,22 @@
+{
+  "components": {
+    "Position": { "fields": { "x": { "type": "number", "default": 0 }, "y": { "type": "number", "default": 0 } } },
+    "Velocity": { "fields": { "x": { "type": "number", "default": 0 }, "y": { "type": "number", "default": 0 } } },
+    "Collider": { "fields": { "w": { "type": "number", "required": true, "min": 0 }, "h": { "type": "number", "required": true, "min": 0 } } },
+    "Sprite": { "fields": { "w": { "type": "number", "default": 1, "min": 0 }, "h": { "type": "number", "default": 1, "min": 0 }, "color": { "type": "text", "default": "#ffffff" }, "image": { "type": "text", "default": "" } } },
+    "Camera": { "fields": { "x": { "type": "number", "default": 0 }, "y": { "type": "number", "default": 0 }, "scale": { "type": "number", "default": 8, "min": 0.1 } } },
+    "Player": { "fields": {} },
+    "Gem": { "fields": {} },
+    "Hazard": { "fields": {} },
+    "Score": { "fields": { "value": { "type": "int", "default": 0, "min": 0 } } },
+    "Speed": { "fields": { "value": { "type": "number", "default": 30 } } },
+    "Recipe": {
+      "fields": {
+        "gems": { "type": "int", "default": 10, "min": 1 },
+        "hazards": { "type": "int", "default": 14, "min": 0 },
+        "width": { "type": "number", "default": 44 },
+        "height": { "type": "number", "default": 26 }
+      }
+    }
+  }
+}

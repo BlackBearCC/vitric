@@ -1,0 +1,62 @@
+{
+  "rules": [
+    {
+      "id": "generate-level",
+      "on": { "event": "start" },
+      "do": [
+        { "call": "generate", "with": {
+          "gems": "@recipe.Recipe.gems",
+          "hazards": "@recipe.Recipe.hazards",
+          "width": "@recipe.Recipe.width",
+          "height": "@recipe.Recipe.height"
+        } }
+      ]
+    },
+
+    { "id": "move-right", "on": { "event": "input", "filter": { "action": "right", "phase": "pressed" } },
+      "do": [{ "set": "@player.Velocity.x", "to": "@player.Speed.value" }] },
+    { "id": "stop-right", "on": { "event": "input", "filter": { "action": "right", "phase": "released" } },
+      "do": [{ "set": "@player.Velocity.x", "to": 0 }] },
+    { "id": "move-left", "on": { "event": "input", "filter": { "action": "left", "phase": "pressed" } },
+      "do": [{ "set": "@player.Velocity.x", "to": -30 }] },
+    { "id": "stop-left", "on": { "event": "input", "filter": { "action": "left", "phase": "released" } },
+      "do": [{ "set": "@player.Velocity.x", "to": 0 }] },
+    { "id": "move-up", "on": { "event": "input", "filter": { "action": "up", "phase": "pressed" } },
+      "do": [{ "set": "@player.Velocity.y", "to": 30 }] },
+    { "id": "stop-up", "on": { "event": "input", "filter": { "action": "up", "phase": "released" } },
+      "do": [{ "set": "@player.Velocity.y", "to": 0 }] },
+    { "id": "move-down", "on": { "event": "input", "filter": { "action": "down", "phase": "pressed" } },
+      "do": [{ "set": "@player.Velocity.y", "to": -30 }] },
+    { "id": "stop-down", "on": { "event": "input", "filter": { "action": "down", "phase": "released" } },
+      "do": [{ "set": "@player.Velocity.y", "to": 0 }] },
+
+    {
+      "id": "collect-gem",
+      "on": { "event": "collision", "between": ["Player", "Gem"] },
+      "do": [
+        { "add": "self.Score.value", "by": 1 },
+        { "despawn": "other" },
+        { "emit": "gem-collected", "data": { "total": "self.Score.value" } }
+      ]
+    },
+    {
+      "id": "hazard-hit",
+      "on": { "event": "collision", "between": ["Player", "Hazard"] },
+      "do": [
+        { "set": "self.Position.x", "to": 0 },
+        { "set": "self.Position.y", "to": 0 },
+        { "emit": "player-died", "data": {} }
+      ]
+    },
+    {
+      "id": "level-clear",
+      "on": { "event": "gem-collected" },
+      "if": [["@player.Score.value", ">=", "@recipe.Recipe.gems"]],
+      "do": [
+        { "set": "@player.Velocity.x", "to": 0 },
+        { "set": "@player.Velocity.y", "to": 0 },
+        { "emit": "level-clear", "data": { "score": "@player.Score.value" } }
+      ]
+    }
+  ]
+}

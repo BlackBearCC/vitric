@@ -89,6 +89,15 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
   - `vitric.fn("名", (args, ctx) => {...})` — 给规则 `call`
   - `ctx.random()`（确定性，别用 Math.random，会直接 throw）/ `ctx.tick` / `ctx.emit` / `ctx.spawn` / `ctx.despawn`
 
+## 动画
+
+清单挂 `"animations": "animations.json"`，文件里定义片段：`{"clips": {"walk": {"frames": ["w0.png","w1.png"], "fps": 6, "loop": true}}}`。
+实体挂 `Anim` 组件（schema 需定义 clip/prev/t/done 四字段），**引擎独占 Sprite.image 的写权**——换动画唯一正路是改 `Anim.clip`（规则 set 即可），切换自动从头播；非循环片段播完发 `anim-finished` 事件并停末帧。状态全在组件里，快照/回放安全。
+
+## 内建事件
+
+`start`（tick 0，初始化/生成关卡的标准入口）、`input`、`collision`、`anim-finished`。
+
 ## 引擎约定组件
 
 内建系统只认这些名字：`Position{x,y}` + `Velocity{x,y}` → 每 tick 积分移动；

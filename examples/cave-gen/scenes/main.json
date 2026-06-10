@@ -1,0 +1,24 @@
+{
+  "entities": [
+    {
+      "name": "player",
+      "components": {
+        "Player": {},
+        "Position": { "x": 0, "y": 0 },
+        "Velocity": {},
+        "Collider": { "w": 1, "h": 1 },
+        "Score": {},
+        "Speed": { "value": 30 },
+        "Sprite": { "w": 1, "h": 1, "color": "#4da3ff" }
+      }
+    },
+    {
+      "name": "camera",
+      "components": { "Camera": { "x": 0, "y": 0, "scale": 10 } }
+    },
+    {
+      "name": "recipe",
+      "components": { "Recipe": { "gems": 10, "hazards": 14, "width": 44, "height": 26 } }
+    }
+  ]
+}
