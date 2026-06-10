@@ -77,9 +77,9 @@ The repo also ships a Claude Code skill (`.claude/skills/vitric/`) and an [llms.
 
 ## Status
 
-The core loop is real and tested (100+ tests, including an e2e where an agent beats the game over HTTP and a recording replays hash-identically): deterministic replay, semantic observation, hot reload, sprite assets with validation, declarative animation, platformer physics (gravity / solid clipping / grounded), on-screen text with a built-in bitmap font (described semantically — no OCR), recipe-generated levels, window + inspector (click/drag writes back to the data layer; selection is visible to both human and AI), audio, TypeScript scripts, MCP server, CI + binary releases.
+The core loop is real and tested (100+ tests, including an e2e where an agent beats the game over HTTP and a recording replays hash-identically): deterministic replay, semantic observation, hot reload, sprite assets with validation, declarative animation, platformer physics (gravity / solid clipping / grounded), on-screen text with a built-in bitmap font (described semantically — no OCR), recipe-generated levels, window + inspector (click/drag writes back to the data layer; selection is visible to both human and AI), GPU presentation (wgpu, `--renderer gpu`, verified on real hardware; headless screenshots stay CPU and byte-deterministic), audio, TypeScript scripts, MCP server, CI + binary releases.
 
-In progress: GPU (wgpu) renderer, runtime LLM module, more built-in systems.
+In progress: runtime LLM module, more built-in systems.
 
 ## License
 
