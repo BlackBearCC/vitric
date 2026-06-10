@@ -4,6 +4,12 @@
 //! - `vitric check <项目目录>`            校验项目（schema/场景/规则/脚本），出报告
 //! - `vitric run <项目目录> [选项]`        无头运行 + AI 控制面
 //! - `vitric replay <项目目录> <录像.json>` 重放录像并校验确定性
+//! - `vitric assets <项目目录> [选项]`      全项目 PNG 统一色板（AI 出图规整成一个调）
+//!
+//! assets 选项：
+//!   --colors <N>     色板颜色数（默认 32）
+//!   --height <H>     高于 H 的图先最近邻缩到高 H（保持宽高比）
+//!   --palette-lock   跳过提取，按项目已有 palette.json 量化（新素材入伙老色板）
 //!
 //! run 选项：
 //!   --port <N>       控制面端口（默认 6173，0=自动分配）
@@ -31,8 +37,9 @@ fn main() {
         Some("check") => cmd_check(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
         Some("replay") => cmd_replay(&args[1..]),
+        Some("assets") => vitric_cli::assets_cmd::run(&args[1..]),
         _ => {
-            eprintln!("用法: vitric <check|run|replay> <项目目录> [选项]\n详见 vitric 仓库 docs/");
+            eprintln!("用法: vitric <check|run|replay|assets> <项目目录> [选项]\n详见 vitric 仓库 docs/");
             std::process::exit(2);
         }
     };

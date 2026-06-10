@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json = { workspace = true }
+# 素材和谐化（vitric assets）的 PNG 读写；版本跟 vitric-render 保持一致
+png = "0.18"
 vitric-ecs = { path = "../vitric-ecs" }
 vitric-data = { path = "../vitric-data" }
 vitric-rules = { path = "../vitric-rules" }

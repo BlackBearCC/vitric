@@ -2,12 +2,13 @@
 
 A one-page manual for AI agents (and humans): how to autonomously run, observe, test, and modify a Vitric game.
 
-## Three commands
+## Four commands
 
 ```bash
 vitric check <project-dir>                 # validate everything (schema/scenes/rules/scripts/assets); errors carry path + code + fix hint
 vitric run <project-dir> [--port 6173] [--window] [--speed X] [--ticks N] [--record out.json]
 vitric replay <project-dir> <recording>    # replay a recording, verifying determinism at every checkpoint
+vitric assets <project-dir> [--colors N] [--height H] [--palette-lock]  # harmonize all project PNGs onto one shared palette (AI-generated art → one coherent look), see docs/art-pipeline.md
 ```
 
 The first stdout line of `run` is a JSON banner containing the control-plane URL (and audio status).

@@ -2551,6 +2551,7 @@ dependencies = [
  "bytemuck",
  "font8x8",
  "naga",
+ "png",
  "pollster",
  "rodio",
  "serde_json",

@@ -2,12 +2,13 @@
 
 给 AI agent（和人）的一页纸操作手册：怎么自主地跑、看、测、改一个 Vitric 游戏。
 
-## 三个命令
+## 四个命令
 
 ```bash
 vitric check <项目目录>                  # 校验一切（schema/场景/规则/脚本），错误带路径+错误码+修法
 vitric run <项目目录> [--port 6173] [--speed X] [--ticks N] [--record 录像.json]
 vitric replay <项目目录> <录像.json>      # 重放录像并逐校验点验证确定性
+vitric assets <项目目录> [--colors N] [--height H] [--palette-lock]  # 全项目 PNG 统一色板，AI 出图规整成一个调，详见 docs/art-pipeline.md
 ```
 
 `run` 启动后 stdout 第一行是 JSON 横幅，里面有控制面地址。

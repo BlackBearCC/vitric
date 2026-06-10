@@ -20,6 +20,9 @@ cargo build --release
 
 # Run it (headless + AI control plane)
 ./target/release/vitric run examples/coin-run --port 6173
+
+# Harmonize AI-generated art: quantize every project PNG onto one shared palette (see docs/art-pipeline.md)
+./target/release/vitric assets examples/glow --colors 16
 ```
 
 In another terminal, beat the game the way an agent would:
@@ -77,7 +80,7 @@ The repo also ships a Claude Code skill (`.claude/skills/vitric/`) and an [llms.
 
 ## Status
 
-The core loop is real and tested (100+ tests, including an e2e where an agent beats the game over HTTP and a recording replays hash-identically): deterministic replay, semantic observation, hot reload, sprite assets with validation, declarative animation, platformer physics (gravity / solid clipping / grounded), on-screen text with a built-in bitmap font (described semantically — no OCR), recipe-generated levels, window + inspector (click/drag writes back to the data layer; selection is visible to both human and AI), GPU presentation (wgpu, `--renderer gpu`, verified on real hardware; headless screenshots stay CPU and byte-deterministic), audio, TypeScript scripts, MCP server, CI + binary releases.
+The core loop is real and tested (100+ tests, including an e2e where an agent beats the game over HTTP and a recording replays hash-identically): deterministic replay, semantic observation, hot reload, sprite assets with validation, declarative animation, platformer physics (gravity / solid clipping / grounded), on-screen text with a built-in bitmap font (described semantically — no OCR), recipe-generated levels, window + inspector (click/drag writes back to the data layer; selection is visible to both human and AI), GPU presentation (wgpu, `--renderer gpu`, verified on real hardware; headless screenshots stay CPU and byte-deterministic), audio, TypeScript scripts, MCP server, CI + binary releases. `vitric assets` harmonizes AI-generated art onto one shared project palette (deterministic median-cut quantization, originals backed up, `--palette-lock` keeps new assets on the existing look).
 
 In progress: runtime LLM module, more built-in systems.
 
