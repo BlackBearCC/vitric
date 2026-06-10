@@ -117,7 +117,8 @@ Convention event: `{"emit": "play-sound", "data": {"sound": "coin.wav"}}` plays 
 
 Built-in systems recognize: `Position{x,y}` + `Velocity{x,y}` → integrated motion each tick;
 `Position` + `Collider{w,h}` → AABB collision emits `collision` events;
-`Position` + `Sprite{w,h,color,image}` → rendering; `Camera{x,y,scale}` → view.
+`Position` + `Sprite{w,h,color,image,rot}` → rendering; `Camera{x,y,scale}` → view.
+`Sprite.rot` is optional (degrees): the sprite rotates around its own Position, counter-clockwise positive in world space (which is also counter-clockwise as seen on screen); default 0 = no rotation. On-screen `Text` never rotates, and picking hits the rotated shape, not the original AABB.
 Game-feel components (Camera `follow`/`lerp`, `Shake`, `Particle`) are covered in the "Game feel" section below.
 
 ## Platformer physics

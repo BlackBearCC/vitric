@@ -116,7 +116,8 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 
 内建系统只认这些名字：`Position{x,y}` + `Velocity{x,y}` → 每 tick 积分移动；
 `Position` + `Collider{w,h}` → AABB 碰撞发 `collision` 事件；
-`Position` + `Sprite{w,h,color}` → 渲染；`Camera{x,y,scale}` → 取景。
+`Position` + `Sprite{w,h,color,image,rot}` → 渲染；`Camera{x,y,scale}` → 取景。
+`Sprite.rot` 可选（度数）：精灵绕自身 Position 旋转，世界空间逆时针为正（画面上看也是逆时针），缺省 0 = 不旋转；屏上文字（Text）永远直立不旋转，点选（pick）按旋转后的真实形状命中。
 游戏感组件（Camera 的 follow/lerp、`Shake`、`Particle`）见下面「游戏感」一节。
 
 ## 平台物理

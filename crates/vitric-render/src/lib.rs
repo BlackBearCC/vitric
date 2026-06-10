@@ -7,7 +7,11 @@
 //! GPU（wgpu）走的是同一个组件约定，后续替换呈现层不动游戏数据。
 //!
 //! 组件约定：
-//! - `Sprite`  {"w": 数字, "h": 数字, "color": "#rrggbb"} — 有它才会被画
+//! - `Sprite`  {"w": 数字, "h": 数字, "color": "#rrggbb", "rot": 度数} — 有它才会被画。
+//!   rot 可选：绕 Position（精灵中心）旋转，**世界空间逆时针为正**——屏幕 y 翻转后
+//!   画面上看同样是逆时针。缺省/0 走原始快路径，输出字节与没有该字段时逐位相同
+//!   （向后兼容由测试锁死）。只转精灵：Text 永远直立；describe 的 overlaps 仍用
+//!   未旋转尺寸的 AABB（近似，见 [`describe_world`] 内注释）
 //! - `Position` {"x", "y"} — 世界坐标，y 向上
 //! - `Camera` {"x", "y", "scale"} — 可选；取第一个，没有则原点、8 像素/单位
 //! - `Shake` {"amplitude", "decay"} — 挂在相机实体上的屏幕抖动；amplitude > 0 时
@@ -70,16 +74,13 @@ pub fn render_world(
         let py = num(world, id, "Position.y")?;
         let sw = num(world, id, "Sprite.w")?;
         let sh = num(world, id, "Sprite.h")?;
+        let rot = rot_of(world, id)?;
 
         // 世界 → 屏幕（y 翻转，相机居中）
         let cx = (width as f64) / 2.0 + (px - cam_x) * scale;
         let cy = (height as f64) / 2.0 - (py - cam_y) * scale;
         let half_w = sw * scale / 2.0;
         let half_h = sh * scale / 2.0;
-        let x0 = (cx - half_w).floor().max(0.0) as i64;
-        let x1 = (cx + half_w).ceil().min(width as f64) as i64;
-        let y0 = (cy - half_h).floor().max(0.0) as i64;
-        let y1 = (cy + half_h).ceil().min(height as f64) as i64;
 
         let image_name = world
             .get_field(id, "Sprite.image")
@@ -87,49 +88,119 @@ pub fn render_world(
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default();
 
-        if image_name.is_empty() {
-            // 纯色块
-            let color = world
-                .get_field(id, "Sprite.color")
-                .ok()
-                .and_then(|v| v.as_str().map(String::from))
-                .unwrap_or_else(|| "#ffffff".to_string());
-            let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Sprite.color: {e}"))?;
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let i = ((y as u32 * width + x as u32) * 4) as usize;
-                    buf[i..i + 4].copy_from_slice(&rgba);
+        if rot == 0.0 {
+            // —— 快路径：不旋转（rot 缺省/为 0）。这段逻辑不许动——
+            //    输出字节必须与 rot 字段出现之前逐位相同（向后兼容由测试锁死）
+            let x0 = (cx - half_w).floor().max(0.0) as i64;
+            let x1 = (cx + half_w).ceil().min(width as f64) as i64;
+            let y0 = (cy - half_h).floor().max(0.0) as i64;
+            let y1 = (cy + half_h).ceil().min(height as f64) as i64;
+            if image_name.is_empty() {
+                // 纯色块
+                let color = world
+                    .get_field(id, "Sprite.color")
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| "#ffffff".to_string());
+                let rgba =
+                    parse_color(&color).map_err(|e| format!("实体 {id} 的 Sprite.color: {e}"))?;
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let i = ((y as u32 * width + x as u32) * 4) as usize;
+                        buf[i..i + 4].copy_from_slice(&rgba);
+                    }
+                }
+            } else {
+                // 贴图：最近邻缩放 + alpha 混合。图不存在直接报错（不画占位符）。
+                let img = image_of(assets, id, &image_name)?;
+                let span_x = 2.0 * half_w;
+                let span_y = 2.0 * half_h;
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let u = ((x as f64 + 0.5) - (cx - half_w)) / span_x;
+                        let v = ((y as f64 + 0.5) - (cy - half_h)) / span_y;
+                        let sx = ((u * img.width as f64) as i64).clamp(0, img.width as i64 - 1) as usize;
+                        let sy = ((v * img.height as f64) as i64).clamp(0, img.height as i64 - 1) as usize;
+                        let s = (sy * img.width as usize + sx) * 4;
+                        let src = &img.rgba[s..s + 4];
+                        let a = src[3] as u32;
+                        if a == 0 {
+                            continue;
+                        }
+                        let i = ((y as u32 * width + x as u32) * 4) as usize;
+                        let dst = &mut buf[i..i + 4];
+                        for c in 0..3 {
+                            dst[c] = ((src[c] as u32 * a + dst[c] as u32 * (255 - a)) / 255) as u8;
+                        }
+                        dst[3] = 255;
+                    }
                 }
             }
         } else {
-            // 贴图：最近邻缩放 + alpha 混合。图不存在直接报错（不画占位符）。
-            let img = assets.image(&image_name).ok_or_else(|| {
-                format!(
-                    "实体 {id} 的 Sprite.image {image_name:?} 不在素材仓库里。\
-                     现有素材: [{}]。提示：图放进项目 assets/ 目录，路径相对 assets/ 写",
-                    assets.names().join(", ")
-                )
-            })?;
-            let span_x = 2.0 * half_w;
-            let span_y = 2.0 * half_h;
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let u = ((x as f64 + 0.5) - (cx - half_w)) / span_x;
-                    let v = ((y as f64 + 0.5) - (cy - half_h)) / span_y;
-                    let sx = ((u * img.width as f64) as i64).clamp(0, img.width as i64 - 1) as usize;
-                    let sy = ((v * img.height as f64) as i64).clamp(0, img.height as i64 - 1) as usize;
-                    let s = (sy * img.width as usize + sx) * 4;
-                    let src = &img.rgba[s..s + 4];
-                    let a = src[3] as u32;
-                    if a == 0 {
-                        continue;
+            // —— 旋转路径：扫旋转后四角的轴对齐包围盒，逐像素逆旋回精灵局部空间再采样。
+            // 角度约定见 [`rot_of`]；f64 三角函数依赖系统数学库——确定性边界与文档一致：
+            // 同平台同二进制逐字节保证，跨平台末位不保证。
+            // 世界逆时针 + 屏幕 y 翻转 → 屏幕系正向矩阵 [[c, s], [-s, c]]，逆变换取转置
+            let (sn, cs) = rot.to_radians().sin_cos();
+            let ext_x = half_w * cs.abs() + half_h * sn.abs();
+            let ext_y = half_w * sn.abs() + half_h * cs.abs();
+            let x0 = (cx - ext_x).floor().max(0.0) as i64;
+            let x1 = (cx + ext_x).ceil().min(width as f64) as i64;
+            let y0 = (cy - ext_y).floor().max(0.0) as i64;
+            let y1 = (cy + ext_y).ceil().min(height as f64) as i64;
+            if image_name.is_empty() {
+                // 纯色块（旋转）：像素中心落在精灵内才上色
+                let color = world
+                    .get_field(id, "Sprite.color")
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| "#ffffff".to_string());
+                let rgba =
+                    parse_color(&color).map_err(|e| format!("实体 {id} 的 Sprite.color: {e}"))?;
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let dx = (x as f64 + 0.5) - cx;
+                        let dy = (y as f64 + 0.5) - cy;
+                        let lx = cs * dx - sn * dy;
+                        let ly = sn * dx + cs * dy;
+                        if lx.abs() > half_w || ly.abs() > half_h {
+                            continue; // 包围盒里但精灵外
+                        }
+                        let i = ((y as u32 * width + x as u32) * 4) as usize;
+                        buf[i..i + 4].copy_from_slice(&rgba);
                     }
-                    let i = ((y as u32 * width + x as u32) * 4) as usize;
-                    let dst = &mut buf[i..i + 4];
-                    for c in 0..3 {
-                        dst[c] = ((src[c] as u32 * a + dst[c] as u32 * (255 - a)) / 255) as u8;
+                }
+            } else {
+                // 贴图（旋转）：局部坐标直接当 UV 用，采样逻辑与快路径一致（最近邻 + alpha 混合）
+                let img = image_of(assets, id, &image_name)?;
+                let span_x = 2.0 * half_w;
+                let span_y = 2.0 * half_h;
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let dx = (x as f64 + 0.5) - cx;
+                        let dy = (y as f64 + 0.5) - cy;
+                        let lx = cs * dx - sn * dy;
+                        let ly = sn * dx + cs * dy;
+                        if lx.abs() > half_w || ly.abs() > half_h {
+                            continue;
+                        }
+                        let u = (lx + half_w) / span_x;
+                        let v = (ly + half_h) / span_y;
+                        let sx = ((u * img.width as f64) as i64).clamp(0, img.width as i64 - 1) as usize;
+                        let sy = ((v * img.height as f64) as i64).clamp(0, img.height as i64 - 1) as usize;
+                        let s = (sy * img.width as usize + sx) * 4;
+                        let src = &img.rgba[s..s + 4];
+                        let a = src[3] as u32;
+                        if a == 0 {
+                            continue;
+                        }
+                        let i = ((y as u32 * width + x as u32) * 4) as usize;
+                        let dst = &mut buf[i..i + 4];
+                        for c in 0..3 {
+                            dst[c] = ((src[c] as u32 * a + dst[c] as u32 * (255 - a)) / 255) as u8;
+                        }
+                        dst[3] = 255;
                     }
-                    dst[3] = 255;
                 }
             }
         }
@@ -285,9 +356,37 @@ fn apply_lighting(
     }
 }
 
+/// 可选的 `Sprite.rot`（度数）。缺省 = 0 = 不旋转；字段在但不是数字 → 显式报错。
+/// 角度约定：**世界空间逆时针为正**——屏幕 y 翻转后，画面上看同样是逆时针。
+/// CPU 光栅化、GPU 顶点流、点选三处共用这一个语义源头。
+pub fn rot_of(world: &World, id: vitric_ecs::EntityId) -> Result<f64, String> {
+    match world.get_field(id, "Sprite.rot") {
+        Err(_) => Ok(0.0),
+        Ok(v) => v
+            .as_f64()
+            .ok_or_else(|| format!("实体 {id} 的 Sprite.rot 不是数字（度数）: {v}")),
+    }
+}
+
+/// 取贴图素材；图不存在直接报错并列出现有素材（不画占位符）。
+fn image_of<'a>(
+    assets: &'a Assets,
+    id: vitric_ecs::EntityId,
+    image_name: &str,
+) -> Result<&'a Image, String> {
+    assets.image(image_name).ok_or_else(|| {
+        format!(
+            "实体 {id} 的 Sprite.image {image_name:?} 不在素材仓库里。\
+             现有素材: [{}]。提示：图放进项目 assets/ 目录，路径相对 assets/ 写",
+            assets.names().join(", ")
+        )
+    })
+}
+
 /// 文字：`Text` {"content","size","color"} + `Position`，内嵌 8x8 点阵字体。
 /// 每个字符占 size×size 世界单位，整串以 Position 为中心，画在所有精灵之上。
 /// 字体只覆盖 ASCII（分数/提示/调试足够），其他字符画实心方块占位。
+/// 文字**永远直立**——`Sprite.rot` 只转精灵，不转文字（点阵字转了就不可读，HUD 保持水平）。
 fn draw_texts(
     world: &World,
     buf: &mut [u8],
@@ -397,7 +496,17 @@ pub fn pick(
         let y = num(world, id, "Position.y")?;
         let w = num(world, id, "Sprite.w")?;
         let h = num(world, id, "Sprite.h")?;
-        if (wx - x).abs() * 2.0 <= w && (wy - y).abs() * 2.0 <= h {
+        let rot = rot_of(world, id)?;
+        // rot != 0 时把点击点逆旋回精灵局部空间（世界系，y 向上）——
+        // 命中判定对的是旋转后的真实形状，不是未旋转的 AABB
+        let (dx, dy) = (wx - x, wy - y);
+        let (lx, ly) = if rot == 0.0 {
+            (dx, dy)
+        } else {
+            let (sn, cs) = rot.to_radians().sin_cos();
+            (dx * cs + dy * sn, dy * cs - dx * sn)
+        };
+        if lx.abs() * 2.0 <= w && ly.abs() * 2.0 <= h {
             return Ok(Some(id));
         }
     }
@@ -422,10 +531,19 @@ pub fn draw_selection_outline(
     let y = num(world, selected, "Position.y")?;
     let w = num(world, selected, "Sprite.w")?;
     let h = num(world, selected, "Sprite.h")?;
+    let rot = rot_of(world, selected)?;
+    // rot != 0 时描边取**旋转后形状的轴对齐包围盒**——画轴对齐矩形比描旋转轮廓
+    // 简单得多，检查器高亮要的只是"看见选中了谁"，不需要贴边精确
+    let (ew, eh) = if rot == 0.0 {
+        (w, h)
+    } else {
+        let (sn, cs) = rot.to_radians().sin_cos();
+        (w * cs.abs() + h * sn.abs(), w * sn.abs() + h * cs.abs())
+    };
     let cx = (width as f64) / 2.0 + (x - cam_x) * scale;
     let cy = (height as f64) / 2.0 - (y - cam_y) * scale;
-    let half_w = w * scale / 2.0 + 2.0;
-    let half_h = h * scale / 2.0 + 2.0;
+    let half_w = ew * scale / 2.0 + 2.0;
+    let half_h = eh * scale / 2.0 + 2.0;
     let x0 = (cx - half_w).floor().max(0.0) as i64;
     let x1 = (cx + half_w).ceil().min(width as f64) as i64 - 1;
     let y0 = (cy - half_h).floor().max(0.0) as i64;
@@ -511,6 +629,7 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default();
         let name = world.name_of(id).map(String::from);
+        let rot = rot_of(world, id)?;
 
         let dx = px - cam_x;
         let dy = py - cam_y;
@@ -525,6 +644,10 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
         let mut sprite = json!({"w": sw, "h": sh, "color": color});
         if !image.is_empty() {
             sprite["image"] = json!(image);
+        }
+        if rot != 0.0 {
+            // 旋转角进语义观察（缺省 0 不输出——和画面行为一样，没有就是没有）
+            sprite["rot"] = json!(rot);
         }
         entry.insert("sprite".into(), sprite);
 
@@ -585,7 +708,9 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
         texts.push(serde_json::Value::Object(entry));
     }
 
-    // 视觉重叠（画面上谁压着谁）
+    // 视觉重叠（画面上谁压着谁）。已知近似：一律按**未旋转尺寸**的 AABB 判相交——
+    // 旋转精灵的精确相交（SAT）对语义观察不值得：方位/坐标/rot 字段已足够 agent 定位，
+    // 边缘误报误漏由像素截图兜底
     let mut overlaps = Vec::new();
     for i in 0..rects.len() {
         for j in (i + 1)..rects.len() {
@@ -975,6 +1100,147 @@ mod tests {
         assert_eq!(pixel(&buf, 64, 32, 32), [255, 0, 0, 255], "精灵本体不被盖");
     }
 
+    /// 旋转测试用素材：halves.png（2x1，左红右蓝——不对称图案才能看出转没转对）。
+    /// 返回 (素材库, 临时目录)，用完调用方负责删目录。
+    fn assets_with_halves(tag: &str) -> (Assets, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("vitric-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pixels: Vec<u8> = vec![255, 0, 0, 255, /**/ 0, 0, 255, 255];
+        {
+            let file = std::fs::File::create(dir.join("halves.png")).unwrap();
+            let mut enc = png::Encoder::new(file, 2, 1);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header().unwrap().write_image_data(&pixels).unwrap();
+        }
+        (Assets::load_dir(&dir).unwrap(), dir)
+    }
+
+    /// 原点处 4x2 的 halves 贴图精灵，可选 rot。
+    fn world_halves_sprite(rot: Option<f64>) -> World {
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let mut sprite = json!({"w": 4.0, "h": 2.0, "image": "halves.png"});
+        if let Some(r) = rot {
+            sprite["rot"] = json!(r);
+        }
+        w.set_component(e, "Sprite", sprite).unwrap();
+        w
+    }
+
+    #[test]
+    fn rot_zero_takes_fast_path_byte_identical() {
+        // 显式写 rot: 0 必须与压根没有 rot 字段逐字节相同（快路径向后兼容锁死）
+        let plain = render_world(&world_one_red_sprite(), 64, 64, &Assets::empty(), 0).unwrap();
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000", "rot": 0.0}))
+            .unwrap();
+        assert_eq!(plain, render_world(&w, 64, 64, &Assets::empty(), 0).unwrap());
+        // 贴图精灵同理
+        let (assets, dir) = assets_with_halves("rot0");
+        let plain = render_world(&world_halves_sprite(None), 64, 64, &assets, 0).unwrap();
+        let with_field = render_world(&world_halves_sprite(Some(0.0)), 64, 64, &assets, 0).unwrap();
+        assert_eq!(plain, with_field);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rot_90_rotates_pixels_counter_clockwise() {
+        // 4x2 左红右蓝，逆时针转 90°：右边的蓝半边转到画面上方，红半边到下方
+        let (assets, dir) = assets_with_halves("rot90");
+        let buf = render_world(&world_halves_sprite(Some(90.0)), 64, 64, &assets, 0).unwrap();
+        assert_eq!(pixel(&buf, 64, 32, 20), [0, 0, 255, 255], "上方是蓝（原来的右半边）");
+        assert_eq!(pixel(&buf, 64, 32, 44), [255, 0, 0, 255], "下方是红（原来的左半边）");
+        // 未旋转 AABB 的左右两翼现在是空的——旋转后形状是竖条（占 x 24..40, y 16..48）
+        assert_eq!(pixel(&buf, 64, 20, 32), BACKGROUND, "左翼是背景");
+        assert_eq!(pixel(&buf, 64, 44, 32), BACKGROUND, "右翼是背景");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rot_180_equals_flipping_both_axes() {
+        // 居中精灵转 180° = 整幅画面两轴同时翻转（逐像素对比）
+        let (assets, dir) = assets_with_halves("rot180");
+        let plain = render_world(&world_halves_sprite(None), 64, 64, &assets, 0).unwrap();
+        let turned = render_world(&world_halves_sprite(Some(180.0)), 64, 64, &assets, 0).unwrap();
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                assert_eq!(
+                    pixel(&turned, 64, x, y),
+                    pixel(&plain, 64, 63 - x, 63 - y),
+                    "({x},{y}) 应等于未旋转帧的中心对称点"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rotated_render_is_deterministic() {
+        // 任意角度（三角函数路径）同世界同 tick → 字节逐位相同
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.5, "y": -0.25})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 3.0, "h": 1.0, "color": "#00ff88", "rot": 37.0}))
+            .unwrap();
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 5).unwrap();
+        assert_eq!(buf, render_world(&w, 64, 64, &Assets::empty(), 5).unwrap());
+    }
+
+    #[test]
+    fn pick_respects_rotation() {
+        let mut w = World::new();
+        let e = w.spawn_named("bar").unwrap();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 4.0, "h": 2.0, "color": "#ff0000", "rot": 90.0}))
+            .unwrap();
+        // 屏幕 (32,18) = 世界 (0, 1.75)：未旋转 AABB 之外（h=2），旋转后竖条之内 → 命中
+        assert_eq!(pick(&w, 64, 64, 32.0, 18.0).unwrap(), Some(e), "旋转后的形状内要命中");
+        // 屏幕 (46,32) = 世界 (1.75, 0)：未旋转 AABB 之内（w=4），旋转后已是空地 → 不命中
+        assert_eq!(pick(&w, 64, 64, 46.0, 32.0).unwrap(), None, "转走了的区域不该命中");
+        // 对照组：rot 归零后两个判定正好反过来
+        w.set_field(e, "Sprite.rot", json!(0.0)).unwrap();
+        assert_eq!(pick(&w, 64, 64, 32.0, 18.0).unwrap(), None);
+        assert_eq!(pick(&w, 64, 64, 46.0, 32.0).unwrap(), Some(e));
+    }
+
+    #[test]
+    fn describe_includes_rot_when_nonzero() {
+        let mut w = World::new();
+        let e = w.spawn_named("tilted").unwrap();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000", "rot": 45.0}))
+            .unwrap();
+        let d = describe_world(&w, 64, 64).unwrap();
+        assert_eq!(d["visible"][0]["sprite"]["rot"], json!(45.0));
+        // 不旋转的精灵不带 rot 字段
+        let d0 = describe_world(&world_one_red_sprite(), 64, 64).unwrap();
+        assert!(d0["visible"][0]["sprite"].get("rot").is_none());
+    }
+
+    #[test]
+    fn selection_outline_uses_rotated_bbox() {
+        // 4x2 转 90° → 旋转后包围盒约 2x4（世界单位）：描边贴竖条，不贴原始横条
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 4.0, "h": 2.0, "color": "#ff0000", "rot": 90.0}))
+            .unwrap();
+        let mut buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        draw_selection_outline(&mut buf, &w, 64, 64, e, 0).unwrap();
+        // 旋转后半宽 1 单位 = 8px + 2px 外扩 → 左描边在 x≈22（2px 厚，取靠内那列避开浮点边界）
+        assert_eq!(pixel(&buf, 64, 22, 32), [39, 192, 168, 255], "左描边贴竖条");
+        // 未旋转尺寸的描边位置（32-18=14）应是背景——证明用的是旋转后的包围盒
+        assert_eq!(pixel(&buf, 64, 14, 32), BACKGROUND, "老位置不该有描边");
+        // 上描边：旋转后半高 2 单位 = 16px + 2px → y=14 起两行
+        assert_eq!(pixel(&buf, 64, 32, 15), [39, 192, 168, 255], "上描边随包围盒抬高");
+        assert_eq!(pixel(&buf, 64, 32, 32), [255, 0, 0, 255], "精灵本体不被盖");
+    }
+
     #[test]
     fn shake_offset_is_pure_function_of_tick_and_amplitude() {
         // 同 (tick, amplitude) → 同偏移（纯函数，没有隐藏状态）
@@ -1143,5 +1409,10 @@ mod tests {
         let err = render_world(&w, 32, 32, &Assets::empty(), 0).unwrap_err();
         assert!(err.contains("#rrggbb"), "{err}");
         assert!(render_world(&w, 0, 32, &Assets::empty(), 0).is_err());
+        // rot 写成字符串：显式报错（不是静默当 0）
+        w.set_component(e, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#ff0000", "rot": "45"}))
+            .unwrap();
+        let err = render_world(&w, 32, 32, &Assets::empty(), 0).unwrap_err();
+        assert!(err.contains("Sprite.rot"), "{err}");
     }
 }

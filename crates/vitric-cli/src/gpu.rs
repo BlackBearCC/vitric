@@ -629,13 +629,26 @@ fn build_vertices(
         let py = num(world, id, "Position.y")?;
         let sw = num(world, id, "Sprite.w")?;
         let sh = num(world, id, "Sprite.h")?;
+        let rot = vitric_render::rot_of(world, id)?;
         // 世界 → 屏幕像素（y 翻转，相机居中）——与 CPU 路径同一公式
         let cx = (width as f64) / 2.0 + (px - cam_x) * scale;
         let cy = (height as f64) / 2.0 - (py - cam_y) * scale;
         let half_w = sw * scale / 2.0;
         let half_h = sh * scale / 2.0;
-        let (x0, y0) = ((cx - half_w) as f32, (cy - half_h) as f32);
-        let (x1, y1) = ((cx + half_w) as f32, (cy + half_h) as f32);
+        // 四角（顺序固定：未旋转时的 左上/右上/右下/左下，UV 跟角走）。
+        // rot != 0 时绕中心旋转——与 CPU 路径同一角度约定（vitric_render::rot_of）：
+        // 度数、世界逆时针为正；屏幕 y 翻转 → 屏幕系正向矩阵 [[c, s], [-s, c]]
+        let corners: [[f32; 2]; 4] = if rot == 0.0 {
+            let (x0, y0) = ((cx - half_w) as f32, (cy - half_h) as f32);
+            let (x1, y1) = ((cx + half_w) as f32, (cy + half_h) as f32);
+            [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+        } else {
+            let (sn, cs) = rot.to_radians().sin_cos();
+            let p = |dx: f64, dy: f64| {
+                [(cx + cs * dx + sn * dy) as f32, (cy - sn * dx + cs * dy) as f32]
+            };
+            [p(-half_w, -half_h), p(half_w, -half_h), p(half_w, half_h), p(-half_w, half_h)]
+        };
 
         let image_name = world
             .get_field(id, "Sprite.image")
@@ -649,7 +662,8 @@ fn build_vertices(
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_else(|| "#ffffff".to_string());
             let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Sprite.color: {e}"))?;
-            push_solid(&mut verts, atlas, x0, y0, x1, y1, rgba);
+            let [u, v] = atlas.white;
+            push_quad_corners(&mut verts, corners, [u, v, u, v], tint(rgba));
         } else {
             // 图不存在直接报错（不画占位符）——错误文案对齐 CPU 路径
             let uv = atlas.images.get(&image_name).ok_or_else(|| {
@@ -659,11 +673,12 @@ fn build_vertices(
                     atlas.images.keys().cloned().collect::<Vec<_>>().join(", ")
                 )
             })?;
-            push_quad(&mut verts, x0, y0, x1, y1, *uv, [1.0; 4]);
+            push_quad_corners(&mut verts, corners, *uv, [1.0; 4]);
         }
     }
 
-    // 文字：每字符一个字形方块，整串居中于 Position，画在精灵之上
+    // 文字：每字符一个字形方块，整串居中于 Position，画在精灵之上。
+    // 永远直立——Sprite.rot 只转精灵，不转文字（与 CPU 路径同语义）
     for id in world.query(&["Position", "Text"]) {
         let content = world
             .get_field(id, "Text.content")
@@ -745,10 +760,18 @@ fn push_selection_outline(
     ) else {
         return; // 字段坏了不阻塞呈现（CPU 路径里调用方也是 let _ = 忽略）
     };
+    // rot != 0 时取旋转后形状的轴对齐包围盒——与 CPU 路径同一选择（高亮不需要贴边精确）
+    let rot = vitric_render::rot_of(world, id).unwrap_or(0.0);
+    let (ew, eh) = if rot == 0.0 {
+        (w, h)
+    } else {
+        let (sn, cs) = rot.to_radians().sin_cos();
+        (w * cs.abs() + h * sn.abs(), w * sn.abs() + h * cs.abs())
+    };
     let cx = (width as f64) / 2.0 + (x - cam_x) * scale;
     let cy = (height as f64) / 2.0 - (y - cam_y) * scale;
-    let half_w = w * scale / 2.0 + 2.0;
-    let half_h = h * scale / 2.0 + 2.0;
+    let half_w = ew * scale / 2.0 + 2.0;
+    let half_h = eh * scale / 2.0 + 2.0;
     // 与 CPU 路径同样先夹到屏幕内再画框（出屏的边贴着屏幕缘显示）
     let x0 = (cx - half_w).floor().max(0.0) as f32;
     let x1 = ((cx + half_w).ceil().min(width as f64) - 1.0) as f32;
@@ -773,12 +796,16 @@ fn push_solid(verts: &mut Vec<Vertex>, atlas: &Atlas, x0: f32, y0: f32, x1: f32,
 
 /// 两个三角形拼一个矩形（不用索引缓冲，顶点流够小不值得）。
 fn push_quad(verts: &mut Vec<Vertex>, x0: f32, y0: f32, x1: f32, y1: f32, uv: UvRect, color: [f32; 4]) {
+    push_quad_corners(verts, [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], uv, color);
+}
+
+/// 任意四角的四边形（精灵旋转用）。角序 = 未旋转时的 左上/右上/右下/左下，
+/// UV 矩形按同样的角序展开跟角走——贴图随四角一起转，不会错位。
+fn push_quad_corners(verts: &mut Vec<Vertex>, p: [[f32; 2]; 4], uv: UvRect, color: [f32; 4]) {
     let [u0, v0, u1, v1] = uv;
-    let a = Vertex { pos: [x0, y0], uv: [u0, v0], color };
-    let b = Vertex { pos: [x1, y0], uv: [u1, v0], color };
-    let c = Vertex { pos: [x1, y1], uv: [u1, v1], color };
-    let d = Vertex { pos: [x0, y1], uv: [u0, v1], color };
-    verts.extend_from_slice(&[a, b, c, a, c, d]);
+    let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
+    let vx = |i: usize| Vertex { pos: p[i], uv: uvs[i], color };
+    verts.extend_from_slice(&[vx(0), vx(1), vx(2), vx(0), vx(2), vx(3)]);
 }
 
 fn tint(rgba: [u8; 4]) -> [f32; 4] {
@@ -886,6 +913,64 @@ mod tests {
         let xs: Vec<f32> = verts[6..].iter().map(|v| v.pos[0]).collect();
         assert_eq!(xs.iter().cloned().fold(f32::MAX, f32::min), 16.0);
         assert_eq!(xs.iter().cloned().fold(f32::MIN, f32::max), 48.0);
+    }
+
+    #[test]
+    fn rotated_quad_corners_exact_for_rot_90() {
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 4.0, "h": 2.0, "color": "#ff0000", "rot": 90.0}))
+            .unwrap();
+        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
+        assert_eq!(verts.len(), 6, "旋转不增加顶点：仍是两个三角形");
+        // 未旋转四角 (16,24)(48,24)(48,40)(16,40) 绕中心 (32,32) 逆时针转 90°：
+        // 横条变竖条。世界逆时针 = 画面逆时针——原右上角转到左上
+        assert_eq!(verts[0].pos, [24.0, 48.0], "左上角 → 左下");
+        assert_eq!(verts[1].pos, [24.0, 16.0], "右上角 → 左上");
+        assert_eq!(verts[2].pos, [40.0, 16.0], "右下角 → 右上");
+        assert_eq!(verts[3].pos, [24.0, 48.0], "第二个三角形从角 0 重新起");
+        assert_eq!(verts[4].pos, [40.0, 16.0]);
+        assert_eq!(verts[5].pos, [40.0, 48.0], "左下角 → 右下");
+        assert_eq!(verts[0].color, [1.0, 0.0, 0.0, 1.0], "染色不受旋转影响");
+        // 显式 rot=0 与无字段同一几何（快路径）
+        w.set_field(e, "Sprite.rot", json!(0.0)).unwrap();
+        let v0 = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
+        assert_eq!(v0[0].pos, [16.0, 24.0]);
+        assert_eq!(v0[2].pos, [48.0, 40.0]);
+    }
+
+    #[test]
+    fn rotated_texture_uv_follows_corners() {
+        // 贴图随四角一起转：UV 角序不变（左上角的 UV 永远是图集区域起点），
+        // 位置变了 UV 不变 = 贴图内容跟着精灵转
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 4.0, "h": 2.0, "image": "hero.png", "rot": 90.0}))
+            .unwrap();
+        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
+        assert_eq!(verts[0].uv, [0.25, 0.25], "角 0 仍是图集区域左上");
+        assert_eq!(verts[2].uv, [0.5, 0.5], "角 2 仍是图集区域右下");
+        assert_eq!(verts[0].pos, [24.0, 48.0], "但位置已旋转");
+    }
+
+    #[test]
+    fn selection_outline_uses_rotated_bbox() {
+        // 4x2 转 90° → 包围盒约 2x4：描边几何取旋转后的包围盒（与 CPU 路径同一选择）
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 4.0, "h": 2.0, "color": "#ff0000", "rot": 90.0}))
+            .unwrap();
+        let verts = build_vertices(&w, 64, 64, &fake_atlas(), Some(e), 0).unwrap();
+        assert_eq!(verts.len(), 6 + 24);
+        // 旋转后半高 2 单位 = 16px + 2px 外扩 → 上缘 y=14（此轴无浮点边界问题，可精确断言）
+        let y_min = verts[6..].iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
+        assert_eq!(y_min, 14.0, "描边上缘随旋转后包围盒抬高");
+        // 横轴只断言范围：cos(90°) 的浮点尾数会让 floor 在 21/22 之间摆，不锁具体值
+        let x_min = verts[6..].iter().map(|v| v.pos[0]).fold(f32::MAX, f32::min);
+        assert!((21.0..=22.0).contains(&x_min), "描边左缘应收窄到竖条附近: {x_min}");
     }
 
     #[test]
