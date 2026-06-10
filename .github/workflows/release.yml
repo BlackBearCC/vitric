@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建发行包
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - name: 装 MinGW
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+      - name: Linux 构建
+        run: cargo build --release -p vitric-cli
+      - name: Windows 构建
+        run: cargo build --release --target x86_64-pc-windows-gnu -p vitric-cli
+      - name: 打包
+        run: |
+          mkdir -p dist
+          cp target/release/vitric dist/vitric-linux-x64
+          cp target/x86_64-pc-windows-gnu/release/vitric.exe dist/vitric-windows-x64.exe
+          cd dist && sha256sum * > SHA256SUMS
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
