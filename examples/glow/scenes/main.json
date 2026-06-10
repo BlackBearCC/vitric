@@ -849,7 +849,7 @@
         "Camera": {
           "x": 0,
           "y": 3,
-          "scale": 14,
+          "scale": 22,
           "follow": "hero",
           "lerp": 0.12
         },
