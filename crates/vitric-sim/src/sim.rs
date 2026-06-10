@@ -149,10 +149,11 @@ impl Sim {
 
     /// 推一帧。流水线（顺序固定，这就是确定性）：
     /// 1. 注入的输入 → input 事件（录像在此记录）
-    /// 2. 内建运动系统：Position += Velocity * DT
-    /// 3. 内建碰撞检测：AABB 重叠 → collision 事件
-    /// 4. 游戏逻辑（规则 + 脚本）消化全部事件
-    /// 5. tick + 1
+    /// 2. 内建重力：Body 实体 Velocity.y += gravity * DT
+    /// 3. 内建运动系统：Position += Velocity * DT（带 Body+Collider 的实体被 Solid 挡停）
+    /// 4. 内建碰撞检测：AABB 重叠 → collision 事件
+    /// 5. 游戏逻辑（规则 + 脚本）消化全部事件
+    /// 6. tick + 1
     pub fn step(&mut self, logic: &mut dyn GameLogic) -> Result<StepReport, SimError> {
         let mut events = Vec::new();
 
@@ -173,7 +174,8 @@ impl Sim {
             events.push(Event::new("input", json!({"action": action, "phase": phase})));
         }
 
-        // 2. 运动
+        // 2. 重力 + 运动
+        self.apply_gravity()?;
         self.integrate_motion()?;
 
         // 3. 碰撞
@@ -276,18 +278,99 @@ impl Sim {
 
     // ---- 内建系统 ----
 
-    fn integrate_motion(&mut self) -> Result<(), SimError> {
-        for id in self.world.query(&["Position", "Velocity"]) {
-            let vx = self.num_field(id, "Velocity", "x")?;
+    /// 重力：Body 实体每 tick 给 Velocity.y 加 gravity * DT（世界 y 朝上，重力通常是负数）。
+    fn apply_gravity(&mut self) -> Result<(), SimError> {
+        for id in self.world.query(&["Body", "Velocity"]) {
+            let g = self.num_field(id, "Body", "gravity")?;
+            if g == 0.0 {
+                continue;
+            }
             let vy = self.num_field(id, "Velocity", "y")?;
+            self.world
+                .set_field(id, "Velocity.y", json!(vy + g * DT))
+                .expect("字段刚读过必然存在");
+        }
+        Ok(())
+    }
+
+    fn integrate_motion(&mut self) -> Result<(), SimError> {
+        // Solid = 挡停体（地面/墙）。带 Body+Collider 的实体撞上会被裁剪到贴边并清掉该轴速度。
+        let solid_ids = self.world.query(&["Solid", "Position", "Collider"]);
+        let mut solids = Vec::with_capacity(solid_ids.len());
+        for &sid in &solid_ids {
+            solids.push((
+                sid,
+                self.num_field(sid, "Position", "x")?,
+                self.num_field(sid, "Position", "y")?,
+                self.num_field(sid, "Collider", "w")?,
+                self.num_field(sid, "Collider", "h")?,
+            ));
+        }
+
+        for id in self.world.query(&["Position", "Velocity"]) {
+            let mut vx = self.num_field(id, "Velocity", "x")?;
+            let mut vy = self.num_field(id, "Velocity", "y")?;
             let px = self.num_field(id, "Position", "x")?;
             let py = self.num_field(id, "Position", "y")?;
-            self.world
-                .set_field(id, "Position.x", json!(px + vx * DT))
-                .expect("字段刚读过必然存在");
-            self.world
-                .set_field(id, "Position.y", json!(py + vy * DT))
-                .expect("字段刚读过必然存在");
+
+            let is_phys = self.world.get_component(id, "Body").is_ok()
+                && self.world.get_component(id, "Collider").is_ok();
+            if !is_phys || solids.is_empty() {
+                self.world
+                    .set_field(id, "Position.x", json!(px + vx * DT))
+                    .expect("字段刚读过必然存在");
+                self.world
+                    .set_field(id, "Position.y", json!(py + vy * DT))
+                    .expect("字段刚读过必然存在");
+                continue;
+            }
+
+            let w = self.num_field(id, "Collider", "w")?;
+            let h = self.num_field(id, "Collider", "h")?;
+            // 轴分离：先走 x 再走 y，每轴撞上就贴边停（中心坐标，重叠判定与 collision 事件同一公式）。
+            // 注意：单 tick 位移大于障碍厚度会穿过去（无扫掠），速度预算要留余量。
+            let mut nx = px + vx * DT;
+            for &(sid, sx, sy, sw, sh) in &solids {
+                if sid == id {
+                    continue;
+                }
+                let overlap =
+                    (nx - sx).abs() * 2.0 < (w + sw) && (py - sy).abs() * 2.0 < (h + sh);
+                if overlap {
+                    nx = if vx > 0.0 { sx - (sw + w) / 2.0 } else { sx + (sw + w) / 2.0 };
+                    vx = 0.0;
+                }
+            }
+            let mut ny = py + vy * DT;
+            let mut grounded = false;
+            for &(sid, sx, sy, sw, sh) in &solids {
+                if sid == id {
+                    continue;
+                }
+                let overlap =
+                    (nx - sx).abs() * 2.0 < (w + sw) && (ny - sy).abs() * 2.0 < (h + sh);
+                if overlap {
+                    if vy <= 0.0 {
+                        ny = sy + (sh + h) / 2.0; // 落在顶面
+                        grounded = true;
+                    } else {
+                        ny = sy - (sh + h) / 2.0; // 顶到底面
+                    }
+                    vy = 0.0;
+                }
+            }
+            self.world.set_field(id, "Position.x", json!(nx)).expect("字段刚读过必然存在");
+            self.world.set_field(id, "Position.y", json!(ny)).expect("字段刚读过必然存在");
+            self.world.set_field(id, "Velocity.x", json!(vx)).expect("字段刚读过必然存在");
+            self.world.set_field(id, "Velocity.y", json!(vy)).expect("字段刚读过必然存在");
+            self.world.set_field(id, "Body.grounded", json!(grounded)).map_err(|e| {
+                SimError::BadComponent {
+                    tick: self.tick,
+                    entity: id.to_string(),
+                    component: "Body".to_string(),
+                    reason: format!("写 grounded 失败: {e}。Body 组件需要 gravity(number) 和 grounded(bool) 两个字段"),
+                }
+            })?;
         }
         Ok(())
     }
@@ -350,6 +433,87 @@ mod tests {
         let wall = sim.world.spawn_named("wall").unwrap();
         sim.world.set_component(wall, "Position", json!({"x": 5.0, "y": 0.0})).unwrap();
         sim.world.set_component(wall, "Collider", json!({"w": 1.0, "h": 1.0})).unwrap();
+    }
+
+    /// 平台物理测试场：一个带重力的角色 + 脚下地板 + 右侧墙。
+    fn platformer_world(sim: &mut Sim) -> vitric_ecs::EntityId {
+        let p = sim.world.spawn_named("hero").unwrap();
+        sim.world.set_component(p, "Position", json!({"x": 0.0, "y": 5.0})).unwrap();
+        sim.world.set_component(p, "Velocity", json!({"x": 0.0, "y": 0.0})).unwrap();
+        sim.world.set_component(p, "Collider", json!({"w": 1.0, "h": 2.0})).unwrap();
+        sim.world
+            .set_component(p, "Body", json!({"gravity": -30.0, "grounded": false}))
+            .unwrap();
+        let floor = sim.world.spawn_named("floor").unwrap();
+        sim.world.set_component(floor, "Position", json!({"x": 0.0, "y": -1.0})).unwrap();
+        sim.world.set_component(floor, "Collider", json!({"w": 40.0, "h": 2.0})).unwrap();
+        sim.world.set_component(floor, "Solid", json!({})).unwrap();
+        let wall = sim.world.spawn_named("wall").unwrap();
+        sim.world.set_component(wall, "Position", json!({"x": 6.0, "y": 2.0})).unwrap();
+        sim.world.set_component(wall, "Collider", json!({"w": 2.0, "h": 4.0})).unwrap();
+        sim.world.set_component(wall, "Solid", json!({})).unwrap();
+        p
+    }
+
+    #[test]
+    fn gravity_pulls_body_down_until_it_lands_grounded() {
+        let mut sim = Sim::new(1);
+        let p = platformer_world(&mut sim);
+        // 自由落体若干 tick：速度向下累积
+        for _ in 0..10 {
+            sim.step(&mut ()).unwrap();
+        }
+        assert!(sim.world.get_field(p, "Velocity.y").unwrap().as_f64().unwrap() < 0.0);
+        assert_eq!(sim.world.get_field(p, "Body.grounded").unwrap(), &json!(false));
+        // 跑到落地：站在地板顶面（地板顶 0.0 + 半高 1.0），竖直速度清零，grounded
+        for _ in 0..120 {
+            sim.step(&mut ()).unwrap();
+        }
+        assert_eq!(sim.world.get_field(p, "Body.grounded").unwrap(), &json!(true));
+        assert_eq!(sim.world.get_field(p, "Velocity.y").unwrap().as_f64(), Some(0.0));
+        let py = sim.world.get_field(p, "Position.y").unwrap().as_f64().unwrap();
+        assert!((py - 1.0).abs() < 1e-9, "应贴在地板顶面，实际 y={py}");
+    }
+
+    #[test]
+    fn solid_wall_blocks_horizontal_motion() {
+        let mut sim = Sim::new(1);
+        let p = platformer_world(&mut sim);
+        // 先落地，再向右冲墙
+        for _ in 0..120 {
+            sim.step(&mut ()).unwrap();
+        }
+        sim.world.set_field(p, "Velocity.x", json!(20.0)).unwrap();
+        for _ in 0..120 {
+            sim.step(&mut ()).unwrap();
+            // 维持推进（撞墙会被清零，模拟持续按键的最坏情况）
+            sim.world.set_field(p, "Velocity.x", json!(20.0)).unwrap();
+        }
+        // 墙左边缘 5.0，角色半宽 0.5 → 最远贴到 4.5
+        let px = sim.world.get_field(p, "Position.x").unwrap().as_f64().unwrap();
+        assert!((px - 4.5).abs() < 1e-9, "应贴墙停下，实际 x={px}");
+    }
+
+    #[test]
+    fn jump_arc_rises_then_lands_back() {
+        let mut sim = Sim::new(1);
+        let p = platformer_world(&mut sim);
+        for _ in 0..120 {
+            sim.step(&mut ()).unwrap();
+        }
+        // 起跳 = 给一个向上的速度（规则里就是 set Velocity.y）
+        sim.world.set_field(p, "Velocity.y", json!(12.0)).unwrap();
+        sim.step(&mut ()).unwrap();
+        assert_eq!(sim.world.get_field(p, "Body.grounded").unwrap(), &json!(false));
+        let mut peak: f64 = 0.0;
+        for _ in 0..120 {
+            sim.step(&mut ()).unwrap();
+            peak = peak.max(sim.world.get_field(p, "Position.y").unwrap().as_f64().unwrap());
+        }
+        assert!(peak > 2.0, "跳起来要离地，峰值 {peak}");
+        assert_eq!(sim.world.get_field(p, "Body.grounded").unwrap(), &json!(true));
+        let py = sim.world.get_field(p, "Position.y").unwrap().as_f64().unwrap();
+        assert!((py - 1.0).abs() < 1e-9, "落回地板顶面，实际 y={py}");
     }
 
     /// 收集事件的测试逻辑。
