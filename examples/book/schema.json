@@ -1,0 +1,86 @@
+{
+  "components": {
+    "Leaf": {
+      "fields": {
+        "t": {
+          "type": "int",
+          "default": 0
+        },
+        "flipping": {
+          "type": "bool",
+          "default": false
+        },
+        "page": {
+          "type": "int",
+          "default": 1
+        }
+      }
+    },
+    "Position": {
+      "fields": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "Sprite": {
+      "fields": {
+        "w": {
+          "type": "number"
+        },
+        "h": {
+          "type": "number"
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        },
+        "image": {
+          "type": "text",
+          "default": ""
+        }
+      }
+    },
+    "Camera": {
+      "fields": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "scale": {
+          "type": "number",
+          "default": 8
+        },
+        "view_h": {
+          "type": "number",
+          "default": 0
+        }
+      }
+    },
+    "Text": {
+      "fields": {
+        "content": {
+          "type": "text",
+          "default": ""
+        },
+        "size": {
+          "type": "number",
+          "default": 1
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        },
+        "screen": {
+          "type": "bool",
+          "default": false
+        }
+      }
+    }
+  }
+}

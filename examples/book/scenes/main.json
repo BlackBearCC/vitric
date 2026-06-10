@@ -1,0 +1,161 @@
+{
+  "entities": [
+    {
+      "name": "cover",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 0
+        },
+        "Sprite": {
+          "w": 21.6,
+          "h": 14.2,
+          "color": "#5a3d2b"
+        }
+      }
+    },
+    {
+      "name": "page-left",
+      "components": {
+        "Position": {
+          "x": -5.05,
+          "y": 0
+        },
+        "Sprite": {
+          "w": 9.9,
+          "h": 13,
+          "color": "#f2e8d0"
+        }
+      }
+    },
+    {
+      "name": "page-right",
+      "components": {
+        "Position": {
+          "x": 5.05,
+          "y": 0
+        },
+        "Sprite": {
+          "w": 9.9,
+          "h": 13,
+          "color": "#f2e8d0"
+        }
+      }
+    },
+    {
+      "name": "spine",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 0
+        },
+        "Sprite": {
+          "w": 0.5,
+          "h": 13,
+          "color": "#c9bda0"
+        }
+      }
+    },
+    {
+      "name": "leaf",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 0
+        },
+        "Sprite": {
+          "w": 0.0,
+          "h": 13,
+          "color": "#e8dcc0"
+        },
+        "Leaf": {
+          "t": 0,
+          "flipping": false,
+          "page": 2
+        }
+      }
+    },
+    {
+      "name": "text-left",
+      "components": {
+        "Position": {
+          "x": -5,
+          "y": 1.2
+        },
+        "Text": {
+          "content": "CHAPTER 1",
+          "size": 0.8,
+          "color": "#4a3b28"
+        }
+      }
+    },
+    {
+      "name": "text-left2",
+      "components": {
+        "Position": {
+          "x": -5,
+          "y": -0.8
+        },
+        "Text": {
+          "content": "THE GLASS BOX",
+          "size": 0.55,
+          "color": "#7a6a50"
+        }
+      }
+    },
+    {
+      "name": "text-right",
+      "components": {
+        "Position": {
+          "x": 5,
+          "y": 1.2
+        },
+        "Text": {
+          "content": "PAGE 2",
+          "size": 0.8,
+          "color": "#4a3b28"
+        }
+      }
+    },
+    {
+      "name": "text-right2",
+      "components": {
+        "Position": {
+          "x": 5,
+          "y": -0.8
+        },
+        "Text": {
+          "content": "TURN ME ->",
+          "size": 0.55,
+          "color": "#7a6a50"
+        }
+      }
+    },
+    {
+      "name": "hint",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": -8.3
+        },
+        "Text": {
+          "content": "PRESS RIGHT TO FLIP",
+          "size": 0.45,
+          "color": "#9a8c70",
+          "screen": true
+        }
+      }
+    },
+    {
+      "name": "camera",
+      "components": {
+        "Camera": {
+          "x": 0,
+          "y": 0,
+          "scale": 8,
+          "view_h": 17
+        }
+      }
+    }
+  ]
+}

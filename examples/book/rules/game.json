@@ -1,0 +1,89 @@
+{
+  "rules": [
+    {
+      "id": "flip",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "right",
+          "phase": "pressed"
+        }
+      },
+      "if": [
+        [
+          "@leaf.Leaf.flipping",
+          "==",
+          false
+        ]
+      ],
+      "do": [
+        {
+          "set": "@leaf.Leaf.flipping",
+          "to": true
+        },
+        {
+          "set": "@leaf.Leaf.t",
+          "to": 0
+        },
+        {
+          "set": "@text-right.Text.content",
+          "to": ""
+        },
+        {
+          "set": "@text-right2.Text.content",
+          "to": ""
+        }
+      ]
+    },
+    {
+      "id": "reveal-front",
+      "on": {
+        "event": "page-mid"
+      },
+      "do": [
+        {
+          "set": "@text-right.Text.content",
+          "to": {
+            "format": "PAGE {}",
+            "args": [
+              "event.n"
+            ]
+          }
+        },
+        {
+          "set": "@text-right2.Text.content",
+          "to": "TURN ME ->"
+        },
+        {
+          "set": "@text-left.Text.content",
+          "to": ""
+        },
+        {
+          "set": "@text-left2.Text.content",
+          "to": ""
+        }
+      ]
+    },
+    {
+      "id": "land-back",
+      "on": {
+        "event": "page-turned"
+      },
+      "do": [
+        {
+          "set": "@text-left.Text.content",
+          "to": {
+            "format": "PAGE {}",
+            "args": [
+              "event.n"
+            ]
+          }
+        },
+        {
+          "set": "@text-left2.Text.content",
+          "to": "..."
+        }
+      ]
+    }
+  ]
+}
