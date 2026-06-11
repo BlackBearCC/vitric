@@ -77,19 +77,19 @@ server.tool(
 
 server.tool(
   "vitric_role",
-  "领取角色工单：返回引擎内置的 team/roles/<role>.md 全文（多 agent 班子里该角色的完整 prompt，含先读清单/地盘/工序/验收门）。给了 project_dir 就把 {PROJECT_DIR} 占位符替换成真实路径，整篇可直接派给 subagent。",
+  "领取角色工单：返回引擎内置的 team/skills/vitric-<role>/SKILL.md 全文（多 agent 班子里该角色的完整 prompt，含先读清单/地盘/工序/验收门）。给了 project_dir 就把 {PROJECT_DIR} 占位符替换成真实路径，整篇可直接派给 subagent。",
   {
     role: z.enum(["art", "level", "gameplay", "audio", "narrative", "qa"]).describe("角色名"),
     project_dir: z.string().optional().describe("项目目录；给了就替换工单里的 {PROJECT_DIR} 占位符"),
   },
   async ({ role, project_dir }) => {
-    const file = path.join(TEAM_DIR, "roles", `${role}.md`);
+    const file = path.join(TEAM_DIR, "skills", `vitric-${role}`, "SKILL.md");
     let content;
     try {
       content = await readFile(file, "utf8");
     } catch (e) {
-      const available = (await readdir(path.join(TEAM_DIR, "roles")).catch(() => []))
-        .filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, ""));
+      const available = (await readdir(path.join(TEAM_DIR, "skills")).catch(() => []))
+        .map((f) => f.replace(/^vitric-/, ""));
       return text(`读取工单 ${file} 失败: ${e.message}。可用角色: ${available.join(", ")}`);
     }
     if (project_dir) content = content.replaceAll("{PROJECT_DIR}", project_dir);
