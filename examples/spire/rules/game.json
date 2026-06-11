@@ -1066,6 +1066,52 @@
           "to": 1.0
         }
       ]
+    },
+    {
+      "id": "clear-hand-won",
+      "on": {
+        "event": "battle-won"
+      },
+      "do": [
+        { "set": "@slot-1.Sprite.color", "to": "#3a3442" },
+        { "set": "@slot-1-text.Text.content", "to": "" },
+        { "set": "@slot-1-cost.Text.content", "to": "" },
+        { "set": "@slot-2.Sprite.color", "to": "#3a3442" },
+        { "set": "@slot-2-text.Text.content", "to": "" },
+        { "set": "@slot-2-cost.Text.content", "to": "" },
+        { "set": "@slot-3.Sprite.color", "to": "#3a3442" },
+        { "set": "@slot-3-text.Text.content", "to": "" },
+        { "set": "@slot-3-cost.Text.content", "to": "" },
+        { "set": "@slot-4.Sprite.color", "to": "#3a3442" },
+        { "set": "@slot-4-text.Text.content", "to": "" },
+        { "set": "@slot-4-cost.Text.content", "to": "" },
+        { "set": "@slot-5.Sprite.color", "to": "#3a3442" },
+        { "set": "@slot-5-text.Text.content", "to": "" },
+        { "set": "@slot-5-cost.Text.content", "to": "" }
+      ]
+    },
+    {
+      "id": "clear-hand-lost",
+      "on": {
+        "event": "battle-lost"
+      },
+      "do": [
+        { "set": "@slot-1.Sprite.color", "to": "#3a3442" },
+        { "set": "@slot-1-text.Text.content", "to": "" },
+        { "set": "@slot-1-cost.Text.content", "to": "" },
+        { "set": "@slot-2.Sprite.color", "to": "#3a3442" },
+        { "set": "@slot-2-text.Text.content", "to": "" },
+        { "set": "@slot-2-cost.Text.content", "to": "" },
+        { "set": "@slot-3.Sprite.color", "to": "#3a3442" },
+        { "set": "@slot-3-text.Text.content", "to": "" },
+        { "set": "@slot-3-cost.Text.content", "to": "" },
+        { "set": "@slot-4.Sprite.color", "to": "#3a3442" },
+        { "set": "@slot-4-text.Text.content", "to": "" },
+        { "set": "@slot-4-cost.Text.content", "to": "" },
+        { "set": "@slot-5.Sprite.color", "to": "#3a3442" },
+        { "set": "@slot-5-text.Text.content", "to": "" },
+        { "set": "@slot-5-cost.Text.content", "to": "" }
+      ]
     }
   ]
 }

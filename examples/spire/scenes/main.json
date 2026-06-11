@@ -147,6 +147,20 @@
       }
     },
     {
+      "name": "rim-enemy-0",
+      "components": {
+        "Position": {
+          "x": 4.4,
+          "y": 1.1
+        },
+        "Light": {
+          "radius": 4.5,
+          "color": "#7fa8e8",
+          "intensity": 1.0
+        }
+      }
+    },
+    {
       "name": "enemy-1",
       "components": {
         "Enemy": {

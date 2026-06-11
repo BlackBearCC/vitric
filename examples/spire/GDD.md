@@ -21,3 +21,6 @@ card-played{name,cost} / turn-ended / enemy-acted{n} / battle-won / battle-lost 
 火把 ×2 (±10,3) Light 暖光,Ambient #1c1822 + Bloom;背景石墙程序砖
 ## 地盘
 美术=assets/animations/palette | 玩法=rules/scripts/sounds | 场景=scenes/(灰盒先行) | schema/本文件=导演
+
+## 调参记录
+- 2026-06-11 QA 打磨：守卫(敌B)意图权重 DEF 50%→40% / ATK 60%；第 9 回合起守卫狂怒,ATK 每回合 +2(6→8→10…,意图如实显示)——龟壳节奏收紧,防御流不再拖 27 回合。敌A 旁加冷色轮廓补光(rim-enemy-0,#7fa8e8 r4.5)解决暗光不可读,全局氛围不动。胜/负终局清空手牌区(卡面回空槽底色、牌名/费用文字置空)。

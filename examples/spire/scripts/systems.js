@@ -47,9 +47,11 @@ function drawCards(draw, discard, hand, n, ctx) {
 }
 
 // 敌人意图（GDD：敌 A 斩击者凶、敌 B 守卫攻守参半）
-function rollIntent(n, ctx) {
+// 调参 2026-06-11：守卫 DEF 50%→40%；第 9 回合起守卫狂怒，ATK 每回合 +2（龟壳节奏收紧，防御流不再拖 27 回合）
+function rollIntent(n, turn, ctx) {
   if (n === 0) return ctx.random() < 0.65 ? { kind: "ATK", value: 8 } : { kind: "ATK", value: 11 };
-  return ctx.random() < 0.5 ? { kind: "DEF", value: 6 } : { kind: "ATK", value: 6 };
+  const atk = 6 + Math.max(0, turn - 8) * 2; // 狂怒计时钟：意图值如实显示，玩家看得见压力上来
+  return ctx.random() < 0.4 ? { kind: "DEF", value: 6 } : { kind: "ATK", value: atk };
 }
 
 // 攻击结算：易伤 ×1.5 向下取整，先破甲再扣血；emit blocked / damaged（GDD 事件表）
@@ -119,8 +121,8 @@ vitric.fn("start-battle", (a, ctx) => {
   emitDeck(ctx, draw, discard, hand);
   emitHand(ctx, hand, 3);
   emitPlayer(ctx, p);
-  emitEnemy(ctx, 0, e0, rollIntent(0, ctx));
-  emitEnemy(ctx, 1, e1, rollIntent(1, ctx));
+  emitEnemy(ctx, 0, e0, rollIntent(0, 1, ctx));
+  emitEnemy(ctx, 1, e1, rollIntent(1, 1, ctx));
   emitBattle(ctx, "player", 3, 1);
 });
 
@@ -217,9 +219,9 @@ vitric.fn("begin-turn", (a, ctx) => {
   const p = { hp: a.php, maxhp: a.pmax, block: 0, vuln: 0 };
   const e0 = { hp: a.e0hp, maxhp: a.e0max, block: a.e0block, vuln: Math.max(0, a.e0vuln - 1) };
   const e1 = { hp: a.e1hp, maxhp: a.e1max, block: a.e1block, vuln: Math.max(0, a.e1vuln - 1) };
-  const i0 = e0.hp > 0 ? rollIntent(0, ctx) : { kind: "", value: 0 };
-  const i1 = e1.hp > 0 ? rollIntent(1, ctx) : { kind: "", value: 0 };
   const turn = a.turn + 1;
+  const i0 = e0.hp > 0 ? rollIntent(0, turn, ctx) : { kind: "", value: 0 };
+  const i1 = e1.hp > 0 ? rollIntent(1, turn, ctx) : { kind: "", value: 0 };
   emitDeck(ctx, draw, discard, hand);
   emitHand(ctx, hand, 3);
   emitPlayer(ctx, p);
