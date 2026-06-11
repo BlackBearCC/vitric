@@ -276,11 +276,11 @@ impl ApplicationHandler for WindowedGame {
         if self.window.is_some() {
             return;
         }
-        // 默认最大化占满屏幕(保留标题栏可关);F11 切无边框全屏
+        // 默认 960x540 窗口:远程桌面/录屏场景全屏暗色渐变是编码最差情况,
+        // 像素越多越卡;要大屏自己最大化或 F11 无边框全屏
         let attrs = Window::default_attributes()
             .with_title(self.title.as_str())
-            .with_inner_size(LogicalSize::new(960.0, 540.0))
-            .with_maximized(true);
+            .with_inner_size(LogicalSize::new(960.0, 540.0));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
