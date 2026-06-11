@@ -2291,7 +2291,8 @@
       "name": "ambient",
       "components": {
         "Ambient": {
-          "color": "#3a4060"
+          "color": "#3a4060",
+          "shadows": true
         },
         "Bloom": {
           "threshold": 0.55,
