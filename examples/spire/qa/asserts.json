@@ -1,0 +1,14 @@
+[
+  { "id": "energy-floor", "if": [["@battle.Battle.energy", ">=", 0]] },
+  { "id": "energy-cap", "if": [["@battle.Battle.energy", "<=", 3]] },
+  { "id": "turn-floor", "if": [["@battle.Battle.turn", ">=", 1]] },
+  { "id": "hero-hp-floor", "if": [["@hero.Unit.hp", ">=", 0]] },
+  { "id": "hero-hp-cap", "if": [["@hero.Unit.hp", "<=", 70]] },
+  { "id": "hero-block-floor", "if": [["@hero.Unit.block", ">=", 0]] },
+  { "id": "enemy-0-hp-floor", "if": [["@enemy-0.Unit.hp", ">=", 0]] },
+  { "id": "enemy-0-hp-cap", "if": [["@enemy-0.Unit.hp", "<=", 28]] },
+  { "id": "enemy-0-vuln-floor", "if": [["@enemy-0.Unit.vuln", ">=", 0]] },
+  { "id": "enemy-1-hp-floor", "if": [["@enemy-1.Unit.hp", ">=", 0]] },
+  { "id": "enemy-1-hp-cap", "if": [["@enemy-1.Unit.hp", "<=", 40]] },
+  { "id": "enemy-1-vuln-floor", "if": [["@enemy-1.Unit.vuln", ">=", 0]] }
+]

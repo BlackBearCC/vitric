@@ -306,11 +306,11 @@
       "components": {
         "Position": {
           "x": -5,
-          "y": -6.2
+          "y": -7.75
         },
         "Text": {
           "content": "",
-          "size": 0.3,
+          "size": 0.26,
           "color": "#f5e8cc"
         }
       }
@@ -320,11 +320,11 @@
       "components": {
         "Position": {
           "x": -2.5,
-          "y": -6.2
+          "y": -7.75
         },
         "Text": {
           "content": "",
-          "size": 0.3,
+          "size": 0.26,
           "color": "#f5e8cc"
         }
       }
@@ -334,11 +334,11 @@
       "components": {
         "Position": {
           "x": 0,
-          "y": -6.2
+          "y": -7.75
         },
         "Text": {
           "content": "",
-          "size": 0.3,
+          "size": 0.26,
           "color": "#f5e8cc"
         }
       }
@@ -348,11 +348,11 @@
       "components": {
         "Position": {
           "x": 2.5,
-          "y": -6.2
+          "y": -7.75
         },
         "Text": {
           "content": "",
-          "size": 0.3,
+          "size": 0.26,
           "color": "#f5e8cc"
         }
       }
@@ -362,11 +362,11 @@
       "components": {
         "Position": {
           "x": 5,
-          "y": -6.2
+          "y": -7.75
         },
         "Text": {
           "content": "",
-          "size": 0.3,
+          "size": 0.26,
           "color": "#f5e8cc"
         }
       }
@@ -474,7 +474,7 @@
       "components": {
         "Position": {
           "x": 7.5,
-          "y": 2.7
+          "y": 3.3
         },
         "Text": {
           "content": "HP 40/40",
