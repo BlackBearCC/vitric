@@ -25,7 +25,7 @@ vitric.system("brazier-counter", { query: ["Brazier"], writes: [] }, (entities, 
 // 粒子迸发:尘土/火花/通关彩带,寿命交给引擎 Particle 系统收尾
 vitric.fn("burst", (args, ctx) => {
   const kinds = {
-    dust:     { colors: ["#d8c8a0", "#c4b48e"],                     img: "dust.png", up: 2, spread: 3, ttl: 22, s: 0.4, light: 0 },
+    dust:     { colors: ["#d8c8a0", "#c4b48e"],                     img: "",         up: 2, spread: 3, ttl: 22, s: 0.4, light: 0 },
     spark:    { colors: ["#ffd75e", "#ffb73e", "#fff2b0"],          img: "",         up: 5, spread: 5, ttl: 28, s: 0.3, light: 1.4 },
     confetti: { colors: ["#ff9a3c", "#ffd75e", "#ffeaa0", "#ff6b3c"], img: "",       up: 9, spread: 8, ttl: 48, s: 0.35, light: 1.0 },
   };

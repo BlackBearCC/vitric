@@ -1,0 +1,6 @@
+[
+  { "id": "hero-in-tower-x", "if": [["@hero.Position.x", ">", -8.5], ["@hero.Position.x", "<", 8.5]] },
+  { "id": "hero-never-falls-out", "if": [["@hero.Position.y", ">", -10]] },
+  { "id": "hero-below-roof", "if": [["@hero.Position.y", "<", 45]] },
+  { "id": "death-counter-sane", "if": [["@hero.Score.value", ">=", 0]] }
+]

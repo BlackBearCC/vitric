@@ -12,5 +12,13 @@
     "scripts/systems.js"
   ],
   "animations": "animations.json",
-  "seed": 7
+  "seed": 7,
+  "gates": {
+    "playthroughs": [
+      { "recording": "recordings/clear.json", "must_emit": "game-won" }
+    ],
+    "assertions": "qa/asserts.json",
+    "check": true,
+    "max_ticks": 120000
+  }
 }

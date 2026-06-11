@@ -30,7 +30,8 @@
         "Sprite": {
           "w": 1.7,
           "h": 2.2,
-          "color": "#6cc6ff"
+          "color": "#6cc6ff",
+          "image": "hero-idle.png"
         },
         "Anim": {
           "clip": "idle"
@@ -52,7 +53,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#3b4252"
+          "color": "#3b4252",
+          "image": "tile.png"
         }
       }
     },
@@ -71,7 +73,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#3b4252"
+          "color": "#3b4252",
+          "image": "tile.png"
         }
       }
     },
@@ -90,7 +93,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#3b4252"
+          "color": "#3b4252",
+          "image": "tile.png"
         }
       }
     },
@@ -109,7 +113,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#3b4252"
+          "color": "#3b4252",
+          "image": "tile.png"
         }
       }
     },
@@ -128,7 +133,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#3b4252"
+          "color": "#3b4252",
+          "image": "tile.png"
         }
       }
     },
@@ -147,7 +153,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#3b4252"
+          "color": "#3b4252",
+          "image": "tile.png"
         }
       }
     },
@@ -166,7 +173,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#3b4252"
+          "color": "#3b4252",
+          "image": "tile.png"
         }
       }
     },
@@ -185,7 +193,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#3b4252"
+          "color": "#3b4252",
+          "image": "tile.png"
         }
       }
     },
@@ -204,7 +213,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -223,7 +233,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -242,7 +253,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -261,7 +273,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -280,7 +293,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -299,7 +313,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -318,7 +333,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -337,7 +353,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -356,7 +373,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -375,7 +393,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -394,7 +413,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -413,7 +433,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -432,7 +453,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -451,7 +473,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -470,7 +493,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -489,7 +513,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -508,7 +533,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -527,7 +553,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -546,7 +573,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -565,7 +593,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -584,7 +613,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -603,7 +633,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -622,7 +653,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -641,7 +673,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -660,7 +693,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -679,7 +713,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -698,7 +733,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -717,7 +753,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -736,7 +773,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -755,7 +793,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -774,7 +813,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -793,7 +833,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -812,7 +853,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -831,7 +873,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -850,7 +893,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -869,7 +913,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -888,7 +933,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -907,7 +953,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -926,7 +973,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -945,7 +993,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -964,7 +1013,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -983,7 +1033,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -1002,7 +1053,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -1021,7 +1073,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -1040,7 +1093,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1059,7 +1113,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1078,7 +1133,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1097,7 +1153,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1116,7 +1173,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1135,7 +1193,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1154,7 +1213,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1173,7 +1233,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1192,7 +1253,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1211,7 +1273,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1230,7 +1293,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1249,7 +1313,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1258,17 +1323,18 @@
       "components": {
         "Position": {
           "x": -7,
-          "y": 34.7505
+          "y": 34.75
         },
         "Collider": {
           "w": 2,
-          "h": 1.999
+          "h": 2.0
         },
         "Solid": {},
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1277,17 +1343,18 @@
       "components": {
         "Position": {
           "x": -5,
-          "y": 34.7505
+          "y": 34.75
         },
         "Collider": {
           "w": 2,
-          "h": 1.999
+          "h": 2.0
         },
         "Solid": {},
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1296,17 +1363,18 @@
       "components": {
         "Position": {
           "x": 1,
-          "y": 37.5005
+          "y": 37.5
         },
         "Collider": {
           "w": 2,
-          "h": 1.999
+          "h": 2.0
         },
         "Solid": {},
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1315,17 +1383,18 @@
       "components": {
         "Position": {
           "x": 3,
-          "y": 37.5005
+          "y": 37.5
         },
         "Collider": {
           "w": 2,
-          "h": 1.999
+          "h": 2.0
         },
         "Solid": {},
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1334,17 +1403,18 @@
       "components": {
         "Position": {
           "x": 5,
-          "y": 37.5005
+          "y": 37.5
         },
         "Collider": {
           "w": 2,
-          "h": 1.999
+          "h": 2.0
         },
         "Solid": {},
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1353,17 +1423,18 @@
       "components": {
         "Position": {
           "x": 7,
-          "y": 37.5005
+          "y": 37.5
         },
         "Collider": {
           "w": 2,
-          "h": 1.999
+          "h": 2.0
         },
         "Solid": {},
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#4f5b75"
+          "color": "#4f5b75",
+          "image": "tile.png"
         }
       }
     },
@@ -1382,7 +1453,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#5d6b89"
+          "color": "#5d6b89",
+          "image": "tile.png"
         }
       }
     },
@@ -1401,7 +1473,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#5d6b89"
+          "color": "#5d6b89",
+          "image": "tile.png"
         }
       }
     },
@@ -1420,7 +1493,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#5d6b89"
+          "color": "#5d6b89",
+          "image": "tile.png"
         }
       }
     },
@@ -1439,7 +1513,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#5d6b89"
+          "color": "#5d6b89",
+          "image": "tile.png"
         }
       }
     },
@@ -1458,7 +1533,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#5d6b89"
+          "color": "#5d6b89",
+          "image": "tile.png"
         }
       }
     },
@@ -1477,7 +1553,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#5d6b89"
+          "color": "#5d6b89",
+          "image": "tile.png"
         }
       }
     },
@@ -1496,7 +1573,8 @@
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#5d6b89"
+          "color": "#5d6b89",
+          "image": "tile.png"
         }
       }
     },
@@ -1505,17 +1583,18 @@
       "components": {
         "Position": {
           "x": -1,
-          "y": 32.0005
+          "y": 32.0
         },
         "Collider": {
           "w": 2,
-          "h": 1.999
+          "h": 2.0
         },
         "Solid": {},
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#5d6b89"
+          "color": "#5d6b89",
+          "image": "tile.png"
         }
       }
     },
@@ -1524,17 +1603,18 @@
       "components": {
         "Position": {
           "x": 3,
-          "y": 42.9995
+          "y": 43.0
         },
         "Collider": {
           "w": 2,
-          "h": 1.999
+          "h": 2.0
         },
         "Solid": {},
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -1543,17 +1623,18 @@
       "components": {
         "Position": {
           "x": 5,
-          "y": 42.9995
+          "y": 43.0
         },
         "Collider": {
           "w": 2,
-          "h": 1.999
+          "h": 2.0
         },
         "Solid": {},
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -1562,17 +1643,18 @@
       "components": {
         "Position": {
           "x": 7,
-          "y": 42.9995
+          "y": 43.0
         },
         "Collider": {
           "w": 2,
-          "h": 1.999
+          "h": 2.0
         },
         "Solid": {},
         "Sprite": {
           "w": 2,
           "h": 2,
-          "color": "#343c4e"
+          "color": "#343c4e",
+          "image": "tile.png"
         }
       }
     },
@@ -1594,7 +1676,8 @@
         "Sprite": {
           "w": 1.4,
           "h": 1.8,
-          "color": "#8a5a2e"
+          "color": "#8a5a2e",
+          "image": "brazier-off.png"
         },
         "Light": {
           "kind": "point",
@@ -1622,7 +1705,8 @@
         "Sprite": {
           "w": 1.4,
           "h": 1.8,
-          "color": "#8a5a2e"
+          "color": "#8a5a2e",
+          "image": "brazier-off.png"
         },
         "Light": {
           "kind": "point",
@@ -1650,7 +1734,8 @@
         "Sprite": {
           "w": 1.4,
           "h": 1.8,
-          "color": "#8a5a2e"
+          "color": "#8a5a2e",
+          "image": "brazier-off.png"
         },
         "Light": {
           "kind": "point",
@@ -1678,7 +1763,8 @@
         "Sprite": {
           "w": 1.4,
           "h": 1.8,
-          "color": "#8a5a2e"
+          "color": "#8a5a2e",
+          "image": "brazier-off.png"
         },
         "Light": {
           "kind": "point",
@@ -1703,7 +1789,8 @@
         "Sprite": {
           "w": 1.8,
           "h": 1.0,
-          "color": "#d04848"
+          "color": "#d04848",
+          "image": "spike.png"
         }
       }
     },
@@ -1722,7 +1809,8 @@
         "Sprite": {
           "w": 1.8,
           "h": 1.0,
-          "color": "#d04848"
+          "color": "#d04848",
+          "image": "spike.png"
         }
       }
     },
@@ -1741,7 +1829,8 @@
         "Sprite": {
           "w": 1.8,
           "h": 1.0,
-          "color": "#d04848"
+          "color": "#d04848",
+          "image": "spike.png"
         }
       }
     },
@@ -1760,7 +1849,8 @@
         "Sprite": {
           "w": 1.8,
           "h": 1.0,
-          "color": "#d04848"
+          "color": "#d04848",
+          "image": "spike.png"
         }
       }
     },
@@ -1779,7 +1869,8 @@
         "Sprite": {
           "w": 1.8,
           "h": 1.0,
-          "color": "#d04848"
+          "color": "#d04848",
+          "image": "spike.png"
         }
       }
     },
@@ -1789,7 +1880,7 @@
         "Door": {},
         "Solid": {},
         "Position": {
-          "x": 4.251,
+          "x": 4.25,
           "y": 40.25
         },
         "Collider": {
@@ -1799,7 +1890,8 @@
         "Sprite": {
           "w": 2.6,
           "h": 3.6,
-          "color": "#c9a45a"
+          "color": "#c9a45a",
+          "image": "door.png"
         }
       }
     },
