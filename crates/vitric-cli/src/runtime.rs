@@ -331,6 +331,108 @@ fn scan_sound_refs(doc: &Value, file: &str, sounds_dir: &Path, missing: &mut Vec
     }
 }
 
+/// 扫描脚本**源码文本**里的字面 .png 贴图引用，每个引用必须在素材仓库里。
+///
+/// 认的写法（真实事故原型：脚本 ctx.spawn 用了不存在的 "dust.png"，check 绿灯、
+/// 游戏跑到一半渲染硬炸）：
+/// - JS 对象字面量：`image: "dust.png"` / `image: 'dust.png'`
+/// - JSON 风格带引号的键：`"image": "dust.png"` / `'image': 'dust.png'`
+///
+/// 诚实的局限——这是对字面量的 lint，不是数据流分析：
+/// 动态拼接（`"dust_" + i + ".png"`）、变量间接引用扫不到，check 过了不等于
+/// 运行期一定有图。所以错误提示里劝"尽量用字面名"，让 lint 兜得住。
+/// 扫的是磁盘上的原文（.ts 不经转译直接扫——esbuild 只剥类型不动字符串字面量）。
+fn scan_script_image_refs(src: &str, file: &str, assets: &vitric_render::Assets, missing: &mut Vec<String>) {
+    let bytes = src.as_bytes();
+    let mut from = 0;
+    while let Some(pos) = src[from..].find("image") {
+        let start = from + pos;
+        let mut i = start + "image".len();
+        from = i; // 无论本次匹配成不成立，下一轮从 "image" 之后继续
+        // 键的左边界：前一个字符不能是标识符成分（排掉 bgimage / my_image / e.image）
+        let prev = src[..start].chars().next_back();
+        if prev.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.') {
+            continue;
+        }
+        // 键带引号（"image" / 'image'）：闭引号必须与开引号配对、紧跟键名
+        if let Some(q @ ('"' | '\'')) = prev {
+            if bytes.get(i) != Some(&(q as u8)) {
+                continue; // "image arts" 之类普通字符串内容，不是键
+            }
+            i += 1;
+        }
+        // 冒号（两侧允许空白）
+        while bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
+            i += 1;
+        }
+        if bytes.get(i) != Some(&b':') {
+            continue;
+        }
+        i += 1;
+        while bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
+            i += 1;
+        }
+        // 值必须是同引号闭合的单段字符串字面量（中途出现拼接/换行就不是字面引用）
+        let Some(&vq) = bytes.get(i) else { continue };
+        if vq != b'"' && vq != b'\'' {
+            continue;
+        }
+        let vstart = i + 1;
+        let Some(rel_end) = src[vstart..].find(vq as char) else { continue };
+        let literal = &src[vstart..vstart + rel_end];
+        if literal.is_empty() || literal.contains('\n') || literal.contains('\\') {
+            continue;
+        }
+        if !literal.to_ascii_lowercase().ends_with(".png") {
+            continue;
+        }
+        if assets.image(literal).is_none() {
+            missing.push(format!(
+                "{file} 的脚本字面引用了不存在的贴图 {literal:?}。\
+                 提示: 脚本 spawn 的贴图也要放 assets/（路径相对 assets/ 写）；\
+                 这是字面量扫描，动态拼接的引用扫不到——尽量用字面名"
+            ));
+        }
+    }
+}
+
+/// 递归扫规则文档里 `{"spawn": {"components": {"Sprite": {"image": "字面量"}}}}` 的
+/// 贴图引用（与 [`scan_sound_refs`] 同款走法）。运行时引用（self./other./event./@）
+/// 不做静态校验——和音效扫描同一条豁免规则。
+fn scan_rule_image_refs(doc: &Value, file: &str, assets: &vitric_render::Assets, missing: &mut Vec<String>) {
+    match doc {
+        Value::Object(map) => {
+            if let Some(image) = map
+                .get("spawn")
+                .and_then(|s| s.get("components"))
+                .and_then(|c| c.get("Sprite"))
+                .and_then(|s| s.get("image"))
+                .and_then(|v| v.as_str())
+            {
+                let is_ref = image.starts_with("self.")
+                    || image.starts_with("other.")
+                    || image.starts_with("event.")
+                    || image.starts_with('@');
+                if !image.is_empty() && !is_ref && assets.image(image).is_none() {
+                    missing.push(format!(
+                        "{file} 的 spawn 动作引用了不存在的贴图 {image:?}。\
+                         提示: 规则 spawn 的贴图也要放 assets/；动态引用（event.* 等）扫不到"
+                    ));
+                }
+            }
+            for v in map.values() {
+                scan_rule_image_refs(v, file, assets, missing);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                scan_rule_image_refs(v, file, assets, missing);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// `vitric check`：只验数据不开跑。返回人类/AI 可读的完整报告。
 pub fn check(dir: &Path) -> Result<Value, String> {
     let project = Project::load(dir).map_err(|r| r.to_string())?;
@@ -386,9 +488,18 @@ pub fn check(dir: &Path) -> Result<Value, String> {
     for (file, doc) in &project.rules {
         scan_sound_refs(doc, file, &dir.join("sounds"), &mut missing);
     }
+    // 贴图字面引用：脚本源码（ctx.spawn 等）与规则 spawn 动作里写死的 .png
+    // 必须在素材仓库——场景之外动态生出来的实体也不许引用不存在的图。
+    // 字面量 lint 的局限见各扫描函数的文档（动态拼接扫不到）
+    for (file, src) in &project.scripts {
+        scan_script_image_refs(src, file, &assets, &mut missing);
+    }
+    for (file, doc) in &project.rules {
+        scan_rule_image_refs(doc, file, &assets, &mut missing);
+    }
     if !missing.is_empty() {
         return Err(format!(
-            "素材/动画/音效引用校验失败:\n  {}\n现有素材: [{}]",
+            "素材/动画/音效/贴图引用校验失败:\n  {}\n现有素材: [{}]",
             missing.join("\n  "),
             assets.names().join(", ")
         ));
@@ -451,5 +562,57 @@ mod tests {
         ]));
         assert_eq!(missing.len(), 1, "只有 coin.wav 该被报: {missing:?}");
         assert!(missing[0].contains("coin.wav"));
+    }
+
+    // ---- 脚本/规则字面贴图引用扫描 ----
+
+    fn scan_src(src: &str) -> Vec<String> {
+        let mut missing = Vec::new();
+        // 空素材仓库：所有字面引用都该被报"不存在"
+        scan_script_image_refs(src, "scripts/fx.js", &vitric_render::Assets::empty(), &mut missing);
+        missing
+    }
+
+    #[test]
+    fn script_scan_flags_literal_png_in_spawn() {
+        let missing =
+            scan_src(r#"vitric.fn("boom", (ctx) => { ctx.spawn({ Sprite: { image: "dust.png", w: 1, h: 1 } }); });"#);
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert!(missing[0].contains("dust.png"), "报错带贴图名: {}", missing[0]);
+        assert!(missing[0].contains("scripts/fx.js"), "报错带来源文件: {}", missing[0]);
+        assert!(missing[0].contains("动态拼接"), "局限要写进错误提示: {}", missing[0]);
+    }
+
+    #[test]
+    fn script_scan_covers_quoted_key_and_single_quotes() {
+        // JSON 风格键 + 单引号两种写法都认
+        let missing = scan_src(r#"const a = { "image": "a.png" }; const b = { 'image': 'b.png' };"#);
+        assert_eq!(missing.len(), 2, "{missing:?}");
+        assert!(missing[0].contains("a.png") && missing[1].contains("b.png"));
+    }
+
+    #[test]
+    fn script_scan_skips_dynamic_and_non_keys() {
+        // 动态拼接是文档化局限：不报（不许误报——误报会让 agent 学会无视 check）
+        assert!(scan_src(r#"ctx.spawn({ Sprite: { image: "dust_" + i + ".png" } });"#).is_empty());
+        // 别的标识符撞上 image 子串 / 属性读取：都不是键
+        assert!(scan_src(r#"const bgimage: string = "x.png"; e.Sprite.image = takeFrom(pool);"#).is_empty());
+        // 非 .png 字面量不在本 lint 范围
+        assert!(scan_src(r#"spawn({ image: "sheet.jpg" })"#).is_empty());
+        // 已知过报边界（文本级扫描不解析语法）：注释/字符串里长得像 `image: 'x.png'`
+        // 的文本也会被当引用。锁住这个行为——它变了说明扫描器语义动了
+        assert_eq!(scan_src(r#"log("an image: 'y.png' inside a string")"#).len(), 1);
+    }
+
+    #[test]
+    fn rule_scan_flags_spawn_sprite_image_and_skips_refs() {
+        let mut missing = Vec::new();
+        let doc = json!({"do": [
+            {"spawn": {"components": {"Sprite": {"image": "puff.png", "w": 1, "h": 1}}}},
+            {"spawn": {"components": {"Sprite": {"image": "event.img", "w": 1, "h": 1}}}},
+        ]});
+        scan_rule_image_refs(&doc, "rules/fx.json", &vitric_render::Assets::empty(), &mut missing);
+        assert_eq!(missing.len(), 1, "只有字面量该被报: {missing:?}");
+        assert!(missing[0].contains("puff.png") && missing[0].contains("rules/fx.json"));
     }
 }

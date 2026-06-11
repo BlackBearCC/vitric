@@ -373,7 +373,8 @@ impl Dispatcher {
             "render/describe" => {
                 let width = params.get("width").and_then(|v| v.as_u64()).unwrap_or(320) as u32;
                 let height = params.get("height").and_then(|v| v.as_u64()).unwrap_or(240) as u32;
-                vitric_render::describe_world(&sim.world, width, height)
+                // 带上素材仓库：文字对比度测量按真贴图渲底色（缺图才退纯色近似）
+                vitric_render::describe_world_with_assets(&sim.world, width, height, &self.assets)
             }
             "render/screenshot" => {
                 let width = params.get("width").and_then(|v| v.as_u64()).unwrap_or(320) as u32;

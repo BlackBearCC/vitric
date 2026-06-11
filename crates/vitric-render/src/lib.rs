@@ -111,6 +111,12 @@ pub const NORMAL_LIGHT_XY: f64 = 0.8;
 /// GPU 路径的清屏/背景方块也用它——两条路径背景同字节。
 pub const BACKGROUND: [u8; 4] = [24, 26, 33, 255];
 
+/// 文字可读性的对比度下限（WCAG 式比值 `(L1+0.05)/(L2+0.05)`，L 为相对亮度）。
+/// 低于它 describe 给 `low-contrast-text` 警告。WCAG AA 正文要求 4.5、大字 3.0；
+/// 这里取 2.5 是刻意放宽——这是给 AI 开发者的"人眼基本读不出来"红线，
+/// 不是无障碍合规检查（误报会让 agent 学会忽略警告，比漏报更糟）。
+pub const TEXT_CONTRAST_MIN: f64 = 2.5;
+
 /// 渲染一帧：返回 RGBA8 像素（行优先，左上原点）。
 /// `tick` 只喂给屏幕抖动（[`camera_of`]）——同一世界同一 tick 渲出的字节逐位相同。
 pub fn render_world(
@@ -120,11 +126,36 @@ pub fn render_world(
     assets: &Assets,
     tick: u64,
 ) -> Result<Vec<u8>, String> {
+    let cam = camera_of(world, tick, height)?;
+    render_with(world, width, height, assets, cam, &RenderOpts::default())
+}
+
+/// 内部渲染变体的开关（对外不暴露——公开 API 只有一种"正常渲染"）。
+/// 存在的唯一理由是 [`describe_world`] 的文字对比度测量：要拿到"这条文字**不画**时
+/// 它脚下的底色"，又不能因为手头没有素材就整帧报错。
+#[derive(Default)]
+struct RenderOpts {
+    /// 跳过这一个 Text 实体不画（测它脚下的底色）。`None` = 正常画全部文字。
+    skip_text: Option<vitric_ecs::EntityId>,
+    /// 宽容贴图模式：`Sprite.image` 不在素材仓库时退化成 `Sprite.color` 纯色块
+    /// （亮度近似），而不是报错。**只给对比度测量用**——正常渲染（false）保持
+    /// "图不存在直接报错"的约定，缺图绝不静默画占位。
+    lenient_images: bool,
+}
+
+/// 渲染主体（相机已定）。[`render_world`] 用缺省 opts 走到这里——
+/// 正常渲染路径的算术与重构前逐字节相同（向后兼容由测试锁死）。
+fn render_with(
+    world: &World,
+    width: u32,
+    height: u32,
+    assets: &Assets,
+    (cam_x, cam_y, scale): (f64, f64, f64),
+    opts: &RenderOpts,
+) -> Result<Vec<u8>, String> {
     if width == 0 || height == 0 || width > 4096 || height > 4096 {
         return Err(format!("分辨率 {width}x{height} 不合法（1..=4096）"));
     }
-    let (cam_x, cam_y, scale) = camera_of(world, tick, height)?;
-
     let mut buf = vec![0u8; (width * height * 4) as usize];
     fill(&mut buf, BACKGROUND);
 
@@ -149,11 +180,17 @@ pub fn render_world(
         let half_w = sw * scale / 2.0;
         let half_h = sh * scale / 2.0;
 
-        let image_name = world
+        let mut image_name = world
             .get_field(id, "Sprite.image")
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default();
+        // 宽容贴图模式（只在对比度测量的内部渲染开）：图不在素材仓库就当纯色块画
+        // （Sprite.color，缺省白）——拿不到真像素时用色块近似亮度，总比整帧报错强。
+        // 正常渲染不走这行，缺图照旧显式报错。
+        if opts.lenient_images && !image_name.is_empty() && assets.image(&image_name).is_none() {
+            image_name = String::new();
+        }
 
         if rot == 0.0 {
             // —— 快路径：不旋转（rot 缺省/为 0）。这段逻辑不许动——
@@ -297,7 +334,16 @@ pub fn render_world(
         }
     }
 
-    draw_texts(world, &mut buf, width, height, (cam_x, cam_y, scale), assets, &mut normals)?;
+    draw_texts(
+        world,
+        &mut buf,
+        width,
+        height,
+        (cam_x, cam_y, scale),
+        assets,
+        &mut normals,
+        opts.skip_text,
+    )?;
 
     // 光照按 Ambient 实体的存在与否开关：没有 = 完全跳过（旧行为字节不变、零开销）。
     // 有 = 整帧打光——精灵/文字/背景一视同仁，HUD 想保持可读自己在旁边放盏灯
@@ -873,6 +919,8 @@ fn image_of<'a>(
 /// 挂了字体（清单 `font`）所有 Text 走矢量路径（比例字距 + 覆盖率抗锯齿）。
 /// 文字**永远直立**——`Sprite.rot` 只转精灵，不转文字（HUD 保持水平）。
 /// `normals`：文字像素清掉底下的法线（文字盖在法线精灵上时按平面打光，不继承浮雕）。
+/// `skip`：跳过这一个 Text 实体（对比度测量专用，见 [`RenderOpts`]）；`None` = 全画。
+#[allow(clippy::too_many_arguments)]
 fn draw_texts(
     world: &World,
     buf: &mut [u8],
@@ -881,8 +929,12 @@ fn draw_texts(
     (cam_x, cam_y, scale): (f64, f64, f64),
     assets: &Assets,
     normals: &mut Option<Vec<[f32; 3]>>,
+    skip: Option<vitric_ecs::EntityId>,
 ) -> Result<(), String> {
     for id in world.query(&["Position", "Text"]) {
+        if skip == Some(id) {
+            continue;
+        }
         let content = world
             .get_field(id, "Text.content")
             .ok()
@@ -1160,7 +1212,37 @@ pub fn screenshot_png(
 /// 这是 agent 的**主观察通道**——比让模型看像素更精准：
 /// 坐标是确切数字、方位是九宫格词、遮挡是明确的实体对、
 /// 视野外的东西有方向和距离。截图（screenshot）退居兜底验证。
+///
+/// 没有素材仓库的便捷入口：等价于 `describe_world_with_assets(.., &Assets::empty())`。
+/// 结构化字段与素材无关；区别只在文字对比度测量的保真度——空仓库时带贴图的精灵
+/// 退化成 `Sprite.color` 纯色块近似底色亮度（见 [`describe_world_with_assets`]）。
 pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_json::Value, String> {
+    describe_world_with_assets(world, width, height, &Assets::empty())
+}
+
+/// [`describe_world`] 的全功能版：带素材仓库，文字对比度测量按真贴图渲染。
+///
+/// 可读性警告（AI 开发者的眼睛）：屏上每条文字，把世界**少画这一条文字**渲一帧
+/// （素材宽容模式，缺图退纯色近似），取文字包围盒内的平均背景相对亮度 L_bg，
+/// 与 `Text.color` 的相对亮度 L_fg 算 WCAG 式对比度 `(max+0.05)/(min+0.05)`；
+/// 低于 [`TEXT_CONTRAST_MIN`] 就给一条 `warnings[]`（kind=`low-contrast-text`）
+/// 并在中文摘要里加一行 ⚠。真实事故原型：米色文字叠在米色卡面上，构建它的 agent
+/// "看不见"所以从没发现人眼读不出来。
+///
+/// 已知近似（这是 lint 不是色彩学）：
+/// - 文字色取原始值、底色取打光后的像素——开了光照/泛光时文字实际也会被打光，
+///   比值有偏差；阈值放宽到 2.5 已把这类偏差吃进余量；
+/// - 包围盒按未渲染的排版几何估（点阵 = 等宽字格，矢量 = layout 总宽 × 字高）；
+/// - 只测中心点在屏内的文字（describe 判"视野外"的同一条标准），视野外不渲不测；
+/// - 测量渲染用不抖的相机（describe 的语义就是不抖）。
+///
+/// 成本：每条屏上文字多渲一帧 describe 分辨率的 CPU 帧；场上没文字 = 零额外开销。
+pub fn describe_world_with_assets(
+    world: &World,
+    width: u32,
+    height: u32,
+    assets: &Assets,
+) -> Result<serde_json::Value, String> {
     use serde_json::json;
 
     if width == 0 || height == 0 {
@@ -1236,6 +1318,17 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
 
     // 屏上文字：内容本身就是语义，agent 不用 OCR 截图
     let mut texts = Vec::new();
+    // 对比度测量候选：只收中心点在屏内、有正字号的（视野外/画不出来的不渲不测）
+    struct ContrastCandidate {
+        id: vitric_ecs::EntityId,
+        content: String,
+        color: String,
+        size: f64,
+        /// 屏幕像素坐标（与绘制路径同一公式）。
+        cx: f64,
+        cy: f64,
+    }
+    let mut candidates: Vec<ContrastCandidate> = Vec::new();
     for id in world.query(&["Position", "Text"]) {
         let content = world
             .get_field(id, "Text.content")
@@ -1264,10 +1357,85 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
             let sx = width as f64 / 2.0 + dx * scale;
             let sy = height as f64 / 2.0 - dy * scale;
             entry.insert("region".into(), json!(region_word(sx / width as f64, sy / height as f64)));
+            // size 缺失/非正的文字画不出来（render 会报错/跳过），没有"底色"可言，不进对比度测量
+            let size = world.get_field(id, "Text.size").ok().and_then(Value::as_f64);
+            if let Some(size) = size.filter(|s| *s > 0.0) {
+                candidates.push(ContrastCandidate {
+                    id,
+                    content: content.clone(),
+                    color: world
+                        .get_field(id, "Text.color")
+                        .ok()
+                        .and_then(|v| v.as_str().map(String::from))
+                        .unwrap_or_else(|| "#ffffff".to_string()),
+                    size,
+                    cx: sx,
+                    cy: sy,
+                });
+            }
         } else {
             entry.insert("region".into(), json!("视野外"));
         }
         texts.push(serde_json::Value::Object(entry));
+    }
+
+    // 文字可读性检查（见函数文档）：屏上有文字才渲帧，否则零额外成本
+    let mut warnings: Vec<Value> = Vec::new();
+    let mut warning_lines: Vec<String> = Vec::new();
+    for c in &candidates {
+        // 少画这一条文字渲一帧（其余文字照画——文字叠文字时底色也算数），
+        // 相机用 describe 自己的不抖相机，素材宽容模式见 RenderOpts
+        let frame = render_with(
+            world,
+            width,
+            height,
+            assets,
+            (cam_x, cam_y, scale),
+            &RenderOpts { skip_text: Some(c.id), lenient_images: true },
+        )?;
+        // 包围盒按绘制几何估算（与 draw_texts 的两条路径镜像），裁到屏内
+        let (half_w, half_h) = match assets.font() {
+            Some(font) => {
+                let px_size = FontStore::px_size(c.size, scale);
+                let (_, total_w) = font.layout(&c.content, px_size);
+                (total_w as f64 / 2.0, px_size as f64 / 2.0)
+            }
+            None => {
+                let n = c.content.chars().count() as f64;
+                (n * c.size * scale / 2.0, c.size * scale / 2.0)
+            }
+        };
+        let x0 = (c.cx - half_w).floor().max(0.0) as i64;
+        let x1 = (c.cx + half_w).ceil().min(width as f64) as i64;
+        let y0 = (c.cy - half_h).floor().max(0.0) as i64;
+        let y1 = (c.cy + half_h).ceil().min(height as f64) as i64;
+        if x0 >= x1 || y0 >= y1 {
+            continue; // 包围盒裁完没有像素（贴边的极端情形），没东西可测
+        }
+        let mut sum = 0.0;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = ((y as u32 * width + x as u32) * 4) as usize;
+                sum += relative_luminance(&frame[i..i + 3]);
+            }
+        }
+        let l_bg = sum / ((x1 - x0) * (y1 - y0)) as f64;
+        let fg = parse_color(&c.color).map_err(|e| format!("实体 {} 的 Text.color: {e}", c.id))?;
+        let l_fg = relative_luminance(&fg[..3]);
+        let ratio = (l_bg.max(l_fg) + 0.05) / (l_bg.min(l_fg) + 0.05);
+        if ratio < TEXT_CONTRAST_MIN {
+            warnings.push(json!({
+                "kind": "low-contrast-text",
+                "entity": c.id.to_string(),
+                "content": c.content,
+                "ratio": (ratio * 100.0).round() / 100.0,
+                "hint": "文字与底色亮度太接近,人眼难读;换文字色或挪到深/浅底上",
+            }));
+            warning_lines.push(format!(
+                "⚠ 文字{:?}与底色对比度过低（{:.2}，下限 {TEXT_CONTRAST_MIN}）：人眼难读，换文字色或挪到深/浅底上",
+                c.content, ratio,
+            ));
+        }
     }
 
     // 视觉重叠（画面上谁压着谁）。已知近似：一律按**未旋转尺寸**的 AABB 判相交——
@@ -1316,6 +1484,8 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
             t["world"]["x"], t["world"]["y"],
         ));
     }
+    // 可读性警告紧跟文字行——agent 读摘要时警告就在出问题的文字旁边
+    lines.extend(warning_lines);
 
     // 光照设置：开着就让 agent 在文字层面看见全部灯（位置/半径/颜色），不用看像素猜
     let lighting = match ambient_of(world)? {
@@ -1384,7 +1554,21 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
     if let Some(b) = &bloom {
         out["bloom"] = json!({"threshold": b.threshold, "strength": b.strength});
     }
+    // 没警告就不出现 warnings 键——"没有这个键 = 没发现问题"，agent 不用扫空数组
+    if !warnings.is_empty() {
+        out["warnings"] = json!(warnings);
+    }
     Ok(out)
+}
+
+/// WCAG 相对亮度（输入 sRGB 字节的前 3 通道）：先逆 gamma 线性化再加权
+/// `L = 0.2126R + 0.7152G + 0.0722B`。对比度比值 = `(L1+0.05)/(L2+0.05)`（亮比暗）。
+fn relative_luminance(rgb: &[u8]) -> f64 {
+    let lin = |c: u8| {
+        let c = c as f64 / 255.0;
+        if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2])
 }
 
 /// 屏幕九宫格方位词（输入为 0..1 的屏幕比例坐标）。
@@ -2518,5 +2702,81 @@ mod tests {
             .unwrap();
         let err = render_world(&w, 32, 32, &Assets::empty(), 0).unwrap_err();
         assert!(err.contains("Sprite.rot"), "{err}");
+    }
+
+    // ---- 文字可读性警告（真实事故原型：米色字叠米色卡面，建造者 agent 看不见）----
+
+    /// 白底精灵 + 一条文字（位置/颜色可调）的脚手架。
+    /// 缺省相机：8 像素/单位 → 64x64 视口可见世界 ±4 单位。
+    fn world_text_on_sprite(sprite_color: &str, text_color: &str, x: f64) -> World {
+        let mut w = World::new();
+        let bg = w.spawn();
+        w.set_component(bg, "Position", json!({"x": x, "y": 0.0})).unwrap();
+        w.set_component(bg, "Sprite", json!({"w": 8.0, "h": 8.0, "color": sprite_color}))
+            .unwrap();
+        let t = w.spawn_named("hud").unwrap();
+        w.set_component(t, "Position", json!({"x": x, "y": 0.0})).unwrap();
+        w.set_component(t, "Text", json!({"content": "HP", "size": 2.0, "color": text_color}))
+            .unwrap();
+        w
+    }
+
+    #[test]
+    fn describe_warns_on_low_contrast_text() {
+        // 白字叠白底：对比度 ≈ 1，必须给 low-contrast-text 警告 + 摘要 ⚠ 行
+        let w = world_text_on_sprite("#ffffff", "#ffffff", 0.0);
+        let d = describe_world(&w, 64, 64).unwrap();
+        let warns = d["warnings"].as_array().expect("白字白底必须有 warnings");
+        assert_eq!(warns.len(), 1, "{warns:?}");
+        assert_eq!(warns[0]["kind"], json!("low-contrast-text"));
+        assert_eq!(warns[0]["content"], json!("HP"));
+        let ratio = warns[0]["ratio"].as_f64().expect("ratio 是数字");
+        assert!(ratio < TEXT_CONTRAST_MIN, "白叠白比值该接近 1，拿到 {ratio}");
+        assert!(warns[0]["hint"].as_str().unwrap().contains("人眼难读"));
+        let text = d["text"].as_str().unwrap();
+        assert!(text.contains('⚠') && text.contains("对比度过低"), "{text}");
+        // 事故原型：米色字（#f5e8cc）叠米色底也必须被抓住
+        let d = describe_world(&world_text_on_sprite("#f0e6c8", "#f5e8cc", 0.0), 64, 64).unwrap();
+        assert!(d.get("warnings").is_some(), "米色叠米色必须有警告");
+    }
+
+    #[test]
+    fn describe_no_warning_on_dark_background() {
+        // 同一条白字落在深色底（缺省背景色）上：不警告、不出现 warnings 键
+        let mut w = World::new();
+        let t = w.spawn();
+        w.set_component(t, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(t, "Text", json!({"content": "HP", "size": 2.0, "color": "#ffffff"}))
+            .unwrap();
+        let d = describe_world(&w, 64, 64).unwrap();
+        assert!(d.get("warnings").is_none(), "深底白字不该警告: {:?}", d.get("warnings"));
+        assert!(!d["text"].as_str().unwrap().contains('⚠'));
+    }
+
+    #[test]
+    fn describe_skips_contrast_check_for_offscreen_text() {
+        // 同样的白叠白搬到视野外（±4 单位之外）：不渲不测，没有警告
+        let w = world_text_on_sprite("#ffffff", "#ffffff", 100.0);
+        let d = describe_world(&w, 64, 64).unwrap();
+        assert_eq!(d["texts"][0]["region"], json!("视野外"));
+        assert!(d.get("warnings").is_none(), "视野外的文字不进对比度测量");
+    }
+
+    #[test]
+    fn describe_contrast_check_tolerates_missing_images() {
+        // 贴图不在素材仓库：对比度测量退 Sprite.color 纯色块近似，describe 不报错。
+        // （正常渲染 render_world 对缺图仍是显式报错——宽容只属于测量这条内部路径）
+        let mut w = world_text_on_sprite("#ffffff", "#ffffff", 0.0);
+        let bg = w.query(&["Sprite"])[0];
+        w.set_component(
+            bg,
+            "Sprite",
+            json!({"w": 8.0, "h": 8.0, "color": "#ffffff", "image": "ghost.png"}),
+        )
+        .unwrap();
+        assert!(render_world(&w, 64, 64, &Assets::empty(), 0).is_err(), "正常渲染缺图必须报错");
+        let d = describe_world(&w, 64, 64).unwrap();
+        let warns = d["warnings"].as_array().expect("白色块近似底下仍是白底，警告照给");
+        assert_eq!(warns[0]["kind"], json!("low-contrast-text"));
     }
 }
