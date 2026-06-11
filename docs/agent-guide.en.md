@@ -175,16 +175,23 @@ Convention components like Body/Solid: the engine recognizes the names, you defi
 
 - **The master switch is the presence of an Ambient entity.** No entity with an `Ambient` component = the lighting pass is skipped entirely (previous behavior, zero cost); one exists (first one wins) = the lighting pipeline activates and the whole frame is lit.
 - `Ambient{color}`: scene ambient base, e.g. `"#202838"` for a dark cave; `"#ffffff"` keeps unlit areas unchanged.
-- `Light{radius, color, intensity}` + `Position`: a point light. radius is in world units (light fades to zero at radius); color defaults to `"#ffffff"`, intensity to 1.0. **Hard cap: 64 lights** — exceeding it is an explicit error, never a silent truncation.
-- The formula (identical on the CPU screenshot path and the GPU window): `lit = min(ambient + Σ light_color·intensity·(1 - d/r)², 1.5)`, then `out = min(scene · lit, 1.0)`. The 1.5 ceiling allows slight over-brightening (a cheap bloom-ish pop).
+- `Light{radius, color, intensity, kind, angle, dir}`: a light source with three `kind`s (defaults to `"point"`; an unknown value is an explicit error listing the valid kinds). **Hard cap: 64 lights total across all kinds** — exceeding it is an explicit error, never a silent truncation.
+  - `"point"` (needs `Position`): radius is in world units (light fades to zero at radius); color defaults to `"#ffffff"`, intensity to 1.0. No kind field = point light = previous behavior, byte-identical output.
+  - `"spot"` (needs `Position`): all point-light fields, plus required `angle` (full cone width in degrees, 1..=360) and required `dir` (facing direction in degrees, world space, 0 = +x, counter-clockwise positive — the same angle convention as `Sprite.rot`).
+  - `"directional"`: required `dir` (the direction the light *travels*, degrees, same convention) plus color/intensity. Ignores Position/radius — the sun is infinitely far away, equally bright everywhere (dir does not enter the math yet; it will once normal maps land).
+- The formula (identical on the CPU screenshot path and the GPU window): `lit = min(ambient + Σ contributions, 1.5)`, then `out = min(scene · lit, 1.0)`. Per-light contribution: point = `light_color·intensity·(1 - d/r)²` (only when d < r); spot = the point formula times an angular falloff `t²` with `t = clamp(1 - Δθ/(angle/2), 0, 1)` (1 at cone center, 0 at cone edge; Δθ is the angle between the pixel direction and dir); directional = `light_color·intensity` (uniform). The 1.5 ceiling allows slight over-brightening (a cheap bloom-ish pop).
 - **Everything is lit uniformly** — sprites, text, background; screen-anchored HUD text is not exempt. Keep HUDs readable by placing a light nearby or raising the ambient.
 - Lighting is deterministic: it reads only component state; identical world + tick → identical bytes. `render/screenshot` includes lighting — the agent sees what the player sees.
-- With lighting active, `render/describe` adds `ambient` (color) and a `lights` array (id/name/world pos/radius/intensity/color) plus a summary line — the full lighting setup is textually observable.
+- With lighting active, `render/describe` adds `ambient` (color) and a `lights` array (id/name/kind/world pos/radius/intensity/color; spots add angle/dir, directionals add dir and omit world pos/radius) plus a summary line — the full lighting setup is textually observable.
 - **Bloom**: put a `Bloom{threshold, strength}` component on any entity (first one wins, like Ambient) to enable the full-screen bloom post-effect — bright areas haze outward into a glow halo; combined with point lights things actually *glow*. threshold ∈ [0,1]: the part of each channel above threshold·255 feeds the bloom; strength ≥ 0: additive multiplier. Both fields are required. Formula: `bright = max(scene - threshold·255, 0)`, separable box blur (3 iterations, approximates gaussian), `out = min(scene + blurred·strength, 255)`. Blur radius = viewport height / 90, floor 2 px — the halo scales with resolution. Bloom runs after lighting; no Bloom entity = the pass is skipped entirely (zero cost, byte-identical). When active, `render/describe` adds a `bloom` field plus a summary line.
 
 ```json
 {"name": "torch", "components": {"Position": {"x": 10, "y": 4},
   "Light": {"radius": 6, "color": "#ff9040", "intensity": 1.2}}}
+{"name": "beam", "components": {"Position": {"x": 0, "y": 8},
+  "Light": {"kind": "spot", "radius": 10, "angle": 50, "dir": 270, "color": "#ffffcc"}}}
+{"name": "sun", "components": {
+  "Light": {"kind": "directional", "dir": 300, "color": "#fff4e0", "intensity": 0.4}}}
 ```
 
 ## On-screen text

@@ -54,4 +54,5 @@
 - 脚本：加载失败（带文件名）/ 运行异常 / **越权写入**（writes 没声明的组件）/ spawn 未过 schema
 - 模拟：组件数据不是数字（内建运动/碰撞要求）/ 重放跑偏（报精确 tick 和期望/实际哈希）
 - 渲染：Sprite.image 不在素材库（带现有素材列表）/ 颜色格式 / 超 2048 尺寸
+- 光照：Light.kind 未知（带合法取值 point/spot/directional）/ 超 64 盏（三种 kind 合计）/ point·spot 缺 Position 或 radius ≤ 0 / spot 缺 angle·dir 或 angle 不在 1..=360 / directional 缺 dir——全部显式报错带写法示例
 - 动画：Anim.clip 未定义（带已定义片段列表）

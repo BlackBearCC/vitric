@@ -30,17 +30,34 @@
 //! - `Ambient` {"color": "#rrggbb"} — 场景环境光，挂任意实体（取第一个）。
 //!   **光照的总开关**：场上没有 Ambient 实体 = 完全不跑光照（旧行为、零开销）；
 //!   有 = 整帧（精灵/文字/背景一视同仁）按下面公式打光
-//! - `Light` {"radius", "color", "intensity"} + `Position` — 点光源。radius 世界单位
-//!   （到 radius 处衰减为零），color 缺省 "#ffffff"，intensity 缺省 1.0。上限 64 盏
+//! - `Light` {"radius", "color", "intensity", "kind", "angle", "dir"} — 光源，三种 kind
+//!   （缺省 "point"，未知值显式报错）：
+//!   * `"point"`（点光源，需要 `Position`）：radius 世界单位（到 radius 处衰减为零），
+//!     color 缺省 "#ffffff"，intensity 缺省 1.0。**不写 kind 字段 = 点光源 = 旧行为，
+//!     输出字节逐位不变（向后兼容由测试锁死）**
+//!   * `"spot"`（聚光灯，需要 `Position`）：点光源的全部字段，外加必填 `angle`
+//!     （锥角全宽，度数，1..=360）和必填 `dir`（朝向，度数，世界空间，0 = +x、
+//!     逆时针为正——和 Sprite.rot 同一个角度约定）
+//!   * `"directional"`（平行光）：必填 `dir`（光**行进**的方向，度数，约定同上）+
+//!     color/intensity。不读 Position/radius——太阳在无穷远，处处同亮。当前贡献
+//!     处处均匀 = color·intensity（dir 暂不参与计算，等法线贴图落地后才有方向感）。
+//!     三种合计上限 64 盏
 //! - `Bloom` {"threshold", "strength"} — 全屏泛光后效，挂任意实体（取第一个，同 Ambient）。
 //!   **泛光的总开关**：场上没有 Bloom 实体 = 完全不跑泛光（旧行为字节不变、零开销）。
 //!   threshold ∈ [0,1]：通道值超过 threshold·255 的部分才进泛光；strength ≥ 0：叠加倍率。
 //!   两个字段都必填（缺了/不是数字显式报错，不静默给缺省值）
 //!
 //! 光照公式（CPU 与 GPU 路径必须一致，GPU 侧在 vitric-cli gpu.rs 的 WGSL 里）：
-//!   lit = min(ambient + Σ light_color·intensity·(1 - d/r)², 1.5)   （d < r 才有贡献）
+//!   lit = min(ambient + Σ 各灯贡献, 1.5)
 //!   out = min(scene · lit, 1.0)
-//! d 是像素到灯的距离（像素空间，取景用抖动后的相机——光跟着画面走）。
+//! 各灯贡献：
+//!   point:       color·intensity·(1 - d/r)²                       （d < r 才有贡献）
+//!   spot:        color·intensity·(1 - d/r)²·t²，
+//!                t = clamp(1 - Δθ/(angle/2), 0, 1)                 （角度衰减：锥心 1、锥边 0）
+//!   directional: color·intensity                                    （处处均匀）
+//! d 是像素到灯的距离（像素空间，取景用抖动后的相机——光跟着画面走）；
+//! Δθ 是「灯指向像素的方向」与 dir 的夹角（度数语义，实现里用弧度 acos）。
+//! 角度衰减刻意用 t²（不是 smoothstep 内建公式）——CPU/GPU 两侧必须镜像同一条式子。
 //! 1.5 的上限允许轻微过曝（廉价的"泛光感"），乘回场景色后再夹回 1。
 //!
 //! 泛光公式（CPU 是真相源——截图/断言以这条路径为准；GPU 侧求视觉一致，差异见 gpu.rs）：
@@ -268,37 +285,139 @@ pub fn ambient_of(world: &World) -> Result<Option<([f64; 3], String)>, String> {
     }
 }
 
-/// 一盏点光源（`Light` + `Position` 实体的解析结果，世界坐标）。
+/// 光源种类（`Light.kind` 的解析结果）。角度字段全部是**度数**、世界空间、
+/// 0 = +x、逆时针为正——和 `Sprite.rot` 同一个约定（语义源头见 [`rot_of`]）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LightKind {
+    /// 点光源（kind 缺省）。
+    Point,
+    /// 聚光灯：`angle` = 锥角全宽（1..=360），`dir` = 朝向。
+    Spot { angle: f64, dir: f64 },
+    /// 平行光：`dir` = 光行进的方向。当前贡献处处均匀（= color·intensity），
+    /// dir 暂不参与计算——法线贴图落地后才有方向感（先把字段语义定死）。
+    Directional { dir: f64 },
+}
+
+impl LightKind {
+    /// describe / 错误信息里的字符串名（和 `Light.kind` 的合法取值一致）。
+    pub fn name(&self) -> &'static str {
+        match self {
+            LightKind::Point => "point",
+            LightKind::Spot { .. } => "spot",
+            LightKind::Directional { .. } => "directional",
+        }
+    }
+}
+
+/// 一盏光源（`Light` 实体的解析结果，世界坐标）。
 pub struct LightSource {
     pub id: vitric_ecs::EntityId,
     pub name: Option<String>,
+    /// 世界坐标。平行光不读 Position，恒为 0（占位，不参与计算）。
     pub x: f64,
     pub y: f64,
-    /// 世界单位；到 radius 处光衰减为零。
+    /// 世界单位；到 radius 处光衰减为零。平行光不读 radius，恒为 0（占位）。
     pub radius: f64,
     pub intensity: f64,
     /// 原始色串（describe 输出用）。
     pub color: String,
     /// color 解析后的 0..1 通道值（未乘 intensity）。
     pub rgb: [f64; 3],
+    pub kind: LightKind,
 }
 
-/// 收集场上全部点光源（Light+Position，槽位序）。超过 [`MAX_LIGHTS`] 直接报错。
+/// 收集场上全部光源（带 `Light` 组件的实体，槽位序）。超过 [`MAX_LIGHTS`] 直接报错
+/// （三种 kind 合计——逐像素/逐片元都要遍历全部灯，平行光也不豁免）。
+/// 校验全在这里做：kind 合法性、point/spot 必须有 Position、spot 的 angle/dir、
+/// directional 的 dir——渲染热路径里只剩纯算术。
 pub fn collect_lights(world: &World) -> Result<Vec<LightSource>, String> {
-    let ids = world.query(&["Position", "Light"]);
+    let ids = world.query(&["Light"]);
     if ids.len() > MAX_LIGHTS {
         return Err(format!(
-            "场上有 {} 个点光源（Light+Position），超过上限 {MAX_LIGHTS} 盏。\
-             提示：删减/合并灯，大面积照亮改用调亮 Ambient.color",
+            "场上有 {} 个光源（Light 组件），超过上限 {MAX_LIGHTS} 盏（三种 kind 合计）。\
+             提示：删减/合并灯，大面积照亮改用调亮 Ambient.color 或一盏平行光",
             ids.len()
         ));
     }
     ids.into_iter()
         .map(|id| {
-            let radius = num(world, id, "Light.radius")?;
-            if radius <= 0.0 {
-                return Err(format!("实体 {id} 的 Light.radius 必须 > 0，拿到 {radius}"));
-            }
+            // kind：可选文本字段，缺省 "point"（旧场景没有这个字段，行为必须不变）
+            let kind_str = match world.get_field(id, "Light.kind") {
+                Err(_) => "point".to_string(),
+                Ok(v) => v.as_str().map(String::from).ok_or_else(|| {
+                    format!(
+                        "实体 {id} 的 Light.kind 不是文本: {v}。\
+                         可选: \"point\"（点光源，缺省）/ \"spot\"（聚光灯）/ \"directional\"（平行光）"
+                    )
+                })?,
+            };
+            // spot/directional 的必填角度字段（度数）；缺了给写法提示
+            let angle_field = |field: &str, hint: &str| -> Result<f64, String> {
+                match world.get_field(id, &format!("Light.{field}")) {
+                    Err(_) => Err(format!(
+                        "实体 {id} 的 Light(kind=\"{kind_str}\") 缺 {field} 字段（度数）。{hint}"
+                    )),
+                    Ok(v) => v.as_f64().ok_or_else(|| {
+                        format!("实体 {id} 的 Light.{field} 不是数字（度数）: {v}")
+                    }),
+                }
+            };
+            let kind = match kind_str.as_str() {
+                "point" => LightKind::Point,
+                "spot" => {
+                    let angle = angle_field(
+                        "angle",
+                        "聚光灯写法: {\"kind\": \"spot\", \"radius\": 6, \"angle\": 60, \"dir\": 90}\
+                         （angle = 锥角全宽，1..=360）",
+                    )?;
+                    if !(1.0..=360.0).contains(&angle) {
+                        return Err(format!(
+                            "实体 {id} 的 Light.angle 必须在 1..=360（锥角全宽，度数），拿到 {angle}"
+                        ));
+                    }
+                    let dir = angle_field(
+                        "dir",
+                        "dir = 朝向，0 = +x 方向、逆时针为正（和 Sprite.rot 同一约定）",
+                    )?;
+                    LightKind::Spot { angle, dir }
+                }
+                "directional" => {
+                    let dir = angle_field(
+                        "dir",
+                        "平行光写法: {\"kind\": \"directional\", \"dir\": 270, \"intensity\": 0.5}\
+                         （dir = 光行进的方向，270 = 从上往下照）",
+                    )?;
+                    LightKind::Directional { dir }
+                }
+                other => {
+                    return Err(format!(
+                        "实体 {id} 的 Light.kind {other:?} 不认识。\
+                         可选: \"point\"（点光源，缺省）/ \"spot\"（聚光灯）/ \"directional\"（平行光）"
+                    ));
+                }
+            };
+            // 平行光不读 Position/radius（太阳在无穷远）；point/spot 必须有
+            let (x, y, radius) = if matches!(kind, LightKind::Directional { .. }) {
+                (0.0, 0.0, 0.0)
+            } else {
+                let axis = |a: &str| -> Result<f64, String> {
+                    match world.get_field(id, &format!("Position.{a}")) {
+                        Err(_) => Err(format!(
+                            "实体 {id} 的 Light(kind=\"{kind_str}\") 需要 Position 组件（灯在哪）。\
+                             不想给位置的全场均匀光改用 kind: \"directional\""
+                        )),
+                        Ok(v) => v
+                            .as_f64()
+                            .ok_or_else(|| format!("实体 {id} 的 Position.{a} 不是数字: {v}")),
+                    }
+                };
+                let (x, y) = (axis("x")?, axis("y")?);
+                let radius = num(world, id, "Light.radius")?;
+                if radius <= 0.0 {
+                    return Err(format!("实体 {id} 的 Light.radius 必须 > 0，拿到 {radius}"));
+                }
+                (x, y, radius)
+            };
             let intensity = world
                 .get_field(id, "Light.intensity")
                 .ok()
@@ -313,19 +432,25 @@ pub fn collect_lights(world: &World) -> Result<Vec<LightSource>, String> {
             Ok(LightSource {
                 id,
                 name: world.name_of(id).map(String::from),
-                x: num(world, id, "Position.x")?,
-                y: num(world, id, "Position.y")?,
+                x,
+                y,
                 radius,
                 intensity,
                 color,
                 rgb: [rgba[0] as f64 / 255.0, rgba[1] as f64 / 255.0, rgba[2] as f64 / 255.0],
+                kind,
             })
         })
         .collect()
 }
 
 /// 逐像素打光（CPU 路径）。公式见模块文档；GPU 侧（gpu.rs 的 WGSL）必须保持同一公式、
-/// 同一顺序（在 sRGB 字节空间上乘）。灯参数先变换到像素空间，内循环只剩距离平方比较。
+/// 同一顺序（在 sRGB 字节空间上乘）。kind 分支全部在逐像素循环**外**做掉：
+/// - 平行光处处均匀 → 一帧折进基底色一次（`base = ambient + Σ directional`），内循环零成本；
+/// - point/spot 分进两个独立列表——纯点光场景的内循环和加 kind 之前逐条指令相同
+///   （字节级向后兼容由测试锁死），聚光灯才多付角度衰减的钱。
+///
+/// 灯参数先变换到像素空间，点光内循环只剩距离平方比较。
 fn apply_lighting(
     buf: &mut [u8],
     width: u32,
@@ -342,26 +467,52 @@ fn apply_lighting(
         /// 已乘 intensity 的通道值。
         rgb: [f64; 3],
     }
-    let px_lights: Vec<PxLight> = lights
-        .iter()
-        .map(|l| {
-            let r = l.radius * scale;
-            PxLight {
-                x: (width as f64) / 2.0 + (l.x - cam_x) * scale,
-                y: (height as f64) / 2.0 - (l.y - cam_y) * scale,
-                r,
-                r2: r * r,
-                rgb: [l.rgb[0] * l.intensity, l.rgb[1] * l.intensity, l.rgb[2] * l.intensity],
+    struct PxSpot {
+        base: PxLight,
+        /// 朝向的**像素空间**单位向量（世界 dir 度数 → (cos, -sin)，y 翻转）。
+        dir: [f64; 2],
+        /// 半锥角（弧度）。collect_lights 保证 angle ∈ 1..=360 → half > 0，除法安全。
+        half: f64,
+    }
+    let to_px = |l: &LightSource| {
+        let r = l.radius * scale;
+        PxLight {
+            x: (width as f64) / 2.0 + (l.x - cam_x) * scale,
+            y: (height as f64) / 2.0 - (l.y - cam_y) * scale,
+            r,
+            r2: r * r,
+            rgb: [l.rgb[0] * l.intensity, l.rgb[1] * l.intensity, l.rgb[2] * l.intensity],
+        }
+    };
+    let mut base = ambient;
+    let mut points: Vec<PxLight> = Vec::new();
+    let mut spots: Vec<PxSpot> = Vec::new();
+    for l in lights {
+        match l.kind {
+            LightKind::Point => points.push(to_px(l)),
+            LightKind::Spot { angle, dir } => {
+                let rad = dir.to_radians();
+                spots.push(PxSpot {
+                    base: to_px(l),
+                    dir: [rad.cos(), -rad.sin()],
+                    half: (angle / 2.0).to_radians(),
+                });
             }
-        })
-        .collect();
+            // 平行光：贡献 = color·intensity 处处相同 → 折进基底，逐像素不再付钱
+            LightKind::Directional { .. } => {
+                for (c, b) in base.iter_mut().enumerate() {
+                    *b += l.rgb[c] * l.intensity;
+                }
+            }
+        }
+    }
 
     for y in 0..height {
         let fy = y as f64 + 0.5; // 像素中心——GPU 片元的 @builtin(position) 也是中心坐标
         for x in 0..width {
             let fx = x as f64 + 0.5;
-            let mut lit = ambient;
-            for l in &px_lights {
+            let mut lit = base;
+            for l in &points {
                 let dx = fx - l.x;
                 let dy = fy - l.y;
                 let d2 = dx * dx + dy * dy;
@@ -373,6 +524,26 @@ fn apply_lighting(
                 lit[0] += l.rgb[0] * f;
                 lit[1] += l.rgb[1] * f;
                 lit[2] += l.rgb[2] * f;
+            }
+            for l in &spots {
+                let dx = fx - l.base.x;
+                let dy = fy - l.base.y;
+                let d2 = dx * dx + dy * dy;
+                if d2 >= l.base.r2 {
+                    continue;
+                }
+                let d = d2.sqrt();
+                let f = 1.0 - d / l.base.r;
+                // 角度衰减（公式见模块文档，GPU 侧逐句镜像）：
+                //   Δθ = acos(像素方向 · 朝向)，t = clamp(1 - Δθ/half, 0, 1)，贡献 ×= t²
+                // d=0（像素正好在灯心）夹角无定义，约定取锥心（t=1）
+                let cosd =
+                    if d > 0.0 { ((dx * l.dir[0] + dy * l.dir[1]) / d).clamp(-1.0, 1.0) } else { 1.0 };
+                let t = (1.0 - cosd.acos() / l.half).clamp(0.0, 1.0);
+                let f = f * f * t * t;
+                lit[0] += l.base.rgb[0] * f;
+                lit[1] += l.base.rgb[1] * f;
+                lit[2] += l.base.rgb[2] * f;
             }
             let i = ((y * width + x) * 4) as usize;
             for c in 0..3 {
@@ -973,7 +1144,7 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
         Some((_, ambient_color)) => {
             let lights = collect_lights(world)?;
             lines.push(format!(
-                "光照开启：环境色 {ambient_color}，{} 盏点光源。",
+                "光照开启：环境色 {ambient_color}，{} 盏光源。",
                 lights.len()
             ));
             let lights_json: Vec<Value> = lights
@@ -984,8 +1155,22 @@ pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_js
                     if let Some(n) = &l.name {
                         entry.insert("name".into(), json!(n));
                     }
-                    entry.insert("world".into(), json!({"x": l.x, "y": l.y}));
-                    entry.insert("radius".into(), json!(l.radius));
+                    entry.insert("kind".into(), json!(l.kind.name()));
+                    // 平行光没有位置/半径（占位 0 不是真值，不输出免得误导 agent）
+                    if !matches!(l.kind, LightKind::Directional { .. }) {
+                        entry.insert("world".into(), json!({"x": l.x, "y": l.y}));
+                        entry.insert("radius".into(), json!(l.radius));
+                    }
+                    match l.kind {
+                        LightKind::Point => {}
+                        LightKind::Spot { angle, dir } => {
+                            entry.insert("angle".into(), json!(angle));
+                            entry.insert("dir".into(), json!(dir));
+                        }
+                        LightKind::Directional { dir } => {
+                            entry.insert("dir".into(), json!(dir));
+                        }
+                    }
                     entry.insert("intensity".into(), json!(l.intensity));
                     entry.insert("color".into(), json!(l.color));
                     Value::Object(entry)
@@ -1622,6 +1807,172 @@ mod tests {
         // 没 Ambient：describe 里不出现光照字段
         let d = describe_world(&World::new(), 64, 64).unwrap();
         assert!(d.get("ambient").is_none() && d.get("lights").is_none());
+    }
+
+    /// 黑环境 + 一盏可配 kind 的灯（原点）——聚光/平行光测试的公共脚手架。
+    fn world_dark_with_light(light: Value) -> World {
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
+        let lamp = w.spawn();
+        w.set_component(lamp, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(lamp, "Light", light).unwrap();
+        w
+    }
+
+    #[test]
+    fn point_light_with_explicit_kind_matches_no_kind_byte_for_byte() {
+        // kind:"point" 显式写出 = 不写 kind 的旧点光源，输出逐字节相同（快路径不变）
+        let implicit = render_world(
+            &world_dark_with_light(json!({"radius": 4.0})),
+            64,
+            64,
+            &Assets::empty(),
+            0,
+        )
+        .unwrap();
+        let explicit = render_world(
+            &world_dark_with_light(json!({"radius": 4.0, "kind": "point"})),
+            64,
+            64,
+            &Assets::empty(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(implicit, explicit);
+    }
+
+    #[test]
+    fn spot_light_lights_cone_and_rotates_with_dir() {
+        // 灯在原点（像素 32,32）、半径 4 单位 = 32px、锥角 90°、朝 +x（dir=0）。
+        // 像素 (40,32) 和 (32,40) 到灯心距离严格相等（dx/dy 对称），只差方向：
+        // (40,32) 在 +x 锥内 → 亮；(32,40) 在 -y 方向（Δθ≈87° > 半角 45°）→ 锥外全黑
+        let spot = |dir: f64| {
+            json!({"radius": 4.0, "kind": "spot", "angle": 90.0, "dir": dir, "intensity": 1.0})
+        };
+        let buf = render_world(&world_dark_with_light(spot(0.0)), 64, 64, &Assets::empty(), 0)
+            .unwrap();
+        let inside = pixel(&buf, 64, 40, 32);
+        let outside = pixel(&buf, 64, 32, 40);
+        assert_eq!(outside, [0, 0, 0, 255], "锥外同距离像素只剩环境黑");
+        assert!(inside[0] > 0 && inside[1] > 0 && inside[2] > 0, "锥内该被照亮: {inside:?}");
+        // 锥跟着 dir 转：dir=90（世界 +y = 画面上方）→ 上方亮、原来 +x 的像素掉出锥外
+        let buf = render_world(&world_dark_with_light(spot(90.0)), 64, 64, &Assets::empty(), 0)
+            .unwrap();
+        assert!(pixel(&buf, 64, 32, 24)[0] > 0, "dir=90 后画面上方在锥内");
+        assert_eq!(pixel(&buf, 64, 40, 32), [0, 0, 0, 255], "+x 方向掉出锥外（Δθ=90° > 45°）");
+        assert_eq!(pixel(&buf, 64, 32, 40), [0, 0, 0, 255], "画面下方仍是锥外");
+        // 确定性：同世界同 tick → 字节逐位相同
+        assert_eq!(
+            buf,
+            render_world(&world_dark_with_light(spot(90.0)), 64, 64, &Assets::empty(), 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn light_kind_and_spot_fields_are_validated_explicitly() {
+        let render = |light: Value| {
+            render_world(&world_dark_with_light(light), 64, 64, &Assets::empty(), 0).unwrap_err()
+        };
+        // 未知 kind：报错列出全部合法取值
+        let err = render(json!({"radius": 4.0, "kind": "cone"}));
+        assert!(
+            err.contains("point") && err.contains("spot") && err.contains("directional"),
+            "{err}"
+        );
+        // kind 不是文本
+        let err = render(json!({"radius": 4.0, "kind": 1}));
+        assert!(err.contains("Light.kind"), "{err}");
+        // 聚光灯缺 angle / 缺 dir：显式报错带写法
+        let err = render(json!({"radius": 4.0, "kind": "spot", "dir": 0.0}));
+        assert!(err.contains("angle"), "{err}");
+        let err = render(json!({"radius": 4.0, "kind": "spot", "angle": 60.0}));
+        assert!(err.contains("dir"), "{err}");
+        // angle 越界（锥角全宽 1..=360）
+        for bad in [0.5, 361.0, -90.0] {
+            let err = render(json!({"radius": 4.0, "kind": "spot", "angle": bad, "dir": 0.0}));
+            assert!(err.contains("1..=360") && err.contains("Light.angle"), "{err}");
+        }
+        // point/spot 必须有 Position（平行光才允许没有）
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
+        let lamp = w.spawn();
+        w.set_component(lamp, "Light", json!({"radius": 4.0})).unwrap();
+        let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
+        assert!(err.contains("Position") && err.contains("directional"), "{err}");
+        // 平行光也占 64 盏配额：65 盏平行光显式报错
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
+        for _ in 0..65 {
+            let l = w.spawn();
+            w.set_component(l, "Light", json!({"kind": "directional", "dir": 270.0})).unwrap();
+        }
+        let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
+        assert!(err.contains("65") && err.contains("64"), "{err}");
+    }
+
+    #[test]
+    fn directional_light_brightens_uniformly_without_position() {
+        // 平行光不需要 Position；贡献处处 = color·intensity，与离任何东西的距离无关。
+        // 黑环境 + 白色平行光 intensity 0.5 → 每个像素 = 原像素 × 0.5（精确可断言）
+        let plain = render_world(&world_one_red_sprite(), 64, 64, &Assets::empty(), 0).unwrap();
+        let mut w = world_one_red_sprite();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
+        let sun = w.spawn(); // 不挂 Position——平行光在无穷远
+        w.set_component(sun, "Light", json!({"kind": "directional", "dir": 270.0, "intensity": 0.5}))
+            .unwrap();
+        let lit = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        for i in 0..plain.len() {
+            let expect =
+                if i % 4 == 3 { 255 } else { (plain[i] as f64 * 0.5).min(255.0) as u8 };
+            assert_eq!(lit[i], expect, "字节 {i}：平行光对全画面是同一个倍率");
+        }
+        // 对照：只有黑环境（没平行光）= 全黑——亮度差全部来自平行光
+        let mut w2 = world_one_red_sprite();
+        let amb2 = w2.spawn();
+        w2.set_component(amb2, "Ambient", json!({"color": "#000000"})).unwrap();
+        let dark = render_world(&w2, 64, 64, &Assets::empty(), 0).unwrap();
+        assert_eq!(pixel(&dark, 64, 32, 32), [0, 0, 0, 255]);
+        assert_eq!(pixel(&dark, 64, 2, 2), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn describe_includes_light_kind_and_angles() {
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#202838"})).unwrap();
+        let torch = w.spawn_named("torch").unwrap();
+        w.set_component(torch, "Position", json!({"x": 1.0, "y": 2.0})).unwrap();
+        w.set_component(torch, "Light", json!({"radius": 5.0})).unwrap();
+        let beam = w.spawn_named("beam").unwrap();
+        w.set_component(beam, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(
+            beam,
+            "Light",
+            json!({"radius": 8.0, "kind": "spot", "angle": 60.0, "dir": 90.0}),
+        )
+        .unwrap();
+        let sun = w.spawn_named("sun").unwrap();
+        w.set_component(sun, "Light", json!({"kind": "directional", "dir": 270.0})).unwrap();
+        let d = describe_world(&w, 64, 64).unwrap();
+        let lights = d["lights"].as_array().unwrap();
+        assert_eq!(lights.len(), 3);
+        // 点光源：kind 总是给出（旧场景没写 kind 也报 "point"），没有 angle/dir
+        assert_eq!(lights[0]["kind"], json!("point"));
+        assert!(lights[0].get("angle").is_none() && lights[0].get("dir").is_none());
+        // 聚光灯：kind + angle + dir + world/radius
+        assert_eq!(lights[1]["kind"], json!("spot"));
+        assert_eq!(lights[1]["angle"], json!(60.0));
+        assert_eq!(lights[1]["dir"], json!(90.0));
+        assert_eq!(lights[1]["radius"], json!(8.0));
+        // 平行光：kind + dir，没有 world/radius（占位 0 不是真值，不输出）
+        assert_eq!(lights[2]["kind"], json!("directional"));
+        assert_eq!(lights[2]["dir"], json!(270.0));
+        assert!(lights[2].get("world").is_none() && lights[2].get("radius").is_none());
+        assert!(d["text"].as_str().unwrap().contains("3 盏"), "{}", d["text"]);
     }
 
     /// 泛光测试场景：中央 2x2 纯白精灵（亮部），可选挂 Bloom。

@@ -51,9 +51,15 @@ struct Vertex {
 
 /// uniform：viewport = [宽, 高, "表面是 sRGB"标志, "光照开启"标志]（z>0.5 时片元做
 /// sRGB→线性，保证最终字节和 CPU 路径的 sRGB 字节一致；w>0.5 时片元跑光照公式）。
-/// ambient = [环境色 rgb, 灯数]；每盏灯两条 vec4：位置数组 [灯心 x_px, y_px, 半径 px, 0]、
-/// 颜色数组 [r·intensity, g·intensity, b·intensity, 0]——世界→像素的变换在 CPU 端做完，
-/// shader 只算距离。vec4 数组在 WGSL uniform（std140 风格）下天然 16 字节步长，无 padding 坑。
+/// ambient = [环境色 rgb, 灯数]；每盏灯三条 vec4（打包布局，被单测锁死）：
+/// - lights_pos[i]   = [灯心 x_px, y_px, 半径 px, kind]，kind: 0=point / 1=spot / 2=directional
+///   （平行光不读位置/半径，前三位恒 0 占位）
+/// - lights_color[i] = [r·intensity, g·intensity, b·intensity, 0]（w 保留）
+/// - lights_dir[i]   = [朝向像素空间单位向量 x, y, 半锥角弧度, 0]；只有 spot 参与片元计算，
+///   directional 也打包朝向（法线贴图落地后要用，先把槽位语义定死），point 恒 0
+///
+/// 世界→像素的变换在 CPU 端做完（含 y 翻转：世界 dir 度数 → (cos, -sin)），shader 只算
+/// 距离和点积。vec4 数组在 WGSL uniform（std140 风格）下天然 16 字节步长，无 padding 坑。
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Globals {
@@ -61,6 +67,7 @@ struct Globals {
     ambient: [f32; 4],
     lights_pos: [[f32; 4]; vitric_render::MAX_LIGHTS],
     lights_color: [[f32; 4]; vitric_render::MAX_LIGHTS],
+    lights_dir: [[f32; 4]; vitric_render::MAX_LIGHTS],
 }
 
 /// 图集里一块区域的 UV 矩形 [u0, v0, u1, v1]。
@@ -248,8 +255,9 @@ const WGSL: &str = r#"
 struct Globals {
     viewport: vec4<f32>,                  // xy 视口尺寸 / z sRGB 标志 / w 光照开关
     ambient: vec4<f32>,                   // rgb 环境色 / w 灯数
-    lights_pos: array<vec4<f32>, 64>,     // xy 灯心(像素) / z 半径(像素)
+    lights_pos: array<vec4<f32>, 64>,     // xy 灯心(像素) / z 半径(像素) / w kind(0 点/1 聚/2 平行)
     lights_color: array<vec4<f32>, 64>,   // rgb 已乘 intensity
+    lights_dir: array<vec4<f32>, 64>,     // xy 朝向单位向量(像素空间) / z 半锥角(弧度)，spot 用
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
@@ -289,7 +297,9 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = textureSample(atlas_tex, atlas_samp, in.uv) * in.color;
     // 光照——与 CPU 路径同一公式（vitric-render 模块文档）：
-    //   lit = min(ambient + Σ color·intensity·(1 - d/r)², 1.5)；out = min(c·lit, 1)
+    //   lit = min(ambient + Σ 各灯贡献, 1.5)；out = min(c·lit, 1)
+    //   point: color·I·(1-d/r)²；spot: 再乘角度衰减 t²，t = clamp(1 - Δθ/半锥角, 0, 1)
+    //   （刻意用 t²，不用 smoothstep 内建——CPU 侧是同一条式子）；directional: color·I 处处均匀。
     // 必须在 sRGB 反算**之前**：CPU 是直接在 sRGB 字节上乘的，这里要在同一数值空间打光，
     // 两条路径才长一个样。in.pos 是帧缓冲像素坐标（中心 +0.5），和 CPU 的像素中心一致。
     if (globals.viewport.w > 0.5) {
@@ -297,10 +307,25 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let n = u32(globals.ambient.w);
         for (var i = 0u; i < n; i = i + 1u) {
             let lp = globals.lights_pos[i];
+            if (lp.w > 1.5) {
+                // directional：与距离无关（dir 等法线贴图落地后才参与计算）
+                lit = lit + globals.lights_color[i].rgb;
+                continue;
+            }
             let d = distance(in.pos.xy, lp.xy);
             if (d < lp.z) {
-                let f = 1.0 - d / lp.z;
-                lit = lit + globals.lights_color[i].rgb * f * f;
+                var f = (1.0 - d / lp.z) * (1.0 - d / lp.z);
+                if (lp.w > 0.5) {
+                    // spot：Δθ = acos(像素方向 · 朝向)；d=0 夹角无定义，约定锥心（t=1）
+                    let ld = globals.lights_dir[i];
+                    var cosd = 1.0;
+                    if (d > 0.0) {
+                        cosd = clamp(dot((in.pos.xy - lp.xy) / d, ld.xy), -1.0, 1.0);
+                    }
+                    let t = clamp(1.0 - acos(cosd) / ld.z, 0.0, 1.0);
+                    f = f * t * t;
+                }
+                lit = lit + globals.lights_color[i].rgb * f;
             }
         }
         lit = min(lit, vec3<f32>(1.5));
@@ -1332,18 +1357,38 @@ fn build_globals(
         g.viewport[3] = 1.0;
         g.ambient = [ambient[0] as f32, ambient[1] as f32, ambient[2] as f32, lights.len() as f32];
         for (i, l) in lights.iter().enumerate() {
-            g.lights_pos[i] = [
-                ((width as f64) / 2.0 + (l.x - cam_x) * scale) as f32,
-                ((height as f64) / 2.0 - (l.y - cam_y) * scale) as f32,
-                (l.radius * scale) as f32,
-                0.0,
-            ];
+            // 打包布局见 Globals 文档：pos.w = kind，dir = [朝向像素空间单位向量, 半锥角弧度, 0]
+            let (kind, dir_deg, half_rad) = match l.kind {
+                vitric_render::LightKind::Point => (0.0, None, 0.0),
+                vitric_render::LightKind::Spot { angle, dir } => {
+                    (1.0, Some(dir), (angle / 2.0).to_radians())
+                }
+                vitric_render::LightKind::Directional { dir } => (2.0, Some(dir), 0.0),
+            };
+            // 平行光不过世界→像素变换（占位 0 喂进变换会得到屏幕中心，污染槽位语义）——
+            // 位置/半径直接打 0，shader 在 kind 分支里根本不碰它们
+            g.lights_pos[i] = if matches!(l.kind, vitric_render::LightKind::Directional { .. }) {
+                [0.0, 0.0, 0.0, kind]
+            } else {
+                [
+                    ((width as f64) / 2.0 + (l.x - cam_x) * scale) as f32,
+                    ((height as f64) / 2.0 - (l.y - cam_y) * scale) as f32,
+                    (l.radius * scale) as f32,
+                    kind,
+                ]
+            };
             g.lights_color[i] = [
                 (l.rgb[0] * l.intensity) as f32,
                 (l.rgb[1] * l.intensity) as f32,
                 (l.rgb[2] * l.intensity) as f32,
                 0.0,
             ];
+            if let Some(dir) = dir_deg {
+                // 世界角度（度，0=+x 逆时针正）→ 像素空间单位向量：y 翻转 → (cos, -sin)，
+                // 和 CPU 路径 apply_lighting 的预计算一字不差
+                let rad = dir.to_radians();
+                g.lights_dir[i] = [rad.cos() as f32, (-rad.sin()) as f32, half_rad as f32, 0.0];
+            }
         }
     }
     Ok(g)
@@ -1890,6 +1935,42 @@ mod tests {
         assert_eq!(g.lights_color[0][2], 0.0);
         // sRGB 标志独立于光照
         assert_eq!(build_globals(&w, 64, 64, true, 0).unwrap().viewport[2], 1.0);
+        // 点光源（不写 kind）：kind 槽位 = 0，朝向数组整条为 0
+        assert_eq!(g.lights_dir[0], [0.0; 4]);
+    }
+
+    #[test]
+    fn globals_pack_spot_and_directional_kinds() {
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
+        let beam = w.spawn();
+        w.set_component(beam, "Position", json!({"x": 2.0, "y": 1.0})).unwrap();
+        w.set_component(
+            beam,
+            "Light",
+            json!({"radius": 4.0, "kind": "spot", "angle": 60.0, "dir": 90.0, "intensity": 2.0}),
+        )
+        .unwrap();
+        let sun = w.spawn(); // 平行光不需要 Position
+        w.set_component(sun, "Light", json!({"kind": "directional", "dir": 180.0, "intensity": 0.5}))
+            .unwrap();
+        let g = build_globals(&w, 64, 64, false, 0).unwrap();
+        assert_eq!(g.ambient[3], 2.0, "平行光也计入灯数");
+        // 聚光灯：位置/半径同点光源（scale=8 → 像素 (48,24)、半径 32px），kind 槽位 = 1
+        assert_eq!(g.lights_pos[0], [48.0, 24.0, 32.0, 1.0]);
+        assert_eq!(g.lights_color[0], [2.0, 2.0, 2.0, 0.0]);
+        // 朝向 dir=90°（世界 +y）→ 像素空间 (cos90, -sin90) = (0,-1)；半锥角 30° 弧度
+        assert!(g.lights_dir[0][0].abs() < 1e-6, "{:?}", g.lights_dir[0]);
+        assert_eq!(g.lights_dir[0][1], -1.0);
+        assert!((g.lights_dir[0][2] - (30f32).to_radians()).abs() < 1e-6);
+        // 平行光：位置/半径占位 0，kind 槽位 = 2，颜色已乘 intensity，朝向也打包
+        // （片元暂不读——法线贴图落地后用）
+        assert_eq!(g.lights_pos[1], [0.0, 0.0, 0.0, 2.0]);
+        assert_eq!(g.lights_color[1], [0.5, 0.5, 0.5, 0.0]);
+        assert_eq!(g.lights_dir[1][0], -1.0, "dir=180° → 像素空间 (-1, 0)");
+        assert!(g.lights_dir[1][1].abs() < 1e-6);
+        assert_eq!(g.lights_dir[1][2], 0.0, "半锥角只属于 spot");
     }
 
     #[test]
