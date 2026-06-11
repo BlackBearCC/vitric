@@ -1,0 +1,1071 @@
+{
+  "rules": [
+    {
+      "id": "boot-bgm",
+      "on": {
+        "event": "start"
+      },
+      "do": [
+        {
+          "emit": "play-music",
+          "data": {
+            "sound": "bgm.wav",
+            "volume": 0.25
+          }
+        }
+      ]
+    },
+    {
+      "id": "boot-battle",
+      "on": {
+        "event": "start"
+      },
+      "do": [
+        {
+          "call": "start-battle",
+          "with": {
+            "php": "@hero.Unit.hp",
+            "pmax": "@hero.Unit.maxhp",
+            "e0hp": "@enemy-0.Unit.hp",
+            "e0max": "@enemy-0.Unit.maxhp",
+            "e1hp": "@enemy-1.Unit.hp",
+            "e1max": "@enemy-1.Unit.maxhp"
+          }
+        }
+      ]
+    },
+    {
+      "id": "play-1",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "1",
+          "phase": "pressed"
+        }
+      },
+      "if": [
+        [
+          "@battle.Battle.phase",
+          "==",
+          "player"
+        ],
+        [
+          "@battle.Card.slot",
+          "==",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "set": "@battle.Card.slot",
+          "to": 1
+        },
+        {
+          "call": "play-card",
+          "with": {
+            "slot": 1,
+            "energy": "@battle.Battle.energy",
+            "turn": "@battle.Battle.turn",
+            "hand": "@battle.Deck.hand",
+            "draw": "@battle.Deck.draw",
+            "discard": "@battle.Deck.discard",
+            "php": "@hero.Unit.hp",
+            "pmax": "@hero.Unit.maxhp",
+            "pblock": "@hero.Unit.block",
+            "e0hp": "@enemy-0.Unit.hp",
+            "e0max": "@enemy-0.Unit.maxhp",
+            "e0block": "@enemy-0.Unit.block",
+            "e0vuln": "@enemy-0.Unit.vuln",
+            "e0ikind": "@enemy-0.Intent.kind",
+            "e0ivalue": "@enemy-0.Intent.value",
+            "e1hp": "@enemy-1.Unit.hp",
+            "e1max": "@enemy-1.Unit.maxhp",
+            "e1block": "@enemy-1.Unit.block",
+            "e1vuln": "@enemy-1.Unit.vuln",
+            "e1ikind": "@enemy-1.Intent.kind",
+            "e1ivalue": "@enemy-1.Intent.value"
+          }
+        }
+      ]
+    },
+    {
+      "id": "play-2",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "2",
+          "phase": "pressed"
+        }
+      },
+      "if": [
+        [
+          "@battle.Battle.phase",
+          "==",
+          "player"
+        ],
+        [
+          "@battle.Card.slot",
+          "==",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "set": "@battle.Card.slot",
+          "to": 2
+        },
+        {
+          "call": "play-card",
+          "with": {
+            "slot": 2,
+            "energy": "@battle.Battle.energy",
+            "turn": "@battle.Battle.turn",
+            "hand": "@battle.Deck.hand",
+            "draw": "@battle.Deck.draw",
+            "discard": "@battle.Deck.discard",
+            "php": "@hero.Unit.hp",
+            "pmax": "@hero.Unit.maxhp",
+            "pblock": "@hero.Unit.block",
+            "e0hp": "@enemy-0.Unit.hp",
+            "e0max": "@enemy-0.Unit.maxhp",
+            "e0block": "@enemy-0.Unit.block",
+            "e0vuln": "@enemy-0.Unit.vuln",
+            "e0ikind": "@enemy-0.Intent.kind",
+            "e0ivalue": "@enemy-0.Intent.value",
+            "e1hp": "@enemy-1.Unit.hp",
+            "e1max": "@enemy-1.Unit.maxhp",
+            "e1block": "@enemy-1.Unit.block",
+            "e1vuln": "@enemy-1.Unit.vuln",
+            "e1ikind": "@enemy-1.Intent.kind",
+            "e1ivalue": "@enemy-1.Intent.value"
+          }
+        }
+      ]
+    },
+    {
+      "id": "play-3",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "3",
+          "phase": "pressed"
+        }
+      },
+      "if": [
+        [
+          "@battle.Battle.phase",
+          "==",
+          "player"
+        ],
+        [
+          "@battle.Card.slot",
+          "==",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "set": "@battle.Card.slot",
+          "to": 3
+        },
+        {
+          "call": "play-card",
+          "with": {
+            "slot": 3,
+            "energy": "@battle.Battle.energy",
+            "turn": "@battle.Battle.turn",
+            "hand": "@battle.Deck.hand",
+            "draw": "@battle.Deck.draw",
+            "discard": "@battle.Deck.discard",
+            "php": "@hero.Unit.hp",
+            "pmax": "@hero.Unit.maxhp",
+            "pblock": "@hero.Unit.block",
+            "e0hp": "@enemy-0.Unit.hp",
+            "e0max": "@enemy-0.Unit.maxhp",
+            "e0block": "@enemy-0.Unit.block",
+            "e0vuln": "@enemy-0.Unit.vuln",
+            "e0ikind": "@enemy-0.Intent.kind",
+            "e0ivalue": "@enemy-0.Intent.value",
+            "e1hp": "@enemy-1.Unit.hp",
+            "e1max": "@enemy-1.Unit.maxhp",
+            "e1block": "@enemy-1.Unit.block",
+            "e1vuln": "@enemy-1.Unit.vuln",
+            "e1ikind": "@enemy-1.Intent.kind",
+            "e1ivalue": "@enemy-1.Intent.value"
+          }
+        }
+      ]
+    },
+    {
+      "id": "play-4",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "4",
+          "phase": "pressed"
+        }
+      },
+      "if": [
+        [
+          "@battle.Battle.phase",
+          "==",
+          "player"
+        ],
+        [
+          "@battle.Card.slot",
+          "==",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "set": "@battle.Card.slot",
+          "to": 4
+        },
+        {
+          "call": "play-card",
+          "with": {
+            "slot": 4,
+            "energy": "@battle.Battle.energy",
+            "turn": "@battle.Battle.turn",
+            "hand": "@battle.Deck.hand",
+            "draw": "@battle.Deck.draw",
+            "discard": "@battle.Deck.discard",
+            "php": "@hero.Unit.hp",
+            "pmax": "@hero.Unit.maxhp",
+            "pblock": "@hero.Unit.block",
+            "e0hp": "@enemy-0.Unit.hp",
+            "e0max": "@enemy-0.Unit.maxhp",
+            "e0block": "@enemy-0.Unit.block",
+            "e0vuln": "@enemy-0.Unit.vuln",
+            "e0ikind": "@enemy-0.Intent.kind",
+            "e0ivalue": "@enemy-0.Intent.value",
+            "e1hp": "@enemy-1.Unit.hp",
+            "e1max": "@enemy-1.Unit.maxhp",
+            "e1block": "@enemy-1.Unit.block",
+            "e1vuln": "@enemy-1.Unit.vuln",
+            "e1ikind": "@enemy-1.Intent.kind",
+            "e1ivalue": "@enemy-1.Intent.value"
+          }
+        }
+      ]
+    },
+    {
+      "id": "play-5",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "5",
+          "phase": "pressed"
+        }
+      },
+      "if": [
+        [
+          "@battle.Battle.phase",
+          "==",
+          "player"
+        ],
+        [
+          "@battle.Card.slot",
+          "==",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "set": "@battle.Card.slot",
+          "to": 5
+        },
+        {
+          "call": "play-card",
+          "with": {
+            "slot": 5,
+            "energy": "@battle.Battle.energy",
+            "turn": "@battle.Battle.turn",
+            "hand": "@battle.Deck.hand",
+            "draw": "@battle.Deck.draw",
+            "discard": "@battle.Deck.discard",
+            "php": "@hero.Unit.hp",
+            "pmax": "@hero.Unit.maxhp",
+            "pblock": "@hero.Unit.block",
+            "e0hp": "@enemy-0.Unit.hp",
+            "e0max": "@enemy-0.Unit.maxhp",
+            "e0block": "@enemy-0.Unit.block",
+            "e0vuln": "@enemy-0.Unit.vuln",
+            "e0ikind": "@enemy-0.Intent.kind",
+            "e0ivalue": "@enemy-0.Intent.value",
+            "e1hp": "@enemy-1.Unit.hp",
+            "e1max": "@enemy-1.Unit.maxhp",
+            "e1block": "@enemy-1.Unit.block",
+            "e1vuln": "@enemy-1.Unit.vuln",
+            "e1ikind": "@enemy-1.Intent.kind",
+            "e1ivalue": "@enemy-1.Intent.value"
+          }
+        }
+      ]
+    },
+    {
+      "id": "end-turn-key",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "e",
+          "phase": "pressed"
+        }
+      },
+      "if": [
+        [
+          "@battle.Battle.phase",
+          "==",
+          "player"
+        ],
+        [
+          "@battle.Card.slot",
+          "==",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "set": "@battle.Card.slot",
+          "to": 6
+        },
+        {
+          "call": "end-turn",
+          "with": {
+            "turn": "@battle.Battle.turn",
+            "hand": "@battle.Deck.hand",
+            "draw": "@battle.Deck.draw",
+            "discard": "@battle.Deck.discard",
+            "e0hp": "@enemy-0.Unit.hp",
+            "e0max": "@enemy-0.Unit.maxhp",
+            "e0block": "@enemy-0.Unit.block",
+            "e0vuln": "@enemy-0.Unit.vuln",
+            "e0ikind": "@enemy-0.Intent.kind",
+            "e0ivalue": "@enemy-0.Intent.value",
+            "e1hp": "@enemy-1.Unit.hp",
+            "e1max": "@enemy-1.Unit.maxhp",
+            "e1block": "@enemy-1.Unit.block",
+            "e1vuln": "@enemy-1.Unit.vuln",
+            "e1ikind": "@enemy-1.Intent.kind",
+            "e1ivalue": "@enemy-1.Intent.value"
+          }
+        }
+      ]
+    },
+    {
+      "id": "apply-battle",
+      "on": {
+        "event": "sync-battle"
+      },
+      "do": [
+        {
+          "set": "@battle.Battle.phase",
+          "to": "event.phase"
+        },
+        {
+          "set": "@battle.Battle.energy",
+          "to": "event.energy"
+        },
+        {
+          "set": "@battle.Battle.turn",
+          "to": "event.turn"
+        },
+        {
+          "set": "@battle.Card.slot",
+          "to": "event.slot"
+        },
+        {
+          "set": "@hud-energy.Text.content",
+          "to": "event.etext"
+        },
+        {
+          "set": "@hud-turn.Text.content",
+          "to": "event.ttext"
+        }
+      ]
+    },
+    {
+      "id": "apply-deck",
+      "on": {
+        "event": "sync-deck"
+      },
+      "do": [
+        {
+          "set": "@battle.Deck.draw",
+          "to": "event.draw"
+        },
+        {
+          "set": "@battle.Deck.discard",
+          "to": "event.discard"
+        },
+        {
+          "set": "@battle.Deck.hand",
+          "to": "event.hand"
+        }
+      ]
+    },
+    {
+      "id": "apply-player",
+      "on": {
+        "event": "sync-player"
+      },
+      "do": [
+        {
+          "set": "@hero.Unit.hp",
+          "to": "event.hp"
+        },
+        {
+          "set": "@hero.Unit.block",
+          "to": "event.block"
+        },
+        {
+          "set": "@hud-hp.Text.content",
+          "to": "event.hptext"
+        }
+      ]
+    },
+    {
+      "id": "apply-enemy-0",
+      "on": {
+        "event": "sync-enemy-0"
+      },
+      "do": [
+        {
+          "set": "@enemy-0.Unit.hp",
+          "to": "event.hp"
+        },
+        {
+          "set": "@enemy-0.Unit.block",
+          "to": "event.block"
+        },
+        {
+          "set": "@enemy-0.Unit.vuln",
+          "to": "event.vuln"
+        },
+        {
+          "set": "@enemy-0.Intent.kind",
+          "to": "event.ikind"
+        },
+        {
+          "set": "@enemy-0.Intent.value",
+          "to": "event.ivalue"
+        },
+        {
+          "set": "@enemy-0-hp.Text.content",
+          "to": "event.hptext"
+        },
+        {
+          "set": "@enemy-0-intent.Text.content",
+          "to": "event.itext"
+        }
+      ]
+    },
+    {
+      "id": "apply-enemy-1",
+      "on": {
+        "event": "sync-enemy-1"
+      },
+      "do": [
+        {
+          "set": "@enemy-1.Unit.hp",
+          "to": "event.hp"
+        },
+        {
+          "set": "@enemy-1.Unit.block",
+          "to": "event.block"
+        },
+        {
+          "set": "@enemy-1.Unit.vuln",
+          "to": "event.vuln"
+        },
+        {
+          "set": "@enemy-1.Intent.kind",
+          "to": "event.ikind"
+        },
+        {
+          "set": "@enemy-1.Intent.value",
+          "to": "event.ivalue"
+        },
+        {
+          "set": "@enemy-1-hp.Text.content",
+          "to": "event.hptext"
+        },
+        {
+          "set": "@enemy-1-intent.Text.content",
+          "to": "event.itext"
+        }
+      ]
+    },
+    {
+      "id": "apply-hand",
+      "on": {
+        "event": "hand-sync"
+      },
+      "do": [
+        {
+          "set": "@slot-1.Card.name",
+          "to": "event.n1"
+        },
+        {
+          "set": "@slot-1-text.Text.content",
+          "to": "event.s1"
+        },
+        {
+          "set": "@slot-1-cost.Text.content",
+          "to": "event.o1"
+        },
+        {
+          "set": "@slot-1.Sprite.color",
+          "to": "event.c1"
+        },
+        {
+          "set": "@slot-2.Card.name",
+          "to": "event.n2"
+        },
+        {
+          "set": "@slot-2-text.Text.content",
+          "to": "event.s2"
+        },
+        {
+          "set": "@slot-2-cost.Text.content",
+          "to": "event.o2"
+        },
+        {
+          "set": "@slot-2.Sprite.color",
+          "to": "event.c2"
+        },
+        {
+          "set": "@slot-3.Card.name",
+          "to": "event.n3"
+        },
+        {
+          "set": "@slot-3-text.Text.content",
+          "to": "event.s3"
+        },
+        {
+          "set": "@slot-3-cost.Text.content",
+          "to": "event.o3"
+        },
+        {
+          "set": "@slot-3.Sprite.color",
+          "to": "event.c3"
+        },
+        {
+          "set": "@slot-4.Card.name",
+          "to": "event.n4"
+        },
+        {
+          "set": "@slot-4-text.Text.content",
+          "to": "event.s4"
+        },
+        {
+          "set": "@slot-4-cost.Text.content",
+          "to": "event.o4"
+        },
+        {
+          "set": "@slot-4.Sprite.color",
+          "to": "event.c4"
+        },
+        {
+          "set": "@slot-5.Card.name",
+          "to": "event.n5"
+        },
+        {
+          "set": "@slot-5-text.Text.content",
+          "to": "event.s5"
+        },
+        {
+          "set": "@slot-5-cost.Text.content",
+          "to": "event.o5"
+        },
+        {
+          "set": "@slot-5.Sprite.color",
+          "to": "event.c5"
+        }
+      ]
+    },
+    {
+      "id": "enemy-0-act",
+      "on": {
+        "event": "enemy-act-req",
+        "filter": {
+          "n": 0
+        }
+      },
+      "if": [
+        [
+          "@enemy-0.Unit.hp",
+          ">",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "call": "enemy-act",
+          "with": {
+            "n": 0,
+            "kind": "@enemy-0.Intent.kind",
+            "value": "@enemy-0.Intent.value",
+            "turn": "@battle.Battle.turn",
+            "php": "@hero.Unit.hp",
+            "pmax": "@hero.Unit.maxhp",
+            "pblock": "@hero.Unit.block",
+            "ehp": "@enemy-0.Unit.hp",
+            "emax": "@enemy-0.Unit.maxhp",
+            "eblock": "@enemy-0.Unit.block",
+            "evuln": "@enemy-0.Unit.vuln"
+          }
+        }
+      ]
+    },
+    {
+      "id": "enemy-0-skip",
+      "on": {
+        "event": "enemy-act-req",
+        "filter": {
+          "n": 0
+        }
+      },
+      "if": [
+        [
+          "@enemy-0.Unit.hp",
+          "<=",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "emit": "enemy-act-req",
+          "data": {
+            "n": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "enemy-1-act",
+      "on": {
+        "event": "enemy-act-req",
+        "filter": {
+          "n": 1
+        }
+      },
+      "if": [
+        [
+          "@enemy-1.Unit.hp",
+          ">",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "call": "enemy-act",
+          "with": {
+            "n": 1,
+            "kind": "@enemy-1.Intent.kind",
+            "value": "@enemy-1.Intent.value",
+            "turn": "@battle.Battle.turn",
+            "php": "@hero.Unit.hp",
+            "pmax": "@hero.Unit.maxhp",
+            "pblock": "@hero.Unit.block",
+            "ehp": "@enemy-1.Unit.hp",
+            "emax": "@enemy-1.Unit.maxhp",
+            "eblock": "@enemy-1.Unit.block",
+            "evuln": "@enemy-1.Unit.vuln"
+          }
+        }
+      ]
+    },
+    {
+      "id": "enemy-1-skip",
+      "on": {
+        "event": "enemy-act-req",
+        "filter": {
+          "n": 1
+        }
+      },
+      "if": [
+        [
+          "@enemy-1.Unit.hp",
+          "<=",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "emit": "player-turn-req",
+          "data": {}
+        }
+      ]
+    },
+    {
+      "id": "new-turn",
+      "on": {
+        "event": "player-turn-req"
+      },
+      "do": [
+        {
+          "call": "begin-turn",
+          "with": {
+            "turn": "@battle.Battle.turn",
+            "draw": "@battle.Deck.draw",
+            "discard": "@battle.Deck.discard",
+            "php": "@hero.Unit.hp",
+            "pmax": "@hero.Unit.maxhp",
+            "e0hp": "@enemy-0.Unit.hp",
+            "e0max": "@enemy-0.Unit.maxhp",
+            "e0block": "@enemy-0.Unit.block",
+            "e0vuln": "@enemy-0.Unit.vuln",
+            "e1hp": "@enemy-1.Unit.hp",
+            "e1max": "@enemy-1.Unit.maxhp",
+            "e1block": "@enemy-1.Unit.block",
+            "e1vuln": "@enemy-1.Unit.vuln"
+          }
+        }
+      ]
+    },
+    {
+      "id": "fx-card",
+      "on": {
+        "event": "card-played"
+      },
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "card.wav",
+            "volume": 0.7
+          }
+        }
+      ]
+    },
+    {
+      "id": "fx-reject",
+      "on": {
+        "event": "card-rejected"
+      },
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "block.wav",
+            "volume": 0.25
+          }
+        }
+      ]
+    },
+    {
+      "id": "fx-dmg-player",
+      "on": {
+        "event": "damaged",
+        "filter": {
+          "target": "player"
+        }
+      },
+      "do": [
+        {
+          "call": "burst",
+          "with": {
+            "x": "@hero.Position.x",
+            "y": "@hero.Position.y",
+            "kind": "hit",
+            "n": 12
+          }
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "hit.wav",
+            "volume": 0.85
+          }
+        }
+      ]
+    },
+    {
+      "id": "fx-shake-player",
+      "on": {
+        "event": "damaged",
+        "filter": {
+          "target": "player"
+        }
+      },
+      "if": [
+        [
+          "@camera.Shake",
+          "exists"
+        ]
+      ],
+      "do": [
+        {
+          "set": "@camera.Shake.amplitude",
+          "to": 0.6
+        }
+      ]
+    },
+    {
+      "id": "fx-block-player",
+      "on": {
+        "event": "blocked",
+        "filter": {
+          "target": "player"
+        }
+      },
+      "do": [
+        {
+          "call": "burst",
+          "with": {
+            "x": "@hero.Position.x",
+            "y": "@hero.Position.y",
+            "kind": "block",
+            "n": 8
+          }
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "block.wav",
+            "volume": 0.7
+          }
+        }
+      ]
+    },
+    {
+      "id": "fx-dmg-enemy-0",
+      "on": {
+        "event": "damaged",
+        "filter": {
+          "target": "enemy-0"
+        }
+      },
+      "do": [
+        {
+          "call": "burst",
+          "with": {
+            "x": "@enemy-0.Position.x",
+            "y": "@enemy-0.Position.y",
+            "kind": "hit",
+            "n": 10
+          }
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "hit.wav",
+            "volume": 0.85
+          }
+        }
+      ]
+    },
+    {
+      "id": "fx-shake-enemy-0",
+      "on": {
+        "event": "damaged",
+        "filter": {
+          "target": "enemy-0"
+        }
+      },
+      "if": [
+        [
+          "@camera.Shake",
+          "exists"
+        ]
+      ],
+      "do": [
+        {
+          "set": "@camera.Shake.amplitude",
+          "to": 0.35
+        }
+      ]
+    },
+    {
+      "id": "fx-block-enemy-0",
+      "on": {
+        "event": "blocked",
+        "filter": {
+          "target": "enemy-0"
+        }
+      },
+      "do": [
+        {
+          "call": "burst",
+          "with": {
+            "x": "@enemy-0.Position.x",
+            "y": "@enemy-0.Position.y",
+            "kind": "block",
+            "n": 8
+          }
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "block.wav",
+            "volume": 0.7
+          }
+        }
+      ]
+    },
+    {
+      "id": "fx-dmg-enemy-1",
+      "on": {
+        "event": "damaged",
+        "filter": {
+          "target": "enemy-1"
+        }
+      },
+      "do": [
+        {
+          "call": "burst",
+          "with": {
+            "x": "@enemy-1.Position.x",
+            "y": "@enemy-1.Position.y",
+            "kind": "hit",
+            "n": 10
+          }
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "hit.wav",
+            "volume": 0.85
+          }
+        }
+      ]
+    },
+    {
+      "id": "fx-shake-enemy-1",
+      "on": {
+        "event": "damaged",
+        "filter": {
+          "target": "enemy-1"
+        }
+      },
+      "if": [
+        [
+          "@camera.Shake",
+          "exists"
+        ]
+      ],
+      "do": [
+        {
+          "set": "@camera.Shake.amplitude",
+          "to": 0.35
+        }
+      ]
+    },
+    {
+      "id": "fx-block-enemy-1",
+      "on": {
+        "event": "blocked",
+        "filter": {
+          "target": "enemy-1"
+        }
+      },
+      "do": [
+        {
+          "call": "burst",
+          "with": {
+            "x": "@enemy-1.Position.x",
+            "y": "@enemy-1.Position.y",
+            "kind": "block",
+            "n": 8
+          }
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "block.wav",
+            "volume": 0.7
+          }
+        }
+      ]
+    },
+    {
+      "id": "fx-won",
+      "on": {
+        "event": "battle-won"
+      },
+      "do": [
+        {
+          "set": "@hud-msg.Text.content",
+          "to": "VICTORY!"
+        },
+        {
+          "call": "burst",
+          "with": {
+            "x": 0,
+            "y": 0,
+            "kind": "confetti",
+            "n": 40
+          }
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "win.wav",
+            "volume": 0.9
+          }
+        }
+      ]
+    },
+    {
+      "id": "fx-shake-won",
+      "on": {
+        "event": "battle-won"
+      },
+      "if": [
+        [
+          "@camera.Shake",
+          "exists"
+        ]
+      ],
+      "do": [
+        {
+          "set": "@camera.Shake.amplitude",
+          "to": 0.5
+        }
+      ]
+    },
+    {
+      "id": "fx-lost",
+      "on": {
+        "event": "battle-lost"
+      },
+      "do": [
+        {
+          "set": "@hud-msg.Text.content",
+          "to": "DEFEAT"
+        },
+        {
+          "emit": "stop-music",
+          "data": {}
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "lose.wav",
+            "volume": 0.9
+          }
+        }
+      ]
+    },
+    {
+      "id": "fx-shake-lost",
+      "on": {
+        "event": "battle-lost"
+      },
+      "if": [
+        [
+          "@camera.Shake",
+          "exists"
+        ]
+      ],
+      "do": [
+        {
+          "set": "@camera.Shake.amplitude",
+          "to": 1.0
+        }
+      ]
+    }
+  ]
+}

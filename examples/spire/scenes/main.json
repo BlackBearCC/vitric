@@ -1,0 +1,587 @@
+{
+  "entities": [
+    {
+      "name": "wall-back",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 1.5
+        },
+        "Sprite": {
+          "w": 32,
+          "h": 14,
+          "color": "#171320"
+        }
+      }
+    },
+    {
+      "name": "wall-pillar-l",
+      "components": {
+        "Position": {
+          "x": -12,
+          "y": 1.5
+        },
+        "Sprite": {
+          "w": 2.4,
+          "h": 13,
+          "color": "#1d1828"
+        }
+      }
+    },
+    {
+      "name": "wall-pillar-r",
+      "components": {
+        "Position": {
+          "x": 12,
+          "y": 1.5
+        },
+        "Sprite": {
+          "w": 2.4,
+          "h": 13,
+          "color": "#1d1828"
+        }
+      }
+    },
+    {
+      "name": "floor",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": -2.2
+        },
+        "Sprite": {
+          "w": 32,
+          "h": 1.6,
+          "color": "#241f2c"
+        }
+      }
+    },
+    {
+      "name": "torch-0",
+      "components": {
+        "Position": {
+          "x": -10,
+          "y": 3
+        },
+        "Sprite": {
+          "w": 1,
+          "h": 1.6,
+          "color": "#caa15a",
+          "image": "torch.png"
+        },
+        "Light": {
+          "radius": 13,
+          "color": "#ff9a3c",
+          "intensity": 1.8
+        }
+      }
+    },
+    {
+      "name": "torch-1",
+      "components": {
+        "Position": {
+          "x": 10,
+          "y": 3
+        },
+        "Sprite": {
+          "w": 1,
+          "h": 1.6,
+          "color": "#caa15a",
+          "image": "torch.png"
+        },
+        "Light": {
+          "radius": 13,
+          "color": "#ff9a3c",
+          "intensity": 1.8
+        }
+      }
+    },
+    {
+      "name": "hero",
+      "components": {
+        "Player": {},
+        "Unit": {
+          "hp": 70,
+          "maxhp": 70,
+          "block": 0,
+          "vuln": 0
+        },
+        "Position": {
+          "x": -7,
+          "y": 0
+        },
+        "Sprite": {
+          "w": 3,
+          "h": 4,
+          "color": "#6c7a99",
+          "image": "player.png"
+        }
+      }
+    },
+    {
+      "name": "enemy-0",
+      "components": {
+        "Enemy": {
+          "n": 0
+        },
+        "Unit": {
+          "hp": 28,
+          "maxhp": 28,
+          "block": 0,
+          "vuln": 0
+        },
+        "Intent": {
+          "kind": "",
+          "value": 0
+        },
+        "Position": {
+          "x": 4,
+          "y": 0.2
+        },
+        "Sprite": {
+          "w": 2.6,
+          "h": 3.4,
+          "color": "#8a4a52",
+          "image": "enemy-0.png"
+        }
+      }
+    },
+    {
+      "name": "enemy-1",
+      "components": {
+        "Enemy": {
+          "n": 1
+        },
+        "Unit": {
+          "hp": 40,
+          "maxhp": 40,
+          "block": 0,
+          "vuln": 0
+        },
+        "Intent": {
+          "kind": "",
+          "value": 0
+        },
+        "Position": {
+          "x": 7.5,
+          "y": 0
+        },
+        "Sprite": {
+          "w": 3,
+          "h": 3.8,
+          "color": "#7a6a4a",
+          "image": "enemy-1.png"
+        }
+      }
+    },
+    {
+      "name": "battle",
+      "components": {
+        "Battle": {
+          "phase": "player",
+          "energy": 3,
+          "turn": 1
+        },
+        "Deck": {
+          "draw": [
+            "STRIKE",
+            "STRIKE",
+            "STRIKE",
+            "STRIKE",
+            "STRIKE",
+            "DEFEND",
+            "DEFEND",
+            "DEFEND",
+            "DEFEND",
+            "BASH",
+            "CLEAVE",
+            "IRON WAVE"
+          ],
+          "discard": [],
+          "hand": []
+        },
+        "Card": {
+          "name": "ctrl",
+          "slot": 0
+        }
+      }
+    },
+    {
+      "name": "slot-1",
+      "components": {
+        "Card": {
+          "name": "",
+          "slot": 1
+        },
+        "Position": {
+          "x": -5,
+          "y": -6
+        },
+        "Sprite": {
+          "w": 2.2,
+          "h": 3,
+          "color": "#3a3442",
+          "image": "card.png"
+        }
+      }
+    },
+    {
+      "name": "slot-2",
+      "components": {
+        "Card": {
+          "name": "",
+          "slot": 2
+        },
+        "Position": {
+          "x": -2.5,
+          "y": -6
+        },
+        "Sprite": {
+          "w": 2.2,
+          "h": 3,
+          "color": "#3a3442",
+          "image": "card.png"
+        }
+      }
+    },
+    {
+      "name": "slot-3",
+      "components": {
+        "Card": {
+          "name": "",
+          "slot": 3
+        },
+        "Position": {
+          "x": 0,
+          "y": -6
+        },
+        "Sprite": {
+          "w": 2.2,
+          "h": 3,
+          "color": "#3a3442",
+          "image": "card.png"
+        }
+      }
+    },
+    {
+      "name": "slot-4",
+      "components": {
+        "Card": {
+          "name": "",
+          "slot": 4
+        },
+        "Position": {
+          "x": 2.5,
+          "y": -6
+        },
+        "Sprite": {
+          "w": 2.2,
+          "h": 3,
+          "color": "#3a3442",
+          "image": "card.png"
+        }
+      }
+    },
+    {
+      "name": "slot-5",
+      "components": {
+        "Card": {
+          "name": "",
+          "slot": 5
+        },
+        "Position": {
+          "x": 5,
+          "y": -6
+        },
+        "Sprite": {
+          "w": 2.2,
+          "h": 3,
+          "color": "#3a3442",
+          "image": "card.png"
+        }
+      }
+    },
+    {
+      "name": "slot-1-text",
+      "components": {
+        "Position": {
+          "x": -5,
+          "y": -6.2
+        },
+        "Text": {
+          "content": "",
+          "size": 0.3,
+          "color": "#f5e8cc"
+        }
+      }
+    },
+    {
+      "name": "slot-2-text",
+      "components": {
+        "Position": {
+          "x": -2.5,
+          "y": -6.2
+        },
+        "Text": {
+          "content": "",
+          "size": 0.3,
+          "color": "#f5e8cc"
+        }
+      }
+    },
+    {
+      "name": "slot-3-text",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": -6.2
+        },
+        "Text": {
+          "content": "",
+          "size": 0.3,
+          "color": "#f5e8cc"
+        }
+      }
+    },
+    {
+      "name": "slot-4-text",
+      "components": {
+        "Position": {
+          "x": 2.5,
+          "y": -6.2
+        },
+        "Text": {
+          "content": "",
+          "size": 0.3,
+          "color": "#f5e8cc"
+        }
+      }
+    },
+    {
+      "name": "slot-5-text",
+      "components": {
+        "Position": {
+          "x": 5,
+          "y": -6.2
+        },
+        "Text": {
+          "content": "",
+          "size": 0.3,
+          "color": "#f5e8cc"
+        }
+      }
+    },
+    {
+      "name": "slot-1-cost",
+      "components": {
+        "Position": {
+          "x": -5,
+          "y": -4.8
+        },
+        "Text": {
+          "content": "",
+          "size": 0.4,
+          "color": "#f5e8cc"
+        }
+      }
+    },
+    {
+      "name": "slot-2-cost",
+      "components": {
+        "Position": {
+          "x": -2.5,
+          "y": -4.8
+        },
+        "Text": {
+          "content": "",
+          "size": 0.4,
+          "color": "#f5e8cc"
+        }
+      }
+    },
+    {
+      "name": "slot-3-cost",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": -4.8
+        },
+        "Text": {
+          "content": "",
+          "size": 0.4,
+          "color": "#f5e8cc"
+        }
+      }
+    },
+    {
+      "name": "slot-4-cost",
+      "components": {
+        "Position": {
+          "x": 2.5,
+          "y": -4.8
+        },
+        "Text": {
+          "content": "",
+          "size": 0.4,
+          "color": "#f5e8cc"
+        }
+      }
+    },
+    {
+      "name": "slot-5-cost",
+      "components": {
+        "Position": {
+          "x": 5,
+          "y": -4.8
+        },
+        "Text": {
+          "content": "",
+          "size": 0.4,
+          "color": "#f5e8cc"
+        }
+      }
+    },
+    {
+      "name": "enemy-0-hp",
+      "components": {
+        "Position": {
+          "x": 4,
+          "y": 2.5
+        },
+        "Text": {
+          "content": "HP 28/28",
+          "size": 0.45,
+          "color": "#e88a8a"
+        }
+      }
+    },
+    {
+      "name": "enemy-0-intent",
+      "components": {
+        "Position": {
+          "x": 4,
+          "y": 4.3
+        },
+        "Text": {
+          "content": "",
+          "size": 0.45,
+          "color": "#ffd75e"
+        }
+      }
+    },
+    {
+      "name": "enemy-1-hp",
+      "components": {
+        "Position": {
+          "x": 7.5,
+          "y": 2.7
+        },
+        "Text": {
+          "content": "HP 40/40",
+          "size": 0.45,
+          "color": "#e88a8a"
+        }
+      }
+    },
+    {
+      "name": "enemy-1-intent",
+      "components": {
+        "Position": {
+          "x": 7.5,
+          "y": 4.5
+        },
+        "Text": {
+          "content": "",
+          "size": 0.45,
+          "color": "#ffd75e"
+        }
+      }
+    },
+    {
+      "name": "hud-hp",
+      "components": {
+        "Position": {
+          "x": -9.8,
+          "y": -6.6
+        },
+        "Text": {
+          "content": "HP 70/70",
+          "size": 0.6,
+          "color": "#e88a8a",
+          "screen": true
+        }
+      }
+    },
+    {
+      "name": "hud-energy",
+      "components": {
+        "Position": {
+          "x": -9.8,
+          "y": -7.5
+        },
+        "Text": {
+          "content": "ENERGY 3/3",
+          "size": 0.6,
+          "color": "#ffd75e",
+          "screen": true
+        }
+      }
+    },
+    {
+      "name": "hud-turn",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 7.3
+        },
+        "Text": {
+          "content": "TURN 1",
+          "size": 0.6,
+          "color": "#b9aed0",
+          "screen": true
+        }
+      }
+    },
+    {
+      "name": "hud-msg",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 0
+        },
+        "Text": {
+          "content": "",
+          "size": 1.1,
+          "color": "#f0e6c8",
+          "screen": true
+        }
+      }
+    },
+    {
+      "name": "camera",
+      "components": {
+        "Camera": {
+          "x": 0,
+          "y": 0,
+          "view_h": 16
+        },
+        "Shake": {
+          "amplitude": 0,
+          "decay": 0.88
+        }
+      }
+    },
+    {
+      "name": "ambient",
+      "components": {
+        "Ambient": {
+          "color": "#453d55"
+        },
+        "Bloom": {
+          "threshold": 0.5,
+          "strength": 0.9
+        }
+      }
+    }
+  ]
+}
