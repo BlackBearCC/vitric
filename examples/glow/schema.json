@@ -187,6 +187,10 @@
         "color": {
           "type": "text",
           "default": "#ffffff"
+        },
+        "shadows": {
+          "type": "bool",
+          "default": false
         }
       }
     },
