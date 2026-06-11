@@ -66,3 +66,6 @@ vitric run {PROJECT_DIR} --port 6173 &     # 起进程
 | 文案 | 全量文案 describe 走查 |
 | QA | `vitric gate` 全门 PASS（录像回归走 gate）+ soak + 体验指标 |
 | 交付（机器裁决） | `vitric gate {PROJECT_DIR}` 退出 0——通关录像逐位重放 + 终局事件 + 断言全程绿 |
+
+## 再认证规则
+内容(场景/规则/脚本/素材)在拿证后改动任意一行,旧录像证书即失效——重放必然跑偏。改完必须重打通关、重录、重跑 `vitric gate`。这不是负担,是马鞍咬合的声音。
