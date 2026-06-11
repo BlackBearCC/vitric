@@ -27,9 +27,11 @@
 //!     字体里有的字形都能画（含 CJK）。矢量文字是引擎里**唯一刻意平滑**的元素：
 //!     覆盖率抗锯齿（像素风全程最近邻不变）。竖向把字身带居中到 Position。
 //!     同平台同二进制仍逐字节确定（ab_glyph 纯 Rust 栅格化）
-//! - `Ambient` {"color": "#rrggbb"} — 场景环境光，挂任意实体（取第一个）。
+//! - `Ambient` {"color": "#rrggbb", "shadows": bool} — 场景环境光，挂任意实体（取第一个）。
 //!   **光照的总开关**：场上没有 Ambient 实体 = 完全不跑光照（旧行为、零开销）；
-//!   有 = 整帧（精灵/文字/背景一视同仁）按下面公式打光
+//!   有 = 整帧（精灵/文字/背景一视同仁）按下面公式打光。
+//!   `shadows` 可选（缺省 false）：**2D 投影的开关**——false/缺省时输出字节与该
+//!   功能出现之前逐位相同（向后兼容由测试锁死）；true 时见下面"投影"一节
 //! - `Light` {"radius", "color", "intensity", "kind", "angle", "dir"} — 光源，三种 kind
 //!   （缺省 "point"，未知值显式报错）：
 //!   * `"point"`（点光源，需要 `Position`）：radius 世界单位（到 radius 处衰减为零），
@@ -59,6 +61,19 @@
 //! Δθ 是「灯指向像素的方向」与 dir 的夹角（度数语义，实现里用弧度 acos）。
 //! 角度衰减刻意用 t²（不是 smoothstep 内建公式）——CPU/GPU 两侧必须镜像同一条式子。
 //! 1.5 的上限允许轻微过曝（廉价的"泛光感"），乘回场景色后再夹回 1。
+//!
+//! 投影（`Ambient.shadows: true` 时启用，CPU 与 GPU 同一套几何）：
+//! - 遮光体 = 带 `Solid` + `Position` + `Collider` 的实体——Solid 在物理里就是
+//!   "挡"（挡停身体），开了投影后同一批实体顺便挡光，**零新增授权概念**。
+//!   上限 [`MAX_OCCLUDERS`]（256）个，超了显式报错（不静默截断）。
+//! - 逐像素逐灯：像素→灯心的线段与任何遮光体 AABB 相交（slab 法，
+//!   见 [`segment_hits_aabb`]）就把这盏灯的贡献清零（硬影，无半影）。
+//!   **例外：像素自己所在的遮光体不挡它**——不然每个 Solid 都把自己涂黑；
+//!   规则是"箱子里的像素只被**别的**箱子遮挡"。
+//! - 只有 point/spot 投影；directional 在 v1 不投影（太阳影需要按方向射线
+//!   而不是点对点线段，留给后续版本），平行光贡献照旧处处均匀。
+//! - 已知约束：灯心埋进某个遮光体时，箱外像素全部被那个箱子挡掉——
+//!   灯别放在墙里。线段几何用取景后的像素空间（同灯参数，光跟着画面走）。
 //!
 //! 法线贴图（零配置命名配对，见 [`normal_map_name`]）：
 //! - 精灵贴图 `hero.png` 在 assets/ 里有 `hero_n.png` 就自动启用——RGB 编码切线空间法线
@@ -98,6 +113,10 @@ pub const MAX_LIGHTS: usize = 64;
 
 /// 光照亮度上限：ambient + 各灯贡献之和每通道夹在这里（见模块文档的公式）。
 pub const LIGHT_CLAMP: f64 = 1.5;
+
+/// 遮光体数量上限（投影开启时）。逐像素逐灯都要扫全部遮光体——CPU 内循环和
+/// GPU uniform 数组（256 × vec4 = 4KB）同时受制于它；超了显式报错，不静默截断。
+pub const MAX_OCCLUDERS: usize = 256;
 
 /// 法线光照的光方向 z 抬升（固定值，见模块文档）：L.z = 0.6，xy 占 0.8——
 /// 单位长度由构造保证。0.6 是审美选择：平面像素在灯正下仍有六成贡献，浮雕感和
@@ -349,6 +368,9 @@ fn render_with(
     // 有 = 整帧打光——精灵/文字/背景一视同仁，HUD 想保持可读自己在旁边放盏灯
     if let Some((ambient, _)) = ambient {
         let lights = collect_lights(world)?;
+        // 遮光体只在投影开启时收集——关着（缺省）传空列表，逐像素循环里
+        // 空列表分支不改任何算术，输出字节与投影功能出现之前逐位相同（测试锁死）
+        let occluders = if shadows_of(world)? { collect_occluders(world)? } else { Vec::new() };
         apply_lighting(
             &mut buf,
             width,
@@ -356,6 +378,7 @@ fn render_with(
             (cam_x, cam_y, scale),
             ambient,
             &lights,
+            &occluders,
             normals.as_deref(),
         );
     }
@@ -391,6 +414,97 @@ pub fn ambient_of(world: &World) -> Result<Option<([f64; 3], String)>, String> {
             )))
         }
     }
+}
+
+/// 投影开关：第一个 `Ambient` 实体上的可选 `shadows` 字段（bool）。
+/// 缺省 false = 不投影 = 旧行为字节不变（向后兼容由测试锁死）；
+/// 字段在但不是 bool → 显式报错（写错类型静默当 false 比报错更难排查）。
+/// 场上没有 Ambient（光照整体关闭）时恒为 false。
+pub fn shadows_of(world: &World) -> Result<bool, String> {
+    match world.query(&["Ambient"]).first() {
+        None => Ok(false),
+        Some(&id) => match world.get_field(id, "Ambient.shadows") {
+            Err(_) => Ok(false),
+            Ok(v) => v.as_bool().ok_or_else(|| {
+                format!(
+                    "实体 {id} 的 Ambient.shadows 不是 bool: {v}。\
+                     写法: {{\"color\": \"#202838\", \"shadows\": true}}；不想要投影就删掉该字段"
+                )
+            }),
+        },
+    }
+}
+
+/// 一个遮光体（`Solid` + `Position` + `Collider` 实体的解析结果，世界坐标）：
+/// 中心 (x, y) + 宽高 (w, h) 的 AABB——和物理挡停用的是同一个碰撞盒，
+/// "挡身体的东西就挡光"，不引入第二套遮挡数据。
+pub struct Occluder {
+    pub id: vitric_ecs::EntityId,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// 收集场上全部遮光体（带 Solid+Position+Collider 的实体，槽位序）。
+/// 只在投影开启（[`shadows_of`] 为 true）时调用；超过 [`MAX_OCCLUDERS`] 显式报错。
+/// 字段校验全在这里做（Collider.w/h、Position.x/y 必须是数字），热路径只剩纯算术。
+pub fn collect_occluders(world: &World) -> Result<Vec<Occluder>, String> {
+    let ids = world.query(&["Solid", "Position", "Collider"]);
+    if ids.len() > MAX_OCCLUDERS {
+        return Err(format!(
+            "场上有 {} 个遮光体（Solid+Position+Collider），超过投影上限 {MAX_OCCLUDERS} 个。\
+             提示：合并相邻的 Solid（一面长墙一个实体），或关掉 Ambient.shadows",
+            ids.len()
+        ));
+    }
+    ids.into_iter()
+        .map(|id| {
+            Ok(Occluder {
+                id,
+                x: num(world, id, "Position.x")?,
+                y: num(world, id, "Position.y")?,
+                w: num(world, id, "Collider.w")?,
+                h: num(world, id, "Collider.h")?,
+            })
+        })
+        .collect()
+}
+
+/// 线段 (px,py)→(qx,qy) 与 AABB [x0..x1, y0..y1] 相交判定（slab 法）。
+/// 轴平行（分量差 < 1e-12）的轴退化成"起点必须落在该轴 slab 内"，不做除法——
+/// 除以接近零的数会算出 ±inf，min/max 链上 inf 的语义在 CPU(f64) 和 GPU(f32)
+/// 不保证一致，显式分支两侧才镜像得起来。GPU 侧（gpu.rs WGSL 的 shadowed）逐句同构。
+fn segment_hits_aabb(
+    (px, py): (f64, f64),
+    (qx, qy): (f64, f64),
+    (x0, y0, x1, y1): (f64, f64, f64, f64),
+) -> bool {
+    let dx = qx - px;
+    let dy = qy - py;
+    let mut tmin = 0.0f64;
+    let mut tmax = 1.0f64;
+    if dx.abs() < 1e-12 {
+        if px < x0 || px > x1 {
+            return false;
+        }
+    } else {
+        let t1 = (x0 - px) / dx;
+        let t2 = (x1 - px) / dx;
+        tmin = tmin.max(t1.min(t2));
+        tmax = tmax.min(t1.max(t2));
+    }
+    if dy.abs() < 1e-12 {
+        if py < y0 || py > y1 {
+            return false;
+        }
+    } else {
+        let t1 = (y0 - py) / dy;
+        let t2 = (y1 - py) / dy;
+        tmin = tmin.max(t1.min(t2));
+        tmax = tmax.min(t1.max(t2));
+    }
+    tmax >= tmin
 }
 
 /// 光源种类（`Light.kind` 的解析结果）。角度字段全部是**度数**、世界空间、
@@ -563,6 +677,11 @@ pub fn collect_lights(world: &World) -> Result<Vec<LightSource>, String> {
 /// `normals`：每帧法线缓冲（哨兵零向量 = 没有法线）。有法线的像素各灯贡献额外乘
 /// `max(dot(N, L), 0)`，平行光也按 dir 算方向（不再折进基底）；哨兵像素走上面那条
 /// 老路径，**输出字节逐位不变**。`None` = 整帧没有法线（等价全哨兵，但少一次查表）。
+///
+/// `occluders`：投影的遮光体（空 = 不投影 = 算术逐位不变）。point/spot 在距离判定
+/// 通过后再做线段遮挡测试（先比距离再扫箱子——半径外的像素一个箱子都不用碰）；
+/// directional 不投影（v1，见模块文档）。
+#[allow(clippy::too_many_arguments)]
 fn apply_lighting(
     buf: &mut [u8],
     width: u32,
@@ -570,6 +689,7 @@ fn apply_lighting(
     (cam_x, cam_y, scale): (f64, f64, f64),
     ambient: [f64; 3],
     lights: &[LightSource],
+    occluders: &[Occluder],
     normals: Option<&[[f32; 3]]>,
 ) {
     struct PxLight {
@@ -637,6 +757,26 @@ fn apply_lighting(
         }
     }
 
+    // 遮光体世界 AABB → 像素空间 [x0, y0, x1, y1]（同灯参数：取景含抖动，光跟画面走）。
+    // 投影关闭时这里是空列表——下面 blocked 的循环零次执行，老路径算术一字不动。
+    let boxes: Vec<(f64, f64, f64, f64)> = occluders
+        .iter()
+        .map(|o| {
+            let cx = (width as f64) / 2.0 + (o.x - cam_x) * scale;
+            let cy = (height as f64) / 2.0 - (o.y - cam_y) * scale;
+            let (hw, hh) = (o.w * scale / 2.0, o.h * scale / 2.0);
+            (cx - hw, cy - hh, cx + hw, cy + hh)
+        })
+        .collect();
+    // 像素 (fx,fy) 到灯心 (lx,ly) 的线段是否被某个遮光体挡住。
+    // 像素自己所在的箱子跳过（规则：箱子里的像素只被别的箱子遮挡，不自压成黑块）。
+    let blocked = |fx: f64, fy: f64, lx: f64, ly: f64| -> bool {
+        boxes.iter().any(|&(x0, y0, x1, y1)| {
+            let inside = fx >= x0 && fx <= x1 && fy >= y0 && fy <= y1;
+            !inside && segment_hits_aabb((fx, fy), (lx, ly), (x0, y0, x1, y1))
+        })
+    };
+
     for y in 0..height {
         let fy = y as f64 + 0.5; // 像素中心——GPU 片元的 @builtin(position) 也是中心坐标
         for x in 0..width {
@@ -671,6 +811,10 @@ fn apply_lighting(
                     if d2 >= l.r2 {
                         continue;
                     }
+                    // 投影：被遮光体挡住 = 这盏灯对该像素零贡献（硬影）
+                    if !boxes.is_empty() && blocked(fx, fy, l.x, l.y) {
+                        continue;
+                    }
                     let d = d2.sqrt();
                     let f = 1.0 - d / l.r;
                     let f = f * f * lambert(dx, dy, d);
@@ -683,6 +827,10 @@ fn apply_lighting(
                     let dy = fy - l.base.y;
                     let d2 = dx * dx + dy * dy;
                     if d2 >= l.base.r2 {
+                        continue;
+                    }
+                    // 投影：聚光灯同点光源一样被遮（锥角衰减不豁免遮挡）
+                    if !boxes.is_empty() && blocked(fx, fy, l.base.x, l.base.y) {
                         continue;
                     }
                     let d = d2.sqrt();
@@ -709,6 +857,10 @@ fn apply_lighting(
                     if d2 >= l.r2 {
                         continue;
                     }
+                    // 投影：空列表时这个分支零成本短路——老路径字节锁死不受影响
+                    if !boxes.is_empty() && blocked(fx, fy, l.x, l.y) {
+                        continue;
+                    }
                     let f = 1.0 - d2.sqrt() / l.r;
                     let f = f * f;
                     lit[0] += l.rgb[0] * f;
@@ -720,6 +872,9 @@ fn apply_lighting(
                     let dy = fy - l.base.y;
                     let d2 = dx * dx + dy * dy;
                     if d2 >= l.base.r2 {
+                        continue;
+                    }
+                    if !boxes.is_empty() && blocked(fx, fy, l.base.x, l.base.y) {
                         continue;
                     }
                     let d = d2.sqrt();
@@ -1496,6 +1651,14 @@ pub fn describe_world_with_assets(
                 "光照开启：环境色 {ambient_color}，{} 盏光源。",
                 lights.len()
             ));
+            // 投影状态也文字化：开着就报遮光体数量，agent 不用数像素猜"影子为什么没出来"
+            let shadows = shadows_of(world)?;
+            let occluder_count = if shadows { collect_occluders(world)?.len() } else { 0 };
+            if shadows {
+                lines.push(format!(
+                    "投影开启：{occluder_count} 个遮光体（Solid+Position+Collider，平行光不投影）。"
+                ));
+            }
             let lights_json: Vec<Value> = lights
                 .iter()
                 .map(|l| {
@@ -1525,7 +1688,7 @@ pub fn describe_world_with_assets(
                     Value::Object(entry)
                 })
                 .collect();
-            Some((ambient_color, lights_json))
+            Some((ambient_color, lights_json, shadows, occluder_count))
         }
     };
 
@@ -1547,9 +1710,14 @@ pub fn describe_world_with_assets(
         "overlaps": overlaps,
         "text": lines.join("\n"),
     });
-    if let Some((ambient_color, lights_json)) = lighting {
+    if let Some((ambient_color, lights_json, shadows, occluder_count)) = lighting {
         out["ambient"] = json!({"color": ambient_color});
         out["lights"] = json!(lights_json);
+        // 投影关闭时不出现这两个键——"没有键 = 没开"，和 bloom/warnings 同一约定
+        if shadows {
+            out["shadows"] = json!(true);
+            out["occluders"] = json!(occluder_count);
+        }
     }
     if let Some(b) = &bloom {
         out["bloom"] = json!({"threshold": b.threshold, "strength": b.strength});
@@ -2760,6 +2928,184 @@ mod tests {
         let d = describe_world(&w, 64, 64).unwrap();
         assert_eq!(d["texts"][0]["region"], json!("视野外"));
         assert!(d.get("warnings").is_none(), "视野外的文字不进对比度测量");
+    }
+
+    // ---- 2D 投影（Ambient.shadows + Solid 遮光体）----
+
+    /// 投影测试脚手架：黑环境（shadows 字段可配）+ 原点白点光（radius 6 = 48px，
+    /// 盖满 64x64 视口大半）。光照作用于整帧（背景也被打光）——不放精灵，
+    /// 亮暗变化全部来自光照/投影，不混入绘制差异。
+    fn world_shadow_scene(shadows: Option<Value>) -> World {
+        let mut w = World::new();
+        let amb = w.spawn();
+        let mut a = json!({"color": "#000000"});
+        if let Some(s) = shadows {
+            a["shadows"] = s;
+        }
+        w.set_component(amb, "Ambient", a).unwrap();
+        let lamp = w.spawn();
+        w.set_component(lamp, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(lamp, "Light", json!({"radius": 6.0, "intensity": 1.0})).unwrap();
+        w
+    }
+
+    /// 在 (x,y) 放一面 cw×ch 的遮光墙（Solid+Position+Collider，刻意不挂 Sprite——
+    /// 画面上隐形，像素差异只能来自它挡光）。
+    fn add_wall(w: &mut World, x: f64, y: f64, cw: f64, ch: f64) -> vitric_ecs::EntityId {
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": x, "y": y})).unwrap();
+        w.set_component(e, "Collider", json!({"w": cw, "h": ch})).unwrap();
+        w.set_component(e, "Solid", json!({})).unwrap();
+        e
+    }
+
+    #[test]
+    fn shadows_off_is_byte_identical() {
+        // 三组对照逐字节锁死"不开 = 没这回事"：
+        // 1) shadows 字段缺省 vs 显式 false（schema 默认值会把 false 物化进组件）
+        let mut absent = world_shadow_scene(None);
+        add_wall(&mut absent, 2.0, 0.0, 1.0, 2.0);
+        let mut explicit_off = world_shadow_scene(Some(json!(false)));
+        add_wall(&mut explicit_off, 2.0, 0.0, 1.0, 2.0);
+        let buf_absent = render_world(&absent, 64, 64, &Assets::empty(), 0).unwrap();
+        assert_eq!(buf_absent, render_world(&explicit_off, 64, 64, &Assets::empty(), 0).unwrap());
+        // 2) 关着时 Solid 墙对画面零影响（墙没有 Sprite，挡光是它唯一可能的像素效应）
+        let no_wall = world_shadow_scene(None);
+        assert_eq!(buf_absent, render_world(&no_wall, 64, 64, &Assets::empty(), 0).unwrap());
+        // 3) 开了但场上没有遮光体：和关着逐字节相同（空列表不改算术）
+        let on_empty = world_shadow_scene(Some(json!(true)));
+        assert_eq!(buf_absent, render_world(&on_empty, 64, 64, &Assets::empty(), 0).unwrap());
+    }
+
+    #[test]
+    fn wall_casts_shadow_and_removing_it_equalizes() {
+        // 灯在像素 (32,32)，墙占像素 x∈[44,52] y∈[24,40]。
+        // 取两个到灯心**严格等距**的像素中心：(56,32)→fx 56.5（墙后）和
+        // (7,32)→fx 7.5（对侧无墙），|dx| 同为 24.5、dy 同为 0.5——亮度差只能来自遮挡
+        let mut w = world_shadow_scene(Some(json!(true)));
+        let wall = add_wall(&mut w, 2.0, 0.0, 1.0, 2.0);
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        let behind = pixel(&buf, 64, 56, 32);
+        let open = pixel(&buf, 64, 7, 32);
+        assert_eq!(behind, [0, 0, 0, 255], "墙后像素被挡 = 只剩环境黑");
+        assert!(open[0] > 0 && open[1] > 0, "对侧等距像素该被照亮: {open:?}");
+        // 拆墙（移除 Solid 即不再是遮光体）：两侧等距像素亮度完全相等
+        w.remove_component(wall, "Solid").unwrap();
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        assert_eq!(pixel(&buf, 64, 56, 32), pixel(&buf, 64, 7, 32), "无墙时等距像素同亮");
+        assert!(pixel(&buf, 64, 56, 32)[0] > 0, "拆墙后原阴影处被照亮");
+    }
+
+    #[test]
+    fn pixel_on_occluder_is_lit_but_other_boxes_still_shadow_it() {
+        // 规则锁死：箱子里的像素不被**自己**遮挡，但照样被**别的**箱子遮挡。
+        // 像素 (48,32)（fx 48.5）在墙 x∈[44,52] 内部
+        let mut w = world_shadow_scene(Some(json!(true)));
+        add_wall(&mut w, 2.0, 0.0, 1.0, 2.0);
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        let on_wall = pixel(&buf, 64, 48, 32);
+        assert!(on_wall[0] > 0, "遮光体上的像素不被自己压黑: {on_wall:?}");
+        // 在灯和墙之间再立一面墙（像素 x∈[38,42]）：原来"在墙上"的像素现在被它挡住
+        add_wall(&mut w, 1.0, 0.0, 0.5, 2.0);
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        assert_eq!(pixel(&buf, 64, 48, 32), [0, 0, 0, 255], "别的箱子照样遮它");
+    }
+
+    #[test]
+    fn spot_light_is_shadowed_too() {
+        // 聚光灯朝 +x（dir=0，锥角 90°）：墙后像素 (56,32) 在锥内但被挡 → 黑；
+        // 拆墙后同像素亮——锥角衰减不豁免遮挡
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#000000", "shadows": true})).unwrap();
+        let lamp = w.spawn();
+        w.set_component(lamp, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(
+            lamp,
+            "Light",
+            json!({"radius": 6.0, "kind": "spot", "angle": 90.0, "dir": 0.0}),
+        )
+        .unwrap();
+        let wall = add_wall(&mut w, 2.0, 0.0, 1.0, 2.0);
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        assert_eq!(pixel(&buf, 64, 56, 32), [0, 0, 0, 255], "锥内但被墙挡 = 黑");
+        w.remove_component(wall, "Solid").unwrap();
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        assert!(pixel(&buf, 64, 56, 32)[0] > 0, "拆墙后锥内像素被照亮");
+    }
+
+    #[test]
+    fn shadowed_render_is_deterministic() {
+        let mut w = world_shadow_scene(Some(json!(true)));
+        add_wall(&mut w, 2.0, 0.0, 1.0, 2.0);
+        add_wall(&mut w, -1.5, 1.0, 2.0, 0.5);
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 7).unwrap();
+        assert_eq!(buf, render_world(&w, 64, 64, &Assets::empty(), 7).unwrap());
+    }
+
+    #[test]
+    fn occluder_cap_is_an_explicit_error() {
+        let mut w = world_shadow_scene(Some(json!(true)));
+        for i in 0..(MAX_OCCLUDERS + 1) {
+            add_wall(&mut w, i as f64, -10.0, 1.0, 1.0);
+        }
+        let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
+        assert!(err.contains("257") && err.contains("256"), "{err}");
+        // 同样的墙阵关着投影不报错（上限只属于投影路径）
+        let mut off = world_shadow_scene(None);
+        for i in 0..(MAX_OCCLUDERS + 1) {
+            add_wall(&mut off, i as f64, -10.0, 1.0, 1.0);
+        }
+        render_world(&off, 64, 64, &Assets::empty(), 0).unwrap();
+    }
+
+    #[test]
+    fn shadow_fields_are_validated_explicitly() {
+        // shadows 不是 bool：显式报错（不静默当 false）
+        let w = world_shadow_scene(Some(json!("yes")));
+        let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
+        assert!(err.contains("Ambient.shadows"), "{err}");
+        // 遮光体的 Collider.w 不是数字：显式报错点名字段
+        let mut w = world_shadow_scene(Some(json!(true)));
+        let wall = add_wall(&mut w, 2.0, 0.0, 1.0, 2.0);
+        w.set_field(wall, "Collider.w", json!("wide")).unwrap();
+        let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
+        assert!(err.contains("Collider.w"), "{err}");
+    }
+
+    #[test]
+    fn segment_hits_aabb_covers_axis_parallel_and_misses() {
+        let bx = (4.0, 4.0, 6.0, 6.0);
+        // 横穿 / 纵穿（轴平行分量 = 0 的退化分支）
+        assert!(segment_hits_aabb((0.0, 5.0), (10.0, 5.0), bx), "水平穿过");
+        assert!(segment_hits_aabb((5.0, 0.0), (5.0, 10.0), bx), "垂直穿过");
+        assert!(!segment_hits_aabb((0.0, 7.0), (10.0, 7.0), bx), "水平线在箱外");
+        assert!(!segment_hits_aabb((7.0, 0.0), (7.0, 10.0), bx), "垂直线在箱外");
+        // 斜穿 / 斜过但不相交（slab 区间不重叠）
+        assert!(segment_hits_aabb((0.0, 0.0), (10.0, 10.0), bx), "对角穿过");
+        assert!(!segment_hits_aabb((0.0, 6.5), (10.0, 16.5), bx), "斜线擦过上方");
+        // 线段截断：方向对但够不着（t > 1）
+        assert!(!segment_hits_aabb((0.0, 5.0), (3.0, 5.0), bx), "线段没到箱子就停");
+        // 端点在箱内也算相交（区间 [0,1] 截在箱内）
+        assert!(segment_hits_aabb((5.0, 5.0), (10.0, 5.0), bx), "起点在箱内");
+    }
+
+    #[test]
+    fn describe_includes_shadows_and_occluder_count() {
+        let mut w = world_shadow_scene(Some(json!(true)));
+        add_wall(&mut w, 2.0, 0.0, 1.0, 2.0);
+        add_wall(&mut w, -3.0, 1.0, 1.0, 1.0);
+        let d = describe_world(&w, 64, 64).unwrap();
+        assert_eq!(d["shadows"], json!(true));
+        assert_eq!(d["occluders"], json!(2));
+        let text = d["text"].as_str().unwrap();
+        assert!(text.contains("投影开启") && text.contains("2 个遮光体"), "{text}");
+        // 关着（缺省）：键不出现、摘要无投影行
+        let mut off = world_shadow_scene(None);
+        add_wall(&mut off, 2.0, 0.0, 1.0, 2.0);
+        let d = describe_world(&off, 64, 64).unwrap();
+        assert!(d.get("shadows").is_none() && d.get("occluders").is_none());
+        assert!(!d["text"].as_str().unwrap().contains("投影"));
     }
 
     #[test]

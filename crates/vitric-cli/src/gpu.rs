@@ -70,6 +70,11 @@ const NO_NORMAL: UvRect = [-1.0; 4];
 /// - lights_dir[i]   = [朝向像素空间单位向量 x, y, 半锥角弧度, 0]；spot 用 xy+z，
 ///   directional 用 xy（法线像素按它算方向，哨兵像素不读），point 恒 0
 ///
+/// 投影（Ambient.shadows）再加两块（同样被单测锁死）：
+/// - shadow_meta = [遮光体数, 0, 0, 0]（投影关闭 = 0，shader 循环零次）
+/// - occluders[i] = 像素空间 AABB [x0, y0, x1, y1]（256 × vec4 = 4KB，上限语义源头
+///   vitric_render::MAX_OCCLUDERS；世界→像素变换与灯同一套，在 CPU 端做完）
+///
 /// 世界→像素的变换在 CPU 端做完（含 y 翻转：世界 dir 度数 → (cos, -sin)），shader 只算
 /// 距离和点积。vec4 数组在 WGSL uniform（std140 风格）下天然 16 字节步长，无 padding 坑。
 #[repr(C)]
@@ -80,6 +85,8 @@ struct Globals {
     lights_pos: [[f32; 4]; vitric_render::MAX_LIGHTS],
     lights_color: [[f32; 4]; vitric_render::MAX_LIGHTS],
     lights_dir: [[f32; 4]; vitric_render::MAX_LIGHTS],
+    shadow_meta: [f32; 4],
+    occluders: [[f32; 4]; vitric_render::MAX_OCCLUDERS],
 }
 
 /// 图集里一块区域的 UV 矩形 [u0, v0, u1, v1]。
@@ -270,6 +277,8 @@ struct Globals {
     lights_pos: array<vec4<f32>, 64>,     // xy 灯心(像素) / z 半径(像素) / w kind(0 点/1 聚/2 平行)
     lights_color: array<vec4<f32>, 64>,   // rgb 已乘 intensity
     lights_dir: array<vec4<f32>, 64>,     // xy 朝向单位向量(像素空间) / z 半锥角(弧度)，spot 用
+    shadow_meta: vec4<f32>,               // x 遮光体数（投影关闭 = 0）
+    occluders: array<vec4<f32>, 256>,     // 像素空间 AABB [x0, y0, x1, y1]
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
@@ -309,6 +318,43 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let lo = c / 12.92;
     let hi = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
     return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+// 投影：像素 p → 灯心 l 的线段是否被某个遮光体 AABB 挡住（slab 法，与 CPU 路径
+// vitric-render 的 segment_hits_aabb 逐句同构——轴平行分量不做除法，显式分支，
+// 两侧 inf 语义才不会漂）。像素自己所在的箱子跳过：箱子里的像素只被别的箱子遮挡。
+// shadow_meta.x = 0（投影关闭）时循环零次，零成本。
+fn shadowed(p: vec2<f32>, l: vec2<f32>) -> bool {
+    let n = u32(globals.shadow_meta.x);
+    let d = l - p;
+    for (var k = 0u; k < n; k = k + 1u) {
+        let b = globals.occluders[k];
+        if (p.x >= b.x && p.x <= b.z && p.y >= b.y && p.y <= b.w) {
+            continue;
+        }
+        var tmin = 0.0;
+        var tmax = 1.0;
+        if (abs(d.x) < 1e-6) {
+            if (p.x < b.x || p.x > b.z) { continue; }
+        } else {
+            let t1 = (b.x - p.x) / d.x;
+            let t2 = (b.z - p.x) / d.x;
+            tmin = max(tmin, min(t1, t2));
+            tmax = min(tmax, max(t1, t2));
+        }
+        if (abs(d.y) < 1e-6) {
+            if (p.y < b.y || p.y > b.w) { continue; }
+        } else {
+            let t1 = (b.y - p.y) / d.y;
+            let t2 = (b.w - p.y) / d.y;
+            tmin = max(tmin, min(t1, t2));
+            tmax = min(tmax, max(t1, t2));
+        }
+        if (tmax >= tmin) {
+            return true;
+        }
+    }
+    return false;
 }
 
 @fragment
@@ -358,6 +404,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             }
             let d = distance(in.pos.xy, lp.xy);
             if (d < lp.z) {
+                // 投影：被遮光体挡住 = 这盏灯零贡献（硬影；只 point/spot，directional
+                // 在上面的分支里已经 continue 掉，永远走不到这里）
+                if (shadowed(in.pos.xy, lp.xy)) {
+                    continue;
+                }
                 var f = (1.0 - d / lp.z) * (1.0 - d / lp.z);
                 if (lp.w > 0.5) {
                     // spot：Δθ = acos(像素方向 · 朝向)；d=0 夹角无定义，约定锥心（t=1）
@@ -1442,6 +1493,24 @@ fn build_globals(
                 g.lights_dir[i] = [rad.cos() as f32, (-rad.sin()) as f32, half_rad as f32, 0.0];
             }
         }
+        // 投影：遮光体打包成像素空间 AABB（与灯同一套取景变换，含 Shake 抖动）。
+        // 开关/收集/上限的语义源头全在 vitric-render；关闭 = shadow_meta 全零，
+        // shader 的遮挡循环零次执行
+        if vitric_render::shadows_of(world)? {
+            let occs = vitric_render::collect_occluders(world)?;
+            g.shadow_meta[0] = occs.len() as f32;
+            for (i, o) in occs.iter().enumerate() {
+                let cx = (width as f64) / 2.0 + (o.x - cam_x) * scale;
+                let cy = (height as f64) / 2.0 - (o.y - cam_y) * scale;
+                let (hw, hh) = (o.w * scale / 2.0, o.h * scale / 2.0);
+                g.occluders[i] = [
+                    (cx - hw) as f32,
+                    (cy - hh) as f32,
+                    (cx + hw) as f32,
+                    (cy + hh) as f32,
+                ];
+            }
+        }
     }
     Ok(g)
 }
@@ -2094,6 +2163,30 @@ mod tests {
         assert_eq!(g.lights_dir[1][0], -1.0, "dir=180° → 像素空间 (-1, 0)");
         assert!(g.lights_dir[1][1].abs() < 1e-6);
         assert_eq!(g.lights_dir[1][2], 0.0, "半锥角只属于 spot");
+    }
+
+    #[test]
+    fn globals_pack_occluders_in_pixel_space() {
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#000000", "shadows": true})).unwrap();
+        let lamp = w.spawn();
+        w.set_component(lamp, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(lamp, "Light", json!({"radius": 6.0})).unwrap();
+        let wall = w.spawn();
+        w.set_component(wall, "Position", json!({"x": 2.0, "y": 1.0})).unwrap();
+        w.set_component(wall, "Collider", json!({"w": 1.0, "h": 2.0})).unwrap();
+        w.set_component(wall, "Solid", json!({})).unwrap();
+        let g = build_globals(&w, 64, 64, false, 0).unwrap();
+        assert_eq!(g.shadow_meta, [1.0, 0.0, 0.0, 0.0], "x 位 = 遮光体数");
+        // 默认相机 scale=8：中心 (2,1) → 像素 (48,24)，半宽 4px / 半高 8px
+        assert_eq!(g.occluders[0], [44.0, 16.0, 52.0, 32.0], "[x0, y0, x1, y1] 像素空间");
+        assert_eq!(g.occluders[1], [0.0; 4], "没占用的槽位保持零");
+        // shadows 关（字段缺省）：墙还在，但 shadow_meta 全零 → shader 循环零次
+        w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
+        let g = build_globals(&w, 64, 64, false, 0).unwrap();
+        assert_eq!(g.shadow_meta, [0.0; 4]);
+        assert_eq!(g.occluders[0], [0.0; 4]);
     }
 
     #[test]
