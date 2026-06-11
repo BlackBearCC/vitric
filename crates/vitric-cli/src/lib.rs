@@ -2,4 +2,5 @@
 
 pub mod assets_cmd;
 pub mod llm;
+pub mod normals;
 pub mod runtime;

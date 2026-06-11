@@ -12,6 +12,28 @@ pub struct Image {
 /// 单张图片的边长上限。超了不是警告是错误——显存膨胀这类事故要在导入时拦死。
 const MAX_DIMENSION: u32 = 2048;
 
+/// 法线贴图命名配对（零配置约定）：`hero.png` 的法线贴图就是 `hero_n.png`。
+/// 返回 `name` 对应的法线贴图名；`name` 本身已是 `_n` 贴图时返回 `None`
+/// （法线贴图没有自己的法线贴图，配对不递归）。
+pub fn normal_map_name(name: &str) -> Option<String> {
+    if is_normal_map_name(name) {
+        return None;
+    }
+    let (stem, ext) = name.rsplit_once('.')?;
+    Some(format!("{stem}_n.{ext}"))
+}
+
+/// `name` 是不是法线贴图（文件名主干以 `_n` 结尾）。
+/// 素材和谐化（vitric assets）用它把 `_n` 文件挡在量化之外——法线编码的是向量
+/// 不是颜色，吸附到色板上等于毁掉数据。
+pub fn is_normal_map_name(name: &str) -> bool {
+    let last = name.rsplit('/').next().unwrap_or(name);
+    match last.rsplit_once('.') {
+        Some((stem, _)) => stem.ends_with("_n"),
+        None => last.ends_with("_n"),
+    }
+}
+
 /// 素材仓库：项目 `assets/` 目录下的全部 PNG，键是相对路径（正斜杠）；
 /// 外加可选的 TTF 字体（清单 `font` 字段，见 [`crate::FontStore`]）。
 ///
@@ -93,6 +115,12 @@ impl Assets {
         self.images.get(name)
     }
 
+    /// `name` 的法线贴图（命名配对约定见 [`normal_map_name`]）。
+    /// `None` = 没配对 = 该精灵不走法线光照（合法常态，不是错误）。
+    pub fn normal_of(&self, name: &str) -> Option<&Image> {
+        self.images.get(&normal_map_name(name)?)
+    }
+
     pub fn names(&self) -> Vec<&str> {
         self.images.keys().map(|s| s.as_str()).collect()
     }
@@ -163,6 +191,36 @@ mod tests {
         assert_eq!(assets.names(), vec!["coin.png", "ui/icon.png"]);
         assert_eq!(assets.image("coin.png").unwrap().width, 2);
         assert!(assets.image("ghost.png").is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn normal_map_naming_pairs_and_excludes_n_files() {
+        assert_eq!(normal_map_name("hero.png").as_deref(), Some("hero_n.png"));
+        assert_eq!(normal_map_name("ui/icon.png").as_deref(), Some("ui/icon_n.png"));
+        // _n 文件自己没有法线贴图（配对不递归）
+        assert_eq!(normal_map_name("hero_n.png"), None);
+        // 无扩展名：配不出来（素材都是 .png，这里只是不 panic）
+        assert_eq!(normal_map_name("noext"), None);
+        assert!(is_normal_map_name("hero_n.png"));
+        assert!(is_normal_map_name("ui/icon_n.png"));
+        assert!(!is_normal_map_name("hero.png"));
+        assert!(!is_normal_map_name("ui/icon.png"));
+        // 主干本来就含 n 的不误判
+        assert!(!is_normal_map_name("lantern.png"));
+    }
+
+    #[test]
+    fn normal_of_finds_paired_image() {
+        let dir = std::env::temp_dir().join(format!("vitric-normalpair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_png(&dir.join("hero.png"), 2, 2, &[255, 0, 0, 255].repeat(4));
+        write_png(&dir.join("hero_n.png"), 2, 2, &[128, 128, 255, 255].repeat(4));
+        write_png(&dir.join("gem.png"), 1, 1, &[0, 255, 0, 255]);
+        let assets = Assets::load_dir(&dir).unwrap();
+        assert!(assets.normal_of("hero.png").is_some(), "命名配对生效");
+        assert!(assets.normal_of("gem.png").is_none(), "没配对 = 不走法线光照");
+        assert!(assets.normal_of("hero_n.png").is_none(), "法线贴图自己没有法线贴图");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -10,6 +10,9 @@
 //!   --colors <N>     色板颜色数（默认 32）
 //!   --height <H>     高于 H 的图先最近邻缩到高 H（保持宽高比）
 //!   --palette-lock   跳过提取，按项目已有 palette.json 量化（新素材入伙老色板）
+//!   --normals        给没有 _n 配对的 PNG 生成法线贴图（程序化，确定性；与色板选项互斥）
+//!   --normals-ai     法线生成改走豆包 Ark Seedream 图生图（需要环境变量 ARK_API_KEY；
+//!                    模型 VITRIC_NORMALS_MODEL，默认 doubao-seedream-5-0-260128）
 //!
 //! run 选项：
 //!   --port <N>       控制面端口（默认 6173，0=自动分配）

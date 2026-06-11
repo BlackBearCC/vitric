@@ -39,9 +39,9 @@
 //!     （锥角全宽，度数，1..=360）和必填 `dir`（朝向，度数，世界空间，0 = +x、
 //!     逆时针为正——和 Sprite.rot 同一个角度约定）
 //!   * `"directional"`（平行光）：必填 `dir`（光**行进**的方向，度数，约定同上）+
-//!     color/intensity。不读 Position/radius——太阳在无穷远，处处同亮。当前贡献
-//!     处处均匀 = color·intensity（dir 暂不参与计算，等法线贴图落地后才有方向感）。
-//!     三种合计上限 64 盏
+//!     color/intensity。不读 Position/radius——太阳在无穷远，处处同亮。没有法线的
+//!     像素贡献处处均匀 = color·intensity（字节锁死的旧行为）；有法线的像素按 dir
+//!     算方向（见下面"法线贴图"一节）。三种合计上限 64 盏
 //! - `Bloom` {"threshold", "strength"} — 全屏泛光后效，挂任意实体（取第一个，同 Ambient）。
 //!   **泛光的总开关**：场上没有 Bloom 实体 = 完全不跑泛光（旧行为字节不变、零开销）。
 //!   threshold ∈ [0,1]：通道值超过 threshold·255 的部分才进泛光；strength ≥ 0：叠加倍率。
@@ -60,6 +60,21 @@
 //! 角度衰减刻意用 t²（不是 smoothstep 内建公式）——CPU/GPU 两侧必须镜像同一条式子。
 //! 1.5 的上限允许轻微过曝（廉价的"泛光感"），乘回场景色后再夹回 1。
 //!
+//! 法线贴图（零配置命名配对，见 [`normal_map_name`]）：
+//! - 精灵贴图 `hero.png` 在 assets/ 里有 `hero_n.png` 就自动启用——RGB 编码切线空间法线
+//!   `n = rgb/255·2-1`，z 取绝对值（强制朝外）再归一化；零向量退化为平面 (0,0,1)。
+//!   法线的 xy 轴对齐**屏幕像素空间**（x 向右、y 向下——图按 1:1 blit 时图轴即屏轴），
+//!   `Sprite.rot` 旋转精灵时法线 xy 跟着同一矩阵转。
+//! - 有法线的像素各灯贡献额外乘 `max(dot(N, L), 0)`。L 是像素指向灯的方向抬升成 3D：
+//!   xy 取像素→灯心的单位方向乘 [`NORMAL_LIGHT_XY`]（0.8），z 固定 [`NORMAL_LIGHT_Z`]
+//!   （0.6；0.8²+0.6²=1，天然单位长度）——平面法线 (0,0,1) 在灯正下也有 0.6 的贡献，
+//!   不会"开了法线反而全黑"。像素正好在灯心（d=0）方向无定义，约定 L=(0,0,1)。
+//!   平行光同构：L = (−行进方向单位向量·0.8, 0.6)——dir 自此参与计算，平行光有了方向感。
+//! - **没有法线的像素走原公式，输出字节逐位不变**（向后兼容由测试锁死）。实现：光照开启时
+//!   精灵 blit 顺手把法线写进一块每帧法线缓冲（哨兵零向量 = 没有法线；后画的精灵/文字
+//!   覆盖像素时同步覆盖/清掉法线——盖住的像素属于上层那张图）。GPU 侧同一公式
+//!   （法线贴图与普通图同住一张图集，顶点带第二组 UV，见 gpu.rs）。
+//!
 //! 泛光公式（CPU 是真相源——截图/断言以这条路径为准；GPU 侧求视觉一致，差异见 gpu.rs）：
 //!   bright = max(scene - threshold·255, 0)       （逐通道提亮部）
 //!   blurred = 盒式模糊(bright) 水平+垂直可分离，迭代 3 次（近似高斯）
@@ -70,7 +85,7 @@
 mod assets;
 mod font;
 
-pub use assets::{Assets, Image};
+pub use assets::{is_normal_map_name, normal_map_name, Assets, Image};
 pub use font::{FontStore, GlyphPlacement, RasterGlyph};
 
 use serde_json::Value;
@@ -83,6 +98,14 @@ pub const MAX_LIGHTS: usize = 64;
 
 /// 光照亮度上限：ambient + 各灯贡献之和每通道夹在这里（见模块文档的公式）。
 pub const LIGHT_CLAMP: f64 = 1.5;
+
+/// 法线光照的光方向 z 抬升（固定值，见模块文档）：L.z = 0.6，xy 占 0.8——
+/// 单位长度由构造保证。0.6 是审美选择：平面像素在灯正下仍有六成贡献，浮雕感和
+/// "别把画面压黑"之间的折中。CPU/GPU 两侧必须同值（gpu.rs WGSL 里硬编码并注明出处）。
+pub const NORMAL_LIGHT_Z: f64 = 0.6;
+
+/// 法线光照的光方向 xy 系数：√(1 − 0.6²) = 0.8（与 [`NORMAL_LIGHT_Z`] 配对成单位向量）。
+pub const NORMAL_LIGHT_XY: f64 = 0.8;
 
 /// 清屏背景色：深灰蓝，区别于纯黑（纯黑常被误判为「没渲出来」）。
 /// GPU 路径的清屏/背景方块也用它——两条路径背景同字节。
@@ -104,6 +127,13 @@ pub fn render_world(
 
     let mut buf = vec![0u8; (width * height * 4) as usize];
     fill(&mut buf, BACKGROUND);
+
+    // 法线缓冲（每帧）：光照开着才分配——关着零分配零开销，旧行为字节不变。
+    // 哨兵零向量 = 该像素没有法线（走原光照公式，字节锁死）；精灵 blit 时顺手填充，
+    // 后画的东西覆盖像素就覆盖/清掉法线（盖住的像素属于上层那张图）。
+    let ambient = ambient_of(world)?;
+    let mut normals: Option<Vec<[f32; 3]>> =
+        ambient.as_ref().map(|_| vec![[0.0f32; 3]; (width * height) as usize]);
 
     // 按实体序绘制（确定性；后画的盖前画的）
     for id in world.query(&["Position", "Sprite"]) {
@@ -145,11 +175,17 @@ pub fn render_world(
                     for x in x0..x1 {
                         let i = ((y as u32 * width + x as u32) * 4) as usize;
                         buf[i..i + 4].copy_from_slice(&rgba);
+                        // 纯色块没有法线：清掉底下可能残留的法线（哨兵零向量）
+                        if let Some(ns) = normals.as_mut() {
+                            ns[i / 4] = [0.0; 3];
+                        }
                     }
                 }
             } else {
                 // 贴图：最近邻缩放 + alpha 混合。图不存在直接报错（不画占位符）。
                 let img = image_of(assets, id, &image_name)?;
+                // 法线贴图按命名配对（hero.png → hero_n.png）；没配对 = 像素清法线
+                let nmap = assets.normal_of(&image_name);
                 let span_x = 2.0 * half_w;
                 let span_y = 2.0 * half_h;
                 for y in y0..y1 {
@@ -170,6 +206,13 @@ pub fn render_world(
                             dst[c] = ((src[c] as u32 * a + dst[c] as u32 * (255 - a)) / 255) as u8;
                         }
                         dst[3] = 255;
+                        if let Some(ns) = normals.as_mut() {
+                            // 用与贴图同一个 (u,v) 采样法线——不旋转时 sn=0/cs=1
+                            ns[i / 4] = match nmap {
+                                Some(m) => sample_normal(m, u, v, 0.0, 1.0),
+                                None => [0.0; 3],
+                            };
+                        }
                     }
                 }
             }
@@ -205,11 +248,15 @@ pub fn render_world(
                         }
                         let i = ((y as u32 * width + x as u32) * 4) as usize;
                         buf[i..i + 4].copy_from_slice(&rgba);
+                        if let Some(ns) = normals.as_mut() {
+                            ns[i / 4] = [0.0; 3];
+                        }
                     }
                 }
             } else {
                 // 贴图（旋转）：局部坐标直接当 UV 用，采样逻辑与快路径一致（最近邻 + alpha 混合）
                 let img = image_of(assets, id, &image_name)?;
+                let nmap = assets.normal_of(&image_name);
                 let span_x = 2.0 * half_w;
                 let span_y = 2.0 * half_h;
                 for y in y0..y1 {
@@ -237,19 +284,34 @@ pub fn render_world(
                             dst[c] = ((src[c] as u32 * a + dst[c] as u32 * (255 - a)) / 255) as u8;
                         }
                         dst[3] = 255;
+                        if let Some(ns) = normals.as_mut() {
+                            // 法线跟着精灵转：传入旋转矩阵的 sin/cos（局部→屏幕）
+                            ns[i / 4] = match nmap {
+                                Some(m) => sample_normal(m, u, v, sn, cs),
+                                None => [0.0; 3],
+                            };
+                        }
                     }
                 }
             }
         }
     }
 
-    draw_texts(world, &mut buf, width, height, (cam_x, cam_y, scale), assets)?;
+    draw_texts(world, &mut buf, width, height, (cam_x, cam_y, scale), assets, &mut normals)?;
 
     // 光照按 Ambient 实体的存在与否开关：没有 = 完全跳过（旧行为字节不变、零开销）。
     // 有 = 整帧打光——精灵/文字/背景一视同仁，HUD 想保持可读自己在旁边放盏灯
-    if let Some((ambient, _)) = ambient_of(world)? {
+    if let Some((ambient, _)) = ambient {
         let lights = collect_lights(world)?;
-        apply_lighting(&mut buf, width, height, (cam_x, cam_y, scale), ambient, &lights);
+        apply_lighting(
+            &mut buf,
+            width,
+            height,
+            (cam_x, cam_y, scale),
+            ambient,
+            &lights,
+            normals.as_deref(),
+        );
     }
 
     // 泛光按 Bloom 实体的存在与否开关：没有 = 完全跳过（旧行为字节不变、零开销）。
@@ -293,8 +355,8 @@ pub enum LightKind {
     Point,
     /// 聚光灯：`angle` = 锥角全宽（1..=360），`dir` = 朝向。
     Spot { angle: f64, dir: f64 },
-    /// 平行光：`dir` = 光行进的方向。当前贡献处处均匀（= color·intensity），
-    /// dir 暂不参与计算——法线贴图落地后才有方向感（先把字段语义定死）。
+    /// 平行光：`dir` = 光行进的方向。没有法线的像素贡献处处均匀（= color·intensity，
+    /// 旧行为字节不变）；有法线的像素按 dir 算 `max(dot(N, L), 0)`（见模块文档）。
     Directional { dir: f64 },
 }
 
@@ -451,6 +513,10 @@ pub fn collect_lights(world: &World) -> Result<Vec<LightSource>, String> {
 ///   （字节级向后兼容由测试锁死），聚光灯才多付角度衰减的钱。
 ///
 /// 灯参数先变换到像素空间，点光内循环只剩距离平方比较。
+///
+/// `normals`：每帧法线缓冲（哨兵零向量 = 没有法线）。有法线的像素各灯贡献额外乘
+/// `max(dot(N, L), 0)`，平行光也按 dir 算方向（不再折进基底）；哨兵像素走上面那条
+/// 老路径，**输出字节逐位不变**。`None` = 整帧没有法线（等价全哨兵，但少一次查表）。
 fn apply_lighting(
     buf: &mut [u8],
     width: u32,
@@ -458,6 +524,7 @@ fn apply_lighting(
     (cam_x, cam_y, scale): (f64, f64, f64),
     ambient: [f64; 3],
     lights: &[LightSource],
+    normals: Option<&[[f32; 3]]>,
 ) {
     struct PxLight {
         x: f64,
@@ -484,9 +551,15 @@ fn apply_lighting(
             rgb: [l.rgb[0] * l.intensity, l.rgb[1] * l.intensity, l.rgb[2] * l.intensity],
         }
     };
+    /// 平行光在法线路径的预计算：L = (−行进方向单位向量·0.8, 0.6)（单位长度由构造保证）。
+    struct PxDir {
+        l: [f64; 3],
+        rgb: [f64; 3],
+    }
     let mut base = ambient;
     let mut points: Vec<PxLight> = Vec::new();
     let mut spots: Vec<PxSpot> = Vec::new();
+    let mut dirs: Vec<PxDir> = Vec::new();
     for l in lights {
         match l.kind {
             LightKind::Point => points.push(to_px(l)),
@@ -498,11 +571,22 @@ fn apply_lighting(
                     half: (angle / 2.0).to_radians(),
                 });
             }
-            // 平行光：贡献 = color·intensity 处处相同 → 折进基底，逐像素不再付钱
-            LightKind::Directional { .. } => {
+            // 平行光：哨兵像素的贡献 = color·intensity 处处相同 → 折进基底，逐像素不再付钱；
+            // 法线像素要按 dir 算 max(dot(N,L),0) → 另存一份带 L 的（行进方向像素空间
+            // (cos,-sin)，指向灯 = 取反，再按 0.8/0.6 抬升成单位向量）
+            LightKind::Directional { dir } => {
                 for (c, b) in base.iter_mut().enumerate() {
                     *b += l.rgb[c] * l.intensity;
                 }
+                let rad = dir.to_radians();
+                dirs.push(PxDir {
+                    l: [
+                        -rad.cos() * NORMAL_LIGHT_XY,
+                        rad.sin() * NORMAL_LIGHT_XY,
+                        NORMAL_LIGHT_Z,
+                    ],
+                    rgb: [l.rgb[0] * l.intensity, l.rgb[1] * l.intensity, l.rgb[2] * l.intensity],
+                });
             }
         }
     }
@@ -511,41 +595,104 @@ fn apply_lighting(
         let fy = y as f64 + 0.5; // 像素中心——GPU 片元的 @builtin(position) 也是中心坐标
         for x in 0..width {
             let fx = x as f64 + 0.5;
-            let mut lit = base;
-            for l in &points {
-                let dx = fx - l.x;
-                let dy = fy - l.y;
-                let d2 = dx * dx + dy * dy;
-                if d2 >= l.r2 {
-                    continue;
-                }
-                let f = 1.0 - d2.sqrt() / l.r;
-                let f = f * f;
-                lit[0] += l.rgb[0] * f;
-                lit[1] += l.rgb[1] * f;
-                lit[2] += l.rgb[2] * f;
-            }
-            for l in &spots {
-                let dx = fx - l.base.x;
-                let dy = fy - l.base.y;
-                let d2 = dx * dx + dy * dy;
-                if d2 >= l.base.r2 {
-                    continue;
-                }
-                let d = d2.sqrt();
-                let f = 1.0 - d / l.base.r;
-                // 角度衰减（公式见模块文档，GPU 侧逐句镜像）：
-                //   Δθ = acos(像素方向 · 朝向)，t = clamp(1 - Δθ/half, 0, 1)，贡献 ×= t²
-                // d=0（像素正好在灯心）夹角无定义，约定取锥心（t=1）
-                let cosd =
-                    if d > 0.0 { ((dx * l.dir[0] + dy * l.dir[1]) / d).clamp(-1.0, 1.0) } else { 1.0 };
-                let t = (1.0 - cosd.acos() / l.half).clamp(0.0, 1.0);
-                let f = f * f * t * t;
-                lit[0] += l.base.rgb[0] * f;
-                lit[1] += l.base.rgb[1] * f;
-                lit[2] += l.base.rgb[2] * f;
-            }
             let i = ((y * width + x) * 4) as usize;
+            // 该像素的法线（哨兵零向量 = 没有）。None / 哨兵都走老路径——字节锁死
+            let n = normals.map(|ns| ns[i / 4]).filter(|n| n[2] != 0.0);
+            let mut lit;
+            if let Some(n) = n {
+                // —— 法线路径：各灯贡献 ×= max(dot(N, L), 0)；L 的构造见模块文档
+                let n = [n[0] as f64, n[1] as f64, n[2] as f64];
+                // 像素指向灯的单位方向 → xy·0.8 + z 0.6；d=0 方向无定义，约定 (0,0,1)
+                let lambert = |dx: f64, dy: f64, d: f64| -> f64 {
+                    let l = if d > 0.0 {
+                        [-dx / d * NORMAL_LIGHT_XY, -dy / d * NORMAL_LIGHT_XY, NORMAL_LIGHT_Z]
+                    } else {
+                        [0.0, 0.0, 1.0]
+                    };
+                    (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]).max(0.0)
+                };
+                lit = ambient; // 平行光不在基底里：逐盏按方向算
+                for dl in &dirs {
+                    let f = (n[0] * dl.l[0] + n[1] * dl.l[1] + n[2] * dl.l[2]).max(0.0);
+                    lit[0] += dl.rgb[0] * f;
+                    lit[1] += dl.rgb[1] * f;
+                    lit[2] += dl.rgb[2] * f;
+                }
+                for l in &points {
+                    let dx = fx - l.x;
+                    let dy = fy - l.y;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 >= l.r2 {
+                        continue;
+                    }
+                    let d = d2.sqrt();
+                    let f = 1.0 - d / l.r;
+                    let f = f * f * lambert(dx, dy, d);
+                    lit[0] += l.rgb[0] * f;
+                    lit[1] += l.rgb[1] * f;
+                    lit[2] += l.rgb[2] * f;
+                }
+                for l in &spots {
+                    let dx = fx - l.base.x;
+                    let dy = fy - l.base.y;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 >= l.base.r2 {
+                        continue;
+                    }
+                    let d = d2.sqrt();
+                    let f = 1.0 - d / l.base.r;
+                    let cosd = if d > 0.0 {
+                        ((dx * l.dir[0] + dy * l.dir[1]) / d).clamp(-1.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    let t = (1.0 - cosd.acos() / l.half).clamp(0.0, 1.0);
+                    let f = f * f * t * t * lambert(dx, dy, d);
+                    lit[0] += l.base.rgb[0] * f;
+                    lit[1] += l.base.rgb[1] * f;
+                    lit[2] += l.base.rgb[2] * f;
+                }
+            } else {
+                // —— 老路径：这段算术不许动——没有法线的像素输出字节必须与法线功能
+                //    出现之前逐位相同（向后兼容由测试锁死）
+                lit = base;
+                for l in &points {
+                    let dx = fx - l.x;
+                    let dy = fy - l.y;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 >= l.r2 {
+                        continue;
+                    }
+                    let f = 1.0 - d2.sqrt() / l.r;
+                    let f = f * f;
+                    lit[0] += l.rgb[0] * f;
+                    lit[1] += l.rgb[1] * f;
+                    lit[2] += l.rgb[2] * f;
+                }
+                for l in &spots {
+                    let dx = fx - l.base.x;
+                    let dy = fy - l.base.y;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 >= l.base.r2 {
+                        continue;
+                    }
+                    let d = d2.sqrt();
+                    let f = 1.0 - d / l.base.r;
+                    // 角度衰减（公式见模块文档，GPU 侧逐句镜像）：
+                    //   Δθ = acos(像素方向 · 朝向)，t = clamp(1 - Δθ/half, 0, 1)，贡献 ×= t²
+                    // d=0（像素正好在灯心）夹角无定义，约定取锥心（t=1）
+                    let cosd = if d > 0.0 {
+                        ((dx * l.dir[0] + dy * l.dir[1]) / d).clamp(-1.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    let t = (1.0 - cosd.acos() / l.half).clamp(0.0, 1.0);
+                    let f = f * f * t * t;
+                    lit[0] += l.base.rgb[0] * f;
+                    lit[1] += l.base.rgb[1] * f;
+                    lit[2] += l.base.rgb[2] * f;
+                }
+            }
             for c in 0..3 {
                 buf[i + c] = (buf[i + c] as f64 * lit[c].min(LIGHT_CLAMP)).min(255.0) as u8;
             }
@@ -685,6 +832,26 @@ pub fn rot_of(world: &World, id: vitric_ecs::EntityId) -> Result<f64, String> {
     }
 }
 
+/// 采样并解码法线贴图的一个纹素 → **屏幕空间**单位法线（约定见模块文档）：
+/// n = rgb/255·2-1，z 取绝对值（强制朝外），xy 按精灵旋转矩阵（局部→屏幕，
+/// 与顶点变换同一矩阵 [[c, s], [-s, c]]）旋转后整体归一化；零向量退化为平面 (0,0,1)。
+/// (u, v) 与漫反射贴图同一套（含 clamp 行为），法线贴图尺寸不必与漫反射一致。
+fn sample_normal(img: &Image, u: f64, v: f64, sn: f64, cs: f64) -> [f32; 3] {
+    let sx = ((u * img.width as f64) as i64).clamp(0, img.width as i64 - 1) as usize;
+    let sy = ((v * img.height as f64) as i64).clamp(0, img.height as i64 - 1) as usize;
+    let s = (sy * img.width as usize + sx) * 4;
+    let nx = img.rgba[s] as f64 / 255.0 * 2.0 - 1.0;
+    let ny = img.rgba[s + 1] as f64 / 255.0 * 2.0 - 1.0;
+    let nz = (img.rgba[s + 2] as f64 / 255.0 * 2.0 - 1.0).abs();
+    let rx = cs * nx + sn * ny;
+    let ry = -sn * nx + cs * ny;
+    let len = (rx * rx + ry * ry + nz * nz).sqrt();
+    if len < 1e-9 {
+        return [0.0, 0.0, 1.0];
+    }
+    [(rx / len) as f32, (ry / len) as f32, (nz / len) as f32]
+}
+
 /// 取贴图素材；图不存在直接报错并列出现有素材（不画占位符）。
 fn image_of<'a>(
     assets: &'a Assets,
@@ -705,6 +872,7 @@ fn image_of<'a>(
 /// （ASCII，等宽，非 ASCII 画实心方块占位——**这段字节不许变**，向后兼容由测试锁死）；
 /// 挂了字体（清单 `font`）所有 Text 走矢量路径（比例字距 + 覆盖率抗锯齿）。
 /// 文字**永远直立**——`Sprite.rot` 只转精灵，不转文字（HUD 保持水平）。
+/// `normals`：文字像素清掉底下的法线（文字盖在法线精灵上时按平面打光，不继承浮雕）。
 fn draw_texts(
     world: &World,
     buf: &mut [u8],
@@ -712,6 +880,7 @@ fn draw_texts(
     height: u32,
     (cam_x, cam_y, scale): (f64, f64, f64),
     assets: &Assets,
+    normals: &mut Option<Vec<[f32; 3]>>,
 ) -> Result<(), String> {
     for id in world.query(&["Position", "Text"]) {
         let content = world
@@ -749,7 +918,9 @@ fn draw_texts(
 
         // 矢量路径：挂了字体所有 Text 都走这里（per-Text 覆盖不在范围内）
         if let Some(font) = assets.font() {
-            draw_text_vector(buf, width, height, font, &content, size, scale, (cx, cy), rgba);
+            draw_text_vector(
+                buf, width, height, font, &content, size, scale, (cx, cy), rgba, normals,
+            );
             continue;
         }
 
@@ -775,6 +946,9 @@ fn draw_texts(
                 if glyph_of(chars[idx])[row] & (1 << col) != 0 {
                     let i = ((y as u32 * width + x as u32) * 4) as usize;
                     buf[i..i + 4].copy_from_slice(&rgba);
+                    if let Some(ns) = normals.as_mut() {
+                        ns[i / 4] = [0.0; 3];
+                    }
                 }
             }
         }
@@ -808,6 +982,7 @@ fn draw_text_vector(
     scale: f64,
     (cx, cy): (f64, f64),
     rgba: [u8; 4],
+    normals: &mut Option<Vec<[f32; 3]>>,
 ) {
     let px_size = FontStore::px_size(size, scale);
     let (placements, total_w) = font.layout(content, px_size);
@@ -842,6 +1017,10 @@ fn draw_text_vector(
                     dst[c] = ((rgba[c] as u32 * cov + dst[c] as u32 * (255 - cov)) / 255) as u8;
                 }
                 dst[3] = 255;
+                // 任何覆盖率 > 0 的文字像素都清法线（半覆盖边缘也按文字算，不做半个法线）
+                if let Some(ns) = normals.as_mut() {
+                    ns[i / 4] = [0.0; 3];
+                }
             }
         }
     }
@@ -1973,6 +2152,145 @@ mod tests {
         assert_eq!(lights[2]["dir"], json!(270.0));
         assert!(lights[2].get("world").is_none() && lights[2].get("radius").is_none());
         assert!(d["text"].as_str().unwrap().contains("3 盏"), "{}", d["text"]);
+    }
+
+    /// 写一张纯色 RGBA PNG（法线贴图测试素材用）。
+    fn write_solid_png(path: &std::path::Path, w: u32, h: u32, rgba: [u8; 4]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::fs::File::create(path).unwrap();
+        let mut enc = png::Encoder::new(file, w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let pixels: Vec<u8> = rgba.repeat((w * h) as usize);
+        enc.write_header().unwrap().write_image_data(&pixels).unwrap();
+    }
+
+    /// 法线测试素材：纯白漫反射 hero.png + 指定法线色的 hero_n.png（整张同一向量）。
+    fn assets_with_normal(tag: &str, normal_rgba: [u8; 4]) -> (Assets, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("vitric-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_solid_png(&dir.join("hero.png"), 2, 2, [255, 255, 255, 255]);
+        write_solid_png(&dir.join("hero_n.png"), 2, 2, normal_rgba);
+        (Assets::load_dir(&dir).unwrap(), dir)
+    }
+
+    /// 黑环境 + 一盏白点光（世界坐标 lx,ly，半径 20）+ 原点 4x4 贴图精灵（可选 rot）。
+    fn world_normal_scene(lx: f64, ly: f64, rot: Option<f64>) -> World {
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
+        let lamp = w.spawn();
+        w.set_component(lamp, "Position", json!({"x": lx, "y": ly})).unwrap();
+        w.set_component(lamp, "Light", json!({"radius": 20.0, "intensity": 1.0})).unwrap();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let mut sprite = json!({"w": 4.0, "h": 4.0, "image": "hero.png"});
+        if let Some(r) = rot {
+            sprite["rot"] = json!(r);
+        }
+        w.set_component(e, "Sprite", sprite).unwrap();
+        w
+    }
+
+    #[test]
+    fn normal_mapped_sprite_lit_side_brighter_than_shadow_side() {
+        // 法线整张朝左（r=0 → nx=-1）：灯在左 = 迎光亮，灯在右 = 背光黑。
+        // 两盏灯到精灵中心距离相同——亮度差全部来自 max(dot(N,L),0)
+        let (assets, dir) = assets_with_normal("nlit", [0, 128, 255, 255]);
+        let lit = render_world(&world_normal_scene(-8.0, 0.0, None), 64, 64, &assets, 0).unwrap();
+        let dark = render_world(&world_normal_scene(8.0, 0.0, None), 64, 64, &assets, 0).unwrap();
+        let bright_px = pixel(&lit, 64, 32, 32);
+        let shadow_px = pixel(&dark, 64, 32, 32);
+        assert!(bright_px[0] > 60, "迎光面应明显被照亮: {bright_px:?}");
+        assert_eq!(shadow_px, [0, 0, 0, 255], "背光面 dot<0 夹到 0 = 只剩环境黑");
+        // 确定性：同世界同 tick → 字节逐位相同
+        assert_eq!(lit, render_world(&world_normal_scene(-8.0, 0.0, None), 64, 64, &assets, 0).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn flat_normal_still_gets_lit_by_z_lift() {
+        // 平面法线 (128,128,255)≈(0,0,1)：靠 L.z=0.6 的抬升仍被照亮，但偏离灯心的像素
+        // 比"没有法线"的同场景暗（老公式没有 dot 因子）——锁住 z_lift 语义
+        let (assets, dir) = assets_with_normal("nflat", [128, 128, 255, 255]);
+        let with_n = render_world(&world_normal_scene(-8.0, 0.0, None), 64, 64, &assets, 0).unwrap();
+        // 对照组：同一场景但素材没有 _n 配对
+        let plain_dir = std::env::temp_dir().join(format!("vitric-nflatp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&plain_dir);
+        write_solid_png(&plain_dir.join("hero.png"), 2, 2, [255, 255, 255, 255]);
+        let plain_assets = Assets::load_dir(&plain_dir).unwrap();
+        let without_n =
+            render_world(&world_normal_scene(-8.0, 0.0, None), 64, 64, &plain_assets, 0).unwrap();
+        let (n_px, p_px) = (pixel(&with_n, 64, 40, 32), pixel(&without_n, 64, 40, 32));
+        assert!(n_px[0] > 0, "平面法线在灯侧仍被照亮: {n_px:?}");
+        assert!(n_px[0] < p_px[0], "dot 因子 ≤ 1：带法线比不带暗: {n_px:?} vs {p_px:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&plain_dir).unwrap();
+    }
+
+    #[test]
+    fn pixels_without_normals_stay_byte_identical_under_lighting() {
+        // 1) 纯色精灵 + 光照：素材仓库里有没有 _n 文件不改一个字节
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#404040"})).unwrap();
+        let lamp = w.spawn();
+        w.set_component(lamp, "Position", json!({"x": 1.0, "y": 0.0})).unwrap();
+        w.set_component(lamp, "Light", json!({"radius": 6.0})).unwrap();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000"})).unwrap();
+        let (assets, dir) = assets_with_normal("nlock", [0, 128, 255, 255]);
+        assert_eq!(
+            render_world(&w, 64, 64, &Assets::empty(), 0).unwrap(),
+            render_world(&w, 64, 64, &assets, 0).unwrap(),
+            "没引用法线精灵的场景：字节与空素材仓库逐位相同"
+        );
+        // 2) 法线精灵被后画的纯色块完全盖住：盖住的像素按"没有法线"打光（法线被覆盖清掉）
+        let mut covered = world_normal_scene(-8.0, 0.0, None);
+        let cover = covered.spawn();
+        covered.set_component(cover, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        covered.set_component(cover, "Sprite", json!({"w": 6.0, "h": 6.0, "color": "#ffffff"})).unwrap();
+        let mut only_cover = World::new();
+        let amb = only_cover.spawn();
+        only_cover.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
+        let lamp = only_cover.spawn();
+        only_cover.set_component(lamp, "Position", json!({"x": -8.0, "y": 0.0})).unwrap();
+        only_cover.set_component(lamp, "Light", json!({"radius": 20.0, "intensity": 1.0})).unwrap();
+        let c2 = only_cover.spawn();
+        only_cover.set_component(c2, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        only_cover.set_component(c2, "Sprite", json!({"w": 6.0, "h": 6.0, "color": "#ffffff"})).unwrap();
+        assert_eq!(
+            render_world(&covered, 64, 64, &assets, 0).unwrap(),
+            render_world(&only_cover, 64, 64, &assets, 0).unwrap(),
+            "被盖住的法线像素必须与压根没有法线精灵的画面逐字节相同"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rotation_rotates_normals_with_the_sprite() {
+        // 法线整张朝上（g=0 → ny=-1，屏幕 y 向下）。逆时针转 90° 后法线朝左：
+        // 「90° 精灵 + 左灯」 ≈ 「不转 + 上灯」（两盏灯到中心距离相同，逐像素近似相等）
+        let (assets, dir) = assets_with_normal("nrot", [128, 0, 255, 255]);
+        let up_lit = render_world(&world_normal_scene(0.0, 8.0, None), 64, 64, &assets, 0).unwrap();
+        let rot_lit =
+            render_world(&world_normal_scene(-8.0, 0.0, Some(90.0)), 64, 64, &assets, 0).unwrap();
+        let a = pixel(&up_lit, 64, 32, 32);
+        let b = pixel(&rot_lit, 64, 32, 32);
+        for c in 0..3 {
+            assert!(
+                (a[c] as i32 - b[c] as i32).abs() <= 2,
+                "中心像素应近似相等: {a:?} vs {b:?}"
+            );
+        }
+        assert!(a[0] > 60, "迎光面确实亮着（不是两边都黑的虚假相等）: {a:?}");
+        // 对照：转了 90° 之后顶灯不再正对法线 → 比左灯暗（旋转真的改了方向）
+        let rot_wrong =
+            render_world(&world_normal_scene(0.0, 8.0, Some(90.0)), 64, 64, &assets, 0).unwrap();
+        let wrong = pixel(&rot_wrong, 64, 32, 32);
+        assert!(wrong[0] + 20 < b[0], "顶灯照旋转后的左向法线应明显更暗: {wrong:?} vs {b:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// 泛光测试场景：中央 2x2 纯白精灵（亮部），可选挂 Bloom。

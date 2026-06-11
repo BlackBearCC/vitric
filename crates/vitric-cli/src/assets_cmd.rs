@@ -14,10 +14,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// 解码后的图片（RGBA8），和 vitric-render 的约定一致。
-struct Img {
-    width: u32,
-    height: u32,
-    rgba: Vec<u8>,
+/// pub(crate)：法线生成（normals.rs）复用同一套解码/编码，不再造一份。
+pub(crate) struct Img {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) rgba: Vec<u8>,
 }
 
 pub struct Options {
@@ -57,10 +58,15 @@ impl Report {
     }
 }
 
-/// CLI 入口：`vitric assets <项目目录> [--colors N] [--height H] [--palette-lock]`
+/// CLI 入口：`vitric assets <项目目录> [--colors N] [--height H] [--palette-lock]
+/// | --normals [--normals-ai]`。色板和谐化与法线生成是两种模式，不混着跑
+/// （一次只做一件事，报告才说得清）。
 pub fn run(args: &[String]) -> Result<(), String> {
     let dir = args.first().ok_or("assets 缺少项目目录参数")?;
     let mut opts = Options::default();
+    let mut normals = false;
+    let mut normals_ai = false;
+    let mut palette_opts_given = false;
     let mut i = 1;
     while i < args.len() {
         let need = |key: &str| format!("{key} 缺少参数值");
@@ -71,6 +77,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     .ok_or(need("--colors"))?
                     .parse()
                     .map_err(|e| format!("--colors: {e}"))?;
+                palette_opts_given = true;
                 i += 2;
             }
             "--height" => {
@@ -80,18 +87,41 @@ pub fn run(args: &[String]) -> Result<(), String> {
                         .parse()
                         .map_err(|e| format!("--height: {e}"))?,
                 );
+                palette_opts_given = true;
                 i += 2;
             }
             "--palette-lock" => {
                 opts.palette_lock = true;
+                palette_opts_given = true;
+                i += 1;
+            }
+            "--normals" => {
+                normals = true;
+                i += 1;
+            }
+            // --normals-ai 蕴含 --normals（它只是换生成器）
+            "--normals-ai" => {
+                normals = true;
+                normals_ai = true;
                 i += 1;
             }
             other => {
                 return Err(format!(
-                    "未知选项 {other:?}。可用: --colors --height --palette-lock"
+                    "未知选项 {other:?}。可用: --colors --height --palette-lock --normals --normals-ai"
                 ))
             }
         }
+    }
+    if normals && palette_opts_given {
+        return Err("--normals 和色板选项（--colors/--height/--palette-lock）不能混用。\
+                    提示：先 --normals 生成法线，再单独跑一次和谐化（_n 文件会被自动跳过）"
+            .into());
+    }
+    if normals {
+        let ai = if normals_ai { Some(crate::normals::AiConfig::from_env()?) } else { None };
+        let report = crate::normals::generate(&PathBuf::from(dir), ai.as_ref())?;
+        println!("{}", serde_json::to_string_pretty(&report.to_json()).expect("报告可序列化"));
+        return Ok(());
     }
     let report = harmonize(&PathBuf::from(dir), &opts)?;
     println!("{}", serde_json::to_string_pretty(&report.to_json()).expect("报告可序列化"));
@@ -125,10 +155,15 @@ pub fn harmonize(project_dir: &Path, opts: &Options) -> Result<Report, String> {
         ));
     }
 
-    let rels = collect_pngs(&assets_dir)?;
+    let mut rels = collect_pngs(&assets_dir)?;
+    // 法线贴图（_n 配对，约定见 vitric_render::is_normal_map_name）整个排除在和谐化之外：
+    // 不进色板提取、不量化、不缩放、不备份——RGB 编码的是向量不是颜色，吸附到色板
+    // 等于毁掉法线数据，且之后每次重跑都会再毁一遍。
+    rels.retain(|r| !vitric_render::is_normal_map_name(r));
     if rels.is_empty() {
         return Err(format!(
-            "{} 里没有 PNG。提示：先把 AI 出的图（PNG）放进 assets/ 再跑",
+            "{} 里没有 PNG（法线贴图 _n 文件不算，它们不参与和谐化）。\
+             提示：先把 AI 出的图（PNG）放进 assets/ 再跑",
             assets_dir.display()
         ));
     }
@@ -210,7 +245,7 @@ pub fn harmonize(project_dir: &Path, opts: &Options) -> Result<Report, String> {
 }
 
 /// 递归收集 assets/ 下全部 PNG 的相对路径（正斜杠），排序保证确定性。
-fn collect_pngs(dir: &Path) -> Result<Vec<String>, String> {
+pub(crate) fn collect_pngs(dir: &Path) -> Result<Vec<String>, String> {
     let mut rels = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -406,7 +441,7 @@ fn parse_hex(s: &str) -> Result<[u8; 3], String> {
 
 /// 解码 PNG 成 RGBA8。模式对齐 vitric-render/src/assets.rs（错误同样带修法），
 /// 但不设 2048 上限——这工具本来就是用来把超大图缩小的（--height）。
-fn load_png(path: &Path) -> Result<Img, String> {
+pub(crate) fn load_png(path: &Path) -> Result<Img, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("打开失败: {e}"))?;
     let decoder = png::Decoder::new(std::io::BufReader::new(file));
     let mut reader = decoder.read_info().map_err(|e| format!("PNG 解码失败: {e}"))?;
@@ -432,7 +467,7 @@ fn load_png(path: &Path) -> Result<Img, String> {
 }
 
 /// 编码 RGBA8 PNG。固定编码参数 → 同样的像素永远出同样的字节（确定性测试依赖这点）。
-fn save_png(path: &Path, img: &Img) -> Result<(), String> {
+pub(crate) fn save_png(path: &Path, img: &Img) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| format!("写入失败: {e}"))?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), img.width, img.height);
     enc.set_color(png::ColorType::Rgba);

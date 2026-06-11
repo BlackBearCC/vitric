@@ -244,3 +244,30 @@ fn empty_assets_dir_is_explicit_error() {
     assert!(err.contains("没有 PNG"), "{err}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn normal_maps_are_excluded_from_harmonize() {
+    // 法线贴图（_n 配对）编码的是向量不是颜色：必须整个排除在量化之外，
+    // 否则每次重跑和谐化都会把法线数据毁一遍
+    let dir = temp_project("normals-guard");
+    scattered_png(&dir.join("assets/hero.png"), 0);
+    // 法线色刻意选成不在 hero.png 里的（量化动了它一眼就能看出）
+    write_png(&dir.join("assets/hero_n.png"), 2, 2, &[3, 250, 99, 255].repeat(4));
+    let n_before = std::fs::read(dir.join("assets/hero_n.png")).unwrap();
+
+    let report = harmonize(&dir, &Options { colors: 4, ..Options::default() }).unwrap();
+    assert_eq!(report.images, 1, "_n 不计入处理的图片数");
+    // 字节一个不动、不进备份、法线色不进色板
+    assert_eq!(std::fs::read(dir.join("assets/hero_n.png")).unwrap(), n_before);
+    assert!(!dir.join("assets_original/hero_n.png").exists(), "_n 不参与 = 不备份");
+    assert!(!read_palette_json(&dir).contains(&[3, 250, 99]), "法线色不许进色板");
+
+    // 只有 _n 文件的项目：显式报错（_n 不算可处理的 PNG）
+    let dir2 = temp_project("normals-only");
+    write_png(&dir2.join("assets/x_n.png"), 1, 1, &[128, 128, 255, 255]);
+    let err = harmonize(&dir2, &Options::default()).unwrap_err();
+    assert!(err.contains("没有 PNG"), "{err}");
+
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::remove_dir_all(&dir2).unwrap();
+}

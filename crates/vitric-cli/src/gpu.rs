@@ -40,14 +40,26 @@ use winit::window::Window;
 use vitric_ecs::World;
 use vitric_render::Assets;
 
-/// 顶点：像素坐标（shader 里除视口尺寸转 NDC）+ 图集 UV + 染色（乘进采样色）。
+/// 顶点：像素坐标（shader 里除视口尺寸转 NDC）+ 图集 UV + 染色（乘进采样色）
+/// + 法线贴图 UV + 精灵旋转。
+///
+/// 法线贴图与普通图同住一张图集（它们就是 assets/ 里的 PNG），所以只多一组 UV：
+/// `nuv` 跟角走（与 uv 同一角序展开），x < 0 = 哨兵 = 该图元没有法线（纯色块/
+/// 文字/没配对的贴图）——片元走原光照公式，与 CPU 路径的哨兵零向量同语义。
+/// `rotcs` = Sprite.rot 的 (cos, sin)，片元里把采样出的法线旋到屏幕空间
+/// （局部→屏幕矩阵 [[c, s], [-s, c]]，与 CPU 的 sample_normal 同一矩阵）。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     pos: [f32; 2],
     uv: [f32; 2],
     color: [f32; 4],
+    nuv: [f32; 2],
+    rotcs: [f32; 2],
 }
+
+/// 法线 UV 的哨兵矩形：四角全 -1（插值后仍 < 0，片元据此跳过法线路径）。
+const NO_NORMAL: UvRect = [-1.0; 4];
 
 /// uniform：viewport = [宽, 高, "表面是 sRGB"标志, "光照开启"标志]（z>0.5 时片元做
 /// sRGB→线性，保证最终字节和 CPU 路径的 sRGB 字节一致；w>0.5 时片元跑光照公式）。
@@ -55,8 +67,8 @@ struct Vertex {
 /// - lights_pos[i]   = [灯心 x_px, y_px, 半径 px, kind]，kind: 0=point / 1=spot / 2=directional
 ///   （平行光不读位置/半径，前三位恒 0 占位）
 /// - lights_color[i] = [r·intensity, g·intensity, b·intensity, 0]（w 保留）
-/// - lights_dir[i]   = [朝向像素空间单位向量 x, y, 半锥角弧度, 0]；只有 spot 参与片元计算，
-///   directional 也打包朝向（法线贴图落地后要用，先把槽位语义定死），point 恒 0
+/// - lights_dir[i]   = [朝向像素空间单位向量 x, y, 半锥角弧度, 0]；spot 用 xy+z，
+///   directional 用 xy（法线像素按它算方向，哨兵像素不读），point 恒 0
 ///
 /// 世界→像素的变换在 CPU 端做完（含 y 翻转：世界 dir 度数 → (cos, -sin)），shader 只算
 /// 距离和点积。vec4 数组在 WGSL uniform（std140 风格）下天然 16 字节步长，无 padding 坑。
@@ -267,6 +279,8 @@ struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) nuv: vec2<f32>,    // 法线贴图 UV；x<0 = 哨兵（没有法线）
+    @location(3) rotcs: vec2<f32>,  // Sprite.rot 的 (cos, sin)
 };
 
 @vertex
@@ -274,6 +288,8 @@ fn vs_main(
     @location(0) pos: vec2<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) nuv: vec2<f32>,
+    @location(4) rotcs: vec2<f32>,
 ) -> VsOut {
     var out: VsOut;
     // 像素坐标（左上原点）→ NDC
@@ -284,6 +300,8 @@ fn vs_main(
     out.pos = vec4<f32>(ndc, 0.0, 1.0);
     out.uv = uv;
     out.color = color;
+    out.nuv = nuv;
+    out.rotcs = rotcs;
     return out;
 }
 
@@ -296,20 +314,46 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = textureSample(atlas_tex, atlas_samp, in.uv) * in.color;
+    // 法线贴图采样必须在 uniform control flow 里（textureSample 的硬约束）——
+    // 无条件采样：哨兵 nuv(-1,-1) 被 ClampToEdge 采到图集 (0,0) 角，结果在分支里整个丢弃
+    let nraw = textureSample(atlas_tex, atlas_samp, in.nuv).rgb * 2.0 - 1.0;
     // 光照——与 CPU 路径同一公式（vitric-render 模块文档）：
     //   lit = min(ambient + Σ 各灯贡献, 1.5)；out = min(c·lit, 1)
     //   point: color·I·(1-d/r)²；spot: 再乘角度衰减 t²，t = clamp(1 - Δθ/半锥角, 0, 1)
     //   （刻意用 t²，不用 smoothstep 内建——CPU 侧是同一条式子）；directional: color·I 处处均匀。
+    //   法线像素（nuv.x ≥ 0）各灯贡献额外 ×= max(dot(N, L), 0)；L 的 xy 取像素指向灯的
+    //   单位方向 ×0.8、z 固定 0.6（NORMAL_LIGHT_XY/Z，语义源头在 vitric-render）。
     // 必须在 sRGB 反算**之前**：CPU 是直接在 sRGB 字节上乘的，这里要在同一数值空间打光，
     // 两条路径才长一个样。in.pos 是帧缓冲像素坐标（中心 +0.5），和 CPU 的像素中心一致。
     if (globals.viewport.w > 0.5) {
+        let has_n = in.nuv.x >= 0.0;
+        var nrm = vec3<f32>(0.0, 0.0, 1.0);
+        if (has_n) {
+            // 解码（与 CPU sample_normal 一字不差）：z 取绝对值，xy 按精灵旋转
+            // （局部→屏幕 [[c, s], [-s, c]]），零向量退化为平面法线
+            var v = vec3<f32>(nraw.xy, abs(nraw.z));
+            v = vec3<f32>(
+                in.rotcs.x * v.x + in.rotcs.y * v.y,
+                -in.rotcs.y * v.x + in.rotcs.x * v.y,
+                v.z,
+            );
+            let len = length(v);
+            if (len > 1e-6) {
+                nrm = v / len;
+            }
+        }
         var lit = globals.ambient.rgb;
         let n = u32(globals.ambient.w);
         for (var i = 0u; i < n; i = i + 1u) {
             let lp = globals.lights_pos[i];
             if (lp.w > 1.5) {
-                // directional：与距离无关（dir 等法线贴图落地后才参与计算）
-                lit = lit + globals.lights_color[i].rgb;
+                // directional：哨兵像素与距离/方向无关（老行为）；法线像素按 dir 算
+                //   L = (-行进方向单位向量·0.8, 0.6)——与 CPU 同一构造
+                var fd = 1.0;
+                if (has_n) {
+                    fd = max(dot(nrm, vec3<f32>(-globals.lights_dir[i].xy * 0.8, 0.6)), 0.0);
+                }
+                lit = lit + globals.lights_color[i].rgb * fd;
                 continue;
             }
             let d = distance(in.pos.xy, lp.xy);
@@ -324,6 +368,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                     }
                     let t = clamp(1.0 - acos(cosd) / ld.z, 0.0, 1.0);
                     f = f * t * t;
+                }
+                if (has_n) {
+                    // L = 像素指向灯心的单位方向 ×0.8、z 固定 0.6；d=0 约定 (0,0,1)
+                    var l = vec3<f32>(0.0, 0.0, 1.0);
+                    if (d > 0.0) {
+                        l = vec3<f32>((lp.xy - in.pos.xy) / d * 0.8, 0.6);
+                    }
+                    f = f * max(dot(nrm, l), 0.0);
                 }
                 lit = lit + globals.lights_color[i].rgb * f;
             }
@@ -1134,7 +1186,7 @@ fn create_scene_pipeline(
             buffers: &[wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x2, 4 => Float32x2],
             }],
         },
         fragment: Some(wgpu::FragmentState {
@@ -1503,7 +1555,20 @@ fn build_scene_vertices(
                     atlas.images.keys().cloned().collect::<Vec<_>>().join(", ")
                 )
             })?;
-            push_quad_corners(&mut verts, corners, *uv, [1.0; 4]);
+            // 法线贴图按命名配对（语义源头 vitric_render::normal_map_name）——它就是
+            // assets/ 里的普通 PNG，必然已在同一张图集里；没配对 = 哨兵 = 老光照路径
+            let nuv = vitric_render::normal_map_name(&image_name)
+                .and_then(|n| atlas.images.get(&n))
+                .copied()
+                .unwrap_or(NO_NORMAL);
+            // rot 的 (cos, sin)：片元用它把法线旋到屏幕空间（rot=0 → (1,0) 恒等）
+            let rotcs = if rot == 0.0 {
+                [1.0, 0.0]
+            } else {
+                let (sn, cs) = rot.to_radians().sin_cos();
+                [cs as f32, sn as f32]
+            };
+            push_quad_corners_n(&mut verts, corners, *uv, nuv, rotcs, [1.0; 4]);
         }
     }
     Ok(verts)
@@ -1698,10 +1763,25 @@ fn push_quad(verts: &mut Vec<Vertex>, x0: f32, y0: f32, x1: f32, y1: f32, uv: Uv
 
 /// 任意四角的四边形（精灵旋转用）。角序 = 未旋转时的 左上/右上/右下/左下，
 /// UV 矩形按同样的角序展开跟角走——贴图随四角一起转，不会错位。
+/// 没有法线贴图的图元（纯色/文字/字形）一律走这个：nuv 哨兵、rotcs 恒等占位。
 fn push_quad_corners(verts: &mut Vec<Vertex>, p: [[f32; 2]; 4], uv: UvRect, color: [f32; 4]) {
+    push_quad_corners_n(verts, p, uv, NO_NORMAL, [1.0, 0.0], color);
+}
+
+/// 带法线贴图区域的四边形：nuv 与 uv 同一角序展开（法线随贴图一起转）。
+fn push_quad_corners_n(
+    verts: &mut Vec<Vertex>,
+    p: [[f32; 2]; 4],
+    uv: UvRect,
+    nuv: UvRect,
+    rotcs: [f32; 2],
+    color: [f32; 4],
+) {
     let [u0, v0, u1, v1] = uv;
     let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
-    let vx = |i: usize| Vertex { pos: p[i], uv: uvs[i], color };
+    let [n0, m0, n1, m1] = nuv;
+    let nuvs = [[n0, m0], [n1, m0], [n1, m1], [n0, m1]];
+    let vx = |i: usize| Vertex { pos: p[i], uv: uvs[i], color, nuv: nuvs[i], rotcs };
     verts.extend_from_slice(&[vx(0), vx(1), vx(2), vx(0), vx(2), vx(3)]);
 }
 
@@ -1738,10 +1818,12 @@ mod tests {
 
     use super::*;
 
-    /// 不碰 GPU 的假图集：白点 + 一张测试图 + 全空字形。
+    /// 不碰 GPU 的假图集：白点 + 测试图（hero 带法线配对，gem 没有）+ 全空字形。
     fn fake_atlas() -> Atlas {
         let mut images = std::collections::BTreeMap::new();
         images.insert("hero.png".to_string(), [0.25, 0.25, 0.5, 0.5]);
+        images.insert("hero_n.png".to_string(), [0.5, 0.5, 0.75, 0.75]);
+        images.insert("gem.png".to_string(), [0.75, 0.75, 0.9, 0.9]);
         Atlas { images, white: [0.1, 0.1], glyphs: [[0.0; 4]; 128] }
     }
 
@@ -1850,6 +1932,47 @@ mod tests {
         assert_eq!(verts[0].uv, [0.25, 0.25], "角 0 仍是图集区域左上");
         assert_eq!(verts[2].uv, [0.5, 0.5], "角 2 仍是图集区域右下");
         assert_eq!(verts[0].pos, [24.0, 48.0], "但位置已旋转");
+    }
+
+    #[test]
+    fn normal_paired_sprite_carries_normal_uv_and_rotation() {
+        // hero.png 在图集里有 hero_n.png 配对：顶点带法线区域 UV + rot 的 (cos, sin)
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "image": "hero.png"})).unwrap();
+        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
+        assert_eq!(verts[0].nuv, [0.5, 0.5], "角 0 = 法线区域左上");
+        assert_eq!(verts[2].nuv, [0.75, 0.75], "角 2 = 法线区域右下");
+        assert_eq!(verts[0].rotcs, [1.0, 0.0], "rot=0 → 恒等旋转");
+        // rot=90：rotcs = (cos, sin)，nuv 角序不变（法线贴图跟着四角转）
+        w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "image": "hero.png", "rot": 90.0}))
+            .unwrap();
+        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
+        assert!(verts[0].rotcs[0].abs() < 1e-6 && (verts[0].rotcs[1] - 1.0).abs() < 1e-6);
+        assert_eq!(verts[0].nuv, [0.5, 0.5]);
+    }
+
+    #[test]
+    fn unpaired_quads_carry_normal_sentinel() {
+        // 没配对的贴图 / 纯色块 / 文字：nuv 全是哨兵（x<0），片元走原光照公式
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "image": "gem.png"})).unwrap();
+        let c = w.spawn();
+        w.set_component(c, "Position", json!({"x": 3.0, "y": 0.0})).unwrap();
+        w.set_component(c, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#ff0000"})).unwrap();
+        let t = w.spawn();
+        w.set_component(t, "Position", json!({"x": 0.0, "y": 2.0})).unwrap();
+        w.set_component(t, "Text", json!({"content": "A", "size": 1.0, "color": "#ffffff"}))
+            .unwrap();
+        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
+        assert!(!verts.is_empty());
+        for (i, v) in verts.iter().enumerate() {
+            assert!(v.nuv[0] < 0.0 && v.nuv[1] < 0.0, "顶点 {i} 该是哨兵: {:?}", v.nuv);
+            assert_eq!(v.rotcs, [1.0, 0.0], "哨兵图元的 rotcs 是恒等占位");
+        }
     }
 
     #[test]
@@ -1965,7 +2088,7 @@ mod tests {
         assert_eq!(g.lights_dir[0][1], -1.0);
         assert!((g.lights_dir[0][2] - (30f32).to_radians()).abs() < 1e-6);
         // 平行光：位置/半径占位 0，kind 槽位 = 2，颜色已乘 intensity，朝向也打包
-        // （片元暂不读——法线贴图落地后用）
+        // （法线像素的片元按它算 max(dot(N,L),0)，哨兵像素不读）
         assert_eq!(g.lights_pos[1], [0.0, 0.0, 0.0, 2.0]);
         assert_eq!(g.lights_color[1], [0.5, 0.5, 0.5, 0.0]);
         assert_eq!(g.lights_dir[1][0], -1.0, "dir=180° → 像素空间 (-1, 0)");
