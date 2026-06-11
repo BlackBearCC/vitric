@@ -2,12 +2,13 @@
 
 给 AI agent（和人）的一页纸操作手册：怎么自主地跑、看、测、改一个 Vitric 游戏。
 
-## 四个命令
+## 五个命令
 
 ```bash
 vitric check <项目目录>                  # 校验一切（schema/场景/规则/脚本），错误带路径+错误码+修法
 vitric run <项目目录> [--port 6173] [--speed X] [--ticks N] [--record 录像.json]
 vitric replay <项目目录> <录像.json>      # 重放录像并逐校验点验证确定性
+vitric gate <项目目录>                   # 交付门禁：check + 通关录像重放 + 断言集，全过才退出 0（见「交付门禁」节）
 vitric assets <项目目录> [--colors N] [--height H] [--palette-lock]  # 全项目 PNG 统一色板，AI 出图规整成一个调，详见 docs/art-pipeline.md
 ```
 
@@ -76,6 +77,28 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 
 复现 bug：`vitric run my-game --ticks 600 --record bug.json` 录下来，
 `vitric replay my-game bug.json` 任何时候逐帧复现；重放跑偏会精确报告在哪个校验点开始不一致。
+
+## 交付门禁（vitric gate）
+
+"做完了"不能靠 agent 自述——引擎机械地验证交付。核心：**确定性录像是不可伪造的通关证书**。一份录像要拿到证书，必须同时做到①从项目数据冷启动逐校验点逐位重放一致（伪造任何一帧，状态哈希必然跑偏）②重放过程中真的观测到终局事件（默认 `game-won`）。两个条件缺一不可：光重放一致可能是挂机局，光有事件名可能是编的录像。
+
+清单 `vitric.json` 声明门禁：
+
+```json
+"gates": {
+  "playthroughs": [{"recording": "qa/clear.json", "must_emit": "game-won"}],
+  "assertions": "qa/asserts.json",
+  "check": true,
+  "max_ticks": 100000
+}
+```
+
+- `playthroughs`（必须非空）：通关录像门。每条录像独立重放验证；`must_emit` 缺省 `"game-won"`。
+- `assertions`（可选）：断言集文件，格式 `[{"id": "...", "if": [[左, op, 右], ...]}, ...]`（条件写法同控制面 `assert/add`）。重放过程中**每个 tick** 全量求值，任何一刻违反都拒发证书（报告列出 id + 首次违反的 tick）。
+- `check`（缺省 true）：先过完整项目校验，任何错误 = FAIL。
+- `max_ticks`（可选）：录像长度上限，防"挂机一百万 tick 总会赢"式注水。
+
+工作流：录像不是 gate 自己生成的——QA/导演真打（或经控制面 RPC 驱动）一局通关，`vitric run my-game --record qa/clear.json` 录下来，然后 `vitric gate my-game` 验证。报告是人机同一份 JSON（`{"pass": bool, "gates": [{name, status, detail}...]}`）打到 stdout；**全部门禁 pass 才退出 0**。清单没声明 gates、或 playthroughs 为空，直接退出 1——无门禁项目不出证书，空门禁放行就是后门。
 
 ## 确定性边界
 

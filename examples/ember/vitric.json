@@ -1,0 +1,16 @@
+{
+  "name": "ember",
+  "schema": "schema.json",
+  "entry": "scenes/main.json",
+  "scenes": [
+    "scenes/main.json"
+  ],
+  "rules": [
+    "rules/game.json"
+  ],
+  "scripts": [
+    "scripts/systems.js"
+  ],
+  "animations": "animations.json",
+  "seed": 7
+}

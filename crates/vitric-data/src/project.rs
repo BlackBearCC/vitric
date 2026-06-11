@@ -44,9 +44,61 @@ pub struct ProjectManifest {
     /// 性能预算（可选）。超了不是默默卡顿，是显式上报。
     #[serde(default)]
     pub budgets: Budgets,
+    /// 交付门禁（可选）。声明了它，`vitric gate` 才会出（或拒发）通关证书；
+    /// 不声明 = 项目没有机器可验的交付标准，gate 直接拒绝（无门禁不出证书）。
+    #[serde(default)]
+    pub gates: Option<Gates>,
     /// 世界随机种子；同种子同输入 = 同结果。
     #[serde(default = "default_seed")]
     pub seed: u64,
+}
+
+/// 交付门禁声明（清单 `gates` 字段）。
+///
+/// ```json
+/// "gates": {
+///   "playthroughs": [{"recording": "recordings/clear.json", "must_emit": "game-won"}],
+///   "assertions": "qa/asserts.json",
+///   "check": true,
+///   "max_ticks": 100000
+/// }
+/// ```
+///
+/// 核心约束：通关录像是**不可伪造的交付证书**——重放必须逐校验点逐位一致，
+/// 且重放过程中真的观测到 `must_emit` 事件。伪造任何一帧，状态哈希必然跑偏。
+#[derive(Debug, Clone, Deserialize)]
+pub struct Gates {
+    /// 通关录像门。每条录像独立重放验证；列表为空 = 没有证书可发，gate 拒绝。
+    #[serde(default)]
+    pub playthroughs: Vec<PlaythroughGate>,
+    /// 断言集文件（相对项目根，格式 `[{"id", "if": [[左,op,右]...]}, ...]`）。
+    /// 声明了就在每条录像重放的**每个 tick** 全量求值，任何一刻违反都拒发证书。
+    #[serde(default)]
+    pub assertions: Option<String>,
+    /// 是否先过完整项目校验（vitric check 同款）。默认 true——数据都不合法谈不上交付。
+    #[serde(default = "default_true")]
+    pub check: bool,
+    /// 录像 tick 数上限（不设 = 不限）。防"挂机一百万 tick 总会赢"式注水证书。
+    #[serde(default)]
+    pub max_ticks: Option<u64>,
+}
+
+/// 一条通关录像门。
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlaythroughGate {
+    /// 录像文件（相对项目根），来自 `vitric run --record`。
+    pub recording: String,
+    /// 重放过程中必须观测到的事件（终局信号）。默认 "game-won"。
+    #[serde(default = "default_must_emit")]
+    pub must_emit: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_must_emit() -> String {
+    "game-won".to_string()
 }
 
 /// 性能预算。0 = 不限。

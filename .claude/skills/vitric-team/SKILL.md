@@ -44,9 +44,11 @@ vitric run {PROJECT_DIR} --port 6173 &     # 起进程
 
 集成期发现跨地盘问题：改合同（GDD/schema）然后**重新派单受影响的角色**，不要自己越俎代庖改进别人地盘里的文件——下一轮他会基于旧认知覆盖你。
 
+集成的收尾动作：把你亲自通关那局用 `--record` 录下来（如 `qa/clear.json`），在 `vitric.json` 里声明 `gates`（playthroughs 挂录像 + assertions 挂 QA 断言集，写法见 `docs/agent-guide.md`「交付门禁」），跑 `vitric gate {PROJECT_DIR}` 看到 `"pass": true`。**交付的定义 = `vitric gate` PASS，不是 agent 自述完成。**
+
 ### ⑤ QA 终验 → 提交
 
-派 QA 角色跑终验：断言集全绿 + `--record` 录像 + `vitric replay` 重放一致 + soak。QA 报告通过后才 commit（一次 commit，全队工作合入；用户没让提交就停在报告）。
+派 QA 角色跑终验：断言集全绿 + `--record` 通关录像 + `vitric gate` 全门 PASS + soak。QA 报告通过后才 commit（一次 commit，全队工作合入；用户没让提交就停在报告）。
 
 ## 打回规则
 
@@ -62,4 +64,5 @@ vitric run {PROJECT_DIR} --port 6173 &     # 起进程
 | 关卡 | 自己经控制面把关卡打通（试玩出来的可达性） |
 | 音频 | check 引用全过 + 事件挂接表 |
 | 文案 | 全量文案 describe 走查 |
-| QA | 回归录像重放一致 + soak + 体验指标 |
+| QA | `vitric gate` 全门 PASS（录像回归走 gate）+ soak + 体验指标 |
+| 交付（机器裁决） | `vitric gate {PROJECT_DIR}` 退出 0——通关录像逐位重放 + 终局事件 + 断言全程绿 |

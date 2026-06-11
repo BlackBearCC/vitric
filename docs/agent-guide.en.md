@@ -2,12 +2,13 @@
 
 A one-page manual for AI agents (and humans): how to autonomously run, observe, test, and modify a Vitric game.
 
-## Four commands
+## Five commands
 
 ```bash
 vitric check <project-dir>                 # validate everything (schema/scenes/rules/scripts/assets); errors carry path + code + fix hint
 vitric run <project-dir> [--port 6173] [--window] [--speed X] [--ticks N] [--record out.json]
 vitric replay <project-dir> <recording>    # replay a recording, verifying determinism at every checkpoint
+vitric gate <project-dir>                  # delivery gate: check + playthrough replays + assertions; exit 0 only if ALL pass (see "Delivery gates")
 vitric assets <project-dir> [--colors N] [--height H] [--palette-lock]  # harmonize all project PNGs onto one shared palette (AI-generated art → one coherent look), see docs/art-pipeline.md
 ```
 
@@ -77,6 +78,28 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'
 
 Reproducing a bug: `vitric run my-game --ticks 600 --record bug.json`, then
 `vitric replay my-game bug.json` replays it frame-exact, and divergence is pinpointed to a checkpoint window.
+
+## Delivery gates (vitric gate)
+
+"Done" is not something an agent gets to claim — the engine verifies delivery mechanically. The core idea: **a deterministic recording is an unforgeable proof-of-completion.** To earn the certificate, a recording must both (1) replay bit-exactly checkpoint-by-checkpoint from a cold boot of the project data (forge a single frame and the state hash diverges at the next checkpoint) and (2) actually emit the terminal event (default `game-won`) during that replay. Neither alone suffices: a clean replay might be an idle run, and an event name alone might be fabricated.
+
+Declare gates in `vitric.json`:
+
+```json
+"gates": {
+  "playthroughs": [{"recording": "qa/clear.json", "must_emit": "game-won"}],
+  "assertions": "qa/asserts.json",
+  "check": true,
+  "max_ticks": 100000
+}
+```
+
+- `playthroughs` (must be non-empty): playthrough gates. Each recording is replayed and verified independently; `must_emit` defaults to `"game-won"`.
+- `assertions` (optional): an assertion file `[{"id": "...", "if": [[lhs, op, rhs], ...]}, ...]` (same condition syntax as the control plane's `assert/add`). Evaluated **every tick** of every replay; a violation at any point fails the gate, reporting the id and the first violating tick.
+- `check` (default true): full project validation first; any error = FAIL.
+- `max_ticks` (optional): recording length cap, so a million-tick AFK run can't be padded into a "win".
+
+Workflow: gate never produces recordings itself — QA/the director plays a winning run (by hand or driven via control-plane RPC) with `vitric run my-game --record qa/clear.json`, then `vitric gate my-game` verifies it. The report is one JSON for humans and machines alike (`{"pass": bool, "gates": [{name, status, detail}...]}`) on stdout; **exit 0 only if every gate passes**. A manifest without gates (or with empty playthroughs) exits 1 — no gates, no certificate; an empty gate that passes would be a loophole.
 
 ## Determinism boundaries
 

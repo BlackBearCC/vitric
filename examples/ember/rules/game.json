@@ -1,0 +1,108 @@
+{
+  "rules": [
+    {
+      "id": "bgm",
+      "on": { "event": "start" },
+      "do": [
+        { "emit": "play-music", "data": { "sound": "bgm.wav", "volume": 0.3 } }
+      ]
+    },
+
+    {
+      "id": "run-left",
+      "on": { "event": "input", "filter": { "action": "left", "phase": "pressed" } },
+      "do": [ { "set": "@hero.Velocity.x", "to": -9 } ]
+    },
+    {
+      "id": "run-right",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "pressed" } },
+      "do": [ { "set": "@hero.Velocity.x", "to": 9 } ]
+    },
+    {
+      "id": "stop-left",
+      "on": { "event": "input", "filter": { "action": "left", "phase": "released" } },
+      "do": [ { "set": "@hero.Velocity.x", "to": 0 } ]
+    },
+    {
+      "id": "stop-right",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "released" } },
+      "do": [ { "set": "@hero.Velocity.x", "to": 0 } ]
+    },
+
+    {
+      "id": "jump-space",
+      "on": { "event": "input", "filter": { "action": "space", "phase": "pressed" } },
+      "if": [ ["@hero.Body.grounded", "==", true] ],
+      "do": [
+        { "set": "@hero.Velocity.y", "to": 16 },
+        { "emit": "play-sound", "data": { "sound": "jump.wav" } },
+        { "call": "burst", "with": { "x": "@hero.Position.x", "y": "@hero.Position.y", "kind": "dust", "n": 6 } }
+      ]
+    },
+    {
+      "id": "jump-up",
+      "on": { "event": "input", "filter": { "action": "up", "phase": "pressed" } },
+      "if": [ ["@hero.Body.grounded", "==", true] ],
+      "do": [
+        { "set": "@hero.Velocity.y", "to": 16 },
+        { "emit": "play-sound", "data": { "sound": "jump.wav" } },
+        { "call": "burst", "with": { "x": "@hero.Position.x", "y": "@hero.Position.y", "kind": "dust", "n": 6 } }
+      ]
+    },
+
+    {
+      "id": "light-brazier",
+      "on": { "event": "collision", "between": ["Player", "Brazier"] },
+      "if": [ ["other.Brazier.lit", "==", false] ],
+      "do": [
+        { "set": "other.Brazier.lit", "to": true },
+        { "set": "other.Light.intensity", "to": 1.6 },
+        { "set": "other.Light.radius", "to": 9 },
+        { "emit": "brazier-lit", "data": { "n": "other.Brazier.n" } },
+        { "set": "@camera.Shake.amplitude", "to": 0.3 },
+        { "emit": "play-sound", "data": { "sound": "light.wav" } },
+        { "call": "burst", "with": { "x": "other.Position.x", "y": "other.Position.y", "kind": "spark", "n": 10 } }
+      ]
+    },
+
+    {
+      "id": "hud-count",
+      "on": { "event": "lit-count" },
+      "do": [
+        {
+          "set": "@hud.Text.content",
+          "to": { "format": "BRAZIERS {}/4", "args": ["event.c"] }
+        }
+      ]
+    },
+
+    {
+      "id": "win",
+      "on": { "event": "all-lit" },
+      "if": [ ["@door", "exists"] ],
+      "do": [
+        { "despawn": "@door" },
+        { "set": "@gate-text.Text.content", "to": "THE GATE IS OPEN" },
+        { "set": "@camera.Shake.amplitude", "to": 0.5 },
+        { "emit": "play-sound", "data": { "sound": "win.wav" } },
+        { "call": "burst", "with": { "x": 0, "y": 39.7, "kind": "confetti", "n": 24 } },
+        { "emit": "game-won", "data": {} }
+      ]
+    },
+
+    {
+      "id": "hazard-hit",
+      "on": { "event": "collision", "between": ["Player", "Hazard"] },
+      "do": [
+        { "add": "@hero.Score.value", "by": 1 },
+        { "set": "@hero.Position.x", "to": "@hero.Spawn.x" },
+        { "set": "@hero.Position.y", "to": "@hero.Spawn.y" },
+        { "set": "@hero.Velocity.x", "to": 0 },
+        { "set": "@hero.Velocity.y", "to": 0 },
+        { "set": "@camera.Shake.amplitude", "to": 0.6 },
+        { "emit": "hero-died", "data": { "deaths": "@hero.Score.value" } },
+        { "emit": "play-sound", "data": { "sound": "hurt.wav" } }
+      ]
+    }
+  ]
+}

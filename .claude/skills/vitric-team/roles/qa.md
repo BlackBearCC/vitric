@@ -27,16 +27,18 @@ rpc '{"method":"assert/add","params":{"id":"hp-floor","if":[["@hero.Unit.hp",">=
 
 覆盖面：数值边界（hp/能量不越界）、状态机合法性、关键实体存在性、事件表每个事件至少被触发一次（`events/recent` 验证）。
 
-### ② 录像回归库
+### ② 录像回归库（走交付门禁）
 
-每条核心路径录一份进 `{PROJECT_DIR}/qa/`：
+每条核心路径录一份进 `{PROJECT_DIR}/qa/`，回归统一走 `vitric gate`（它比裸 replay 多验两件事：终局事件真的触发了、断言集在重放全程为绿）：
 
 ```bash
-vitric run {PROJECT_DIR} --ticks 1200 --record qa/run-win.json   # 录制时驱动通关
-vitric replay {PROJECT_DIR} qa/run-win.json                      # 回归：必须逐校验点一致
+vitric run {PROJECT_DIR} --ticks 1200 --record qa/run-win.json   # 录制时驱动通关（input/inject 或真打）
+vitric gate {PROJECT_DIR}                                        # 回归裁决：check + 录像逐位重放 + must_emit + 断言
 ```
 
-至少三盘：通关之路、死亡之路、乱按 soak 盘。**重放跑偏 = 有人混进了非确定性**（脚本私藏状态/Math.random），这是最高优先级 bug，直接报导演，附跑偏的校验点位置。注意录制期间 `world/set`/`spawn`/`reload`/`restore` 会被拒绝，影响世界只能 `input/inject`。
+`gates` 声明在 `vitric.json` 里（清单归导演管）：你把录像和 `qa/asserts.json` 备好后，提请导演把它们挂进 `gates.playthroughs` / `gates.assertions`（写法见 `docs/agent-guide.md`「交付门禁」）。通关录像就是不可伪造的交付证书——重放逐位一致 + 重放中观测到 `game-won`，缺一不可。
+
+至少三盘：通关之路（进 gates，必须 emit 终局事件）、死亡之路、乱按 soak 盘（后两盘用 `vitric replay` 验一致性即可，不挂 must_emit）。**重放跑偏 = 有人混进了非确定性**（脚本私藏状态/Math.random），这是最高优先级 bug，直接报导演，附跑偏的校验点位置。注意录制期间 `world/set`/`spawn`/`reload`/`restore` 会被拒绝，影响世界只能 `input/inject`。
 
 ### ③ Soak
 
@@ -58,7 +60,7 @@ rpc '{"method":"assert/failures"}'   # 全程必须为空
 ## 验收门（全过才算交付/放行）
 
 - 断言集全绿（`assert/failures` 为空，覆盖 GDD 全部机制）
-- 回归录像全部 `vitric replay` 重放一致
+- `vitric gate {PROJECT_DIR}` 退出 0（通关录像逐位重放 + 终局事件 + 断言全程绿）；不在 gates 里的回归录像 `vitric replay` 重放一致
 - soak ≥10 万 tick 无断言失败、perf 无单调增长
 - 体验指标表完整
 

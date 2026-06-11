@@ -233,6 +233,19 @@ impl Sim {
     /// 重放一段录像并逐校验点比对。调用前 world 必须处于录像起点状态
     /// （同一份项目数据实例化出来的世界天然满足）。
     pub fn replay(&mut self, rec: &Recording, logic: &mut dyn GameLogic) -> Result<(), SimError> {
+        self.replay_observed(rec, logic, |_, _, _, _| {})
+    }
+
+    /// 重放 + 逐 tick 观察。每个 tick 推完后把观察窗口交给 `observe`：
+    /// `(tick, 世界, 本 tick 喂给逻辑的事件, 逻辑层 emit 的事件)`。
+    /// `vitric gate` 用它在重放中收集事件、跑断言——观察者**只许看不许写**，
+    /// 写了世界，下一个校验点哈希必然跑偏（这正是录像作为交付证书不可伪造的根基）。
+    pub fn replay_observed(
+        &mut self,
+        rec: &Recording,
+        logic: &mut dyn GameLogic,
+        mut observe: impl FnMut(u64, &World, &[Event], Vec<Event>),
+    ) -> Result<(), SimError> {
         // 起点校验
         if let Some(&(t0, h0)) = rec.checkpoints.first() {
             let actual = self.world.state_hash();
@@ -249,7 +262,9 @@ impl Sim {
             for reply in rec.replies_at(self.tick) {
                 self.inject_reply(&reply.name, reply.data.clone());
             }
-            self.step(logic)?;
+            let report = self.step(logic)?;
+            let observed = logic.drain_observed();
+            observe(self.tick, &self.world, &report.events, observed);
             if let Some(&&(t, expected)) = cp.peek() {
                 if self.tick == t {
                     cp.next();

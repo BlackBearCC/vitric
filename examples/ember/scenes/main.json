@@ -1,0 +1,1935 @@
+{
+  "entities": [
+    {
+      "name": "hero",
+      "components": {
+        "Player": {},
+        "Position": {
+          "x": 0,
+          "y": 1.25
+        },
+        "Velocity": {
+          "x": 0,
+          "y": 0
+        },
+        "Collider": {
+          "w": 1.3,
+          "h": 2.1
+        },
+        "Body": {
+          "gravity": -34,
+          "grounded": false
+        },
+        "Spawn": {
+          "x": 0,
+          "y": 1.25
+        },
+        "Score": {
+          "value": 0
+        },
+        "Sprite": {
+          "w": 1.7,
+          "h": 2.2,
+          "color": "#6cc6ff"
+        },
+        "Anim": {
+          "clip": "idle"
+        }
+      }
+    },
+    {
+      "name": "gnd-0",
+      "components": {
+        "Position": {
+          "x": -7,
+          "y": -1.0
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#3b4252"
+        }
+      }
+    },
+    {
+      "name": "gnd-1",
+      "components": {
+        "Position": {
+          "x": -5,
+          "y": -1.0
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#3b4252"
+        }
+      }
+    },
+    {
+      "name": "gnd-2",
+      "components": {
+        "Position": {
+          "x": -3,
+          "y": -1.0
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#3b4252"
+        }
+      }
+    },
+    {
+      "name": "gnd-3",
+      "components": {
+        "Position": {
+          "x": -1,
+          "y": -1.0
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#3b4252"
+        }
+      }
+    },
+    {
+      "name": "gnd-4",
+      "components": {
+        "Position": {
+          "x": 1,
+          "y": -1.0
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#3b4252"
+        }
+      }
+    },
+    {
+      "name": "gnd-5",
+      "components": {
+        "Position": {
+          "x": 3,
+          "y": -1.0
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#3b4252"
+        }
+      }
+    },
+    {
+      "name": "gnd-6",
+      "components": {
+        "Position": {
+          "x": 5,
+          "y": -1.0
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#3b4252"
+        }
+      }
+    },
+    {
+      "name": "gnd-7",
+      "components": {
+        "Position": {
+          "x": 7,
+          "y": -1.0
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#3b4252"
+        }
+      }
+    },
+    {
+      "name": "wall-l-0",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-0",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 1
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-1",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 3
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-1",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 3
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-2",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 5
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-2",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 5
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-3",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 7
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-3",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 7
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-4",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 9
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-4",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 9
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-5",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 11
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-5",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 11
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-6",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 13
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-6",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 13
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-7",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 15
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-7",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 15
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-8",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 17
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-8",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 17
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-9",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 19
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-9",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 19
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-10",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 21
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-10",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 21
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-11",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 23
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-11",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 23
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-12",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 25
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-12",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 25
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-13",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 27
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-13",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 27
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-14",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 29
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-14",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 29
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-15",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 31
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-15",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 31
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-16",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 33
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-16",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 33
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-17",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 35
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-17",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 35
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-18",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 37
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-18",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 37
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-19",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 39
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-19",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 39
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-20",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 41
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-20",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 41
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-l-21",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 43
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "wall-r-21",
+      "components": {
+        "Position": {
+          "x": 9,
+          "y": 43
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "l1-0",
+      "components": {
+        "Position": {
+          "x": -7,
+          "y": 1.75
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "l1-1",
+      "components": {
+        "Position": {
+          "x": -5,
+          "y": 1.75
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "r3-0",
+      "components": {
+        "Position": {
+          "x": 5,
+          "y": 7.25
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "r3-1",
+      "components": {
+        "Position": {
+          "x": 7,
+          "y": 7.25
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "l5-0",
+      "components": {
+        "Position": {
+          "x": -7,
+          "y": 12.75
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "l5-1",
+      "components": {
+        "Position": {
+          "x": -5,
+          "y": 12.75
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "r7-0",
+      "components": {
+        "Position": {
+          "x": 5,
+          "y": 18.25
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "r7-1",
+      "components": {
+        "Position": {
+          "x": 7,
+          "y": 18.25
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "l9-0",
+      "components": {
+        "Position": {
+          "x": -7,
+          "y": 23.75
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "l9-1",
+      "components": {
+        "Position": {
+          "x": -5,
+          "y": 23.75
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "r11-0",
+      "components": {
+        "Position": {
+          "x": 5,
+          "y": 29.25
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "r11-1",
+      "components": {
+        "Position": {
+          "x": 7,
+          "y": 29.25
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "l13-0",
+      "components": {
+        "Position": {
+          "x": -7,
+          "y": 34.7505
+        },
+        "Collider": {
+          "w": 2,
+          "h": 1.999
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "l13-1",
+      "components": {
+        "Position": {
+          "x": -5,
+          "y": 34.7505
+        },
+        "Collider": {
+          "w": 2,
+          "h": 1.999
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "summit-0",
+      "components": {
+        "Position": {
+          "x": 1,
+          "y": 37.5005
+        },
+        "Collider": {
+          "w": 2,
+          "h": 1.999
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "summit-1",
+      "components": {
+        "Position": {
+          "x": 3,
+          "y": 37.5005
+        },
+        "Collider": {
+          "w": 2,
+          "h": 1.999
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "summit-2",
+      "components": {
+        "Position": {
+          "x": 5,
+          "y": 37.5005
+        },
+        "Collider": {
+          "w": 2,
+          "h": 1.999
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "summit-3",
+      "components": {
+        "Position": {
+          "x": 7,
+          "y": 37.5005
+        },
+        "Collider": {
+          "w": 2,
+          "h": 1.999
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#4f5b75"
+        }
+      }
+    },
+    {
+      "name": "c2-0",
+      "components": {
+        "Position": {
+          "x": 1,
+          "y": 4.5
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#5d6b89"
+        }
+      }
+    },
+    {
+      "name": "c2-1",
+      "components": {
+        "Position": {
+          "x": 3,
+          "y": 4.5
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#5d6b89"
+        }
+      }
+    },
+    {
+      "name": "c4-0",
+      "components": {
+        "Position": {
+          "x": -3,
+          "y": 10.0
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#5d6b89"
+        }
+      }
+    },
+    {
+      "name": "c4-1",
+      "components": {
+        "Position": {
+          "x": -1,
+          "y": 10.0
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#5d6b89"
+        }
+      }
+    },
+    {
+      "name": "c6-0",
+      "components": {
+        "Position": {
+          "x": 1,
+          "y": 15.5
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#5d6b89"
+        }
+      }
+    },
+    {
+      "name": "c8-0",
+      "components": {
+        "Position": {
+          "x": -1,
+          "y": 21.0
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#5d6b89"
+        }
+      }
+    },
+    {
+      "name": "c10-0",
+      "components": {
+        "Position": {
+          "x": 1,
+          "y": 26.5
+        },
+        "Collider": {
+          "w": 2,
+          "h": 2.0
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#5d6b89"
+        }
+      }
+    },
+    {
+      "name": "c12-0",
+      "components": {
+        "Position": {
+          "x": -1,
+          "y": 32.0005
+        },
+        "Collider": {
+          "w": 2,
+          "h": 1.999
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#5d6b89"
+        }
+      }
+    },
+    {
+      "name": "roof-0",
+      "components": {
+        "Position": {
+          "x": 3,
+          "y": 42.9995
+        },
+        "Collider": {
+          "w": 2,
+          "h": 1.999
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "roof-1",
+      "components": {
+        "Position": {
+          "x": 5,
+          "y": 42.9995
+        },
+        "Collider": {
+          "w": 2,
+          "h": 1.999
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "roof-2",
+      "components": {
+        "Position": {
+          "x": 7,
+          "y": 42.9995
+        },
+        "Collider": {
+          "w": 2,
+          "h": 1.999
+        },
+        "Solid": {},
+        "Sprite": {
+          "w": 2,
+          "h": 2,
+          "color": "#343c4e"
+        }
+      }
+    },
+    {
+      "name": "brazier-1",
+      "components": {
+        "Brazier": {
+          "lit": false,
+          "n": 1
+        },
+        "Position": {
+          "x": -5.0,
+          "y": 3.65
+        },
+        "Collider": {
+          "w": 1.2,
+          "h": 1.6
+        },
+        "Sprite": {
+          "w": 1.4,
+          "h": 1.8,
+          "color": "#8a5a2e"
+        },
+        "Light": {
+          "kind": "point",
+          "radius": 9,
+          "color": "#ff9a3e",
+          "intensity": 0.15
+        }
+      }
+    },
+    {
+      "name": "brazier-2",
+      "components": {
+        "Brazier": {
+          "lit": false,
+          "n": 2
+        },
+        "Position": {
+          "x": -1.5,
+          "y": 11.9
+        },
+        "Collider": {
+          "w": 1.2,
+          "h": 1.6
+        },
+        "Sprite": {
+          "w": 1.4,
+          "h": 1.8,
+          "color": "#8a5a2e"
+        },
+        "Light": {
+          "kind": "point",
+          "radius": 9,
+          "color": "#ff9a3e",
+          "intensity": 0.15
+        }
+      }
+    },
+    {
+      "name": "brazier-3",
+      "components": {
+        "Brazier": {
+          "lit": false,
+          "n": 3
+        },
+        "Position": {
+          "x": -1.5,
+          "y": 22.9
+        },
+        "Collider": {
+          "w": 1.2,
+          "h": 1.6
+        },
+        "Sprite": {
+          "w": 1.4,
+          "h": 1.8,
+          "color": "#8a5a2e"
+        },
+        "Light": {
+          "kind": "point",
+          "radius": 9,
+          "color": "#ff9a3e",
+          "intensity": 0.15
+        }
+      }
+    },
+    {
+      "name": "brazier-4",
+      "components": {
+        "Brazier": {
+          "lit": false,
+          "n": 4
+        },
+        "Position": {
+          "x": -5.0,
+          "y": 36.65
+        },
+        "Collider": {
+          "w": 1.2,
+          "h": 1.6
+        },
+        "Sprite": {
+          "w": 1.4,
+          "h": 1.8,
+          "color": "#8a5a2e"
+        },
+        "Light": {
+          "kind": "point",
+          "radius": 9,
+          "color": "#ff9a3e",
+          "intensity": 0.15
+        }
+      }
+    },
+    {
+      "name": "spike-1",
+      "components": {
+        "Hazard": {},
+        "Position": {
+          "x": -7,
+          "y": 14.25
+        },
+        "Collider": {
+          "w": 1.6,
+          "h": 0.9
+        },
+        "Sprite": {
+          "w": 1.8,
+          "h": 1.0,
+          "color": "#d04848"
+        }
+      }
+    },
+    {
+      "name": "spike-2",
+      "components": {
+        "Hazard": {},
+        "Position": {
+          "x": 7,
+          "y": 19.75
+        },
+        "Collider": {
+          "w": 1.6,
+          "h": 0.9
+        },
+        "Sprite": {
+          "w": 1.8,
+          "h": 1.0,
+          "color": "#d04848"
+        }
+      }
+    },
+    {
+      "name": "spike-3",
+      "components": {
+        "Hazard": {},
+        "Position": {
+          "x": -7,
+          "y": 25.25
+        },
+        "Collider": {
+          "w": 1.6,
+          "h": 0.9
+        },
+        "Sprite": {
+          "w": 1.8,
+          "h": 1.0,
+          "color": "#d04848"
+        }
+      }
+    },
+    {
+      "name": "spike-4",
+      "components": {
+        "Hazard": {},
+        "Position": {
+          "x": 7,
+          "y": 30.75
+        },
+        "Collider": {
+          "w": 1.6,
+          "h": 0.9
+        },
+        "Sprite": {
+          "w": 1.8,
+          "h": 1.0,
+          "color": "#d04848"
+        }
+      }
+    },
+    {
+      "name": "spike-5",
+      "components": {
+        "Hazard": {},
+        "Position": {
+          "x": -7,
+          "y": 36.25
+        },
+        "Collider": {
+          "w": 1.6,
+          "h": 0.9
+        },
+        "Sprite": {
+          "w": 1.8,
+          "h": 1.0,
+          "color": "#d04848"
+        }
+      }
+    },
+    {
+      "name": "door",
+      "components": {
+        "Door": {},
+        "Solid": {},
+        "Position": {
+          "x": 4.251,
+          "y": 40.25
+        },
+        "Collider": {
+          "w": 2.4,
+          "h": 3.4
+        },
+        "Sprite": {
+          "w": 2.6,
+          "h": 3.6,
+          "color": "#c9a45a"
+        }
+      }
+    },
+    {
+      "name": "camera",
+      "components": {
+        "Camera": {
+          "x": 0,
+          "y": 8,
+          "view_h": 20,
+          "follow": "hero",
+          "lerp": 0.12
+        },
+        "Shake": {
+          "amplitude": 0,
+          "decay": 0.88
+        }
+      }
+    },
+    {
+      "name": "ambient",
+      "components": {
+        "Ambient": {
+          "color": "#262b40",
+          "shadows": true
+        },
+        "Bloom": {
+          "threshold": 0.55,
+          "strength": 0.9
+        }
+      }
+    },
+    {
+      "name": "hud",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 9
+        },
+        "Text": {
+          "content": "BRAZIERS 0/4",
+          "size": 0.7,
+          "color": "#ffcf7a",
+          "screen": true
+        }
+      }
+    },
+    {
+      "name": "txt-title",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 8.5
+        },
+        "Text": {
+          "content": "EMBER TOWER",
+          "size": 0.9,
+          "color": "#a89fc0"
+        }
+      }
+    },
+    {
+      "name": "txt-controls",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 1.6
+        },
+        "Text": {
+          "content": "ARROWS RUN . SPACE JUMP",
+          "size": 0.5,
+          "color": "#8d86a8"
+        }
+      }
+    },
+    {
+      "name": "txt-brazier",
+      "components": {
+        "Position": {
+          "x": -0.5,
+          "y": 6.1
+        },
+        "Text": {
+          "content": "TOUCH A BRAZIER . WAKE ITS FLAME",
+          "size": 0.45,
+          "color": "#8d86a8"
+        }
+      }
+    },
+    {
+      "name": "txt-spikes",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 15.1
+        },
+        "Text": {
+          "content": "THE TOWER BITES . MIND THE RED",
+          "size": 0.45,
+          "color": "#8d86a8"
+        }
+      }
+    },
+    {
+      "name": "txt-flames",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 26.6
+        },
+        "Text": {
+          "content": "FOUR FLAMES OPEN THE GATE",
+          "size": 0.45,
+          "color": "#8d86a8"
+        }
+      }
+    },
+    {
+      "name": "gate-text",
+      "components": {
+        "Position": {
+          "x": 1.5,
+          "y": 40.9
+        },
+        "Text": {
+          "content": "THE KEEPER WAITS ABOVE",
+          "size": 0.45,
+          "color": "#c9b27a"
+        }
+      }
+    }
+  ]
+}

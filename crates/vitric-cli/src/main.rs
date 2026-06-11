@@ -4,6 +4,7 @@
 //! - `vitric check <项目目录>`            校验项目（schema/场景/规则/脚本），出报告
 //! - `vitric run <项目目录> [选项]`        无头运行 + AI 控制面
 //! - `vitric replay <项目目录> <录像.json>` 重放录像并校验确定性
+//! - `vitric gate <项目目录>`              交付门禁：check + 通关录像重放 + 断言集，全过才出证书
 //! - `vitric assets <项目目录> [选项]`      全项目 PNG 统一色板（AI 出图规整成一个调）
 //!
 //! assets 选项：
@@ -43,9 +44,10 @@ fn main() {
         Some("check") => cmd_check(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
         Some("replay") => cmd_replay(&args[1..]),
+        Some("gate") => cmd_gate(&args[1..]),
         Some("assets") => vitric_cli::assets_cmd::run(&args[1..]),
         _ => {
-            eprintln!("用法: vitric <check|run|replay|assets> <项目目录> [选项]\n详见 vitric 仓库 docs/");
+            eprintln!("用法: vitric <check|run|replay|gate|assets> <项目目录> [选项]\n详见 vitric 仓库 docs/");
             std::process::exit(2);
         }
     };
@@ -83,6 +85,19 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
         })
     );
     Ok(())
+}
+
+/// `vitric gate`：交付门禁。报告（人和机器同一份 JSON）永远打到 stdout；
+/// 全部门禁 pass 才退出 0——"交付完成"由这里裁决，不由 agent 自述。
+fn cmd_gate(args: &[String]) -> Result<(), String> {
+    let dir = args.first().ok_or("gate 缺少项目目录参数")?;
+    let (report, pass) = vitric_cli::gate::run(&PathBuf::from(dir))?;
+    println!("{}", serde_json::to_string_pretty(&report).expect("报告可序列化"));
+    if pass {
+        Ok(())
+    } else {
+        Err("交付门禁未通过（fail 项详见上方 JSON 报告）".to_string())
+    }
 }
 
 fn cmd_run(args: &[String]) -> Result<(), String> {

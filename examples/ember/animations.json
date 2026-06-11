@@ -1,0 +1,34 @@
+{
+  "clips": {
+    "idle": {
+      "frames": [
+        "hero-idle.png"
+      ],
+      "fps": 1,
+      "loop": true
+    },
+    "walk": {
+      "frames": [
+        "hero-walk1.png",
+        "hero-walk2.png"
+      ],
+      "fps": 6,
+      "loop": true
+    },
+    "jump": {
+      "frames": [
+        "hero-jump.png"
+      ],
+      "fps": 1,
+      "loop": true
+    },
+    "burn": {
+      "frames": [
+        "brazier-lit.png",
+        "brazier-lit2.png"
+      ],
+      "fps": 4,
+      "loop": true
+    }
+  }
+}
