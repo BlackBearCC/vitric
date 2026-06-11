@@ -4,11 +4,16 @@
 // 环境变量：VITRIC_BIN = vitric 可执行文件路径（默认 PATH 上的 "vitric"）。
 
 import { spawn } from "node:child_process";
+import { readFile, readdir } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
 const VITRIC_BIN = process.env.VITRIC_BIN || "vitric";
+// 角色工单随引擎发货：本文件在 <repo>/mcp/，工单的唯一权威源在 <repo>/team/
+const TEAM_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../team");
 
 /** 当前由本 server 启动的游戏进程。 */
 let game = null; // { child, controlUrl, project }
@@ -48,6 +53,47 @@ server.tool(
       p.on("close", (code) => resolve(text(code === 0 ? out : `校验失败:\n${err}`)));
       p.on("error", (e) => resolve(text(`无法执行 ${VITRIC_BIN}: ${e.message}（用 VITRIC_BIN 环境变量指定路径）`)));
     });
+  }
+);
+
+/** 跑一个 vitric 子命令，把 stdout（成功）或 stderr（失败）原样回给客户端。 */
+function runCli(args, { okExit = [0] } = {}) {
+  return new Promise((resolve) => {
+    const p = spawn(VITRIC_BIN, args);
+    let out = "", err = "";
+    p.stdout.on("data", (d) => (out += d));
+    p.stderr.on("data", (d) => (err += d));
+    p.on("close", (code) => resolve(text(okExit.includes(code) ? out : `${out}\n${err}`.trim())));
+    p.on("error", (e) => resolve(text(`无法执行 ${VITRIC_BIN}: ${e.message}（用 VITRIC_BIN 环境变量指定路径）`)));
+  });
+}
+
+server.tool(
+  "vitric_team",
+  "多 agent 班子协同黑板：各角色（美术/关卡/玩法/音频/文案/QA）交付物健康度 + GDD/schema 合同与门禁声明状态 + 卡点提示（blocking）。只读状态工具，不是门禁。",
+  { project_dir: z.string().describe("项目目录（含 vitric.json）") },
+  async ({ project_dir }) => runCli(["team", project_dir])
+);
+
+server.tool(
+  "vitric_role",
+  "领取角色工单：返回引擎内置的 team/roles/<role>.md 全文（多 agent 班子里该角色的完整 prompt，含先读清单/地盘/工序/验收门）。给了 project_dir 就把 {PROJECT_DIR} 占位符替换成真实路径，整篇可直接派给 subagent。",
+  {
+    role: z.enum(["art", "level", "gameplay", "audio", "narrative", "qa"]).describe("角色名"),
+    project_dir: z.string().optional().describe("项目目录；给了就替换工单里的 {PROJECT_DIR} 占位符"),
+  },
+  async ({ role, project_dir }) => {
+    const file = path.join(TEAM_DIR, "roles", `${role}.md`);
+    let content;
+    try {
+      content = await readFile(file, "utf8");
+    } catch (e) {
+      const available = (await readdir(path.join(TEAM_DIR, "roles")).catch(() => []))
+        .filter((f) => f.endsWith(".md")).map((f) => f.replace(/\.md$/, ""));
+      return text(`读取工单 ${file} 失败: ${e.message}。可用角色: ${available.join(", ")}`);
+    }
+    if (project_dir) content = content.replaceAll("{PROJECT_DIR}", project_dir);
+    return text(content);
   }
 );
 

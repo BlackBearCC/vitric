@@ -45,7 +45,13 @@
 
 ## 落地形态
 
-本打法已产品化为 Claude Code skill：[`.claude/skills/vitric-team/`](../.claude/skills/vitric-team/SKILL.md)。
-`SKILL.md` 是导演编排循环，`templates/GDD-template.md` 是合同骨架，`roles/` 下六份角色工单
-（art/level/gameplay/audio/narrative/qa）替换 `{PROJECT_DIR}` 后即可整篇作为 subagent prompt 派出。
+**协同制度已内置引擎，随引擎发货**（协议权威源见 [`team/README.md`](../team/README.md)）：
+
+- `team/` 目录：六份角色工单（`team/roles/<role>.md`，替换 `{PROJECT_DIR}` 后整篇作为 subagent prompt）
+  和合同骨架 `team/templates/GDD-template.md`——任何 agent 平台都直接消费，不依赖某家的 skill 格式。
+- `vitric team <项目目录>`：协同黑板，各角色交付物健康度 + 合同/门禁状态 + 卡点提示（只读，永远退出 0）。
+- `vitric turf <项目目录> --role <角色> <改动文件...>`：地盘执法，越界文件逐条点名并退出 1。
+- MCP 工具 `vitric_role` / `vitric_team`：MCP 客户端（Claude Code / Cursor / Codex…）从引擎本体领工单、看黑板。
+
+Claude Code 上的导演编排循环是薄薄一层皮：[`.claude/skills/vitric-team/SKILL.md`](../.claude/skills/vitric-team/SKILL.md)。
 合同范例：`examples/ember/GDD.md`、`examples/spire/GDD.md`。

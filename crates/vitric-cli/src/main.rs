@@ -6,6 +6,8 @@
 //! - `vitric replay <项目目录> <录像.json>` 重放录像并校验确定性
 //! - `vitric gate <项目目录>`              交付门禁：check + 通关录像重放 + 断言集，全过才出证书
 //! - `vitric assets <项目目录> [选项]`      全项目 PNG 统一色板（AI 出图规整成一个调）
+//! - `vitric team <项目目录>`              多 agent 班子协同黑板：各角色交付物健康度 + 门禁/合同状态（只读，永远退出 0）
+//! - `vitric turf <项目目录> --role <角色> <改动文件...>`  地盘执法：改动文件越出角色地盘即退出 1
 //!
 //! assets 选项：
 //!   --colors <N>     色板颜色数（默认 32）
@@ -46,8 +48,10 @@ fn main() {
         Some("replay") => cmd_replay(&args[1..]),
         Some("gate") => cmd_gate(&args[1..]),
         Some("assets") => vitric_cli::assets_cmd::run(&args[1..]),
+        Some("team") => cmd_team(&args[1..]),
+        Some("turf") => cmd_turf(&args[1..]),
         _ => {
-            eprintln!("用法: vitric <check|run|replay|gate|assets> <项目目录> [选项]\n详见 vitric 仓库 docs/");
+            eprintln!("用法: vitric <check|run|replay|gate|assets|team|turf> <项目目录> [选项]\n详见 vitric 仓库 docs/");
             std::process::exit(2);
         }
     };
@@ -97,6 +101,26 @@ fn cmd_gate(args: &[String]) -> Result<(), String> {
         Ok(())
     } else {
         Err("交付门禁未通过（fail 项详见上方 JSON 报告）".to_string())
+    }
+}
+
+/// `vitric team`：班子协同黑板。状态工具不是门——报告打到 stdout 后**永远成功退出**，
+/// 有卡点也只是 blocking 提示；交付裁决归 `vitric gate`。
+fn cmd_team(args: &[String]) -> Result<(), String> {
+    let dir = args.first().ok_or("team 缺少项目目录参数")?;
+    let report = vitric_cli::team::run(&PathBuf::from(dir))?;
+    println!("{}", serde_json::to_string_pretty(&report).expect("报告可序列化"));
+    Ok(())
+}
+
+/// `vitric turf`：地盘执法。报告同 gate 风格打到 stdout；有越界文件就退出 1。
+fn cmd_turf(args: &[String]) -> Result<(), String> {
+    let (report, pass) = vitric_cli::turf::run(args)?;
+    println!("{}", serde_json::to_string_pretty(&report).expect("报告可序列化"));
+    if pass {
+        Ok(())
+    } else {
+        Err("地盘违规（violations 详见上方 JSON 报告）——跨地盘需求走事件约定提给导演".to_string())
     }
 }
 
