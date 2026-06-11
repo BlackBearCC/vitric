@@ -41,3 +41,10 @@
 
 立项时导演产出"实体尺寸表"（名字 → Collider/Sprite 的 w/h）。关卡以此用纯色块搭关；
 美术产出贴图时尺寸必须匹配该表；换贴图只改 `Sprite.image`，物理与布局零波动。
+
+## 落地形态
+
+本打法已产品化为 Claude Code skill：[`.claude/skills/vitric-team/`](../.claude/skills/vitric-team/SKILL.md)。
+`SKILL.md` 是导演编排循环，`templates/GDD-template.md` 是合同骨架，`roles/` 下六份角色工单
+（art/level/gameplay/audio/narrative/qa）替换 `{PROJECT_DIR}` 后即可整篇作为 subagent prompt 派出。
+合同范例：`examples/ember/GDD.md`、`examples/spire/GDD.md`。

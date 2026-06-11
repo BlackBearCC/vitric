@@ -6,6 +6,7 @@ description: Use when developing, running, testing, or debugging a Vitric game p
 # 用 Vitric 开发游戏
 
 Vitric 是 glass-box 游戏引擎：一切状态对 agent 可见、可操作、可验证。你（agent）可以自主完成"改 → 校验 → 跑 → 看 → 测 → 修"全闭环，不需要人帮你看屏幕。
+（要多个 agent 分角色组队开发，用 `vitric-team` skill——本 skill 是单人开发手册。）
 
 ## 铁律
 
