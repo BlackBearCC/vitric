@@ -388,15 +388,19 @@ impl Sim {
 
             let w = self.num_field(id, "Collider", "w")?;
             let h = self.num_field(id, "Collider", "h")?;
-            // 轴分离：先走 x 再走 y，每轴撞上就贴边停（中心坐标，重叠判定与 collision 事件同一公式）。
+            // 轴分离：先走 x 再走 y，每轴撞上就贴边停（中心坐标）。
+            // 重叠判定用 penetrates（带相对余量），不是 collision 事件的严格 <：
+            // 贴边 snap（如 ny = sy + (sh+h)/2）的浮点加法在大坐标下会舍掉最多
+            // 一个 ULP，写回的位置比精确接触深一丝。严格 < 会把这种「站着」
+            // 误判成穿透——下一 tick 的 x 轴判定先命中，把站在平台上的实体
+            // 横着弹出去。余量见 penetrates 的注释。
             // 注意：单 tick 位移大于障碍厚度会穿过去（无扫掠），速度预算要留余量。
             let mut nx = px + vx * DT;
             for &(sid, sx, sy, sw, sh) in &solids {
                 if sid == id {
                     continue;
                 }
-                let overlap =
-                    (nx - sx).abs() * 2.0 < (w + sw) && (py - sy).abs() * 2.0 < (h + sh);
+                let overlap = penetrates(nx, sx, w + sw) && penetrates(py, sy, h + sh);
                 if overlap {
                     nx = if vx > 0.0 { sx - (sw + w) / 2.0 } else { sx + (sw + w) / 2.0 };
                     vx = 0.0;
@@ -408,8 +412,7 @@ impl Sim {
                 if sid == id {
                     continue;
                 }
-                let overlap =
-                    (nx - sx).abs() * 2.0 < (w + sw) && (ny - sy).abs() * 2.0 < (h + sh);
+                let overlap = penetrates(nx, sx, w + sw) && penetrates(ny, sy, h + sh);
                 if overlap {
                     if vy <= 0.0 {
                         ny = sy + (sh + h) / 2.0; // 落在顶面
@@ -604,6 +607,20 @@ impl Sim {
     }
 }
 
+/// 挡停体重叠判定：实体中心 a、固体中心 b、两者尺寸之和 span，
+/// 穿透深度必须超过相对余量才算重叠。
+///
+/// 约束：余量必须跟坐标量级走。贴边 snap 的舍入误差是 ULP 级，而 ULP
+/// 正比于坐标大小（y≈34 时约 7e-15，y≈1 时常为 0——所以弹飞 bug 只在
+/// 大坐标出现）。固定绝对余量要么大坐标下不够用，要么小坐标下吞掉真位移。
+/// 取 1e-9 × 量级：比 ULP（2.2e-16 × 量级）大六个数量级，稳压舍入误差；
+/// 又比任何真实穿透（速度 × DT，最小也是 1e-3 级）小得多，不会吞掉真碰撞。
+/// 低坐标场景下与原严格 < 判定结果一致，已有轨迹（含录像哈希）不变。
+fn penetrates(a: f64, b: f64, span: f64) -> bool {
+    let eps = 1e-9 * a.abs().max(b.abs()).max(1.0);
+    span - (a - b).abs() * 2.0 > eps
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
@@ -699,6 +716,97 @@ mod tests {
         assert_eq!(sim.world.get_field(p, "Body.grounded").unwrap(), &json!(true));
         let py = sim.world.get_field(p, "Position.y").unwrap().as_f64().unwrap();
         assert!((py - 1.0).abs() < 1e-9, "落回地板顶面，实际 y={py}");
+    }
+
+    /// 高台测试场：方块堆到顶面 y=top 的平台 + 一个 2.1 高的角色站在上面。
+    /// 角色 2.1 高、平台块 2.0 高的组合让 snap 坐标（top + 1.05）带小数，
+    /// 在大坐标下必然产生 ULP 舍入——这正是弹飞 bug 的触发形态。
+    fn tall_platform_world(sim: &mut Sim, top: f64) -> vitric_ecs::EntityId {
+        // 平台：一列 2.0 高的方块，最上面那块的顶面在 y=top
+        let mut y = top - 1.0;
+        while y > top - 7.0 {
+            let t = sim.world.spawn();
+            sim.world.set_component(t, "Position", json!({"x": 8.0, "y": y})).unwrap();
+            sim.world.set_component(t, "Collider", json!({"w": 2.0, "h": 2.0})).unwrap();
+            sim.world.set_component(t, "Solid", json!({})).unwrap();
+            y -= 2.0;
+        }
+        // 旁边一堵墙（复刻实测场景：被弹飞的实体会沿墙列级联往上爬）
+        let mut wy = top + 1.0;
+        for _ in 0..4 {
+            let wall = sim.world.spawn();
+            sim.world.set_component(wall, "Position", json!({"x": 10.5, "y": wy})).unwrap();
+            sim.world.set_component(wall, "Collider", json!({"w": 1.0, "h": 2.0})).unwrap();
+            sim.world.set_component(wall, "Solid", json!({})).unwrap();
+            wy += 2.0;
+        }
+        let hero = sim.world.spawn_named("hero").unwrap();
+        // 从平台上方一点点落下，让 snap 路径真实走一遍
+        sim.world.set_component(hero, "Position", json!({"x": 8.0, "y": top + 1.3})).unwrap();
+        sim.world.set_component(hero, "Velocity", json!({"x": 0.0, "y": 0.0})).unwrap();
+        sim.world.set_component(hero, "Collider", json!({"w": 1.0, "h": 2.1})).unwrap();
+        sim.world
+            .set_component(hero, "Body", json!({"gravity": -30.0, "grounded": false}))
+            .unwrap();
+        hero
+    }
+
+    /// 回归（弹飞 bug）：站在 top=33 的高台上，snap 写回的 y 比精确接触
+    /// 低一个 ULP，旧的严格 < 判定下一 tick 把「站着」当穿透，x 轴先命中
+    /// 把角色横着弹出去（实测从 top=33 飞到 (8.65, 47.05) 沿墙列级联上爬）。
+    /// 修复后：120 tick 站着不动。
+    #[test]
+    fn standing_on_high_platform_is_stable() {
+        let mut sim = Sim::new(1);
+        let hero = tall_platform_world(&mut sim, 33.0);
+        for _ in 0..120 {
+            sim.step(&mut ()).unwrap();
+        }
+        let px = sim.world.get_field(hero, "Position.x").unwrap().as_f64().unwrap();
+        let py = sim.world.get_field(hero, "Position.y").unwrap().as_f64().unwrap();
+        assert_eq!(px, 8.0, "站着不该有任何横向位移，实际 x={px}");
+        assert!((py - 34.05).abs() < 1e-9, "应贴在高台顶面 33+1.05，实际 y={py}");
+        assert_eq!(sim.world.get_field(hero, "Body.grounded").unwrap(), &json!(true));
+        assert_eq!(sim.world.get_field(hero, "Velocity.x").unwrap().as_f64(), Some(0.0));
+    }
+
+    /// 同一形态在低坐标（top=1）从来没出过事——锁住它继续没事。
+    #[test]
+    fn standing_on_low_platform_is_stable() {
+        let mut sim = Sim::new(1);
+        let hero = tall_platform_world(&mut sim, 1.0);
+        for _ in 0..120 {
+            sim.step(&mut ()).unwrap();
+        }
+        let px = sim.world.get_field(hero, "Position.x").unwrap().as_f64().unwrap();
+        let py = sim.world.get_field(hero, "Position.y").unwrap().as_f64().unwrap();
+        assert_eq!(px, 8.0, "站着不该有任何横向位移，实际 x={px}");
+        assert!((py - 2.05).abs() < 1e-9, "应贴在平台顶面 1+1.05，实际 y={py}");
+        assert_eq!(sim.world.get_field(hero, "Body.grounded").unwrap(), &json!(true));
+    }
+
+    /// 高坐标下起跳→落回也要稳：上升、落地回到原地、不被横向弹开。
+    #[test]
+    fn jump_and_land_on_high_platform_is_stable() {
+        let mut sim = Sim::new(1);
+        let hero = tall_platform_world(&mut sim, 33.0);
+        for _ in 0..60 {
+            sim.step(&mut ()).unwrap();
+        }
+        sim.world.set_field(hero, "Velocity.y", json!(12.0)).unwrap();
+        sim.step(&mut ()).unwrap();
+        assert_eq!(sim.world.get_field(hero, "Body.grounded").unwrap(), &json!(false));
+        let mut peak: f64 = 0.0;
+        for _ in 0..120 {
+            sim.step(&mut ()).unwrap();
+            peak = peak.max(sim.world.get_field(hero, "Position.y").unwrap().as_f64().unwrap());
+        }
+        assert!(peak > 36.0, "跳起来要离台，峰值 {peak}");
+        let px = sim.world.get_field(hero, "Position.x").unwrap().as_f64().unwrap();
+        let py = sim.world.get_field(hero, "Position.y").unwrap().as_f64().unwrap();
+        assert_eq!(px, 8.0, "竖直跳不该有横向位移，实际 x={px}");
+        assert!((py - 34.05).abs() < 1e-9, "落回高台顶面，实际 y={py}");
+        assert_eq!(sim.world.get_field(hero, "Body.grounded").unwrap(), &json!(true));
     }
 
     /// 收集事件的测试逻辑。

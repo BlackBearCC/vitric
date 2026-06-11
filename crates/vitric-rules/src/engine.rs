@@ -465,16 +465,32 @@ impl Engine {
         Ok(None)
     }
 
-    /// exists 检查：组件或字段是否存在（实体不存在也算 false，不报错）。
+    /// exists 检查：组件或字段是否存在。exists 的本职就是问「在不在」，
+    /// 所以实体缺席的所有形态——@名字查无此人（despawn 会注销名字）、句柄代数过期、
+    /// self/other 未绑定——都回答 false，不报错。约束只对 exists/!exists 放宽：
+    /// 其他操作符引用缺失实体仍然报错（拿不存在的字段去比较是规则真写错了）。
+    /// 引用语法本身不合法（既不是 self/other/@名字也不是句柄）照常报错。
     fn ref_exists(&self, world: &World, ctx: Ctx, path: &str) -> Result<bool, String> {
         let (ent_part, rest) = match path.split_once('.') {
             Some((e, r)) => (e, Some(r)),
             None => (path, None),
         };
-        let id = match self.entity_ref_opt(world, ctx, ent_part)? {
-            Some(id) if world.is_alive(id) => id,
-            _ => return Ok(false),
+        // @名字单独处理：entity_ref_opt 对查无此名是报错（其他操作符要的就是这个），
+        // 但对 exists 来说「名字不在了」恰恰是要检测的合法答案
+        let id = if let Some(name) = ent_part.strip_prefix('@') {
+            match world.entity(name) {
+                Ok(id) => id,
+                Err(_) => return Ok(false),
+            }
+        } else {
+            match self.entity_ref_opt(world, ctx, ent_part)? {
+                Some(id) => id,
+                None => return Ok(false),
+            }
         };
+        if !world.is_alive(id) {
+            return Ok(false);
+        }
         match rest {
             None => Ok(true),
             Some(r) => match r.split_once('.') {
@@ -739,6 +755,92 @@ mod tests {
         let err = eng.process_tick(&mut w, vec![Event::new("go", json!({}))]).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("bad") && msg.contains("self"), "错误要带规则 id 和原因: {msg}");
+    }
+
+    /// 回归（exists 报错 bug）：实体被 despawn 后名字注销，
+    /// `["@名字", "exists"]` 必须求值为 false 而不是报「没有名为 X 的实体」——
+    /// 否则所有「检测某东西被摧毁后做事」的规则在它真被摧毁那刻把模拟干停。
+    #[test]
+    fn exists_on_despawned_named_entity_is_false_not_error() {
+        let eng = engine(json!({"rules": [
+            {
+                "id": "door-still-there",
+                "on": {"event": "check"},
+                "if": [["@door", "exists"]],
+                "do": [{"set": "@player.Score.value", "to": 1}]
+            },
+            {
+                "id": "door-destroyed",
+                "on": {"event": "check"},
+                "if": [["@door", "!exists"]],
+                "do": [{"set": "@player.Score.value", "to": 2}]
+            }
+        ]}));
+        let (mut w, p, _) = world_with_player_and_coin();
+        let door = w.spawn_named("door").unwrap();
+        w.set_component(door, "Coin", json!({"value": 1})).unwrap();
+
+        // 门还在：exists 命中
+        let out = eng.process_tick(&mut w, vec![Event::new("check", json!({}))]).unwrap();
+        assert_eq!(out.fired, vec!["door-still-there"]);
+        assert_eq!(w.get_field(p, "Score.value").unwrap(), &json!(1));
+
+        // 门没了：不报错，!exists 命中，模拟继续跑
+        w.despawn(door).unwrap();
+        let out = eng.process_tick(&mut w, vec![Event::new("check", json!({}))]).unwrap();
+        assert_eq!(out.fired, vec!["door-destroyed"]);
+        assert_eq!(w.get_field(p, "Score.value").unwrap(), &json!(2));
+        // 再跑一轮也照样平稳（不是只豁免一次）
+        eng.process_tick(&mut w, vec![Event::new("check", json!({}))]).unwrap();
+    }
+
+    /// exists 的实体缺席各形态：带字段路径的引用、过期句柄、未绑定的 self/other，
+    /// 全部回答 false 不报错。
+    #[test]
+    fn exists_handles_all_missing_entity_forms() {
+        let eng = engine(json!({"rules": []}));
+        let (mut w, _, _) = world_with_player_and_coin();
+        let door = w.spawn_named("door").unwrap();
+        w.set_component(door, "Coin", json!({"value": 1})).unwrap();
+        let handle = door.to_string();
+        w.despawn(door).unwrap();
+
+        let f = json!(false);
+        // @名字 + 组件路径 / 字段路径：实体不在 → false
+        assert!(eng.check(&w, &[("@door".into(), "!exists".into(), f.clone())]).unwrap());
+        assert!(!eng.check(&w, &[("@door.Coin".into(), "exists".into(), f.clone())]).unwrap());
+        assert!(!eng.check(&w, &[("@door.Coin.value".into(), "exists".into(), f.clone())]).unwrap());
+        // 过期句柄（代数已翻篇）→ false
+        assert!(!eng.check(&w, &[(handle, "exists".into(), f.clone())]).unwrap());
+        // self/other 在无绑定上下文里 → false
+        assert!(!eng.check(&w, &[("self".into(), "exists".into(), f.clone())]).unwrap());
+        assert!(!eng.check(&w, &[("other.Coin".into(), "exists".into(), f.clone())]).unwrap());
+        // 活实体上缺组件/缺字段仍是 false（原有语义不变）
+        assert!(!eng.check(&w, &[("@player.Coin".into(), "exists".into(), f.clone())]).unwrap());
+        assert!(eng.check(&w, &[("@player.Score".into(), "exists".into(), f)]).unwrap());
+    }
+
+    /// 缺席豁免只给 exists/!exists：其他操作符读缺失实体仍然显式报错——
+    /// 那是规则真写错了，静默放过会把 bug 藏起来。
+    #[test]
+    fn non_exists_operators_still_error_on_missing_entity() {
+        let eng = engine(json!({"rules": [{
+            "id": "read-the-dead",
+            "on": {"event": "check"},
+            "if": [["@door.Coin.value", "==", 1]],
+            "do": [{"set": "@player.Score.value", "to": 9}]
+        }]}));
+        let (mut w, _, _) = world_with_player_and_coin();
+        let err = eng
+            .process_tick(&mut w, vec![Event::new("check", json!({}))])
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("door"), "错误要点名缺失的实体: {msg}");
+        // 引用语法本身不合法也照常报错（exists 也不豁免语法错误）
+        let err = eng
+            .check(&w, &[("door".into(), "exists".into(), json!(false))])
+            .unwrap_err();
+        assert!(err.to_string().contains("无法识别"), "{err}");
     }
 
     #[test]
