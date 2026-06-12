@@ -7,6 +7,8 @@ use vitric_ecs::{EntityId, World};
 use vitric_rules::{Engine, Event, RuleSet};
 use vitric_sim::{GameLogic, Sim};
 
+use crate::saves::SaveStore;
+
 /// 主循环节奏控制（dispatcher 改，主循环读）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopCtl {
@@ -49,6 +51,9 @@ pub struct Dispatcher {
     last_tick_events: u64,
     /// 事件计数对应的 tick。
     events_count_tick: u64,
+    /// 玩家存档仓库（vitric run 挂 `<项目>/saves/`；嵌入式/测试装配可以不挂，
+    /// 此时存档相关方法显式报错而不是悄悄写到不知道哪里）。
+    saves: Option<SaveStore>,
     pub ctl: LoopCtl,
 }
 
@@ -66,8 +71,14 @@ impl Dispatcher {
             budgets: vitric_data::Budgets::default(),
             last_tick_events: 0,
             events_count_tick: u64::MAX,
+            saves: None,
             ctl: LoopCtl::default(),
         }
+    }
+
+    /// 挂载玩家存档仓库（save-game/load-game 约定事件与 save/* RPC 的执行端）。
+    pub fn set_save_store(&mut self, store: SaveStore) {
+        self.saves = Some(store);
     }
 
     pub fn set_budgets(&mut self, budgets: vitric_data::Budgets) {
@@ -183,6 +194,73 @@ impl Dispatcher {
         fresh
     }
 
+    /// 运行循环每个 tick 调用：执行本 tick 规则/脚本 emit 的存档约定事件。
+    ///
+    /// 约束（与确定性的关系）：
+    /// - `save-game` 是纯输出副作用（同 play-sound）：写盘不回流进模拟，放在哪个
+    ///   时机执行都不影响轨迹；
+    /// - `load-game` 会改写模拟，必须在帧边界（两个 tick 之间）执行；它是"会话
+    ///   边界"操作——不进录像、回放不复现它，所以录像期间显式拒绝（同 sim/restore
+    ///   的 RPC 守卫，时间线断裂后录像必然不可重放）。
+    ///
+    /// 返回结构化错误记录（槽名不合法/文件缺失/版本不符/录像互斥），调用方负责
+    /// 打到 stderr——存档失败不崩游戏，但绝不静默。
+    pub fn handle_save_load_events(
+        &mut self,
+        observed: &[Event],
+        sim: &mut Sim,
+        logic: &mut dyn GameLogic,
+    ) -> Vec<Value> {
+        let mut errors = Vec::new();
+        for e in observed {
+            if e.name != "save-game" && e.name != "load-game" {
+                continue;
+            }
+            if let Err(message) = self.run_save_event(e, sim, logic) {
+                errors.push(json!({
+                    "event": e.name,
+                    "data": Value::Object(e.data.clone()),
+                    "error": message,
+                }));
+            }
+        }
+        errors
+    }
+
+    /// 单个 save-game / load-game 事件的执行（错误统一收口给上面包装）。
+    fn run_save_event(
+        &mut self,
+        e: &Event,
+        sim: &mut Sim,
+        logic: &mut dyn GameLogic,
+    ) -> Result<(), String> {
+        let slot = e.data.get("slot").and_then(|v| v.as_str()).ok_or_else(|| {
+            format!(
+                "{} 事件缺少 slot 字段（文本）。写法: \
+                 {{\"emit\": \"{}\", \"data\": {{\"slot\": \"slot1\"}}}}，实际 data: {}",
+                e.name,
+                e.name,
+                Value::Object(e.data.clone())
+            )
+        })?;
+        let store = self.saves.as_ref().ok_or(NO_SAVE_STORE)?;
+        if e.name == "save-game" {
+            store.write(slot, sim, &*logic)?;
+            return Ok(());
+        }
+        if sim.is_recording() {
+            return Err(format!(
+                "正在录像：load-game（槽 {slot:?}）会把模拟跳回存档时刻，时间线断裂后\
+                 录像必然不可重放——读档与录像互斥。要读档请先结束录制（去掉 --record）"
+            ));
+        }
+        let snap = store.read(slot)?;
+        sim.restore(&snap, logic)?;
+        // 旧世界的实体句柄随 restore 全部失效，选中态一并清掉（不留幽灵选中）
+        self.selection = None;
+        Ok(())
+    }
+
     /// 处理一条控制请求，返回响应 JSON。
     pub fn handle(&mut self, request: &Value, sim: &mut Sim, logic: &mut dyn GameLogic) -> Value {
         let method = match request.get("method").and_then(|v| v.as_str()) {
@@ -206,7 +284,7 @@ impl Dispatcher {
         // 录像只记输入流。这些方法绕过输入直接改世界/规则，录制中放行的话
         // 录出来的录像必然重放分歧，还会把排查方向误导到"非确定性"上——明确拒绝。
         const BREAKS_RECORDING: &[&str] =
-            &["world/set", "world/spawn", "world/despawn", "project/reload", "sim/restore"];
+            &["world/set", "world/spawn", "world/despawn", "project/reload", "sim/restore", "save/load"];
         if sim.is_recording() && BREAKS_RECORDING.contains(&method) {
             return Err(format!(
                 "正在录像：{method} 不走输入流，改了的状态不会进录像，录像会变得不可重放。\
@@ -369,6 +447,27 @@ impl Dispatcher {
             }
             "sim/hash" => Ok(json!(format!("{:#018x}", sim.world.state_hash()))),
 
+            // ---- 玩家存档（saves/<slot>.json；与 save-game/load-game 约定事件同一条代码路径。
+            //      save/write 是纯输出副作用录像期间放行；save/load 等价 sim/restore 受同一守卫）----
+            "save/write" => {
+                let slot = str_param(params, "slot")?;
+                let store = self.saves.as_ref().ok_or(NO_SAVE_STORE)?;
+                store.write(&slot, sim, &*logic)
+            }
+            "save/load" => {
+                let slot = str_param(params, "slot")?;
+                let store = self.saves.as_ref().ok_or(NO_SAVE_STORE)?;
+                let snap = store.read(&slot)?;
+                sim.restore(&snap, logic)?;
+                // 旧世界的实体句柄随 restore 全部失效，选中态一并清掉
+                self.selection = None;
+                Ok(json!({"slot": slot, "tick": sim.tick}))
+            }
+            "save/list" => {
+                let store = self.saves.as_ref().ok_or(NO_SAVE_STORE)?;
+                Ok(json!(store.list()?))
+            }
+
             // ---- 观察（语义描述是主通道，截图是兜底验证）----
             "render/describe" => {
                 let width = params.get("width").and_then(|v| v.as_u64()).unwrap_or(320) as u32;
@@ -467,12 +566,17 @@ impl Dispatcher {
                 "未知方法 {other:?}。可用方法: ping, world/entities, world/get, world/set, \
                  world/spawn, world/despawn, input/inject, sim/pause, sim/resume, sim/step, \
                  sim/speed, sim/quit, sim/snapshot, sim/restore, sim/hash, project/reload, \
+                 save/write, save/load, save/list, \
                  inspect/selection, inspect/select, events/recent, perf/stats, render/describe, \
                  render/screenshot, assert/add, assert/remove, assert/list, assert/failures"
             )),
         }
     }
 }
+
+/// 没挂存档仓库时的统一报错（嵌入式/测试装配可能不挂；`vitric run` 一定会挂）。
+const NO_SAVE_STORE: &str =
+    "该运行时没有挂存档目录（嵌入式/测试装配）。vitric run 会自动挂 <项目>/saves/";
 
 fn err_response(message: &str) -> Value {
     json!({"ok": false, "error": message})
@@ -779,6 +883,72 @@ mod tests {
         d.set_selection(None);
         let r = call(&mut d, &mut sim, "inspect/select", json!({"entity": null}));
         assert_eq!(r["selected"], json!(null));
+    }
+
+    fn temp_save_root(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("vitric-dispatch-save-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn save_rpcs_roundtrip_and_clear_selection() {
+        let (mut d, mut sim) = setup();
+        let root = temp_save_root("roundtrip");
+        d.set_save_store(SaveStore::new(&root, "rpc-test"));
+
+        let written = call(&mut d, &mut sim, "save/write", json!({"slot": "s1"}));
+        assert_eq!(written["slot"], json!("s1"));
+        assert!(root.join("saves/s1.json").exists());
+        assert_eq!(call(&mut d, &mut sim, "save/list", json!({})), json!(["s1"]));
+
+        // 改世界 + 选中实体，读档后状态回滚、选中清空
+        let h0 = call(&mut d, &mut sim, "sim/hash", json!({}));
+        call(&mut d, &mut sim, "world/set", json!({"entity": "@player", "path": "Health.hp", "value": 5}));
+        call(&mut d, &mut sim, "inspect/select", json!({"entity": "@player"}));
+        assert_ne!(call(&mut d, &mut sim, "sim/hash", json!({})), h0);
+        call(&mut d, &mut sim, "save/load", json!({"slot": "s1"}));
+        assert_eq!(call(&mut d, &mut sim, "sim/hash", json!({})), h0, "读档后哈希必须回到存档时刻");
+        assert!(d.selection().is_none(), "restore 后旧句柄全部失效，选中必须清空");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_load_rejected_while_recording_but_write_allowed() {
+        let (mut d, mut sim) = setup();
+        let root = temp_save_root("recording");
+        d.set_save_store(SaveStore::new(&root, "rpc-test"));
+        call(&mut d, &mut sim, "save/write", json!({"slot": "s1"}));
+        sim.start_recording();
+        // 读档 = 时间线断裂，录像期间拒绝（同 sim/restore 守卫）
+        let e = call_err(&mut d, &mut sim, "save/load", json!({"slot": "s1"}));
+        assert!(e.contains("录像"), "{e}");
+        assert!(sim.is_recording(), "拒绝后录像必须仍然有效");
+        // 写存档是纯输出副作用，录像期间照常放行
+        call(&mut d, &mut sim, "save/write", json!({"slot": "s2"}));
+        assert!(root.join("saves/s2.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn save_rpcs_explicit_errors() {
+        let (mut d, mut sim) = setup();
+        // 没挂存档仓库：显式报错而不是悄悄写到不知道哪里
+        let e = call_err(&mut d, &mut sim, "save/write", json!({"slot": "s1"}));
+        assert!(e.contains("存档目录"), "{e}");
+        let root = temp_save_root("errors");
+        d.set_save_store(SaveStore::new(&root, "rpc-test"));
+        // 槽名路径穿越被拒
+        let e = call_err(&mut d, &mut sim, "save/write", json!({"slot": "../evil"}));
+        assert!(e.contains("不合法"), "{e}");
+        // 读不存在的槽：报错带现有存档列表
+        call(&mut d, &mut sim, "save/write", json!({"slot": "s1"}));
+        let e = call_err(&mut d, &mut sim, "save/load", json!({"slot": "ghost"}));
+        assert!(e.contains("ghost") && e.contains("s1"), "{e}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

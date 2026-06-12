@@ -11,7 +11,9 @@
 //! 响应 `{"ok": true, "result": ...}` 或 `{"ok": false, "error": "..."}`。
 
 mod dispatcher;
+pub mod saves;
 mod server;
 
 pub use dispatcher::{Dispatcher, LoopCtl};
+pub use saves::SaveStore;
 pub use server::{ControlServer, PendingRequest};

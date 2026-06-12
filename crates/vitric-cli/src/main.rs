@@ -22,6 +22,7 @@
 //!   --speed <X>      初始倍速（默认 1.0）
 //!   --ticks <N>      跑满 N tick 后自动退出（CI/脚本用，全速不限速）
 //!   --record <文件>   退出时把录像写到文件
+//!   --load <槽名>     启动后立刻从 <项目>/saves/<槽名>.json 恢复续玩（与 --record 互斥）
 //!   --renderer <gpu|cpu> 窗口呈现路径（默认 cpu=softbuffer；gpu=wgpu，自带开窗）
 //!
 //! 运行时 LLM 经环境变量启用：VITRIC_LLM_URL / VITRIC_LLM_KEY / VITRIC_LLM_MODEL（见 src/llm.rs）。
@@ -36,7 +37,7 @@ use std::time::{Duration, Instant};
 use vitric_cli::llm::{self, Llm};
 use vitric_cli::runtime::{self, Runtime};
 use vitric_sim::GameLogic;
-use vitric_control::{ControlServer, Dispatcher};
+use vitric_control::{ControlServer, Dispatcher, SaveStore};
 use vitric_data::Project;
 use vitric_sim::{Recording, DT};
 
@@ -130,6 +131,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let mut speed: f64 = 1.0;
     let mut max_ticks: Option<u64> = None;
     let mut record_path: Option<String> = None;
+    let mut load_slot: Option<String> = None;
     let mut windowed = false;
     let mut renderer = window::Renderer::Cpu;
     let mut i = 1;
@@ -166,7 +168,11 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
                 record_path = Some(args.get(i + 1).ok_or(need("--record"))?.clone());
                 i += 2;
             }
-            other => return Err(format!("未知选项 {other:?}。可用: --window --renderer --port --speed --ticks --record")),
+            "--load" => {
+                load_slot = Some(args.get(i + 1).ok_or(need("--load"))?.clone());
+                i += 2;
+            }
+            other => return Err(format!("未知选项 {other:?}。可用: --window --renderer --port --speed --ticks --record --load")),
         }
     }
     // GPU 是窗口呈现路径，没有无头形态——选了 gpu 就等于要开窗
@@ -185,6 +191,25 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     }
     dispatcher.set_budgets(project.manifest.budgets.clone());
     dispatcher.ctl.speed = speed;
+
+    // 玩家存档：槽位固定在 <项目>/saves/，约定事件（save-game/load-game）、
+    // save/* RPC、--load 共用这一个 SaveStore——同一条代码路径同一套校验
+    let saves = SaveStore::new(&dir, &project.manifest.name);
+    if let Some(slot) = &load_slot {
+        // 录像必须从项目数据冷启动可逐位重放；从存档续玩的会话起点不是冷启动，
+        // 录出来的录像 vitric replay 必然在起点就跑偏——明确互斥，不产出废录像
+        if record_path.is_some() {
+            return Err(
+                "--load 与 --record 互斥：录像要求从项目数据冷启动可重放，从存档续玩的\
+                 一局录不出可重放的录像。要录像就从头跑，要续玩就去掉 --record"
+                    .to_string(),
+            );
+        }
+        // 在 tick 0 之前恢复：start 事件不会重发（存档时刻早已过了 tick 0）
+        let snap = saves.read(slot)?;
+        sim.restore(&snap, &mut rt).map_err(|e| format!("--load {slot}: 存档恢复失败: {e}"))?;
+    }
+    dispatcher.set_save_store(saves);
 
     if record_path.is_some() {
         sim.start_recording();
@@ -306,6 +331,11 @@ pub fn step_once(
     llm::handle_ask_events(llm, &observed, sim);
     llm::pump_replies(llm, sim);
     dispatcher.record_events(report.tick, &observed);
+    // 存档约定事件：save-game 写盘（纯输出副作用，同音频）；load-game 在这里——
+    // 帧边界、模拟之外——整体回跳到存档时刻。失败结构化上报 stderr，不崩游戏
+    for error in dispatcher.handle_save_load_events(&observed, sim, rt) {
+        eprintln!("{}", serde_json::json!({"save_error": error}));
+    }
     for failure in dispatcher.check_assertions(sim) {
         // 断言失败实时上报到 stderr（结构化一行），同时存进 assert/failures
         eprintln!("{}", serde_json::json!({"assert_failure": failure}));
