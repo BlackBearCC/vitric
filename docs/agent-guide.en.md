@@ -41,6 +41,7 @@ Response: `{"ok": true, "result": ...}` or `{"ok": false, "error": "message with
 | Method | Params |
 |---|---|
 | `input/inject` | `action`, `phase: pressed/released` |
+| `input/click` | `x`, `y` (**world coordinates**), `button?: left/right` (default left) — the headless "mouse": pick resolution shares the window click-pick path, injects a `mouse` / `mouse-alt` event, and the response carries the pick result directly (see "Mouse input") |
 | `world/set` | `entity`, `path` (e.g. `"Health.hp"`), `value` — schema-validated, out-of-range rejected |
 | `world/spawn` | `components`, `name?` |
 | `world/despawn` | `entity` |
@@ -107,7 +108,7 @@ Workflow: gate never produces recordings itself — QA/the director plays a winn
 
 What the engine guarantees, and where the guarantee ends:
 
-- **Recordings capture exactly two external channels: the input stream and external replies (LLM).** While recording, `world/set` / `world/spawn` / `world/despawn` / `project/reload` / `sim/restore` are explicitly rejected (out-of-band mutations don't enter the recording, so it would silently become unreplayable), and inspector dragging is disabled. To affect the world during a recording, use `input/inject` — inputs are recorded. LLM replies enter through the engine's inject_reply channel, are recorded too, and are re-injected at the original tick on replay (see "Runtime LLM").
+- **Recordings capture exactly two external channels: the input stream and external replies (LLM).** While recording, `world/set` / `world/spawn` / `world/despawn` / `project/reload` / `sim/restore` are explicitly rejected (out-of-band mutations don't enter the recording, so it would silently become unreplayable), and inspector dragging is disabled. To affect the world during a recording, use `input/inject` — inputs are recorded. LLM replies enter through the engine's inject_reply channel, are recorded too, and are re-injected at the original tick on replay (see "Runtime LLM"); mouse clicks (window clicks / `input/click`) ride the same reply channel and stay available while recording (see "Mouse input").
 - **Scripts must be stateless.** Cross-tick state belongs in components. Anything stashed in `globalThis` or closures is invisible to snapshots and wiped by hot reload. `Math.random` / `Date.now` / `new Date()` throw and point you to `ctx.random()` / `ctx.tick`; explicit-argument `new Date(0)` is pure computation and allowed.
 - **Snapshots are complete.** `sim/snapshot` includes the world, tick, RNG state, pending inputs, and the logic layer's carried-over events; restore-then-continue is bit-identical to the original trajectory (locked by test).
 - **The guarantee is per platform, per binary.** Transcendental functions like `Math.sin` depend on the system math library; last-bit results may differ across Linux ↔ Windows. Sharing recordings or comparing hashes across platforms is outside the guarantee.
@@ -182,7 +183,17 @@ A complete game is more than one scene: menu → level → next level → ending
 
 ## Built-in events
 
-`start` (tick 0 — the standard hook for init / level generation; not re-fired by scene switches), `input`, `collision`, `anim-finished`, `scene-loaded` (the tick after each scene switch — the per-scene init hook, see "Scenes & flow").
+`start` (tick 0 — the standard hook for init / level generation; not re-fired by scene switches), `input`, `mouse` / `mouse-alt` (mouse clicks, see "Mouse input"), `collision`, `anim-finished`, `scene-loaded` (the tick after each scene switch — the per-scene init hook, see "Scenes & flow").
+
+## Mouse input
+
+Clicks are **game input** on the same footing as key presses — menus and card games consume them with plain rules:
+
+- **Events**: left button = `mouse`, right button = `mouse-alt`, both with data `{x, y, entity}` — x/y are **world coordinates** (window clicks are converted through the un-shaken camera: clicks target the world itself, screen shake is visual decoration only), and `entity` is the name of the picked entity (handle text for unnamed entities, null on empty space). Hit-testing is the same as inspector picking / `render/describe` (including `Sprite.rot` rotated shapes). Rules read as usual: trigger `{"event": "mouse"}`, conditions/values via `event.x` / `event.y` / `event.entity`, filtering via `"filter": {"entity": "card"}`.
+- **Two entrances, one pipe**: a human clicking in the window and an agent calling `input/click {x, y, button?}` (world coordinates directly) go through the exact same pick-and-inject path — humans and AI are peer players. The RPC response carries the pick result, so a headless agent doesn't need a describe round-trip to know what it hit.
+- **Recording semantics**: clicks ride the reply channel (the same recorded channel as LLM replies): they enter the recording together with their tick and pick result (`Recording.replies`), are re-injected at the original tick on replay, and pending clicks are included in snapshots — click-driven sessions replay bit-identically offline, and **clicking stays allowed while recording**. A playthrough recording for a mouse game can be produced entirely via `input/click` over RPC and passes the gate as usual.
+- **One click, two meanings**: in the window, a left click injects the `mouse` event *and* still drives inspector selection/dragging (teal outline, `inspect/selection`). The inspector exists only in windowed mode — a game that doesn't want that layer can simply ignore the selection; right clicks never touch the inspector.
+- **Boundary**: the mouse *position* by itself is **not** an event — reporting the cursor every tick would bloat recordings; hover effects are out of scope for v1. The engine emits on press only (no release event — a click means one event).
 
 ## Engine component conventions
 

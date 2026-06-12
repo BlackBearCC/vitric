@@ -385,6 +385,20 @@ impl Dispatcher {
                 sim.inject_input(&action, phase);
                 Ok(json!({}))
             }
+            "input/click" => {
+                // 无头 agent 的"鼠标"：世界坐标点击，拾取解析和窗口点选同一条路径。
+                // 走回复通道所以录制中照常放行——点击会被录进录像、重放原样注入。
+                let x = params
+                    .get("x")
+                    .and_then(|v| v.as_f64())
+                    .ok_or("缺少 x 数字参数（世界坐标）")?;
+                let y = params
+                    .get("y")
+                    .and_then(|v| v.as_f64())
+                    .ok_or("缺少 y 数字参数（世界坐标）")?;
+                let button = params.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+                inject_click(sim, x, y, button)
+            }
 
             // ---- 控时间 ----
             "sim/pause" => {
@@ -564,7 +578,7 @@ impl Dispatcher {
 
             other => Err(format!(
                 "未知方法 {other:?}。可用方法: ping, world/entities, world/get, world/set, \
-                 world/spawn, world/despawn, input/inject, sim/pause, sim/resume, sim/step, \
+                 world/spawn, world/despawn, input/inject, input/click, sim/pause, sim/resume, sim/step, \
                  sim/speed, sim/quit, sim/snapshot, sim/restore, sim/hash, project/reload, \
                  save/write, save/load, save/list, \
                  inspect/selection, inspect/select, events/recent, perf/stats, render/describe, \
@@ -572,6 +586,33 @@ impl Dispatcher {
             )),
         }
     }
+}
+
+/// 把一次鼠标点击注入模拟——窗口点击和 `input/click` RPC 共用的唯一路径。
+///
+/// 坐标是**世界坐标**；在 (x,y) 做拾取（同窗口点选的命中规则，见
+/// `vitric_render::pick_world`），注入事件 data 为 `{x, y, entity}`：
+/// entity = 命中实体的名字（无名实体用句柄文本），没命中 = null。
+/// `button`: "left" → 事件 `mouse`，"right" → 事件 `mouse-alt`。
+///
+/// 走回复通道（`Sim::inject_reply`）：与 LLM 回复同级的录制通道——点击连同
+/// tick、拾取结果一起进录像（`Recording.replies`）、重放原 tick 原样注入、
+/// 快照含未消化的点击。所以点击驱动的游戏录像离线重放逐位一致，零新机制。
+pub fn inject_click(sim: &mut Sim, x: f64, y: f64, button: &str) -> Result<Value, String> {
+    let event = match button {
+        "left" => "mouse",
+        "right" => "mouse-alt",
+        other => return Err(format!("button 必须是 left 或 right，拿到 {other:?}")),
+    };
+    let entity = match vitric_render::pick_world(&sim.world, x, y)? {
+        Some(id) => match sim.world.name_of(id) {
+            Some(name) => json!(name),
+            None => json!(id.to_string()),
+        },
+        None => Value::Null,
+    };
+    sim.inject_reply(event, json!({"x": x, "y": y, "entity": entity}));
+    Ok(json!({"event": event, "entity": entity}))
 }
 
 /// 没挂存档仓库时的统一报错（嵌入式/测试装配可能不挂；`vitric run` 一定会挂）。
@@ -949,6 +990,92 @@ mod tests {
         let e = call_err(&mut d, &mut sim, "save/load", json!({"slot": "ghost"}));
         assert!(e.contains("ghost") && e.contains("s1"), "{e}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn input_click_resolves_pick_and_injects_mouse_event() {
+        let (mut d, mut sim) = setup();
+        // 静止的 player 挂 Sprite（2x2，中心 (0,0)），拾取有目标
+        let p = sim.world.entity("player").unwrap();
+        sim.world.set_component(p, "Velocity", json!({"x": 0.0, "y": 0.0})).unwrap();
+        sim.world.set_component(p, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000"})).unwrap();
+        call(&mut d, &mut sim, "sim/pause", json!({}));
+
+        // 点在 player 身上（世界坐标）：拾取结果直接在返回值里
+        let r = call(&mut d, &mut sim, "input/click", json!({"x": 0.5, "y": 0.5}));
+        assert_eq!(r["event"], json!("mouse"));
+        assert_eq!(r["entity"], json!("player"));
+        // 点空地：entity = null
+        let r = call(&mut d, &mut sim, "input/click", json!({"x": 100.0, "y": 100.0}));
+        assert_eq!(r["entity"], json!(null));
+        // 右键 → mouse-alt，同一套 payload
+        let r = call(&mut d, &mut sim, "input/click", json!({"x": 0.0, "y": 0.0, "button": "right"}));
+        assert_eq!(r["event"], json!("mouse-alt"));
+        assert_eq!(r["entity"], json!("player"));
+
+        // 下一 tick 三个事件都到，payload 是世界坐标 + 拾取结果
+        call(&mut d, &mut sim, "sim/step", json!({}));
+        let events = call(&mut d, &mut sim, "events/recent", json!({}));
+        let arr = events.as_array().unwrap();
+        let hit = arr.iter().find(|e| e["name"] == json!("mouse") && e["data"]["entity"] == json!("player")).expect("命中事件");
+        assert_eq!(hit["data"]["x"], json!(0.5));
+        assert_eq!(hit["data"]["y"], json!(0.5));
+        assert!(arr.iter().any(|e| e["name"] == json!("mouse") && e["data"]["entity"] == json!(null)));
+        assert!(arr.iter().any(|e| e["name"] == json!("mouse-alt") && e["data"]["entity"] == json!("player")));
+
+        // 参数校验：缺坐标 / 未知按键都显式报错
+        let e = call_err(&mut d, &mut sim, "input/click", json!({"y": 1.0}));
+        assert!(e.contains('x'), "{e}");
+        let e = call_err(&mut d, &mut sim, "input/click", json!({"x": 0.0, "y": 0.0, "button": "middle"}));
+        assert!(e.contains("left") && e.contains("right"), "{e}");
+    }
+
+    #[test]
+    fn clicks_ride_reply_channel_recorded_and_replayed() {
+        /// 把 mouse 事件写进世界的逻辑——点击真实影响状态哈希，
+        /// 重放时丢了点击必然分歧（要锁死的不变量）。
+        struct ApplyClick;
+        impl GameLogic for ApplyClick {
+            fn on_tick(&mut self, w: &mut World, ev: Vec<Event>, _: &mut vitric_sim::Pcg32, _: u64) -> Result<(), String> {
+                for e in ev {
+                    if e.name == "mouse" || e.name == "mouse-alt" {
+                        let p = w.entity("player").map_err(|e| e.to_string())?;
+                        w.set_component(p, "Clicked", json!({"at": Value::Object(e.data)}))
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                Ok(())
+            }
+        }
+        let build = || {
+            let mut sim = Sim::new(11);
+            let p = sim.world.spawn_named("player").unwrap();
+            sim.world.set_component(p, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+            sim.world.set_component(p, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000"})).unwrap();
+            sim
+        };
+        let mut sim = build();
+        sim.start_recording();
+        for t in 0..90 {
+            if t == 30 {
+                inject_click(&mut sim, 0.0, 0.0, "left").unwrap();
+            }
+            if t == 60 {
+                inject_click(&mut sim, 50.0, 50.0, "right").unwrap();
+            }
+            sim.step(&mut ApplyClick).unwrap();
+        }
+        let rec = sim.stop_recording().unwrap();
+        // 点击走回复通道：连同 tick + 拾取结果一起进录像
+        assert_eq!(rec.replies.len(), 2);
+        assert_eq!((rec.replies[0].tick, rec.replies[0].name.as_str()), (30, "mouse"));
+        assert_eq!(rec.replies[0].data["entity"], json!("player"));
+        assert_eq!((rec.replies[1].tick, rec.replies[1].name.as_str()), (60, "mouse-alt"));
+        assert_eq!(rec.replies[1].data["entity"], json!(null));
+        // 重放：点击从录像注入，逐校验点 + 终态哈希逐位一致
+        let mut sim2 = build();
+        sim2.replay(&rec, &mut ApplyClick).unwrap();
+        assert_eq!(sim2.world.state_hash(), rec.final_hash);
     }
 
     #[test]

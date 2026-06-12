@@ -6,8 +6,11 @@
 //! - gpu：wgpu 走显卡，读同一套组件约定，视觉语义对齐 CPU 路径（见 gpu.rs）；
 //!   初始化失败直接报错退出，不静默回退——用户该换 --renderer cpu 时要明说
 //!
-//! 键盘事件映射成 input 事件注入模拟，和控制面 `input/inject` 走同一条管道
-//! ——人和 AI 是同级玩家。鼠标点选/拖拽不依赖呈现路径，两边行为一致。
+//! 键盘事件映射成 input 事件注入模拟，和控制面 `input/inject` 走同一条管道；
+//! 鼠标左/右键映射成 `mouse` / `mouse-alt` 事件（世界坐标 + 拾取结果，经回复
+//! 通道被录像、可重放），和控制面 `input/click` 走同一条管道——人和 AI 是
+//! 同级玩家。左键同时照旧驱动检查器点选/拖拽（同一击两个含义，检查器只在
+//! 窗口模式存在，游戏不想要可忽略）。鼠标点选/拖拽不依赖呈现路径，两边行为一致。
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -174,10 +177,14 @@ impl WindowedGame {
         (size.width > 0 && size.height > 0).then_some((size.width, size.height))
     }
 
-    /// 左键按下：点选实体（命中开始拖拽，空地取消选中）。
+    /// 左键按下：同一次点击两个含义——
+    /// 1. 游戏输入：注入 `mouse` 事件（世界坐标 + 拾取结果，经回复通道被录像、可重放）；
+    /// 2. 检查器：点选实体（命中开始拖拽，空地取消选中）。
+    ///    游戏不想要检查器行为可忽略选中态——检查器只在窗口模式存在。
     fn mouse_down(&mut self) {
         let Some((w, h)) = self.viewport() else { return };
         let (px, py) = self.cursor;
+        self.inject_mouse(w, h, "left");
         match vitric_render::pick(&self.sim.world, w, h, px, py) {
             Ok(Some(id)) => {
                 self.dispatcher.set_selection(Some(id));
@@ -192,6 +199,27 @@ impl WindowedGame {
             }
             Ok(None) => self.dispatcher.set_selection(None),
             Err(_) => {}
+        }
+    }
+
+    /// 右键按下：只注入 `mouse-alt` 事件（payload 同 `mouse`），不动检查器。
+    fn mouse_alt_down(&mut self) {
+        let Some((w, h)) = self.viewport() else { return };
+        self.inject_mouse(w, h, "right");
+    }
+
+    /// 把光标处的点击翻译成世界坐标 + 拾取结果，经回复通道注入模拟
+    /// （和控制面 `input/click` 同一条路径——人和 AI 是同级玩家）。
+    /// 坐标用不抖的相机（screen_to_world）：点击对的是世界本体，抖动只是视觉装饰。
+    fn inject_mouse(&mut self, w: u32, h: u32, button: &str) {
+        let (px, py) = self.cursor;
+        match vitric_render::screen_to_world(&self.sim.world, w, h, px, py) {
+            Ok((wx, wy)) => {
+                if let Err(e) = vitric_control::inject_click(&mut self.sim, wx, wy, button) {
+                    eprintln!("[vitric] 鼠标点击注入失败: {e}");
+                }
+            }
+            Err(e) => eprintln!("[vitric] 鼠标点击坐标换算失败: {e}"),
         }
     }
 
@@ -350,12 +378,12 @@ impl ApplicationHandler for WindowedGame {
                 self.cursor = (position.x, position.y);
                 self.mouse_drag();
             }
-            WindowEvent::MouseInput { state, button: winit::event::MouseButton::Left, .. } => {
-                match state {
-                    ElementState::Pressed => self.mouse_down(),
-                    ElementState::Released => self.drag = None,
-                }
-            }
+            WindowEvent::MouseInput { state, button, .. } => match (state, button) {
+                (ElementState::Pressed, winit::event::MouseButton::Left) => self.mouse_down(),
+                (ElementState::Released, winit::event::MouseButton::Left) => self.drag = None,
+                (ElementState::Pressed, winit::event::MouseButton::Right) => self.mouse_alt_down(),
+                _ => {}
+            },
             WindowEvent::RedrawRequested => self.draw(),
             _ => {}
         }

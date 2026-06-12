@@ -1258,6 +1258,18 @@ pub fn pick(
     py: f64,
 ) -> Result<Option<vitric_ecs::EntityId>, String> {
     let (wx, wy) = screen_to_world(world, width, height, px, py)?;
+    pick_world(world, wx, wy)
+}
+
+/// 点选拾取（世界坐标版）：返回世界点 (wx,wy) 命中的最上层实体。
+/// 窗口点击（屏幕坐标先经 screen_to_world）和控制面 `input/click`（直接给
+/// 世界坐标）共用这一套判定——人点的和 AI 点的命中规则逐位一致。
+/// 判定确定性：query 按槽位序、不碰模拟 RNG，可安全用于录制中的点击解析。
+pub fn pick_world(
+    world: &World,
+    wx: f64,
+    wy: f64,
+) -> Result<Option<vitric_ecs::EntityId>, String> {
     let ids = world.query(&["Position", "Sprite"]);
     // 倒序：后画的盖在上面，优先命中
     for &id in ids.iter().rev() {
@@ -2021,6 +2033,22 @@ mod tests {
         // 坐标往返
         let (wx, wy) = screen_to_world(&w, 64, 64, 32.0 + 8.0, 32.0 - 16.0).unwrap();
         assert!((wx - 1.0).abs() < 1e-9 && (wy - 2.0).abs() < 1e-9, "{wx},{wy}");
+    }
+
+    #[test]
+    fn pick_world_same_verdict_as_screen_pick() {
+        let mut w = World::new();
+        let e = w.spawn_named("card").unwrap();
+        w.set_component(e, "Position", json!({"x": 3.0, "y": 2.0})).unwrap();
+        w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#00ff00"})).unwrap();
+        // 世界坐标直接命中/空地
+        assert_eq!(pick_world(&w, 3.0, 2.0).unwrap(), Some(e));
+        assert_eq!(pick_world(&w, 3.9, 1.1).unwrap(), Some(e), "边内要命中");
+        assert_eq!(pick_world(&w, 5.5, 2.0).unwrap(), None, "边外是空地");
+        // 与屏幕坐标版同一套判定：屏幕点 → screen_to_world → pick_world 闭环
+        let (wx, wy) = screen_to_world(&w, 64, 64, 32.0 + 24.0, 32.0 - 16.0).unwrap();
+        assert_eq!(pick(&w, 64, 64, 32.0 + 24.0, 32.0 - 16.0).unwrap(), pick_world(&w, wx, wy).unwrap());
+        assert_eq!(pick_world(&w, wx, wy).unwrap(), Some(e));
     }
 
     #[test]
