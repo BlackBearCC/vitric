@@ -1,0 +1,281 @@
+{
+  "components": {
+    "Player": {
+      "fields": {
+        "hearts": {
+          "type": "int",
+          "default": 3
+        },
+        "oil": {
+          "type": "int",
+          "default": 3
+        }
+      }
+    },
+    "Shade": {
+      "fields": {
+        "kind": {
+          "type": "text",
+          "default": ""
+        },
+        "hp": {
+          "type": "int",
+          "default": 1
+        },
+        "n": {
+          "type": "int",
+          "default": 0
+        },
+        "stunned": {
+          "type": "bool",
+          "default": false
+        }
+      }
+    },
+    "Lamp": {
+      "fields": {}
+    },
+    "Card": {
+      "fields": {
+        "name": {
+          "type": "text",
+          "default": ""
+        },
+        "slot": {
+          "type": "int",
+          "default": 0
+        }
+      }
+    },
+    "Cell": {
+      "fields": {
+        "cx": {
+          "type": "int",
+          "default": 0
+        },
+        "cy": {
+          "type": "int",
+          "default": 0
+        }
+      }
+    },
+    "Run": {
+      "fields": {
+        "node": {
+          "type": "int",
+          "default": 0
+        },
+        "phase": {
+          "type": "enum",
+          "variants": [
+            "player",
+            "shade",
+            "won",
+            "lost"
+          ],
+          "default": "player"
+        },
+        "turn": {
+          "type": "int",
+          "default": 1
+        }
+      }
+    },
+    "Persist": {
+      "fields": {}
+    },
+    "Solid": {
+      "fields": {}
+    },
+    "Hazard": {
+      "fields": {}
+    },
+    "Position": {
+      "fields": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "Velocity": {
+      "fields": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "Collider": {
+      "fields": {
+        "w": {
+          "type": "number"
+        },
+        "h": {
+          "type": "number"
+        }
+      }
+    },
+    "Sprite": {
+      "fields": {
+        "w": {
+          "type": "number"
+        },
+        "h": {
+          "type": "number"
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        },
+        "image": {
+          "type": "text",
+          "default": ""
+        },
+        "rot": {
+          "type": "number",
+          "default": 0
+        }
+      }
+    },
+    "Camera": {
+      "fields": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "scale": {
+          "type": "number",
+          "default": 10
+        },
+        "view_h": {
+          "type": "number",
+          "default": 18
+        },
+        "follow": {
+          "type": "text",
+          "default": ""
+        },
+        "lerp": {
+          "type": "number",
+          "default": 0
+        }
+      }
+    },
+    "Shake": {
+      "fields": {
+        "amplitude": {
+          "type": "number",
+          "default": 0
+        },
+        "decay": {
+          "type": "number",
+          "default": 0.88
+        }
+      }
+    },
+    "Particle": {
+      "fields": {
+        "ttl": {
+          "type": "int",
+          "default": 30
+        }
+      }
+    },
+    "Text": {
+      "fields": {
+        "content": {
+          "type": "text",
+          "default": ""
+        },
+        "size": {
+          "type": "number",
+          "default": 1
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        },
+        "screen": {
+          "type": "bool",
+          "default": false
+        }
+      }
+    },
+    "Light": {
+      "fields": {
+        "radius": {
+          "type": "number"
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        },
+        "intensity": {
+          "type": "number",
+          "default": 1
+        },
+        "kind": {
+          "type": "text",
+          "default": "point"
+        },
+        "angle": {
+          "type": "number",
+          "default": 0
+        },
+        "dir": {
+          "type": "number",
+          "default": 0
+        }
+      }
+    },
+    "Ambient": {
+      "fields": {
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        },
+        "shadows": {
+          "type": "bool",
+          "default": false
+        }
+      }
+    },
+    "Bloom": {
+      "fields": {
+        "threshold": {
+          "type": "number"
+        },
+        "strength": {
+          "type": "number"
+        }
+      }
+    },
+    "Anim": {
+      "fields": {
+        "clip": {
+          "type": "text",
+          "default": ""
+        },
+        "prev": {
+          "type": "text",
+          "default": ""
+        },
+        "t": {
+          "type": "int",
+          "default": 0
+        },
+        "done": {
+          "type": "bool",
+          "default": false
+        }
+      }
+    }
+  }
+}

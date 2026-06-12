@@ -1,0 +1,22 @@
+{
+  "name": "echo",
+  "schema": "schema.json",
+  "entry": "scenes/menu.json",
+  "scenes": [
+    "scenes/menu.json",
+    "scenes/map.json",
+    "scenes/battle-1.json",
+    "scenes/battle-2.json",
+    "scenes/boss.json",
+    "scenes/victory.json"
+  ],
+  "rules": [
+    "rules/game.json"
+  ],
+  "scripts": [
+    "scripts/systems.js"
+  ],
+  "animations": "animations.json",
+  "font": "fonts/DejaVuSans.ttf",
+  "seed": 42
+}
