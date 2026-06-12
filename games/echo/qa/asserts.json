@@ -1,0 +1,8 @@
+[
+  { "id": "progress-exists", "if": [["@progress", "exists"]] },
+  { "id": "progress-node-floor", "if": [["@progress.Run.node", ">=", 0]] },
+  { "id": "progress-node-cap", "if": [["@progress.Run.node", "<=", 3]] },
+  { "id": "progress-turn-floor", "if": [["@progress.Run.turn", ">=", 1]] },
+  { "id": "camera-exists", "if": [["@camera", "exists"]] },
+  { "id": "ambient-exists", "if": [["@ambient", "exists"]] }
+]

@@ -18,5 +18,16 @@
   ],
   "animations": "animations.json",
   "font": "fonts/DejaVuSans.ttf",
-  "seed": 42
+  "seed": 42,
+  "gates": {
+    "playthroughs": [
+      {
+        "recording": "recordings/clear.json",
+        "must_emit": "run-complete"
+      }
+    ],
+    "assertions": "qa/asserts.json",
+    "check": true,
+    "max_ticks": 100000
+  }
 }
