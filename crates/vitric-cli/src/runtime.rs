@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use vitric_data::{Clip, Project};
+use vitric_data::{Clip, Project, Scene, Schema};
 use vitric_ecs::World;
 use vitric_rules::{Engine, Event, RuleSet, ScriptCall};
 use vitric_script::ScriptEngine;
@@ -23,6 +23,12 @@ pub struct Runtime {
     pub scripts: ScriptEngine,
     /// 动画片段定义。
     pub animations: BTreeMap<String, Clip>,
+    /// schema（场景切换时实例化新场景用，与规则/脚本持有的是同一份定义）。
+    schema: Schema,
+    /// 清单里的全部场景（装配期预载的不可变副本）。场景切换从这里取数据
+    /// 而不是切换时读磁盘——运行中磁盘上的场景文件被改了也不影响本进程的
+    /// 切换结果，重放和原局加载的是同一份内存数据，确定性不被热编辑破坏。
+    scenes: BTreeMap<String, Scene>,
     /// 项目根目录（热重载从这里重读磁盘）。
     root: Option<std::path::PathBuf>,
     /// 脚本上一 tick 发出的事件，本 tick 交给规则。
@@ -59,6 +65,8 @@ impl Runtime {
             rules,
             scripts,
             animations: project.animations.clone(),
+            schema: project.schema.clone(),
+            scenes: project.scenes.clone(),
             root: None,
             carryover: Vec::new(),
             observed: Vec::new(),
@@ -75,6 +83,71 @@ impl Runtime {
             .map_err(|r| r.to_string())?;
         Ok((sim, runtime))
     }
+
+    /// 场景切换（约定事件 `load-scene {"scene": "scenes/xxx.json"}` 的执行端）。
+    ///
+    /// 时机约束：切换发生在 on_tick 尾部、仍在 sim.step 的确定性流水线之内——
+    /// 触发它的 load-scene 事件本身由规则/脚本确定性地产生，所以重放同一份
+    /// 录像会在同一 tick 走到这里、装出同一个世界，校验点哈希照常对得上。
+    ///
+    /// 语义：默认整个世界推倒重来（clear_entities 走正规 despawn，旧句柄全部
+    /// 失效）；想跨场景活下来的实体挂 `Persist` 标记组件——它的全部组件被
+    /// 原样搬进新世界（同名重建，槽位序）。新场景的初始化钩子是下一 tick 的
+    /// `scene-loaded` 事件；`start` 只在整局的 tick 0 发一次，不会重发。
+    fn switch_scene(&mut self, world: &mut World, scene_rel: &str) -> Result<(), String> {
+        let scene = self.scenes.get(scene_rel).ok_or_else(|| {
+            format!(
+                "load-scene 引用的场景 {scene_rel:?} 不在清单 scenes 列表里。\
+                 可用场景: [{}]。提示：新场景文件要先加进 vitric.json 的 scenes 数组",
+                self.scenes.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
+
+        // Persist 幸存者：先拍下（名字 + 全部组件），错误都在动世界之前暴露
+        let mut survivors: Vec<(String, Vec<(String, Value)>)> = Vec::new();
+        for id in world.query(&["Persist"]) {
+            let name = world.name_of(id).map(String::from).ok_or_else(|| {
+                format!(
+                    "实体 {id} 挂了 Persist 但没有名字。跨场景幸存的实体必须命名——\
+                     没有名字，新场景里的规则就没有办法引用它"
+                )
+            })?;
+            let comps = world
+                .components_of(id)
+                .into_iter()
+                .map(|c| {
+                    let v = world.get_component(id, &c).expect("components_of 列出").clone();
+                    (c, v)
+                })
+                .collect();
+            survivors.push((name, comps));
+        }
+
+        // 推倒 → 重建。注意 carryover 里本 tick 已发出的事件（含动画事件）不清：
+        // 事件是纯数据，照常送达下一 tick——和"脚本 emit 的事件跨 tick 送达"同一条约定。
+        world.clear_entities();
+        vitric_data::instantiate_scene(scene, &self.schema, world)
+            .map_err(|r| format!("切换到场景 {scene_rel:?} 失败:\n{r}"))?;
+
+        for (name, comps) in survivors {
+            let id = world.spawn_named(&name).map_err(|e| {
+                format!(
+                    "Persist 实体 {name:?} 无法进入场景 {scene_rel:?}: {e}。\
+                     提示：要携带跨场景的实体，名字不能和目标场景里的实体重名——\
+                     要么改 Persist 实体的名字，要么从目标场景里删掉同名实体"
+                )
+            })?;
+            for (c, v) in comps {
+                world.set_component(id, &c, v).expect("实体刚创建必然存活");
+            }
+        }
+
+        // 新场景的"start"：下一 tick 的 scene-loaded 事件（进 observed 让控制面可见）
+        let loaded = Event::new("scene-loaded", json!({"scene": scene_rel}));
+        self.observed.push(loaded.clone());
+        self.carryover.push(loaded);
+        Ok(())
+    }
 }
 
 impl GameLogic for Runtime {
@@ -88,8 +161,17 @@ impl GameLogic for Runtime {
         let mut inbox = std::mem::take(&mut self.carryover);
         inbox.extend(events);
 
+        // 本 tick 规则/脚本 emit 的 load-scene（场景切换约定事件）。切换推迟到
+        // 流水线尾部统一执行——发起方 emit 之后本 tick 的剩余逻辑仍面对旧世界，
+        // 时序清楚；只看"自己发的"事件，外部注入想换场景也得走规则这道正门。
+        let mut loads: Vec<Event> = Vec::new();
+        let collect_loads = |events: &[Event], loads: &mut Vec<Event>| {
+            loads.extend(events.iter().filter(|e| e.name == "load-scene").cloned());
+        };
+
         // 1. 规则
         let out = self.rules.process_tick(world, inbox).map_err(|e| e.to_string())?;
+        collect_loads(&out.emitted, &mut loads);
         self.observed.extend(out.emitted);
 
         // 2. 规则 -> 脚本函数调用
@@ -98,12 +180,14 @@ impl GameLogic for Runtime {
                 .scripts
                 .call_fn(&function, &args, self_entity, world, rng, tick)
                 .map_err(|e| e.to_string())?;
+            collect_loads(&so.events, &mut loads);
             self.observed.extend(so.events.iter().cloned());
             self.carryover.extend(so.events);
         }
 
         // 3. 脚本系统
         let so = self.scripts.run_systems(world, rng, tick).map_err(|e| e.to_string())?;
+        collect_loads(&so.events, &mut loads);
         self.observed.extend(so.events.iter().cloned());
         self.carryover.extend(so.events);
 
@@ -112,6 +196,36 @@ impl GameLogic for Runtime {
         let anim_events = advance_animations(world, &self.animations)?;
         self.observed.extend(anim_events.iter().cloned());
         self.carryover.extend(anim_events);
+
+        // 5. 场景切换（必须在确定性流水线内执行，重放才会在同一 tick 复现）
+        if let Some(load) = loads.first() {
+            if loads.len() > 1 {
+                let wanted: Vec<String> = loads
+                    .iter()
+                    .map(|e| e.data.get("scene").cloned().unwrap_or(Value::Null).to_string())
+                    .collect();
+                return Err(format!(
+                    "同一 tick 发出了 {} 个 load-scene（{}），去哪个场景没有答案。\
+                     提示：给切换规则加条件互斥，一个 tick 只发一次 load-scene",
+                    loads.len(),
+                    wanted.join(", ")
+                ));
+            }
+            let scene_rel = load
+                .data
+                .get("scene")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .ok_or_else(|| {
+                    format!(
+                        "load-scene 事件缺少 scene 字段（文本）。写法: \
+                         {{\"emit\": \"load-scene\", \"data\": {{\"scene\": \"scenes/level2.json\"}}}}，\
+                         实际 data: {}",
+                        Value::Object(load.data.clone())
+                    )
+                })?;
+            self.switch_scene(world, &scene_rel)?;
+        }
 
         Ok(())
     }
@@ -449,38 +563,52 @@ pub fn check(dir: &Path) -> Result<Value, String> {
         assets.load_font(&dir.join(font_rel))?;
     }
     let mut missing = Vec::new();
-    for id in sim.world.query(&["Sprite"]) {
-        if let Ok(image) = sim.world.get_field(id, "Sprite.image") {
-            if let Some(name) = image.as_str().filter(|s| !s.is_empty()) {
-                if assets.image(name).is_none() {
-                    missing.push(format!(
-                        "实体 {}{} 引用了不存在的素材 {name:?}",
-                        id,
-                        sim.world.name_of(id).map(|n| format!("({n})")).unwrap_or_default(),
-                    ));
+    // 清单里的**每个**场景都实例化 + 查引用——load-scene 随时可能切过去，
+    // 非入口场景的坏引用不在 check 期抓，就会在切换的那一刻才炸
+    for (rel, scene) in &project.scenes {
+        let mut scratch;
+        let world: &World = if rel == &project.manifest.entry {
+            &sim.world // 入口已实例化（报告里的 entities/initial_hash 用它）
+        } else {
+            scratch = World::new();
+            vitric_data::instantiate_scene(scene, &project.schema, &mut scratch)
+                .map_err(|r| format!("场景 {rel:?} 实例化失败:\n{r}"))?;
+            &scratch
+        };
+        for id in world.query(&["Sprite"]) {
+            if let Ok(image) = world.get_field(id, "Sprite.image") {
+                if let Some(name) = image.as_str().filter(|s| !s.is_empty()) {
+                    if assets.image(name).is_none() {
+                        missing.push(format!(
+                            "场景 {rel} 的实体 {}{} 引用了不存在的素材 {name:?}",
+                            id,
+                            world.name_of(id).map(|n| format!("({n})")).unwrap_or_default(),
+                        ));
+                    }
+                }
+            }
+        }
+        // 场景里 Anim.clip 引用的片段都已定义
+        for id in world.query(&["Anim"]) {
+            if let Ok(clip) = world.get_field(id, "Anim.clip") {
+                if let Some(name) = clip.as_str().filter(|s| !s.is_empty()) {
+                    if !project.animations.contains_key(name) {
+                        missing.push(format!(
+                            "场景 {rel} 的实体 {}{} 的 Anim.clip 引用了未定义的片段 {name:?}（已定义: [{}]）",
+                            id,
+                            world.name_of(id).map(|n| format!("({n})")).unwrap_or_default(),
+                            project.animations.keys().cloned().collect::<Vec<_>>().join(", "),
+                        ));
+                    }
                 }
             }
         }
     }
-    // 动画：clip 引用的帧图都在素材库、场景里 Anim.clip 都已定义
+    // 动画：clip 引用的帧图都在素材库
     for (cname, clip) in &project.animations {
         for frame in &clip.frames {
             if assets.image(frame).is_none() {
                 missing.push(format!("动画片段 {cname:?} 引用了不存在的帧图 {frame:?}"));
-            }
-        }
-    }
-    for id in sim.world.query(&["Anim"]) {
-        if let Ok(clip) = sim.world.get_field(id, "Anim.clip") {
-            if let Some(name) = clip.as_str().filter(|s| !s.is_empty()) {
-                if !project.animations.contains_key(name) {
-                    missing.push(format!(
-                        "实体 {}{} 的 Anim.clip 引用了未定义的片段 {name:?}（已定义: [{}]）",
-                        id,
-                        sim.world.name_of(id).map(|n| format!("({n})")).unwrap_or_default(),
-                        project.animations.keys().cloned().collect::<Vec<_>>().join(", "),
-                    ));
-                }
             }
         }
     }

@@ -72,6 +72,18 @@ impl World {
         Ok(())
     }
 
+    /// 按槽位序销毁全部存活实体（场景切换用）。
+    ///
+    /// 约束：走的是正规 despawn 路径，不是"重置世界"——每个槽位代数 +1、
+    /// 名字注销、槽位进 free 列表。旧场景的实体句柄全部干净地失效
+    /// （is_alive = false），不存在"新场景实体顶着旧句柄复活"的混淆；
+    /// 槽位/代数痕迹保留进快照，切换前后的世界哈希因此可区分。
+    pub fn clear_entities(&mut self) {
+        for id in self.entities() {
+            self.despawn(id).expect("entities() 给出的实体必然存活");
+        }
+    }
+
     pub fn is_alive(&self, id: EntityId) -> bool {
         self.alive.get(id.index as usize).copied().unwrap_or(false)
             && self.generations[id.index as usize] == id.generation
@@ -551,6 +563,35 @@ mod tests {
         // 槽位复用行为也必须一致：两边各 spawn 一个，结果相同
         assert_eq!(w.spawn(), w2.spawn());
         assert_eq!(w.state_hash(), w2.state_hash());
+    }
+
+    #[test]
+    fn clear_entities_kills_all_handles_and_frees_names() {
+        let mut w = World::new();
+        let p = w.spawn_named("player").unwrap();
+        w.set_component(p, "Position", pos(1.0, 2.0)).unwrap();
+        let c = w.spawn();
+        w.set_component(c, "Coin", json!({"value": 1})).unwrap();
+
+        w.clear_entities();
+        // 旧句柄全部干净失效（代数 +1），名字释放，世界空了
+        assert!(!w.is_alive(p) && !w.is_alive(c));
+        assert!(w.entity("player").is_err());
+        assert!(w.entities().is_empty());
+        // 名字可立即复用；新实体拿到的代数和旧句柄不同
+        let p2 = w.spawn_named("player").unwrap();
+        assert_ne!(p2, p);
+        assert!(!w.is_alive(p), "新实体不许让旧句柄复活");
+        // 清空是确定性操作：同样的序列两遍，哈希一致
+        let run = || {
+            let mut w = World::new();
+            w.spawn_named("a").unwrap();
+            w.spawn();
+            w.clear_entities();
+            w.spawn_named("b").unwrap();
+            w.state_hash()
+        };
+        assert_eq!(run(), run());
     }
 
     #[test]
