@@ -1242,7 +1242,7 @@
           "y": -8.3
         },
         "Text": {
-          "content": "E - END TURN",
+          "content": "CLICK A CARD",
           "size": 0.6,
           "color": "#b8b0d0",
           "screen": true
@@ -1370,6 +1370,28 @@
         "Position": {
           "x": -30,
           "y": -32
+        },
+        "Card": {
+          "name": "",
+          "slot": 0
+        }
+      }
+    },
+    {
+      "name": "tutor",
+      "components": {
+        "Shade": {
+          "kind": "tutor",
+          "hp": 0,
+          "n": 0
+        },
+        "Cell": {
+          "cx": -1,
+          "cy": 0
+        },
+        "Position": {
+          "x": -30,
+          "y": -34
         },
         "Card": {
           "name": "",

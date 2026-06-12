@@ -983,6 +983,126 @@
       ]
     },
     {
+      "id": "apply-hint",
+      "on": { "event": "sync-hint" },
+      "if": [["@hud-hint", "exists"]],
+      "do": [
+        { "set": "@hud-hint.Text.content", "to": "event.text" }
+      ]
+    },
+    {
+      "id": "tut-step-select",
+      "on": { "event": "sync-hand" },
+      "if": [
+        ["@tutor", "exists"],
+        ["@tutor.Card.slot", "<", 1],
+        ["@ctl.Card.slot", ">=", 1]
+      ],
+      "do": [
+        { "set": "@tutor.Card.slot", "to": 1 }
+      ]
+    },
+    {
+      "id": "tut-step-play",
+      "on": { "event": "card-played" },
+      "if": [
+        ["@tutor", "exists"],
+        ["@tutor.Card.slot", "<", 2]
+      ],
+      "do": [
+        { "set": "@tutor.Card.slot", "to": 2 }
+      ]
+    },
+    {
+      "id": "tut-step-endturn",
+      "on": { "event": "sync-hud" },
+      "if": [
+        ["@tutor", "exists"],
+        ["@tutor.Card.slot", "<", 3],
+        ["event.oil", "==", "OIL 0"]
+      ],
+      "do": [
+        { "set": "@tutor.Card.slot", "to": 3 }
+      ]
+    },
+    {
+      "id": "tut-step-stun",
+      "on": { "event": "shade-stunned" },
+      "if": [
+        ["@tutor", "exists"],
+        ["@tutor.Card.slot", "<", 4]
+      ],
+      "do": [
+        { "set": "@tutor.Card.slot", "to": 4 }
+      ]
+    },
+    {
+      "id": "tut-step-kill",
+      "on": { "event": "shade-died" },
+      "if": [
+        ["@tutor", "exists"],
+        ["@tutor.Card.slot", "<", 5]
+      ],
+      "do": [
+        { "set": "@tutor.Card.slot", "to": 5 }
+      ]
+    },
+    {
+      "id": "card-help-clear",
+      "on": { "event": "mouse-alt" },
+      "if": [
+        ["@ctl", "exists"],
+        ["@ctl.Shade.hp", "==", 0]
+      ],
+      "do": [
+        { "set": "@ctl.Cell.cx", "to": 20 }
+      ]
+    },
+    {
+      "id": "card-help-slot-1",
+      "on": { "event": "mouse-alt", "filter": { "entity": "slot-1" } },
+      "if": [
+        ["@ctl", "exists"],
+        ["@ctl.Shade.hp", "==", 0]
+      ],
+      "do": [
+        { "set": "@ctl.Cell.cx", "to": 21 }
+      ]
+    },
+    {
+      "id": "card-help-slot-2",
+      "on": { "event": "mouse-alt", "filter": { "entity": "slot-2" } },
+      "if": [
+        ["@ctl", "exists"],
+        ["@ctl.Shade.hp", "==", 0]
+      ],
+      "do": [
+        { "set": "@ctl.Cell.cx", "to": 22 }
+      ]
+    },
+    {
+      "id": "card-help-slot-3",
+      "on": { "event": "mouse-alt", "filter": { "entity": "slot-3" } },
+      "if": [
+        ["@ctl", "exists"],
+        ["@ctl.Shade.hp", "==", 0]
+      ],
+      "do": [
+        { "set": "@ctl.Cell.cx", "to": 23 }
+      ]
+    },
+    {
+      "id": "card-help-slot-4",
+      "on": { "event": "mouse-alt", "filter": { "entity": "slot-4" } },
+      "if": [
+        ["@ctl", "exists"],
+        ["@ctl.Shade.hp", "==", 0]
+      ],
+      "do": [
+        { "set": "@ctl.Cell.cx", "to": 24 }
+      ]
+    },
+    {
       "id": "bgm-victory",
       "on": {
         "event": "scene-loaded",

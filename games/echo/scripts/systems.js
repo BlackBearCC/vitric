@@ -15,6 +15,8 @@
 //   "blocker"  遮板（另带 Solid+Collider，挡光挡路由引擎承担）
 //   "ctl"      指令寄存器（每个战斗场景一只，详见下面寄存器表）
 //   "node"     节点标签：Shade.n = 本战斗的节点号（1/2/3）
+//   "tutor"    教学寄存器（仅 battle-1 有）：Card.slot=已达教学步(0..5,只增不减,由规则推进)
+//              Cell.cx=已显示步(脑每 tick 对账,不等就 emit sync-hint 刷 HUD,场景初值 -1=强制首发)
 // 这是查询机制的要求：脚本系统按组件 AND 匹配，只有同档案才能在一个系统里互见。
 // ⚠ 所以「Shade 组件 ≠ 影怪」，数影怪要按 kind 过滤——QA 断言别直接数 Shade 实体。
 //
@@ -24,6 +26,7 @@
 //   Card.name  = 手牌寄存器：4 槽逗号串，如 "lamp,flash,," ；"" = 尚未发牌（开战哨兵）
 //   Card.slot  = 当前选中的手牌槽（0=未选，1..4）
 //   Cell.cx    = 指令：0 空闲 / 1 棋盘点击 / 2 结束回合 / 11..14 切换选中第 N 张牌
+//                / 20 右键空地(恢复默认提示) / 21..24 右键第 N 张牌(HUD 显示该牌说明)
 //   Cell.cy    = 阶段内进度：影怪回合=下一个行动的影怪序、胜负阶段=退场倒计时
 //   Position   = 最近一次点击的世界坐标（棋盘点击用）
 //
@@ -39,15 +42,26 @@
 
 "use strict";
 
-// ---- 牌表（GDD 第1期合同定死） ----
+// ---- 牌表（GDD 第1期合同定死；help = 右键牌说明行，DejaVu 无 CJK 故全 ASCII） ----
 const CARDS = {
-  lamp:    { cost: 1, label: "LAMP" },   // 放灯：目标格放一盏灯 r=4.5 暖光
-  move:    { cost: 1, label: "MOVE" },   // 移灯：离目标格最近的一盏己灯移过去（v1 简化：不二段选灯）
-  snuff:   { cost: 0, label: "SNUFF" },  // 熄灯：收回目标格的灯，+1 油
-  prism:   { cost: 2, label: "PRISM" },  // 棱镜：目标格的灯变 60° 聚光锥 r=7，朝向最近影怪（重打可转向）
-  blocker: { cost: 1, label: "BLOCK" },  // 遮板：目标格立遮光板（Solid 2×2，尺寸表为准）
-  flash:   { cost: 2, label: "FLASH" },  // 闪光：目标格瞬间强光 r=3，照到的影怪 -1 命并僵直，灯不留场
+  lamp:    { cost: 1, label: "LAMP", help: "LAMP 1 OIL - LIGHT A CELL" },        // 放灯：目标格放一盏灯 r=4.5 暖光
+  move:    { cost: 1, label: "MOVE", help: "MOVE 1 OIL - MOVE NEAREST LAMP" },   // 移灯：离目标格最近的一盏己灯移过去（v1 简化：不二段选灯）
+  snuff:   { cost: 0, label: "SNUFF", help: "SNUFF 0 OIL - REMOVE LAMP +1 OIL" },// 熄灯：收回目标格的灯，+1 油
+  prism:   { cost: 2, label: "PRISM", help: "PRISM 2 OIL - FOCUS LAMP AT FOE" }, // 棱镜：目标格的灯变 60° 聚光锥 r=7，朝向最近影怪（重打可转向）
+  blocker: { cost: 1, label: "BLOCK", help: "BLOCK 1 OIL - WALL STOPS LIGHT" },  // 遮板：目标格立遮光板（Solid 2×2，尺寸表为准）
+  flash:   { cost: 2, label: "FLASH", help: "FLASH 2 OIL - STUN SHADES NEAR" },  // 闪光：目标格瞬间强光 r=3，照到的影怪 -1 命并僵直，灯不留场
 };
+
+// ---- 教学文案（battle-1 引导步；步号即 tutor.Card.slot，规则只增不减） ----
+const HINT_DEFAULT = "E - END TURN";
+const TUT_TEXT = [
+  "CLICK A CARD",                          // 0 开场
+  "CLICK A CELL TO PLAY IT",               // 1 选中了牌
+  "SHADES FEAR LIGHT - TRAP THEM",         // 2 出过第一张牌
+  "PRESS E TO END TURN",                   // 3 油耗尽还没结束回合（回合状态驱动，非墙钟）
+  "STUNNED SHADES LOSE HP - END THEM",     // 4 第一次僵直（≤33 字符：hud-hint 居中锚在 x=10.6，再长出右框）
+  HINT_DEFAULT,                            // 5 第一杀，毕业回常驻提示
+];
 const DRAW_POOL = ["lamp", "move", "snuff", "prism", "blocker", "flash"]; // 无限牌库均匀抽
 const HAND_SIZE = 4;
 
@@ -138,13 +152,14 @@ vitric.system(
   { query: ["Shade", "Cell", "Position", "Card"], writes: ["Shade", "Cell", "Position", "Card"] },
   (entities, ctx) => {
     // 1) 按 kind 分拣棋子
-    let ctl = null, hero = null, tag = null;
+    let ctl = null, hero = null, tag = null, tut = null;
     const shades = [], lamps = [], blockers = [];
     for (const e of entities) {
       const k = e.Shade.kind;
       if (k === "ctl") ctl = e;
       else if (k === "hero") hero = e;
       else if (k === "node") tag = e;
+      else if (k === "tutor") tut = e;
       else if (k === "lamp") lamps.push(e);
       else if (k === "blocker") blockers.push(e);
       else if (k === "stalker" || k === "lurker" || k === "devourer") shades.push(e);
@@ -152,6 +167,13 @@ vitric.system(
     if (!ctl || !hero) return; // 非战斗场景（menu/map/victory）：空转
     const node = tag ? tag.Shade.n : 0;
     const alive = () => shades.filter((s) => s.Shade.hp > 0);
+
+    // ---- 教学提示对账（battle-1 才有 tutor）：实际步(Card.slot,规则推进)≠已显示步(Cell.cx)
+    // 就刷一次 HUD。寄存器模式：幂等、零私藏状态、重放安全。
+    if (tut && tut.Cell.cx !== tut.Card.slot) {
+      tut.Cell.cx = tut.Card.slot;
+      ctx.emit("sync-hint", { text: TUT_TEXT[tut.Card.slot] || HINT_DEFAULT });
+    }
 
     // ---- 工具（闭包仅在本 tick 内用，不跨 tick 存东西） ----
     const parseHand = () => {
@@ -287,6 +309,16 @@ vitric.system(
         const slot = cmd - 10;
         ctl.Card.slot = ctl.Card.slot === slot ? 0 : slot;
         syncHand();
+        return;
+      }
+
+      if (cmd >= 20 && cmd <= 24) { // 右键牌说明：21..24 显示第 N 张牌的费用/效果，20/空槽恢复默认
+        let text = tut ? (TUT_TEXT[tut.Card.slot] || HINT_DEFAULT) : HINT_DEFAULT; // 默认 = 教学当前步（battle-1）或常驻提示
+        if (cmd >= 21) {
+          const name = parseHand()[cmd - 21];
+          if (name) text = CARDS[name].help;
+        }
+        ctx.emit("sync-hint", { text });
         return;
       }
 
