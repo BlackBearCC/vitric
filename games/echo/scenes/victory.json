@@ -1,0 +1,229 @@
+{
+  "entities": [
+    {
+      "name": "camera",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 0
+        },
+        "Camera": {
+          "x": 0,
+          "y": 0,
+          "view_h": 18
+        },
+        "Shake": {
+          "amplitude": 0
+        }
+      }
+    },
+    {
+      "name": "ambient",
+      "components": {
+        "Ambient": {
+          "color": "#1f1b2c",
+          "shadows": false
+        },
+        "Bloom": {
+          "threshold": 0.5,
+          "strength": 0.9
+        }
+      }
+    },
+    {
+      "name": "victory-title",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 5.4
+        },
+        "Text": {
+          "content": "VICTORY",
+          "size": 2.2,
+          "color": "#ffe9c8"
+        }
+      }
+    },
+    {
+      "name": "victory-sub",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 3.4
+        },
+        "Text": {
+          "content": "THE NIGHT ECHOES WITH LIGHT",
+          "size": 0.8,
+          "color": "#d8c9a8"
+        }
+      }
+    },
+    {
+      "name": "v-lamp-1",
+      "components": {
+        "Position": {
+          "x": -9,
+          "y": 0.8
+        },
+        "Sprite": {
+          "w": 0.8,
+          "h": 1.4,
+          "color": "#ffc97a",
+          "image": "lamp.png"
+        },
+        "Light": {
+          "radius": 4,
+          "color": "#ffa94d",
+          "intensity": 1.1
+        }
+      }
+    },
+    {
+      "name": "v-lamp-2",
+      "components": {
+        "Position": {
+          "x": -5.5,
+          "y": -1.5
+        },
+        "Sprite": {
+          "w": 0.8,
+          "h": 1.4,
+          "color": "#ffc97a",
+          "image": "lamp.png"
+        },
+        "Light": {
+          "radius": 4.5,
+          "color": "#ffa94d",
+          "intensity": 1.1
+        }
+      }
+    },
+    {
+      "name": "v-lamp-3",
+      "components": {
+        "Position": {
+          "x": -2,
+          "y": 0.5
+        },
+        "Sprite": {
+          "w": 0.8,
+          "h": 1.4,
+          "color": "#ffc97a",
+          "image": "lamp.png"
+        },
+        "Light": {
+          "radius": 4,
+          "color": "#ffa94d",
+          "intensity": 1.1
+        }
+      }
+    },
+    {
+      "name": "v-lamp-4",
+      "components": {
+        "Position": {
+          "x": 1.5,
+          "y": -1.8
+        },
+        "Sprite": {
+          "w": 0.8,
+          "h": 1.4,
+          "color": "#ffc97a",
+          "image": "lamp.png"
+        },
+        "Light": {
+          "radius": 4.5,
+          "color": "#ffa94d",
+          "intensity": 1.1
+        }
+      }
+    },
+    {
+      "name": "v-lamp-5",
+      "components": {
+        "Position": {
+          "x": 5,
+          "y": 0.8
+        },
+        "Sprite": {
+          "w": 0.8,
+          "h": 1.4,
+          "color": "#ffc97a",
+          "image": "lamp.png"
+        },
+        "Light": {
+          "radius": 4,
+          "color": "#ffa94d",
+          "intensity": 1.1
+        }
+      }
+    },
+    {
+      "name": "v-lamp-6",
+      "components": {
+        "Position": {
+          "x": 8.5,
+          "y": -1.2
+        },
+        "Sprite": {
+          "w": 0.8,
+          "h": 1.4,
+          "color": "#ffc97a",
+          "image": "lamp.png"
+        },
+        "Light": {
+          "radius": 4,
+          "color": "#ffa94d",
+          "intensity": 1.1
+        }
+      }
+    },
+    {
+      "name": "v-glow-1",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 5.2
+        },
+        "Light": {
+          "radius": 5,
+          "color": "#ffd9a0",
+          "intensity": 1.2
+        }
+      }
+    },
+    {
+      "name": "v-glow-2",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": -5.2
+        },
+        "Light": {
+          "radius": 4.5,
+          "color": "#ffd9a0",
+          "intensity": 1.2
+        }
+      }
+    },
+    {
+      "name": "menu-btn",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": -5.2
+        },
+        "Sprite": {
+          "w": 7,
+          "h": 1.8,
+          "color": "#3a3454"
+        },
+        "Text": {
+          "content": "RETURN TO MENU",
+          "size": 0.8,
+          "color": "#ffeccd"
+        }
+      }
+    }
+  ]
+}

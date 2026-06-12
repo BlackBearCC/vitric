@@ -1,0 +1,131 @@
+{
+  "entities": [
+    {
+      "name": "camera",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 0
+        },
+        "Camera": {
+          "x": 0,
+          "y": 0,
+          "view_h": 18
+        },
+        "Shake": {
+          "amplitude": 0
+        }
+      }
+    },
+    {
+      "name": "ambient",
+      "components": {
+        "Ambient": {
+          "color": "#16131f",
+          "shadows": false
+        },
+        "Bloom": {
+          "threshold": 0.5,
+          "strength": 0.9
+        }
+      }
+    },
+    {
+      "name": "progress",
+      "components": {
+        "Run": {
+          "node": 0,
+          "phase": "player",
+          "turn": 1
+        },
+        "Persist": {}
+      }
+    },
+    {
+      "name": "title",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 4.2
+        },
+        "Text": {
+          "content": "ECHO",
+          "size": 3,
+          "color": "#ffe2b0"
+        }
+      }
+    },
+    {
+      "name": "subtitle",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 2.2
+        },
+        "Text": {
+          "content": "A LANTERN AGAINST THE DARK",
+          "size": 0.7,
+          "color": "#b3a8d0"
+        }
+      }
+    },
+    {
+      "name": "start-btn",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": -1
+        },
+        "Sprite": {
+          "w": 6,
+          "h": 1.6,
+          "color": "#3a3454"
+        },
+        "Text": {
+          "content": "START",
+          "size": 0.9,
+          "color": "#ffeccd"
+        }
+      }
+    },
+    {
+      "name": "continue-btn",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": -3.6
+        },
+        "Sprite": {
+          "w": 6,
+          "h": 1.6,
+          "color": "#322d48"
+        },
+        "Text": {
+          "content": "CONTINUE",
+          "size": 0.9,
+          "color": "#cdbfa0"
+        }
+      }
+    },
+    {
+      "name": "menu-lamp",
+      "components": {
+        "Position": {
+          "x": 0,
+          "y": 1
+        },
+        "Sprite": {
+          "w": 0.8,
+          "h": 1.4,
+          "color": "#ffc97a",
+          "image": "lamp.png"
+        },
+        "Light": {
+          "radius": 14,
+          "color": "#ffb966",
+          "intensity": 1.3
+        }
+      }
+    }
+  ]
+}

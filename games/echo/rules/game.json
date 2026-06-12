@@ -1,0 +1,1004 @@
+{
+  "rules": [
+    {
+      "id": "board-click",
+      "on": {
+        "event": "mouse"
+      },
+      "if": [
+        [
+          "@ctl",
+          "exists"
+        ],
+        [
+          "@ctl.Shade.hp",
+          "==",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "set": "@ctl.Position.x",
+          "to": "event.x"
+        },
+        {
+          "set": "@ctl.Position.y",
+          "to": "event.y"
+        },
+        {
+          "set": "@ctl.Cell.cx",
+          "to": 1
+        }
+      ]
+    },
+    {
+      "id": "select-card-1",
+      "on": {
+        "event": "mouse",
+        "filter": {
+          "entity": "slot-1"
+        }
+      },
+      "if": [
+        [
+          "@ctl",
+          "exists"
+        ],
+        [
+          "@ctl.Shade.hp",
+          "==",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "set": "@ctl.Cell.cx",
+          "to": 11
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "click.wav",
+            "volume": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "id": "select-card-2",
+      "on": {
+        "event": "mouse",
+        "filter": {
+          "entity": "slot-2"
+        }
+      },
+      "if": [
+        [
+          "@ctl",
+          "exists"
+        ],
+        [
+          "@ctl.Shade.hp",
+          "==",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "set": "@ctl.Cell.cx",
+          "to": 12
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "click.wav",
+            "volume": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "id": "select-card-3",
+      "on": {
+        "event": "mouse",
+        "filter": {
+          "entity": "slot-3"
+        }
+      },
+      "if": [
+        [
+          "@ctl",
+          "exists"
+        ],
+        [
+          "@ctl.Shade.hp",
+          "==",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "set": "@ctl.Cell.cx",
+          "to": 13
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "click.wav",
+            "volume": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "id": "select-card-4",
+      "on": {
+        "event": "mouse",
+        "filter": {
+          "entity": "slot-4"
+        }
+      },
+      "if": [
+        [
+          "@ctl",
+          "exists"
+        ],
+        [
+          "@ctl.Shade.hp",
+          "==",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "set": "@ctl.Cell.cx",
+          "to": 14
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "click.wav",
+            "volume": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "id": "end-turn-key",
+      "on": {
+        "event": "input",
+        "filter": {
+          "action": "e",
+          "phase": "pressed"
+        }
+      },
+      "if": [
+        [
+          "@ctl",
+          "exists"
+        ],
+        [
+          "@ctl.Shade.hp",
+          "==",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "set": "@ctl.Cell.cx",
+          "to": 2
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "click.wav",
+            "volume": 0.4
+          }
+        }
+      ]
+    },
+    {
+      "id": "apply-hud",
+      "on": {
+        "event": "sync-hud"
+      },
+      "do": [
+        {
+          "set": "@hud-oil.Text.content",
+          "to": "event.oil"
+        },
+        {
+          "set": "@hud-hearts.Text.content",
+          "to": "event.hearts"
+        },
+        {
+          "set": "@hud-turn.Text.content",
+          "to": "event.turn"
+        }
+      ]
+    },
+    {
+      "id": "apply-banner",
+      "on": {
+        "event": "sync-hud"
+      },
+      "if": [
+        [
+          "@banner",
+          "exists"
+        ]
+      ],
+      "do": [
+        {
+          "set": "@banner.Text.content",
+          "to": "event.banner"
+        }
+      ]
+    },
+    {
+      "id": "apply-hand",
+      "on": {
+        "event": "sync-hand"
+      },
+      "do": [
+        {
+          "set": "@slot-1.Text.content",
+          "to": "event.t1"
+        },
+        {
+          "set": "@slot-1.Sprite.color",
+          "to": "event.c1"
+        },
+        {
+          "set": "@slot-2.Text.content",
+          "to": "event.t2"
+        },
+        {
+          "set": "@slot-2.Sprite.color",
+          "to": "event.c2"
+        },
+        {
+          "set": "@slot-3.Text.content",
+          "to": "event.t3"
+        },
+        {
+          "set": "@slot-3.Sprite.color",
+          "to": "event.c3"
+        },
+        {
+          "set": "@slot-4.Text.content",
+          "to": "event.t4"
+        },
+        {
+          "set": "@slot-4.Sprite.color",
+          "to": "event.c4"
+        }
+      ]
+    },
+    {
+      "id": "apply-battle",
+      "on": {
+        "event": "sync-battle"
+      },
+      "do": [
+        {
+          "set": "@progress.Run.phase",
+          "to": "event.phase"
+        },
+        {
+          "set": "@progress.Run.turn",
+          "to": "event.turn"
+        }
+      ]
+    },
+    {
+      "id": "advance-progress",
+      "on": {
+        "event": "node-cleared"
+      },
+      "if": [
+        [
+          "event.node",
+          ">",
+          "@progress.Run.node"
+        ]
+      ],
+      "do": [
+        {
+          "set": "@progress.Run.node",
+          "to": "event.node"
+        }
+      ]
+    },
+    {
+      "id": "autosave-on-clear",
+      "on": {
+        "event": "node-cleared"
+      },
+      "do": [
+        {
+          "emit": "save-game",
+          "data": {
+            "slot": "auto"
+          }
+        }
+      ]
+    },
+    {
+      "id": "autosave-on-map",
+      "on": {
+        "event": "scene-loaded",
+        "filter": {
+          "scene": "scenes/map.json"
+        }
+      },
+      "if": [
+        [
+          "@progress",
+          "exists"
+        ]
+      ],
+      "do": [
+        {
+          "emit": "save-game",
+          "data": {
+            "slot": "auto"
+          }
+        }
+      ]
+    },
+    {
+      "id": "battle-exit-to-map",
+      "on": {
+        "event": "battle-exit"
+      },
+      "if": [
+        [
+          "event.node",
+          "<=",
+          2
+        ]
+      ],
+      "do": [
+        {
+          "emit": "load-scene",
+          "data": {
+            "scene": "scenes/map.json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "battle-exit-to-victory",
+      "on": {
+        "event": "battle-exit"
+      },
+      "if": [
+        [
+          "event.node",
+          ">=",
+          3
+        ]
+      ],
+      "do": [
+        {
+          "emit": "run-complete",
+          "data": {}
+        },
+        {
+          "emit": "load-scene",
+          "data": {
+            "scene": "scenes/victory.json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "battle-retreat-to-map",
+      "on": {
+        "event": "battle-retreat"
+      },
+      "do": [
+        {
+          "emit": "load-scene",
+          "data": {
+            "scene": "scenes/map.json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "menu-new-run",
+      "on": {
+        "event": "mouse",
+        "filter": {
+          "entity": "start-btn"
+        }
+      },
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "click.wav",
+            "volume": 0.6
+          }
+        },
+        {
+          "emit": "load-scene",
+          "data": {
+            "scene": "scenes/map.json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "menu-continue",
+      "on": {
+        "event": "mouse",
+        "filter": {
+          "entity": "continue-btn"
+        }
+      },
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "click.wav",
+            "volume": 0.6
+          }
+        },
+        {
+          "emit": "load-game",
+          "data": {
+            "slot": "auto"
+          }
+        }
+      ]
+    },
+    {
+      "id": "map-enter-battle-1",
+      "on": {
+        "event": "mouse",
+        "filter": {
+          "entity": "node-1"
+        }
+      },
+      "if": [
+        [
+          "@progress",
+          "exists"
+        ],
+        [
+          "@progress.Run.node",
+          ">=",
+          0
+        ]
+      ],
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "click.wav",
+            "volume": 0.6
+          }
+        },
+        {
+          "emit": "load-scene",
+          "data": {
+            "scene": "scenes/battle-1.json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "map-enter-battle-2",
+      "on": {
+        "event": "mouse",
+        "filter": {
+          "entity": "node-2"
+        }
+      },
+      "if": [
+        [
+          "@progress",
+          "exists"
+        ],
+        [
+          "@progress.Run.node",
+          ">=",
+          1
+        ]
+      ],
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "click.wav",
+            "volume": 0.6
+          }
+        },
+        {
+          "emit": "load-scene",
+          "data": {
+            "scene": "scenes/battle-2.json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "map-enter-boss",
+      "on": {
+        "event": "mouse",
+        "filter": {
+          "entity": "node-boss"
+        }
+      },
+      "if": [
+        [
+          "@progress",
+          "exists"
+        ],
+        [
+          "@progress.Run.node",
+          ">=",
+          2
+        ]
+      ],
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "click.wav",
+            "volume": 0.6
+          }
+        },
+        {
+          "emit": "load-scene",
+          "data": {
+            "scene": "scenes/boss.json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "victory-back-to-menu",
+      "on": {
+        "event": "mouse",
+        "filter": {
+          "entity": "menu-btn"
+        }
+      },
+      "if": [
+        [
+          "@progress",
+          "exists"
+        ]
+      ],
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "click.wav",
+            "volume": 0.6
+          }
+        },
+        {
+          "despawn": "@progress"
+        },
+        {
+          "emit": "load-scene",
+          "data": {
+            "scene": "scenes/menu.json"
+          }
+        }
+      ]
+    },
+    {
+      "id": "map-tint-node-1-open",
+      "on": {
+        "event": "scene-loaded",
+        "filter": {
+          "scene": "scenes/map.json"
+        }
+      },
+      "do": [
+        {
+          "set": "@node-1.Sprite.color",
+          "to": "#e8a44c"
+        }
+      ]
+    },
+    {
+      "id": "map-tint-node-2-open",
+      "on": {
+        "event": "scene-loaded",
+        "filter": {
+          "scene": "scenes/map.json"
+        }
+      },
+      "if": [
+        [
+          "@progress.Run.node",
+          ">=",
+          1
+        ]
+      ],
+      "do": [
+        {
+          "set": "@node-2.Sprite.color",
+          "to": "#e8a44c"
+        }
+      ]
+    },
+    {
+      "id": "map-tint-node-3-open",
+      "on": {
+        "event": "scene-loaded",
+        "filter": {
+          "scene": "scenes/map.json"
+        }
+      },
+      "if": [
+        [
+          "@progress.Run.node",
+          ">=",
+          2
+        ]
+      ],
+      "do": [
+        {
+          "set": "@node-boss.Sprite.color",
+          "to": "#e8a44c"
+        }
+      ]
+    },
+    {
+      "id": "map-tint-node-1-cleared",
+      "on": {
+        "event": "scene-loaded",
+        "filter": {
+          "scene": "scenes/map.json"
+        }
+      },
+      "if": [
+        [
+          "@progress.Run.node",
+          ">=",
+          1
+        ]
+      ],
+      "do": [
+        {
+          "set": "@node-1.Sprite.color",
+          "to": "#6f6a7a"
+        }
+      ]
+    },
+    {
+      "id": "map-tint-node-2-cleared",
+      "on": {
+        "event": "scene-loaded",
+        "filter": {
+          "scene": "scenes/map.json"
+        }
+      },
+      "if": [
+        [
+          "@progress.Run.node",
+          ">=",
+          2
+        ]
+      ],
+      "do": [
+        {
+          "set": "@node-2.Sprite.color",
+          "to": "#6f6a7a"
+        }
+      ]
+    },
+    {
+      "id": "hit-feedback",
+      "on": {
+        "event": "player-hit"
+      },
+      "do": [
+        {
+          "set": "@camera.Shake.amplitude",
+          "to": 0.5
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "hit.wav",
+            "volume": 0.8
+          }
+        }
+      ]
+    },
+    {
+      "id": "shade-died-feedback",
+      "on": {
+        "event": "shade-died"
+      },
+      "do": [
+        {
+          "set": "@camera.Shake.amplitude",
+          "to": 0.3
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "die.wav",
+            "volume": 0.7
+          }
+        },
+        {
+          "call": "burst",
+          "with": {
+            "x": "event.x",
+            "y": "event.y",
+            "n": 10
+          }
+        }
+      ]
+    },
+    {
+      "id": "shade-stunned-sound",
+      "on": {
+        "event": "shade-stunned"
+      },
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "stun.wav",
+            "volume": 0.6
+          }
+        }
+      ]
+    },
+    {
+      "id": "shade-acted-sound",
+      "on": {
+        "event": "shade-acted"
+      },
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "hiss.wav",
+            "volume": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "id": "card-played-sound",
+      "on": {
+        "event": "card-played"
+      },
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "card.wav",
+            "volume": 0.6
+          }
+        }
+      ]
+    },
+    {
+      "id": "lamp-placed-sound",
+      "on": {
+        "event": "card-played",
+        "filter": {
+          "name": "lamp"
+        }
+      },
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "lamp.wav",
+            "volume": 0.7
+          }
+        }
+      ]
+    },
+    {
+      "id": "card-rejected-sound",
+      "on": {
+        "event": "card-rejected"
+      },
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "reject.wav",
+            "volume": 0.5
+          }
+        }
+      ]
+    },
+    {
+      "id": "lamp-devoured-feedback",
+      "on": {
+        "event": "lamp-devoured"
+      },
+      "do": [
+        {
+          "set": "@camera.Shake.amplitude",
+          "to": 0.4
+        },
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "devour.wav",
+            "volume": 0.8
+          }
+        }
+      ]
+    },
+    {
+      "id": "battle-won-feedback",
+      "on": {
+        "event": "battle-won"
+      },
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "win.wav",
+            "volume": 0.8
+          }
+        },
+        {
+          "call": "burst",
+          "with": {
+            "x": 0,
+            "y": 0,
+            "n": 24
+          }
+        }
+      ]
+    },
+    {
+      "id": "battle-lost-sound",
+      "on": {
+        "event": "battle-lost"
+      },
+      "do": [
+        {
+          "emit": "play-sound",
+          "data": {
+            "sound": "lose.wav",
+            "volume": 0.8
+          }
+        }
+      ]
+    },
+    {
+      "id": "bgm-boot",
+      "on": {
+        "event": "start"
+      },
+      "do": [
+        {
+          "emit": "play-music",
+          "data": {
+            "sound": "bgm-menu.wav",
+            "volume": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "id": "bgm-menu",
+      "on": {
+        "event": "scene-loaded",
+        "filter": {
+          "scene": "scenes/menu.json"
+        }
+      },
+      "do": [
+        {
+          "emit": "play-music",
+          "data": {
+            "sound": "bgm-menu.wav",
+            "volume": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "id": "bgm-map",
+      "on": {
+        "event": "scene-loaded",
+        "filter": {
+          "scene": "scenes/map.json"
+        }
+      },
+      "do": [
+        {
+          "emit": "play-music",
+          "data": {
+            "sound": "bgm-menu.wav",
+            "volume": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "id": "bgm-battle-1",
+      "on": {
+        "event": "scene-loaded",
+        "filter": {
+          "scene": "scenes/battle-1.json"
+        }
+      },
+      "do": [
+        {
+          "emit": "play-music",
+          "data": {
+            "sound": "bgm-battle.wav",
+            "volume": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "id": "bgm-battle-2",
+      "on": {
+        "event": "scene-loaded",
+        "filter": {
+          "scene": "scenes/battle-2.json"
+        }
+      },
+      "do": [
+        {
+          "emit": "play-music",
+          "data": {
+            "sound": "bgm-battle.wav",
+            "volume": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "id": "bgm-boss",
+      "on": {
+        "event": "scene-loaded",
+        "filter": {
+          "scene": "scenes/boss.json"
+        }
+      },
+      "do": [
+        {
+          "emit": "play-music",
+          "data": {
+            "sound": "bgm-battle.wav",
+            "volume": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "id": "bgm-victory",
+      "on": {
+        "event": "scene-loaded",
+        "filter": {
+          "scene": "scenes/victory.json"
+        }
+      },
+      "do": [
+        {
+          "emit": "play-music",
+          "data": {
+            "sound": "bgm-menu.wav",
+            "volume": 0.3
+          }
+        }
+      ]
+    }
+  ]
+}
