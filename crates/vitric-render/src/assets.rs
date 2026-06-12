@@ -121,6 +121,13 @@ impl Assets {
         self.images.get(&normal_map_name(name)?)
     }
 
+    /// 素材仓库里有没有任何法线贴图（`*_n.png` 命名配对）。没有 = 渲染器整帧
+    /// 跳过法线缓冲（分配/清写/合成读全省掉）——输出与"有缓冲但全哨兵"逐位相同
+    /// （哨兵语义见 lib.rs 模块文档，向后兼容由测试锁死）。
+    pub fn has_normal_maps(&self) -> bool {
+        self.images.keys().any(|k| is_normal_map_name(k))
+    }
+
     pub fn names(&self) -> Vec<&str> {
         self.images.keys().map(|s| s.as_str()).collect()
     }

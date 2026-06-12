@@ -74,6 +74,12 @@
 //!   而不是点对点线段，留给后续版本），平行光贡献照旧处处均匀。
 //! - 已知约束：灯心埋进某个遮光体时，箱外像素全部被那个箱子挡掉——
 //!   灯别放在墙里。线段几何用取景后的像素空间（同灯参数，光跟着画面走）。
+//! - 性能（输出字节不变，由等价性测试锁死）：边缘逐位贴齐的相邻遮光体每帧
+//!   自动合并成大箱（瓦片地板收成一根长条，见 [`build_shadow_boxes`]）、再按
+//!   灯盘逐灯剔除碰不到的箱子（[`cull_shadow_boxes`]）；点/聚光只扫自己灯盘的
+//!   外接方框，贡献为零（锥外/背光面）的像素跳过遮挡测试。GPU 路径共用同一套
+//!   合并/剔除结果，另有 uniform 预算：单灯剔除后 ≤ 64 箱、全部灯合计 ≤ 256 条
+//!   （超了显式报错，见 gpu.rs）。
 //!
 //! 法线贴图（零配置命名配对，见 [`normal_map_name`]）：
 //! - 精灵贴图 `hero.png` 在 assets/ 里有 `hero_n.png` 就自动启用——RGB 编码切线空间法线
@@ -178,12 +184,15 @@ fn render_with(
     let mut buf = vec![0u8; (width * height * 4) as usize];
     fill(&mut buf, BACKGROUND);
 
-    // 法线缓冲（每帧）：光照开着才分配——关着零分配零开销，旧行为字节不变。
+    // 法线缓冲（每帧）：光照开着、且素材仓库里真有法线贴图才分配——否则零分配
+    // 零开销（None 与"有缓冲但全哨兵"输出逐位相同，旧行为字节不变）。
     // 哨兵零向量 = 该像素没有法线（走原光照公式，字节锁死）；精灵 blit 时顺手填充，
     // 后画的东西覆盖像素就覆盖/清掉法线（盖住的像素属于上层那张图）。
     let ambient = ambient_of(world)?;
-    let mut normals: Option<Vec<[f32; 3]>> =
-        ambient.as_ref().map(|_| vec![[0.0f32; 3]; (width * height) as usize]);
+    let mut normals: Option<Vec<[f32; 3]>> = ambient
+        .as_ref()
+        .filter(|_| assets.has_normal_maps())
+        .map(|_| vec![[0.0f32; 3]; (width * height) as usize]);
 
     // 按实体序绘制（确定性；后画的盖前画的）
     for id in world.query(&["Position", "Sprite"]) {
@@ -507,6 +516,161 @@ fn segment_hits_aabb(
     tmax >= tmin
 }
 
+/// 一个合并后的遮挡大箱（像素空间）。`aabb` 是成员子箱像素 AABB 的逐分量 min/max
+/// （**不是**世界合并框再变换——子箱各自走原变换表达式，min/max 保证大箱边界与
+/// 子箱边界逐位贴齐，外测命中才与逐箱命中逐位等价）。
+pub struct MergedOccluder {
+    /// [x0, y0, x1, y1]，像素空间。
+    pub aabb: [f64; 4],
+    /// 在 [`ShadowBoxes::subs`] 里的起点。
+    pub sub_start: usize,
+    /// 成员子箱数。
+    pub sub_len: usize,
+}
+
+/// 投影遮挡的逐帧加速结构（像素空间）：相邻齐边的遮光体合并成大箱，
+/// 大箱外的像素只测大箱；大箱内的像素回落到原始子箱（"自己所在的箱子不挡自己"
+/// 按原始实体逐个判——合并不改这条规则的语义）。见 [`build_shadow_boxes`]。
+pub struct ShadowBoxes {
+    pub merged: Vec<MergedOccluder>,
+    /// 原始遮光体的像素空间 AABB [x0, y0, x1, y1]，按 merged 分组重排成连续区间。
+    /// 每个箱子的数值与逐箱路径同一条变换表达式——逐位相同。
+    pub subs: Vec<[f64; 4]>,
+}
+
+/// 把遮光体合并成大箱并变换到像素空间（每帧一次；CPU 逐像素路径和 GPU uniform
+/// 打包共用，语义源头在这里）。
+///
+/// 合并规则：两轮贪心 1D 合并——先沿 x（同 y 区间的瓦片行收成横条），再沿 y
+/// （同 x 区间的横条摞成大块）。只在**世界空间边缘 f64 逐位相等**（贴齐无缝）
+/// 且两侧都是规整箱（w/h > 0）时合并：并集 == 大箱时阴影几何一寸不变，
+/// 带容差的"差不多贴齐"会让并集 ≠ 大箱、阴影字节漂移，所以不做。
+/// 排序键全走 `total_cmp` + 原槽位——结果与输入顺序无关，逐帧确定。
+///
+/// 等价性（合并前后输出字节逐位相同，由测试锁死）：箱外像素对大箱的 slab 命中
+/// == 对成员子箱逐个 slab 命中取或——前提是子箱像素边缘逐位共享（贴齐的世界边缘
+/// 经同一条变换得到同一个 f64；瓦片坐标是二进制可精确表示的常见情形）。
+/// 箱内像素不走大箱，直接按原始子箱逐个判，与未合并路径同一条算式。
+pub fn build_shadow_boxes(
+    occluders: &[Occluder],
+    width: u32,
+    height: u32,
+    (cam_x, cam_y, scale): (f64, f64, f64),
+) -> ShadowBoxes {
+    struct Group {
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        members: Vec<usize>,
+    }
+    // 世界空间边缘（只用于合并判定；像素变换始终按原始 Occluder 走原表达式）
+    let mut groups: Vec<Group> = occluders
+        .iter()
+        .enumerate()
+        .map(|(i, o)| Group {
+            x0: o.x - o.w / 2.0,
+            y0: o.y - o.h / 2.0,
+            x1: o.x + o.w / 2.0,
+            y1: o.y + o.h / 2.0,
+            members: vec![i],
+        })
+        .collect();
+    // 贪心 1D 合并：排序后线性扫描，与队尾贴齐就并入（队尾边界随合并延伸，长链一次收完）
+    let merge_pass = |mut gs: Vec<Group>, along_x: bool| -> Vec<Group> {
+        gs.sort_by(|a, b| {
+            let key = |g: &Group| {
+                if along_x {
+                    (g.y0, g.y1, g.x0, g.x1)
+                } else {
+                    (g.x0, g.x1, g.y0, g.y1)
+                }
+            };
+            let (a0, a1, a2, a3) = key(a);
+            let (b0, b1, b2, b3) = key(b);
+            a0.total_cmp(&b0)
+                .then(a1.total_cmp(&b1))
+                .then(a2.total_cmp(&b2))
+                .then(a3.total_cmp(&b3))
+                .then(a.members[0].cmp(&b.members[0]))
+        });
+        let mut out: Vec<Group> = Vec::with_capacity(gs.len());
+        for g in gs {
+            if let Some(last) = out.last_mut() {
+                let flush = if along_x {
+                    last.y0 == g.y0 && last.y1 == g.y1 && last.x1 == g.x0
+                } else {
+                    last.x0 == g.x0 && last.x1 == g.x1 && last.y1 == g.y0
+                };
+                // 退化/反写箱（w/h ≤ 0）不参与合并：各自成组 = 原行为原样保留
+                let well_formed = last.x0 < last.x1
+                    && last.y0 < last.y1
+                    && g.x0 < g.x1
+                    && g.y0 < g.y1;
+                if flush && well_formed {
+                    if along_x {
+                        last.x1 = g.x1;
+                    } else {
+                        last.y1 = g.y1;
+                    }
+                    last.members.extend(g.members);
+                    continue;
+                }
+            }
+            out.push(g);
+        }
+        out
+    };
+    groups = merge_pass(groups, true);
+    groups = merge_pass(groups, false);
+
+    let mut subs = Vec::with_capacity(occluders.len());
+    let mut merged = Vec::with_capacity(groups.len());
+    for g in groups {
+        let sub_start = subs.len();
+        // 单成员组的 aabb 就是子箱本身（min/max 各取一侧，反写箱也原样保留）
+        let mut aabb = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+        for &i in &g.members {
+            let o = &occluders[i];
+            // 与逐箱路径同一条变换表达式（取景含抖动，光跟画面走）——逐位相同
+            let cx = (width as f64) / 2.0 + (o.x - cam_x) * scale;
+            let cy = (height as f64) / 2.0 - (o.y - cam_y) * scale;
+            let (hw, hh) = (o.w * scale / 2.0, o.h * scale / 2.0);
+            let b = [cx - hw, cy - hh, cx + hw, cy + hh];
+            aabb[0] = aabb[0].min(b[0]);
+            aabb[1] = aabb[1].min(b[1]);
+            aabb[2] = aabb[2].max(b[2]);
+            aabb[3] = aabb[3].max(b[3]);
+            subs.push(b);
+        }
+        merged.push(MergedOccluder { aabb, sub_start, sub_len: g.members.len() });
+    }
+    ShadowBoxes { merged, subs }
+}
+
+/// 这盏灯的遮挡候选：圆盘（灯心 (lx,ly)、半径 r 像素）碰得到的大箱下标。
+/// 剔除是**无损**的：像素只在 d² < r² 时才做遮挡测试，线段两端（像素、灯心）
+/// 都在灯盘里，圆盘是凸的 → 线段整条在灯盘里 → 灯盘碰不到的箱子永远不会被命中。
+/// CPU 逐像素路径和 GPU uniform 打包共用（语义源头在这里）。
+pub fn cull_shadow_boxes(boxes: &ShadowBoxes, lx: f64, ly: f64, r: f64) -> Vec<u32> {
+    let r2 = r * r;
+    boxes
+        .merged
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            // slab 法自带区间归一（t1/t2 取 min/max），反写箱命中行为等同归一后的箱——
+            // 最近点也按归一后的边算，剔除判定与命中判定才对得上
+            let (x0, x1) = (m.aabb[0].min(m.aabb[2]), m.aabb[0].max(m.aabb[2]));
+            let (y0, y1) = (m.aabb[1].min(m.aabb[3]), m.aabb[1].max(m.aabb[3]));
+            let dx = lx - lx.clamp(x0, x1);
+            let dy = ly - ly.clamp(y0, y1);
+            dx * dx + dy * dy <= r2
+        })
+        .map(|(i, _)| i as u32)
+        .collect()
+}
+
 /// 光源种类（`Light.kind` 的解析结果）。角度字段全部是**度数**、世界空间、
 /// 0 = +x、逆时针为正——和 `Sprite.rot` 同一个约定（语义源头见 [`rot_of`]）。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -679,17 +843,36 @@ pub fn collect_lights(world: &World) -> Result<Vec<LightSource>, String> {
 /// 老路径，**输出字节逐位不变**。`None` = 整帧没有法线（等价全哨兵，但少一次查表）。
 ///
 /// `occluders`：投影的遮光体（空 = 不投影 = 算术逐位不变）。point/spot 在距离判定
-/// 通过后再做线段遮挡测试（先比距离再扫箱子——半径外的像素一个箱子都不用碰）；
+/// 通过、贡献非零后再做线段遮挡测试；遮光体先合并成大箱（[`build_shadow_boxes`]）、
+/// 再按灯盘逐灯剔除（[`cull_shadow_boxes`]）——两步都不改输出字节（测试锁死）。
 /// directional 不投影（v1，见模块文档）。
 #[allow(clippy::too_many_arguments)]
 fn apply_lighting(
     buf: &mut [u8],
     width: u32,
     height: u32,
-    (cam_x, cam_y, scale): (f64, f64, f64),
+    cam: (f64, f64, f64),
     ambient: [f64; 3],
     lights: &[LightSource],
     occluders: &[Occluder],
+    normals: Option<&[[f32; 3]]>,
+) {
+    let grid = build_shadow_boxes(occluders, width, height, cam);
+    apply_lighting_impl(buf, width, height, cam, ambient, lights, &grid, true, normals);
+}
+
+/// [`apply_lighting`] 的主体，遮挡结构由调用方给（`cull=false` = 不做逐灯剔除，
+/// 全量候选——等价性测试的对照路径，正常渲染恒走 `cull=true`）。
+#[allow(clippy::too_many_arguments)]
+fn apply_lighting_impl(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    (cam_x, cam_y, scale): (f64, f64, f64),
+    ambient: [f64; 3],
+    lights: &[LightSource],
+    grid: &ShadowBoxes,
+    cull: bool,
     normals: Option<&[[f32; 3]]>,
 ) {
     struct PxLight {
@@ -757,145 +940,277 @@ fn apply_lighting(
         }
     }
 
-    // 遮光体世界 AABB → 像素空间 [x0, y0, x1, y1]（同灯参数：取景含抖动，光跟画面走）。
-    // 投影关闭时这里是空列表——下面 blocked 的循环零次执行，老路径算术一字不动。
-    let boxes: Vec<(f64, f64, f64, f64)> = occluders
-        .iter()
-        .map(|o| {
-            let cx = (width as f64) / 2.0 + (o.x - cam_x) * scale;
-            let cy = (height as f64) / 2.0 - (o.y - cam_y) * scale;
-            let (hw, hh) = (o.w * scale / 2.0, o.h * scale / 2.0);
-            (cx - hw, cy - hh, cx + hw, cy + hh)
-        })
-        .collect();
-    // 像素 (fx,fy) 到灯心 (lx,ly) 的线段是否被某个遮光体挡住。
-    // 像素自己所在的箱子跳过（规则：箱子里的像素只被别的箱子遮挡，不自压成黑块）。
-    let blocked = |fx: f64, fy: f64, lx: f64, ly: f64| -> bool {
-        boxes.iter().any(|&(x0, y0, x1, y1)| {
-            let inside = fx >= x0 && fx <= x1 && fy >= y0 && fy <= y1;
-            !inside && segment_hits_aabb((fx, fy), (lx, ly), (x0, y0, x1, y1))
+    // 每盏灯的遮挡候选（merged 大箱下标）：剔除灯盘碰不到的箱子（无损，
+    // 见 cull_shadow_boxes）。投影关闭时 grid 为空——候选全空，老路径算术一字不动。
+    let light_boxes = |l: &PxLight| -> Vec<u32> {
+        if cull {
+            cull_shadow_boxes(grid, l.x, l.y, l.r)
+        } else {
+            (0..grid.merged.len() as u32).collect()
+        }
+    };
+    let point_boxes: Vec<Vec<u32>> = points.iter().map(light_boxes).collect();
+    let spot_boxes: Vec<Vec<u32>> = spots.iter().map(|s| light_boxes(&s.base)).collect();
+    // 像素 (fx,fy) 到灯心 (lx,ly) 的线段是否被某个候选箱挡住。
+    // 大箱外的像素只测大箱（并集 == 大箱，命中逐位等价，见 build_shadow_boxes）；
+    // 大箱内的像素回落到原始子箱——像素自己所在的箱子跳过（规则：箱子里的像素
+    // 只被别的箱子遮挡，不自压成黑块），合并不改这条规则的字节语义。
+    let blocked = |fx: f64, fy: f64, lx: f64, ly: f64, candidates: &[u32]| -> bool {
+        candidates.iter().any(|&k| {
+            let m = &grid.merged[k as usize];
+            let [x0, y0, x1, y1] = m.aabb;
+            if fx >= x0 && fx <= x1 && fy >= y0 && fy <= y1 {
+                grid.subs[m.sub_start..m.sub_start + m.sub_len].iter().any(
+                    |&[bx0, by0, bx1, by1]| {
+                        let inside = fx >= bx0 && fx <= bx1 && fy >= by0 && fy <= by1;
+                        !inside && segment_hits_aabb((fx, fy), (lx, ly), (bx0, by0, bx1, by1))
+                    },
+                )
+            } else {
+                segment_hits_aabb((fx, fy), (lx, ly), (x0, y0, x1, y1))
+            }
         })
     };
 
-    for y in 0..height {
-        let fy = y as f64 + 0.5; // 像素中心——GPU 片元的 @builtin(position) 也是中心坐标
-        for x in 0..width {
-            let fx = x as f64 + 0.5;
-            let i = ((y * width + x) * 4) as usize;
-            // 该像素的法线（哨兵零向量 = 没有）。None / 哨兵都走老路径——字节锁死
-            let n = normals.map(|ns| ns[i / 4]).filter(|n| n[2] != 0.0);
-            let mut lit;
-            if let Some(n) = n {
-                // —— 法线路径：各灯贡献 ×= max(dot(N, L), 0)；L 的构造见模块文档
-                let n = [n[0] as f64, n[1] as f64, n[2] as f64];
-                // 像素指向灯的单位方向 → xy·0.8 + z 0.6；d=0 方向无定义，约定 (0,0,1)
-                let lambert = |dx: f64, dy: f64, d: f64| -> f64 {
-                    let l = if d > 0.0 {
-                        [-dx / d * NORMAL_LIGHT_XY, -dy / d * NORMAL_LIGHT_XY, NORMAL_LIGHT_Z]
-                    } else {
-                        [0.0, 0.0, 1.0]
-                    };
-                    (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]).max(0.0)
-                };
-                lit = ambient; // 平行光不在基底里：逐盏按方向算
+    // —— 逐灯有界扫描。重构前是逐像素扫全部灯（每帧 像素数×灯数 次距离判定），
+    //    重构后点/聚光只扫自己灯盘的外接方框——方框外的像素连距离都不用算。
+    //    字节等价的根据：每个像素收到的 f64 加法**序列**不变——
+    //    初始化（ambient/基底 + 平行光）→ 点光（槽位序）→ 聚光（槽位序）→
+    //    最后统一夹紧乘回；方框外像素在旧代码里走 d²≥r² 的 continue（不加），
+    //    新代码干脆不访问（同样不加）。锁死的光照/投影/法线测试全部盖住这一步。
+
+    // 像素指向灯的单位方向 → xy·0.8 + z 0.6；d=0 方向无定义，约定 (0,0,1)
+    fn lambert(n: [f64; 3], dx: f64, dy: f64, d: f64) -> f64 {
+        let l = if d > 0.0 {
+            [-dx / d * NORMAL_LIGHT_XY, -dy / d * NORMAL_LIGHT_XY, NORMAL_LIGHT_Z]
+        } else {
+            [0.0, 0.0, 1.0]
+        };
+        (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]).max(0.0)
+    }
+    // 该像素的法线（哨兵零向量 = 没有 → None，走老路径——字节锁死）
+    let normal_at = |i: usize| -> Option<[f64; 3]> {
+        normals
+            .map(|ns| ns[i])
+            .filter(|n| n[2] != 0.0)
+            .map(|n| [n[0] as f64, n[1] as f64, n[2] as f64])
+    };
+    // 行级候选过滤：slab 法的 y 区间只依赖 (fy, ly, 箱子 y 边)——整行是常量。
+    // y 区间已空的箱子，这一行的任何像素都不可能命中（x 轴只会让区间更紧），
+    // 用与 segment_hits_aabb **完全相同的算式**预判，过滤逐位无损；子箱的 y 边
+    // 被大箱的 min/max 夹住，大箱区间空 ⇒ 子箱区间更空，箱内回落路径同样无损。
+    let row_pass = |fy: f64, ly: f64, y0: f64, y1: f64| -> bool {
+        let dy = ly - fy;
+        if dy.abs() < 1e-12 {
+            fy >= y0 && fy <= y1
+        } else {
+            let t1 = (y0 - fy) / dy;
+            let t2 = (y1 - fy) / dy;
+            let tmin = 0.0f64.max(t1.min(t2));
+            let tmax = 1.0f64.min(t1.max(t2));
+            tmax >= tmin
+        }
+    };
+    // 行级候选的复用暂存（避免逐行分配）
+    let mut row_cand: Vec<u32> = Vec::new();
+
+    // 灯盘外接方框（裁到视口；±r 外 d²≥r² 恒不过判定，1px 余量盖住浮点边缘）
+    let light_rect = |lx: f64, ly: f64, r: f64| -> (u32, u32, u32, u32) {
+        (
+            ((lx - r - 1.5).floor().max(0.0) as u32).min(width),
+            ((lx + r + 1.5).ceil().max(0.0) as u32).min(width),
+            ((ly - r - 1.5).floor().max(0.0) as u32).min(height),
+            ((ly + r + 1.5).ceil().max(0.0) as u32).min(height),
+        )
+    };
+
+    // —— 灯光累加缓冲只开"灯碰得到"的包围矩形（全部灯盘方框的并集外接框）那么大：
+    //    远离所有灯的像素整帧不分配不访问，合成时直接走未触碰路径。
+    //    touched = 该像素收过点/聚光贡献（累加值已从起点分化）。
+    let (mut ux0, mut ux1, mut uy0, mut uy1) = (width, 0u32, height, 0u32);
+    {
+        let mut add_rect = |(x0, x1, y0, y1): (u32, u32, u32, u32)| {
+            if x0 < x1 && y0 < y1 {
+                ux0 = ux0.min(x0);
+                ux1 = ux1.max(x1);
+                uy0 = uy0.min(y0);
+                uy1 = uy1.max(y1);
+            }
+        };
+        for l in &points {
+            add_rect(light_rect(l.x, l.y, l.r));
+        }
+        for l in &spots {
+            add_rect(light_rect(l.base.x, l.base.y, l.base.r));
+        }
+    }
+    let uw = ux1.saturating_sub(ux0);
+    let un = (uw as usize) * (uy1.saturating_sub(uy0)) as usize;
+    let mut lit_buf: Vec<[f64; 3]> = vec![[0.0; 3]; un];
+    let mut touched: Vec<bool> = vec![false; un];
+    // 帧像素 (x,y) → 累加缓冲下标（只在某盏灯的方框内调用，必在并集框内）
+    let local = |x: u32, y: u32| ((y - uy0) * uw + (x - ux0)) as usize;
+
+    // 像素的光照累加**起点**（第一次收到灯光贡献时才算；没收过的合成时现算同一条
+    // 式子）：法线像素 = ambient + 平行光按方向逐盏算（L 的构造见模块文档）；
+    // 哨兵像素 = 基底（平行光已折进去）
+    let init_lit = |i: usize| -> [f64; 3] {
+        match normal_at(i) {
+            Some(n) => {
+                let mut acc = ambient;
                 for dl in &dirs {
                     let f = (n[0] * dl.l[0] + n[1] * dl.l[1] + n[2] * dl.l[2]).max(0.0);
-                    lit[0] += dl.rgb[0] * f;
-                    lit[1] += dl.rgb[1] * f;
-                    lit[2] += dl.rgb[2] * f;
+                    acc[0] += dl.rgb[0] * f;
+                    acc[1] += dl.rgb[1] * f;
+                    acc[2] += dl.rgb[2] * f;
                 }
-                for l in &points {
-                    let dx = fx - l.x;
-                    let dy = fy - l.y;
-                    let d2 = dx * dx + dy * dy;
-                    if d2 >= l.r2 {
-                        continue;
-                    }
-                    // 投影：被遮光体挡住 = 这盏灯对该像素零贡献（硬影）
-                    if !boxes.is_empty() && blocked(fx, fy, l.x, l.y) {
-                        continue;
-                    }
-                    let d = d2.sqrt();
-                    let f = 1.0 - d / l.r;
-                    let f = f * f * lambert(dx, dy, d);
-                    lit[0] += l.rgb[0] * f;
-                    lit[1] += l.rgb[1] * f;
-                    lit[2] += l.rgb[2] * f;
+                acc
+            }
+            None => base,
+        }
+    };
+
+    // 点光 pass（槽位序——每像素的累加顺序与逐像素全扫描一致）
+    for (l, lb) in points.iter().zip(&point_boxes) {
+        let (x0, x1, y0, y1) = light_rect(l.x, l.y, l.r);
+        for y in y0..y1 {
+            let fy = y as f64 + 0.5; // 像素中心——GPU 片元的 @builtin(position) 也是中心坐标
+            row_cand.clear();
+            row_cand.extend(lb.iter().copied().filter(|&k| {
+                let m = &grid.merged[k as usize];
+                row_pass(fy, l.y, m.aabb[1], m.aabb[3])
+            }));
+            for x in x0..x1 {
+                let fx = x as f64 + 0.5;
+                let dx = fx - l.x;
+                let dy = fy - l.y;
+                let d2 = dx * dx + dy * dy;
+                if d2 >= l.r2 {
+                    continue;
                 }
-                for l in &spots {
-                    let dx = fx - l.base.x;
-                    let dy = fy - l.base.y;
-                    let d2 = dx * dx + dy * dy;
-                    if d2 >= l.base.r2 {
-                        continue;
+                let i = (y * width + x) as usize;
+                let d = d2.sqrt();
+                let f = 1.0 - d / l.r;
+                let f = match normal_at(i) {
+                    // 法线像素：贡献 ×= max(dot(N, L), 0)
+                    Some(n) => f * f * lambert(n, dx, dy, d),
+                    // 老路径：这条算式不许动（字节锁死）
+                    None => f * f,
+                };
+                // 贡献为零（背光面 / d 经舍入顶到 r）加不加都一样（+0.0 逐位
+                // 无操作）——先判零再做遮挡测试，零贡献像素一个箱子都不用碰
+                if f == 0.0 {
+                    continue;
+                }
+                // 投影：被遮光体挡住 = 这盏灯对该像素零贡献（硬影）；
+                // 候选全空时零成本短路——投影关闭的老路径字节锁死不受影响
+                if !row_cand.is_empty() && blocked(fx, fy, l.x, l.y, &row_cand) {
+                    continue;
+                }
+                let li = local(x, y);
+                if !touched[li] {
+                    lit_buf[li] = init_lit(i);
+                    touched[li] = true;
+                }
+                let lit = &mut lit_buf[li];
+                lit[0] += l.rgb[0] * f;
+                lit[1] += l.rgb[1] * f;
+                lit[2] += l.rgb[2] * f;
+            }
+        }
+    }
+
+    // 聚光 pass（在点光之后——每像素仍是先点光后聚光，槽位序）
+    for (l, lb) in spots.iter().zip(&spot_boxes) {
+        let (x0, x1, y0, y1) = light_rect(l.base.x, l.base.y, l.base.r);
+        for y in y0..y1 {
+            let fy = y as f64 + 0.5;
+            row_cand.clear();
+            row_cand.extend(lb.iter().copied().filter(|&k| {
+                let m = &grid.merged[k as usize];
+                row_pass(fy, l.base.y, m.aabb[1], m.aabb[3])
+            }));
+            for x in x0..x1 {
+                let fx = x as f64 + 0.5;
+                let dx = fx - l.base.x;
+                let dy = fy - l.base.y;
+                let d2 = dx * dx + dy * dy;
+                if d2 >= l.base.r2 {
+                    continue;
+                }
+                let i = (y * width + x) as usize;
+                let d = d2.sqrt();
+                let f = 1.0 - d / l.base.r;
+                // 角度衰减（公式见模块文档，GPU 侧逐句镜像）：
+                //   Δθ = acos(像素方向 · 朝向)，t = clamp(1 - Δθ/half, 0, 1)，贡献 ×= t²
+                // d=0（像素正好在灯心）夹角无定义，约定取锥心（t=1）
+                let cosd = if d > 0.0 {
+                    ((dx * l.dir[0] + dy * l.dir[1]) / d).clamp(-1.0, 1.0)
+                } else {
+                    1.0
+                };
+                let t = (1.0 - cosd.acos() / l.half).clamp(0.0, 1.0);
+                let f = match normal_at(i) {
+                    Some(n) => f * f * t * t * lambert(n, dx, dy, d),
+                    None => f * f * t * t,
+                };
+                // 锥外/背光面贡献为零：跳过遮挡测试（+0.0 逐位无操作）——
+                // 聚光锥只盖灯盘的一角，锥外像素一个箱子都不用碰
+                if f == 0.0 {
+                    continue;
+                }
+                // 投影：聚光灯同点光源一样被遮（锥角衰减不豁免遮挡）
+                if !row_cand.is_empty() && blocked(fx, fy, l.base.x, l.base.y, &row_cand) {
+                    continue;
+                }
+                let li = local(x, y);
+                if !touched[li] {
+                    lit_buf[li] = init_lit(i);
+                    touched[li] = true;
+                }
+                let lit = &mut lit_buf[li];
+                lit[0] += l.base.rgb[0] * f;
+                lit[1] += l.base.rgb[1] * f;
+                lit[2] += l.base.rgb[2] * f;
+            }
+        }
+    }
+
+    // 合成 pass：夹紧、乘回 sRGB 字节（与重构前同一条算式，alpha 不动）。
+    // 没收过灯光贡献的哨兵像素（累加值恒 = 基底）走 256 项查表——表项用同一条
+    // 表达式逐档预算，输出字节与逐像素现算逐位相同；没收过贡献的法线像素现算
+    // 起点（与 init_lit 同一条式子）再乘回。
+    let mut lut = [[0u8; 256]; 3];
+    for (c, table) in lut.iter_mut().enumerate() {
+        let m = base[c].min(LIGHT_CLAMP);
+        for (v, e) in table.iter_mut().enumerate() {
+            *e = (v as f64 * m).min(255.0) as u8;
+        }
+    }
+    let mul = |buf: &mut [u8], i: usize, lit: [f64; 3]| {
+        for c in 0..3 {
+            buf[i * 4 + c] = (buf[i * 4 + c] as f64 * lit[c].min(LIGHT_CLAMP)).min(255.0) as u8;
+        }
+    };
+    for y in 0..height {
+        let in_uy = y >= uy0 && y < uy1;
+        for x in 0..width {
+            let i = (y * width + x) as usize;
+            if in_uy && x >= ux0 && x < ux1 && touched[local(x, y)] {
+                mul(buf, i, lit_buf[local(x, y)]);
+            } else if normals.is_some() {
+                match normal_at(i) {
+                    Some(_) => mul(buf, i, init_lit(i)),
+                    None => {
+                        for (c, table) in lut.iter().enumerate() {
+                            buf[i * 4 + c] = table[buf[i * 4 + c] as usize];
+                        }
                     }
-                    // 投影：聚光灯同点光源一样被遮（锥角衰减不豁免遮挡）
-                    if !boxes.is_empty() && blocked(fx, fy, l.base.x, l.base.y) {
-                        continue;
-                    }
-                    let d = d2.sqrt();
-                    let f = 1.0 - d / l.base.r;
-                    let cosd = if d > 0.0 {
-                        ((dx * l.dir[0] + dy * l.dir[1]) / d).clamp(-1.0, 1.0)
-                    } else {
-                        1.0
-                    };
-                    let t = (1.0 - cosd.acos() / l.half).clamp(0.0, 1.0);
-                    let f = f * f * t * t * lambert(dx, dy, d);
-                    lit[0] += l.base.rgb[0] * f;
-                    lit[1] += l.base.rgb[1] * f;
-                    lit[2] += l.base.rgb[2] * f;
                 }
             } else {
-                // —— 老路径：这段算术不许动——没有法线的像素输出字节必须与法线功能
-                //    出现之前逐位相同（向后兼容由测试锁死）
-                lit = base;
-                for l in &points {
-                    let dx = fx - l.x;
-                    let dy = fy - l.y;
-                    let d2 = dx * dx + dy * dy;
-                    if d2 >= l.r2 {
-                        continue;
-                    }
-                    // 投影：空列表时这个分支零成本短路——老路径字节锁死不受影响
-                    if !boxes.is_empty() && blocked(fx, fy, l.x, l.y) {
-                        continue;
-                    }
-                    let f = 1.0 - d2.sqrt() / l.r;
-                    let f = f * f;
-                    lit[0] += l.rgb[0] * f;
-                    lit[1] += l.rgb[1] * f;
-                    lit[2] += l.rgb[2] * f;
+                for (c, table) in lut.iter().enumerate() {
+                    buf[i * 4 + c] = table[buf[i * 4 + c] as usize];
                 }
-                for l in &spots {
-                    let dx = fx - l.base.x;
-                    let dy = fy - l.base.y;
-                    let d2 = dx * dx + dy * dy;
-                    if d2 >= l.base.r2 {
-                        continue;
-                    }
-                    if !boxes.is_empty() && blocked(fx, fy, l.base.x, l.base.y) {
-                        continue;
-                    }
-                    let d = d2.sqrt();
-                    let f = 1.0 - d / l.base.r;
-                    // 角度衰减（公式见模块文档，GPU 侧逐句镜像）：
-                    //   Δθ = acos(像素方向 · 朝向)，t = clamp(1 - Δθ/half, 0, 1)，贡献 ×= t²
-                    // d=0（像素正好在灯心）夹角无定义，约定取锥心（t=1）
-                    let cosd = if d > 0.0 {
-                        ((dx * l.dir[0] + dy * l.dir[1]) / d).clamp(-1.0, 1.0)
-                    } else {
-                        1.0
-                    };
-                    let t = (1.0 - cosd.acos() / l.half).clamp(0.0, 1.0);
-                    let f = f * f * t * t;
-                    lit[0] += l.base.rgb[0] * f;
-                    lit[1] += l.base.rgb[1] * f;
-                    lit[2] += l.base.rgb[2] * f;
-                }
-            }
-            for c in 0..3 {
-                buf[i + c] = (buf[i + c] as f64 * lit[c].min(LIGHT_CLAMP)).min(255.0) as u8;
             }
         }
     }
@@ -3134,6 +3449,170 @@ mod tests {
         let d = describe_world(&off, 64, 64).unwrap();
         assert!(d.get("shadows").is_none() && d.get("occluders").is_none());
         assert!(!d["text"].as_str().unwrap().contains("投影"));
+    }
+
+    /// glow 量级的合成场景：1280x720、12 盏点光、100 个瓦片遮光体（两条 40 瓦地板
+    /// 加 20 根散立柱）。基准测试和等价性测试共用——盖住合并（整行地板）、
+    /// 不可合并（错位立柱）、灯心落在地板带内（箱内像素路径）这几类形态。
+    fn world_glow_like_scene() -> World {
+        let mut w = World::new();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#101018", "shadows": true})).unwrap();
+        // 两条 40 瓦的地板（整行可合并成一根长条）
+        for row in 0..2 {
+            let y = if row == 0 { -2.0 } else { 6.0 };
+            for i in 0..40 {
+                add_wall(&mut w, -19.5 + i as f64, y, 1.0, 1.0);
+            }
+        }
+        // 20 根散立柱（间隔 3，留缝不可合并）
+        for i in 0..20 {
+            add_wall(&mut w, -28.5 + i as f64 * 3.0, 2.0, 1.0, 2.0);
+        }
+        // 12 盏点光：一半飘在地板上方，一半灯心埋进地板带（箱内像素也要走遮挡）
+        for i in 0..12 {
+            let lamp = w.spawn();
+            let x = -22.0 + i as f64 * 4.0;
+            let y = if i % 2 == 0 { 1.0 } else { -2.0 };
+            w.set_component(lamp, "Position", json!({"x": x, "y": y})).unwrap();
+            w.set_component(lamp, "Light", json!({"radius": 10.0, "intensity": 1.2})).unwrap();
+        }
+        w
+    }
+
+    /// 基准（默认忽略，手动跑：`cargo test --release -p vitric-render -- --ignored shadow_bench --nocapture`）。
+    /// 1280x720 · 12 灯 · 100 遮光体——优化前这一帧是 像素×灯×箱子 的全乘积。
+    #[test]
+    #[ignore]
+    fn shadow_bench_glow_like_scene() {
+        let w = world_glow_like_scene();
+        // 预热一次（占位分配、页错误不进计时）
+        render_world(&w, 1280, 720, &Assets::empty(), 0).unwrap();
+        let n = 5;
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            render_world(&w, 1280, 720, &Assets::empty(), 0).unwrap();
+        }
+        let per_frame = t0.elapsed().as_secs_f64() * 1000.0 / n as f64;
+        println!("shadow_bench: 1280x720 · 12 灯 · 100 遮光体 = {per_frame:.1} ms/帧");
+    }
+
+    /// 等价性基准：每个遮光体各自成组（不合并）——外测路径就是原始逐箱算式。
+    fn naive_grid(occluders: &[Occluder], width: u32, height: u32, cam: (f64, f64, f64)) -> ShadowBoxes {
+        let mut grid = ShadowBoxes { merged: Vec::new(), subs: Vec::new() };
+        for i in 0..occluders.len() {
+            let g = build_shadow_boxes(&occluders[i..=i], width, height, cam);
+            let off = grid.subs.len();
+            grid.subs.extend(g.subs);
+            for mut m in g.merged {
+                m.sub_start += off;
+                grid.merged.push(m);
+            }
+        }
+        grid
+    }
+
+    /// 等价性测试的加强版场景：在 glow 量级场景上再加聚光灯、重叠墙、退化墙（w=0）
+    /// 和非默认（但二进制可精确表示的）相机——盖住合并判定的全部分支。
+    fn world_equivalence_scene() -> World {
+        let mut w = world_glow_like_scene();
+        let beam = w.spawn();
+        w.set_component(beam, "Position", json!({"x": -4.0, "y": 4.0})).unwrap();
+        w.set_component(
+            beam,
+            "Light",
+            json!({"radius": 12.0, "kind": "spot", "angle": 80.0, "dir": 270.0}),
+        )
+        .unwrap();
+        add_wall(&mut w, 0.25, -2.0, 1.0, 1.0); // 与地板行重叠但不贴齐：不许合并
+        add_wall(&mut w, 5.0, 0.5, 0.0, 2.0); // 退化墙（w=0）：不参与合并，行为原样
+        let cam = w.spawn();
+        w.set_component(cam, "Camera", json!({"x": 0.5, "y": -0.25, "scale": 4.0})).unwrap();
+        w
+    }
+
+    #[test]
+    fn merged_and_culled_shadows_are_byte_identical_to_naive() {
+        // 优化路径（render_world：合并 + 逐灯剔除）与对照路径（逐箱全量、不剔除）
+        // 输出逐字节相同——合并/剔除都不许改一个字节。
+        let (width, height) = (320u32, 180u32);
+        let mut w = world_equivalence_scene();
+        let optimized = render_world(&w, width, height, &Assets::empty(), 0).unwrap();
+
+        let lights = collect_lights(&w).unwrap();
+        let occs = collect_occluders(&w).unwrap();
+        let cam = camera_of(&w, 0, height).unwrap();
+        let (ambient, _) = ambient_of(&w).unwrap().unwrap();
+        // 不点亮的底版：拿掉 Ambient = 光照整体关闭，其余绘制完全相同
+        let amb = w.query(&["Ambient"])[0];
+        w.remove_component(amb, "Ambient").unwrap();
+        let unlit = render_world(&w, width, height, &Assets::empty(), 0).unwrap();
+        assert_ne!(optimized, unlit, "场景必须真的被光照改写过，否则测试空转");
+
+        // 对照 1：不合并、不剔除（原始逐箱逐灯全量算式）
+        let mut naive = unlit.clone();
+        let grid = naive_grid(&occs, width, height, cam);
+        apply_lighting_impl(&mut naive, width, height, cam, ambient, &lights, &grid, false, None);
+        assert_eq!(optimized, naive, "合并+剔除改了输出字节");
+
+        // 对照 2：合并、不剔除——单独锁死"逐灯剔除无损"
+        let mut merged_only = unlit;
+        let grid = build_shadow_boxes(&occs, width, height, cam);
+        apply_lighting_impl(
+            &mut merged_only,
+            width,
+            height,
+            cam,
+            ambient,
+            &lights,
+            &grid,
+            false,
+            None,
+        );
+        assert_eq!(optimized, merged_only, "逐灯剔除改了输出字节");
+    }
+
+    #[test]
+    fn flush_tiles_merge_into_slabs_and_gaps_do_not() {
+        let mut w = World::new();
+        // 10 块 1x1 瓦片贴齐成行（中心 x = 0..9）→ 合并成一根横条
+        for i in 0..10 {
+            add_wall(&mut w, i as f64, 0.0, 1.0, 1.0);
+        }
+        add_wall(&mut w, 12.0, 0.0, 1.0, 1.0); // 留缝：不并
+        add_wall(&mut w, 0.0, 3.0, 1.0, 1.0); // 同列但 y 不贴齐：不并
+        let occs = collect_occluders(&w).unwrap();
+        let g = build_shadow_boxes(&occs, 64, 64, (0.0, 0.0, 8.0));
+        assert_eq!(g.merged.len(), 3, "一根横条 + 两个孤箱");
+        assert_eq!(g.subs.len(), 12, "子箱总数 = 原始遮光体数");
+        let slab = g.merged.iter().find(|m| m.sub_len == 10).expect("瓦片行收成一组");
+        // 行世界 x ∈ [-0.5, 9.5]、y ∈ [-0.5, 0.5] → 像素 [28, 28, 108, 36]（scale 8）
+        assert_eq!(slab.aabb, [28.0, 28.0, 108.0, 36.0]);
+
+        // 2x2 瓦片阵：先沿 x 收成两条、再沿 y 摞成一块（4 个子箱）
+        let mut w = World::new();
+        for (x, y) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+            add_wall(&mut w, x, y, 1.0, 1.0);
+        }
+        let occs = collect_occluders(&w).unwrap();
+        let g = build_shadow_boxes(&occs, 64, 64, (0.0, 0.0, 8.0));
+        assert_eq!((g.merged.len(), g.merged[0].sub_len), (1, 4), "两轮 1D 合并 = 一整块");
+    }
+
+    #[test]
+    fn light_disc_culls_only_unreachable_boxes() {
+        let mut w = World::new();
+        add_wall(&mut w, 1.0, 0.0, 1.0, 1.0); // 灯盘内：保留
+        add_wall(&mut w, 20.0, 0.0, 1.0, 1.0); // 远在灯盘外：剔除
+        let occs = collect_occluders(&w).unwrap();
+        let g = build_shadow_boxes(&occs, 64, 64, (0.0, 0.0, 8.0));
+        // 灯在像素 (32,32)，半径 6*8=48px。近箱中心 (40,32)、远箱中心 (192,32)
+        let kept = cull_shadow_boxes(&g, 32.0, 32.0, 48.0);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(g.merged[kept[0] as usize].aabb, [36.0, 28.0, 44.0, 36.0]);
+        // 灯心埋在箱子里：最近距离 0，必然保留
+        let kept = cull_shadow_boxes(&g, 40.0, 32.0, 1.0);
+        assert_eq!(kept.len(), 1);
     }
 
     #[test]
