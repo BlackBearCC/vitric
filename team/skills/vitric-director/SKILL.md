@@ -20,3 +20,7 @@ description: 导演角色:多 agent 班子开发 Vitric 游戏的总编排——
 场景流程(load-scene/Persist)/存档(save-game/--load)/光照(点聚平行/法线/阴影/泛光)/
 动画/音频(音效/BGM)/文字(点阵|TTF)/物理(Body/Solid)/粒子/屏震/镜头/LLM(llm-ask)/
 gate/team/turf/assets 规整。详见 docs/agent-guide.md。
+
+## 发行期待清单(强制)
+交付(gate+bundle)前过 team/templates/release-checklist.md,逐项写"有/砍(理由)"进 GDD 附录;
+没作答=交付不完整。玩家不提的需求由这张表替他们提,不许等需求方点名。
