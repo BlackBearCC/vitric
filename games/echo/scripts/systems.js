@@ -14,6 +14,8 @@
 //   "lamp"     灯：Card.name="point"|"spot"（棱镜化） Card.slot=聚光朝向（度）
 //   "blocker"  遮板（另带 Solid+Collider，挡光挡路由引擎承担）
 //   "ctl"      指令寄存器（每个战斗场景一只，详见下面寄存器表）
+//   "fx"       反馈计时寄存器（每个战斗场景一只）：Cell.cx=油不足红闪倒计时(tick)
+//              Cell.cy=SAVED 存档提示倒计时(tick)；脑每 tick 递减，到 0 发恢复事件
 //   "node"     节点标签：Shade.n = 本战斗的节点号（1/2/3）
 //   "tutor"    教学寄存器（仅 battle-1 有）：Card.slot=已达教学步(0..5,只增不减,由规则推进)
 //              Cell.cx=已显示步(脑每 tick 对账,不等就 emit sync-hint 刷 HUD,场景初值 -1=强制首发)
@@ -23,9 +25,11 @@
 // 【ctl 寄存器表】（战斗场景必须包含名为 ctl 的实体）
 //   Shade.hp   = 阶段：0 玩家回合 / 1 影怪回合 / 2 胜 / 3 负
 //   Shade.n    = 回合数（从 1 起）
+//   Shade.stunned = 暂停标志（true = 暂停：脑整体冻结，只听指令 3 解除）
 //   Card.name  = 手牌寄存器：4 槽逗号串，如 "lamp,flash,," ；"" = 尚未发牌（开战哨兵）
 //   Card.slot  = 当前选中的手牌槽（0=未选，1..4）
-//   Cell.cx    = 指令：0 空闲 / 1 棋盘点击 / 2 结束回合 / 11..14 切换选中第 N 张牌
+//   Cell.cx    = 指令：0 空闲 / 1 棋盘点击 / 2 结束回合 / 3 暂停开关(ESC/R)
+//                / 11..14 切换选中第 N 张牌
 //                / 20 右键空地(恢复默认提示) / 21..24 右键第 N 张牌(HUD 显示该牌说明)
 //   Cell.cy    = 阶段内进度：影怪回合=下一个行动的影怪序、胜负阶段=退场倒计时
 //   Position   = 最近一次点击的世界坐标（棋盘点击用）
@@ -80,6 +84,17 @@ const FLASH_R = 3, FLASH_INT = 2.0;     // 闪光按白光 luma=1
 const ACT_PERIOD = 24;   // 影怪行动间隔（tick，24 = 0.4s 一只）
 const EXIT_DELAY = 90;   // 胜/负横幅停留（tick）后切场景
 const SHAKE_BLOCK = 2;   // 遮板尺寸（2×2，尺寸表为准；牌面文案的 1×2 以尺寸表覆盖）
+const OIL_FLASH_TICKS = 18; // 无效出牌时 OIL 文字红闪时长（0.3s）
+const TOAST_TICKS = 90;     // SAVED 存档提示停留时长（1.5s）
+
+// ---- 暂停文案（发行清单：暂停/继续/退出到菜单；引擎无规则可达的退进程口，诚实提示关窗） ----
+// ESC=暂停开关 R=继续 M=回主菜单（仅暂停时生效）。M 不丢全局进度：progress 挂
+// Persist 跟去菜单（menu 场景不再预置 progress，开局由 start 规则 spawn、通关由
+// victory-back-to-menu 字段重置）——丢的只是本场战斗；再点 START 从地图续打本节点。
+const PAUSE_BANNER = "PAUSED - [R]ESUME [M]ENU";
+const PAUSE_HINT = "CLOSE WINDOW TO QUIT";
+const OIL_COLOR = "#ffe9a8";      // hud-oil 常态色（场景初值同款）
+const OIL_FLASH_COLOR = "#ff6055"; // 红闪色
 
 // ---- 纯函数工具 ----
 function cellCenter(cx, cy) { return [ORIGIN_X + cx * CELL, ORIGIN_Y + cy * CELL]; }
@@ -152,7 +167,7 @@ vitric.system(
   { query: ["Shade", "Cell", "Position", "Card"], writes: ["Shade", "Cell", "Position", "Card"] },
   (entities, ctx) => {
     // 1) 按 kind 分拣棋子
-    let ctl = null, hero = null, tag = null, tut = null;
+    let ctl = null, hero = null, tag = null, tut = null, fx = null;
     const shades = [], lamps = [], blockers = [];
     for (const e of entities) {
       const k = e.Shade.kind;
@@ -160,6 +175,7 @@ vitric.system(
       else if (k === "hero") hero = e;
       else if (k === "node") tag = e;
       else if (k === "tutor") tut = e;
+      else if (k === "fx") fx = e;
       else if (k === "lamp") lamps.push(e);
       else if (k === "blocker") blockers.push(e);
       else if (k === "stalker" || k === "lurker" || k === "devourer") shades.push(e);
@@ -241,7 +257,8 @@ vitric.system(
       ctl.Shade.hp = 2;
       ctl.Cell.cy = 0; // 退场倒计时
       ctx.emit("battle-won", { node });
-      ctx.emit("node-cleared", { node });
+      ctx.emit("node-cleared", { node }); // → 规则 autosave-on-clear 落盘
+      if (fx) { fx.Cell.cy = TOAST_TICKS; ctx.emit("sync-toast", { text: "SAVED" }); } // 存档明示
       syncBattle(); syncHud();
     };
     const lose = () => {
@@ -249,6 +266,11 @@ vitric.system(
       ctl.Cell.cy = 0;
       ctx.emit("battle-lost", {});
       syncBattle(); syncHud();
+    };
+    // 无效操作统一出口：reject 音效（规则 card-rejected-sound）+ OIL 文字红闪（计时在 fx 寄存器）
+    const reject = (name, reason) => {
+      ctx.emit("card-rejected", { name, reason });
+      if (fx) { fx.Cell.cx = OIL_FLASH_TICKS; ctx.emit("sync-oil-flash", { color: OIL_FLASH_COLOR }); }
     };
     const hitHero = (dmg) => {
       hero.Shade.hp -= dmg;
@@ -274,6 +296,30 @@ vitric.system(
       }
       return best;
     };
+
+    // ---- 1.5) 暂停（指令 3，任意阶段可用）：toggle 后整个脑冻结/解冻 ----
+    // 暂停标志在 ctl.Shade.stunned（组件里，快照/回放安全）。冻结 = 影怪行动、
+    // 回合处理、胜负倒计时、反馈计时全停；恢复时横幅/提示从阶段真值重算（幂等）。
+    if (ctl.Cell.cx === 3) {
+      ctl.Cell.cx = 0;
+      ctl.Shade.stunned = !ctl.Shade.stunned;
+      ctx.emit("sync-pause", ctl.Shade.stunned
+        ? { banner: PAUSE_BANNER, hint: PAUSE_HINT }
+        : { banner: banner(), hint: tut ? (TUT_TEXT[tut.Card.slot] || HINT_DEFAULT) : HINT_DEFAULT });
+    }
+    if (ctl.Shade.stunned) return; // 暂停冻结
+
+    // ---- 1.6) 反馈计时寄存器递减（红闪/SAVED 提示，到 0 发恢复事件） ----
+    if (fx) {
+      if (fx.Cell.cx > 0) {
+        fx.Cell.cx -= 1;
+        if (fx.Cell.cx === 0) ctx.emit("sync-oil-flash", { color: OIL_COLOR });
+      }
+      if (fx.Cell.cy > 0) {
+        fx.Cell.cy -= 1;
+        if (fx.Cell.cy === 0) ctx.emit("sync-toast", { text: "" });
+      }
+    }
 
     // ---- 2) 开战哨兵：手牌寄存器为空 = 第一次进场，发起手 4 张 ----
     if (ctl.Card.name === "") {
@@ -305,8 +351,9 @@ vitric.system(
       if (cmd === 0) return;
       ctl.Cell.cx = 0;
 
-      if (cmd >= 11 && cmd <= 14) { // 点牌：切换选中
+      if (cmd >= 11 && cmd <= 14) { // 点牌：切换选中；点空槽 = 无效操作给反馈
         const slot = cmd - 10;
+        if (!parseHand()[slot - 1]) { reject("", "empty"); return; }
         ctl.Card.slot = ctl.Card.slot === slot ? 0 : slot;
         syncHand();
         return;
@@ -348,7 +395,7 @@ vitric.system(
         const name = hand[sel - 1];
         if (!name) { ctl.Card.slot = 0; syncHand(); return; } // 选中了空槽：清选中
         const card = CARDS[name];
-        if (card.cost > hero.Shade.n) { ctx.emit("card-rejected", { name, reason: "oil" }); return; }
+        if (card.cost > hero.Shade.n) { reject(name, "oil"); return; }
 
         const [cx, cy] = cell;
         const [px, py] = cellCenter(cx, cy);
@@ -446,7 +493,7 @@ vitric.system(
           return false;
         })();
 
-        if (!ok) { ctx.emit("card-rejected", { name, reason: "target" }); return; }
+        if (!ok) { reject(name, "target"); return; }
         hero.Shade.n -= card.cost;
         hand[sel - 1] = "";
         ctl.Card.slot = 0;

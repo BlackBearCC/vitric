@@ -14,6 +14,11 @@
           "@ctl.Shade.hp",
           "==",
           0
+        ],
+        [
+          "@ctl.Shade.stunned",
+          "==",
+          false
         ]
       ],
       "do": [
@@ -48,6 +53,11 @@
           "@ctl.Shade.hp",
           "==",
           0
+        ],
+        [
+          "@ctl.Shade.stunned",
+          "==",
+          false
         ]
       ],
       "do": [
@@ -81,6 +91,11 @@
           "@ctl.Shade.hp",
           "==",
           0
+        ],
+        [
+          "@ctl.Shade.stunned",
+          "==",
+          false
         ]
       ],
       "do": [
@@ -114,6 +129,11 @@
           "@ctl.Shade.hp",
           "==",
           0
+        ],
+        [
+          "@ctl.Shade.stunned",
+          "==",
+          false
         ]
       ],
       "do": [
@@ -147,6 +167,11 @@
           "@ctl.Shade.hp",
           "==",
           0
+        ],
+        [
+          "@ctl.Shade.stunned",
+          "==",
+          false
         ]
       ],
       "do": [
@@ -181,6 +206,11 @@
           "@ctl.Shade.hp",
           "==",
           0
+        ],
+        [
+          "@ctl.Shade.stunned",
+          "==",
+          false
         ]
       ],
       "do": [
@@ -583,7 +613,16 @@
           }
         },
         {
-          "despawn": "@progress"
+          "set": "@progress.Run.node",
+          "to": 0
+        },
+        {
+          "set": "@progress.Run.phase",
+          "to": "player"
+        },
+        {
+          "set": "@progress.Run.turn",
+          "to": 1
         },
         {
           "emit": "load-scene",
@@ -1052,7 +1091,8 @@
       "on": { "event": "mouse-alt" },
       "if": [
         ["@ctl", "exists"],
-        ["@ctl.Shade.hp", "==", 0]
+        ["@ctl.Shade.hp", "==", 0],
+        ["@ctl.Shade.stunned", "==", false]
       ],
       "do": [
         { "set": "@ctl.Cell.cx", "to": 20 }
@@ -1063,7 +1103,8 @@
       "on": { "event": "mouse-alt", "filter": { "entity": "slot-1" } },
       "if": [
         ["@ctl", "exists"],
-        ["@ctl.Shade.hp", "==", 0]
+        ["@ctl.Shade.hp", "==", 0],
+        ["@ctl.Shade.stunned", "==", false]
       ],
       "do": [
         { "set": "@ctl.Cell.cx", "to": 21 }
@@ -1074,7 +1115,8 @@
       "on": { "event": "mouse-alt", "filter": { "entity": "slot-2" } },
       "if": [
         ["@ctl", "exists"],
-        ["@ctl.Shade.hp", "==", 0]
+        ["@ctl.Shade.hp", "==", 0],
+        ["@ctl.Shade.stunned", "==", false]
       ],
       "do": [
         { "set": "@ctl.Cell.cx", "to": 22 }
@@ -1085,7 +1127,8 @@
       "on": { "event": "mouse-alt", "filter": { "entity": "slot-3" } },
       "if": [
         ["@ctl", "exists"],
-        ["@ctl.Shade.hp", "==", 0]
+        ["@ctl.Shade.hp", "==", 0],
+        ["@ctl.Shade.stunned", "==", false]
       ],
       "do": [
         { "set": "@ctl.Cell.cx", "to": 23 }
@@ -1096,10 +1139,87 @@
       "on": { "event": "mouse-alt", "filter": { "entity": "slot-4" } },
       "if": [
         ["@ctl", "exists"],
-        ["@ctl.Shade.hp", "==", 0]
+        ["@ctl.Shade.hp", "==", 0],
+        ["@ctl.Shade.stunned", "==", false]
       ],
       "do": [
         { "set": "@ctl.Cell.cx", "to": 24 }
+      ]
+    },
+    {
+      "id": "spawn-progress",
+      "on": { "event": "start" },
+      "do": [
+        {
+          "spawn": {
+            "name": "progress",
+            "components": {
+              "Run": { "node": 0, "phase": "player", "turn": 1 },
+              "Persist": {}
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "pause-key",
+      "on": { "event": "input", "filter": { "action": "escape", "phase": "pressed" } },
+      "if": [["@ctl", "exists"]],
+      "do": [
+        { "set": "@ctl.Cell.cx", "to": 3 },
+        { "emit": "play-sound", "data": { "sound": "click.wav", "volume": 0.4 } }
+      ]
+    },
+    {
+      "id": "pause-resume-key",
+      "on": { "event": "input", "filter": { "action": "r", "phase": "pressed" } },
+      "if": [
+        ["@ctl", "exists"],
+        ["@ctl.Shade.stunned", "==", true]
+      ],
+      "do": [
+        { "set": "@ctl.Cell.cx", "to": 3 },
+        { "emit": "play-sound", "data": { "sound": "click.wav", "volume": 0.4 } }
+      ]
+    },
+    {
+      "id": "pause-menu-key",
+      "on": { "event": "input", "filter": { "action": "m", "phase": "pressed" } },
+      "if": [
+        ["@ctl", "exists"],
+        ["@ctl.Shade.stunned", "==", true]
+      ],
+      "do": [
+        { "emit": "play-sound", "data": { "sound": "click.wav", "volume": 0.6 } },
+        { "emit": "load-scene", "data": { "scene": "scenes/menu.json" } }
+      ]
+    },
+    {
+      "id": "apply-pause",
+      "on": { "event": "sync-pause" },
+      "if": [
+        ["@banner", "exists"],
+        ["@hud-hint", "exists"]
+      ],
+      "do": [
+        { "set": "@banner.Text.content", "to": "event.banner" },
+        { "set": "@hud-hint.Text.content", "to": "event.hint" }
+      ]
+    },
+    {
+      "id": "apply-oil-flash",
+      "on": { "event": "sync-oil-flash" },
+      "if": [["@hud-oil", "exists"]],
+      "do": [
+        { "set": "@hud-oil.Text.color", "to": "event.color" }
+      ]
+    },
+    {
+      "id": "apply-toast",
+      "on": { "event": "sync-toast" },
+      "if": [["@hud-toast", "exists"]],
+      "do": [
+        { "set": "@hud-toast.Text.content", "to": "event.text" }
       ]
     },
     {

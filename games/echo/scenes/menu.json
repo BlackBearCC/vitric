@@ -31,17 +31,6 @@
       }
     },
     {
-      "name": "progress",
-      "components": {
-        "Run": {
-          "node": 0,
-          "phase": "player",
-          "turn": 1
-        },
-        "Persist": {}
-      }
-    },
-    {
       "name": "title",
       "components": {
         "Position": {
@@ -104,6 +93,34 @@
           "content": "CONTINUE",
           "size": 0.9,
           "color": "#cdbfa0"
+        }
+      }
+    },
+    {
+      "name": "version",
+      "components": {
+        "Position": {
+          "x": 10.6,
+          "y": -8.4
+        },
+        "Text": {
+          "content": "SLICE v0.1",
+          "size": 0.5,
+          "color": "#8f86a8"
+        }
+      }
+    },
+    {
+      "name": "version-light",
+      "components": {
+        "Position": {
+          "x": 10.6,
+          "y": -8.4
+        },
+        "Light": {
+          "radius": 2.5,
+          "color": "#fff2dc",
+          "intensity": 1.3
         }
       }
     },
