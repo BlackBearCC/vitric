@@ -130,9 +130,25 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 清单挂 `"animations": "animations.json"`，文件里定义片段：`{"clips": {"walk": {"frames": ["w0.png","w1.png"], "fps": 6, "loop": true}}}`。
 实体挂 `Anim` 组件（schema 需定义 clip/prev/t/done 四字段），**引擎独占 Sprite.image 的写权**——换动画唯一正路是改 `Anim.clip`（规则 set 即可），切换自动从头播；非循环片段播完发 `anim-finished` 事件并停末帧。状态全在组件里，快照/回放安全。
 
+## 场景与流程 / Scenes & flow
+
+完整的游戏不止一个场景：菜单 → 关卡 → 下一关 → 结局。切换是一个约定事件，整个发生在确定性流水线之内：
+
+- 规则/脚本 `{"emit": "load-scene", "data": {"scene": "scenes/level2.json"}}`。`scene` 必须在清单 `scenes` 列表里——不在就显式报错并列出可用场景（新场景文件先加进 vitric.json）。
+- 切换在该 tick 逻辑的尾部执行：旧世界的实体**全部**正规销毁（旧句柄干净失效、名字释放），新场景按启动时预载的数据实例化。因为触发事件本身是确定性的，录像重放会在同一 tick 复现同一切换，跨切换的校验点哈希照常成立；快照/restore 同样跨切换可用。运行中改磁盘上的场景文件不影响本进程的切换结果（场景和 schema 一样启动时装载，改了要重启）。
+- **跨场景携带 = `Persist` 标记组件**。挂了 `Persist`（schema 里定义一个无字段组件即可）的实体在切换中幸存：全部组件原样搬进新世界、按原名重建——玩家、分数、背包的延续零新系统。两条硬约束：幸存者必须有名字（匿名的没法被规则引用，显式报错）；名字不许和目标场景的实体重名（重名显式报错）。
+- **每场景的初始化钩子是 `scene-loaded {scene}`**（切换完成后的下一 tick 送达规则）；`start` 只在整局 tick 0 发一次，切换**不会**重发它。
+- 同一 tick 发出多个 load-scene = 显式报错（去哪个场景没有答案，给切换规则加互斥条件）。
+- `vitric check` 实例化清单里**每个**场景——非入口场景的坏引用（缺图、未定义的动画片段）也在 check 期红灯，不会拖到切换那一刻才炸。
+
+```json
+{"id": "level-clear", "on": {"event": "collision", "between": ["Player", "Exit"]},
+ "do": [{"emit": "load-scene", "data": {"scene": "scenes/level2.json"}}]}
+```
+
 ## 内建事件
 
-`start`（tick 0，初始化/生成关卡的标准入口）、`input`、`collision`、`anim-finished`。
+`start`（tick 0，初始化/生成关卡的标准入口；场景切换不重发）、`input`、`collision`、`anim-finished`、`scene-loaded`（每次场景切换后的下一 tick，每场景初始化钩子，见「场景与流程」）。
 
 ## 音效
 

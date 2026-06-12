@@ -164,9 +164,25 @@ Minimal NPC dialogue wiring (use `filter: {"id": ...}` to route the reply back t
 ]}
 ```
 
+## Scenes & flow
+
+A complete game is more than one scene: menu → level → next level → ending. Switching is a convention event, executed entirely inside the deterministic pipeline:
+
+- Rules/scripts emit `{"emit": "load-scene", "data": {"scene": "scenes/level2.json"}}`. `scene` must be one of the manifest's `scenes` — anything else is an explicit error listing the available scenes (add new scene files to vitric.json first).
+- The switch runs at the tail of that tick's logic: **every** entity of the old world is properly despawned (stale handles die cleanly, names are released), and the new scene is instantiated from data preloaded at boot. Since the triggering event is itself deterministic, a replay reproduces the switch at the same tick and checkpoint hashes keep matching across it; snapshots/restore work across switches too. Editing scene files on disk mid-run does not affect this process (scenes load at boot, like the schema — restart to pick up changes).
+- **Carry-over = the `Persist` marker component.** Entities with `Persist` (define a field-less component in your schema) survive the switch: all their components are moved into the new world and respawned under the same name — player, score, inventory continuity with zero new systems. Two hard constraints: survivors must be named (an anonymous one can't be referenced by rules — explicit error), and the name must not collide with an entity in the target scene (explicit error).
+- **The per-scene init hook is `scene-loaded {scene}`** (delivered to rules on the tick after the switch); `start` fires once at tick 0 of the whole run and is **not** re-fired by switches.
+- Emitting more than one load-scene in a single tick is an explicit error (there is no right answer for where to go — make your switch rules mutually exclusive).
+- `vitric check` instantiates **every** scene in the manifest — bad references in non-entry scenes (missing images, undefined animation clips) fail check instead of exploding at switch time.
+
+```json
+{"id": "level-clear", "on": {"event": "collision", "between": ["Player", "Exit"]},
+ "do": [{"emit": "load-scene", "data": {"scene": "scenes/level2.json"}}]}
+```
+
 ## Built-in events
 
-`start` (tick 0 — the standard hook for init / level generation), `input`, `collision`, `anim-finished`.
+`start` (tick 0 — the standard hook for init / level generation; not re-fired by scene switches), `input`, `collision`, `anim-finished`, `scene-loaded` (the tick after each scene switch — the per-scene init hook, see "Scenes & flow").
 
 ## Engine component conventions
 
