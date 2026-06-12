@@ -30,6 +30,9 @@ font8x8 = "0.3"
 # 运行时 LLM（src/llm.rs）的 HTTP 客户端：同步阻塞 API 正好住在单工作线程里，
 # 一个 POST 不值得拖进 tokio；默认 rustls（纯 Rust TLS），windows-gnu 交叉编译无痛
 ureq = { version = "3", features = ["json"] }
+# 发行打包（src/bundle.rs）的 zlib 压缩：flate2 早已在依赖树里（png 和 ureq 都在用），
+# 不引入新依赖家族；默认 miniz_oxide 纯 Rust 后端，windows-gnu 交叉编译无痛
+flate2 = "1"
 
 [dev-dependencies]
 # 只为单测里离线校验 WGSL（无 GPU 环境也能锁住 shader 不写炸）；版本必须跟 wgpu 同步

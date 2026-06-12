@@ -5,6 +5,7 @@
 //! - `vitric run <项目目录> [选项]`        无头运行 + AI 控制面
 //! - `vitric replay <项目目录> <录像.json>` 重放录像并校验确定性
 //! - `vitric gate <项目目录>`              交付门禁：check + 通关录像重放 + 断言集，全过才出证书
+//! - `vitric bundle <项目目录> [选项]`      发行打包：gate PASS 后把项目附进引擎副本，出自包含单文件（无证书不发行）
 //! - `vitric assets <项目目录> [选项]`      全项目 PNG 统一色板（AI 出图规整成一个调）
 //! - `vitric team <项目目录>`              多 agent 班子协同黑板：各角色交付物健康度 + 门禁/合同状态（只读，永远退出 0）
 //! - `vitric turf <项目目录> --role <角色> <改动文件...>`  地盘执法：改动文件越出角色地盘即退出 1
@@ -24,6 +25,15 @@
 //!   --record <文件>   退出时把录像写到文件
 //!   --load <槽名>     启动后立刻从 <项目>/saves/<槽名>.json 恢复续玩（与 --record 互斥）
 //!   --renderer <gpu|cpu> 窗口呈现路径（默认 cpu=softbuffer；gpu=wgpu，自带开窗）
+//!
+//! bundle 选项：
+//!   --out <文件>     输出路径（默认 <项目名>-<平台>[.exe]）
+//!   --engine <exe>   附加到指定引擎二进制（跨平台出包：linux 上给 windows 出包就指交叉产物）
+//!
+//! 发行包（exe 尾部有内嵌项目，见 src/bundle.rs）的启动行为：
+//!   无参数            玩家双击：解包后开窗运行（CPU 渲染）
+//!   run-embedded …    运行内嵌项目，run 同款选项透传（--ticks 5 无头冒烟 / --renderer gpu）
+//!   其他参数          正常 CLI（发行包同时也是完整引擎）
 //!
 //! 运行时 LLM 经环境变量启用：VITRIC_LLM_URL / VITRIC_LLM_KEY / VITRIC_LLM_MODEL（见 src/llm.rs）。
 
@@ -48,12 +58,14 @@ fn main() {
         Some("run") => cmd_run(&args[1..]),
         Some("replay") => cmd_replay(&args[1..]),
         Some("gate") => cmd_gate(&args[1..]),
+        Some("bundle") => vitric_cli::bundle::run(&args[1..]),
+        Some("run-embedded") => cmd_run_embedded(&args[1..]),
         Some("assets") => vitric_cli::assets_cmd::run(&args[1..]),
         Some("team") => cmd_team(&args[1..]),
         Some("turf") => cmd_turf(&args[1..]),
-        _ => {
-            eprintln!("用法: vitric <check|run|replay|gate|assets|team|turf> <项目目录> [选项]\n详见 vitric 仓库 docs/");
-            std::process::exit(2);
+        None => cmd_default(),
+        Some(_) => {
+            usage_and_exit();
         }
     };
     if let Err(message) = result {
@@ -61,6 +73,35 @@ fn main() {
         eprintln!("vitric 错误: {message}");
         std::process::exit(1);
     }
+}
+
+fn usage_and_exit() -> ! {
+    eprintln!("用法: vitric <check|run|replay|gate|bundle|assets|team|turf> <项目目录> [选项]\n详见 vitric 仓库 docs/");
+    std::process::exit(2);
+}
+
+/// 无参数启动。发行包（exe 尾部有内嵌项目）= 玩家双击：解包后开窗运行内嵌项目
+/// （CPU 渲染，处处能跑；要 GPU 走 `run-embedded --renderer gpu`）；普通引擎 = 打用法。
+fn cmd_default() -> Result<(), String> {
+    if let Some(dir) = vitric_cli::bundle::extract_self()? {
+        return cmd_run(&[dir.display().to_string(), "--window".to_string()]);
+    }
+    usage_and_exit();
+}
+
+/// `run-embedded [run 选项]`：发行包专用——解出内嵌项目再走 cmd_run，选项原样透传
+/// （无头冒烟 `--ticks 5`、玩家要 GPU `--renderer gpu` 都从这进）。
+fn cmd_run_embedded(args: &[String]) -> Result<(), String> {
+    let Some(dir) = vitric_cli::bundle::extract_self()? else {
+        return Err(
+            "本 vitric 不是发行包（exe 尾部没有内嵌项目）。\
+             提示：发行包用 vitric bundle <项目目录> 制作；普通运行用 vitric run <项目目录>"
+                .to_string(),
+        );
+    };
+    let mut full = vec![dir.display().to_string()];
+    full.extend_from_slice(args);
+    cmd_run(&full)
 }
 
 fn cmd_check(args: &[String]) -> Result<(), String> {

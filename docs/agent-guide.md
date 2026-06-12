@@ -2,13 +2,14 @@
 
 给 AI agent（和人）的一页纸操作手册：怎么自主地跑、看、测、改一个 Vitric 游戏。
 
-## 七个命令
+## 八个命令
 
 ```bash
 vitric check <项目目录>                  # 校验一切（schema/场景/规则/脚本），错误带路径+错误码+修法
 vitric run <项目目录> [--port 6173] [--speed X] [--ticks N] [--record 录像.json] [--load 槽名]
 vitric replay <项目目录> <录像.json>      # 重放录像并逐校验点验证确定性
 vitric gate <项目目录>                   # 交付门禁：check + 通关录像重放 + 断言集，全过才退出 0（见「交付门禁」节）
+vitric bundle <项目目录> [--out 文件] [--engine 引擎exe]  # 发行打包：gate PASS 后出自包含单文件，无证书不发行（见「发行打包」节）
 vitric assets <项目目录> [--colors N] [--height H] [--palette-lock]  # 全项目 PNG 统一色板，AI 出图规整成一个调，详见 docs/art-pipeline.md
 vitric team <项目目录>                   # 多 agent 班子协同黑板：各角色交付物健康度+合同/门禁状态+卡点提示（只读，永远退出 0），详见 team/README.md
 vitric turf <项目目录> --role <角色> <改动文件...>  # 地盘执法：改动文件越出角色地盘即退出 1，逐条点名
@@ -103,6 +104,18 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 - `max_ticks`（可选）：录像长度上限，防"挂机一百万 tick 总会赢"式注水。
 
 工作流：录像不是 gate 自己生成的——QA/导演真打（或经控制面 RPC 驱动）一局通关，`vitric run my-game --record qa/clear.json` 录下来，然后 `vitric gate my-game` 验证。报告是人机同一份 JSON（`{"pass": bool, "gates": [{name, status, detail}...]}`）打到 stdout；**全部门禁 pass 才退出 0**。清单没声明 gates、或 playthroughs 为空，直接退出 1——无门禁项目不出证书，空门禁放行就是后门。
+
+## 发行打包（vitric bundle）
+
+`vitric bundle my-game` 把项目和引擎打成**一个可分发的单文件**（独立单机）。门禁先行：先跑 `vitric gate`，不 PASS 不出包——无证书不发行（拒绝时门禁报告原样打到 stdout）。通过后把项目文件（含 qa/ 通关录像——证书本体随包；顶层 `saves/`、`assets_original/` 和隐藏文件除外）打成 zlib 压缩档，附在引擎二进制副本尾部（尾标 = 8 字节魔数 + 包长，格式见 `crates/vitric-cli/src/bundle.rs`）。成功输出单行 JSON `{out, bytes, project, files}`；缺省文件名 `<项目名>-<平台>[.exe]`，`--out` 改名。
+
+发行包的行为（exe 尾部有内嵌项目，启动时自检）：
+
+- **无参数**（玩家双击）：解包到 `temp/vitric-<哈希>/` 后开窗运行（CPU 渲染，处处能跑）。解包目录按包哈希唯一，玩家存档 saves/ 长在那里随包持久。
+- **`run-embedded [run 选项]`**：运行内嵌项目，选项透传——`--ticks 5` 无头冒烟、`--renderer gpu` 玩家要 GPU 都走这。
+- **其他参数**：正常 CLI——发行包同时也是完整引擎。
+
+跨平台：在 linux 上给 windows 出包，`--engine` 指交叉编译好的 windows 引擎（`cargo build --release --target x86_64-pc-windows-gnu`）——尾标格式与平台无关，附在哪个引擎上就是哪个平台的发行包。发行包不能再当 `--engine`（拒绝套娃）。
 
 ## 确定性边界
 

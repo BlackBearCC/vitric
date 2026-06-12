@@ -2945,6 +2945,7 @@ name = "vitric-cli"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "flate2",
  "font8x8",
  "naga",
  "png",

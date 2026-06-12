@@ -2,13 +2,14 @@
 
 A one-page manual for AI agents (and humans): how to autonomously run, observe, test, and modify a Vitric game.
 
-## Seven commands
+## Eight commands
 
 ```bash
 vitric check <project-dir>                 # validate everything (schema/scenes/rules/scripts/assets); errors carry path + code + fix hint
 vitric run <project-dir> [--port 6173] [--window] [--speed X] [--ticks N] [--record out.json]
 vitric replay <project-dir> <recording>    # replay a recording, verifying determinism at every checkpoint
 vitric gate <project-dir>                  # delivery gate: check + playthrough replays + assertions; exit 0 only if ALL pass (see "Delivery gates")
+vitric bundle <project-dir> [--out file] [--engine exe]  # ship a self-contained single file; gate must PASS first — no certificate, no release (see "Shipping a bundle")
 vitric assets <project-dir> [--colors N] [--height H] [--palette-lock]  # harmonize all project PNGs onto one shared palette (AI-generated art → one coherent look), see docs/art-pipeline.md
 vitric team <project-dir>                  # multi-agent team blackboard: per-role deliverable health + contract/gate status + blocking hints (read-only, always exits 0), see team/README.md
 vitric turf <project-dir> --role <name> <changed-files...>  # turf enforcement: exit 1 naming every changed file outside the role's turf
@@ -103,6 +104,18 @@ Declare gates in `vitric.json`:
 - `max_ticks` (optional): recording length cap, so a million-tick AFK run can't be padded into a "win".
 
 Workflow: gate never produces recordings itself — QA/the director plays a winning run (by hand or driven via control-plane RPC) with `vitric run my-game --record qa/clear.json`, then `vitric gate my-game` verifies it. The report is one JSON for humans and machines alike (`{"pass": bool, "gates": [{name, status, detail}...]}`) on stdout; **exit 0 only if every gate passes**. A manifest without gates (or with empty playthroughs) exits 1 — no gates, no certificate; an empty gate that passes would be a loophole.
+
+## Shipping a bundle (vitric bundle)
+
+`vitric bundle my-game` packs project + engine into **one distributable file** (a standalone game). The gate comes first: bundle runs `vitric gate` and refuses to ship unless it PASSes — no certificate, no release (on refusal the gate report is printed to stdout as-is). On PASS, the project files (including the qa/ playthrough recordings — the certificate ships with the game; top-level `saves/`, `assets_original/` and hidden files are excluded) are packed into a zlib-compressed archive appended to a copy of the engine binary (footer = 8-byte magic + blob length; format documented in `crates/vitric-cli/src/bundle.rs`). On success it prints one JSON line `{out, bytes, project, files}`; the default file name is `<project>-<platform>[.exe]`, override with `--out`.
+
+A bundled executable (engine with an embedded project in its tail, self-detected at startup) behaves as:
+
+- **No arguments** (player double-click): extracts to `temp/vitric-<hash>/` and runs windowed (CPU renderer — works everywhere). The extraction dir is unique per bundle hash; player saves/ live there and persist per bundle.
+- **`run-embedded [run options]`**: runs the embedded project with options passed through — `--ticks 5` for a headless smoke run, `--renderer gpu` for players who want GPU.
+- **Any other arguments**: the normal CLI — a bundle is still the full engine.
+
+Cross-platform: to ship a windows build from linux, point `--engine` at a cross-compiled windows engine (`cargo build --release --target x86_64-pc-windows-gnu`) — the footer format is platform-independent; the bundle targets whatever engine it's appended to. A bundle cannot itself be used as `--engine` (no nesting).
 
 ## Determinism boundaries
 
