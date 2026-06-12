@@ -203,6 +203,79 @@
           "type": "number"
         }
       }
+    },
+    "Emitter": {
+      "fields": {
+        "kind": {
+          "type": "enum",
+          "variants": ["stream", "burst"]
+        },
+        "rate": {
+          "type": "number",
+          "default": 0,
+          "min": 0
+        },
+        "count": {
+          "type": "int",
+          "default": 0,
+          "min": 0
+        },
+        "burst": {
+          "type": "int",
+          "default": -1
+        },
+        "lifetime": {
+          "type": "int",
+          "default": 30,
+          "min": 1
+        },
+        "speed_min": {
+          "type": "number",
+          "default": 0,
+          "min": 0
+        },
+        "speed_max": {
+          "type": "number",
+          "default": 0,
+          "min": 0
+        },
+        "dir": {
+          "type": "number",
+          "default": 0
+        },
+        "spread": {
+          "type": "number",
+          "default": 360,
+          "min": 0,
+          "max": 360
+        },
+        "gravity": {
+          "type": "number",
+          "default": 0
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        },
+        "color_end": {
+          "type": "text",
+          "default": ""
+        },
+        "size": {
+          "type": "number",
+          "default": 0.3,
+          "min": 0
+        },
+        "size_end": {
+          "type": "number",
+          "default": 0,
+          "min": 0
+        },
+        "active": {
+          "type": "bool",
+          "default": true
+        }
+      }
     }
   }
 }

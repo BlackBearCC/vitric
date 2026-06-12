@@ -1189,6 +1189,45 @@ mod tests {
     }
 
     #[test]
+    fn emitter_fields_hash_but_particles_add_no_state() {
+        // 粒子是渲染层纯函数产物：发射器字段本身入状态哈希，但跑多少 tick
+        // 都不产生任何额外状态（没有 sim 系统碰 Emitter——这条测试锁死这个事实）
+        let mut sim = Sim::new(1);
+        let e = sim.world.spawn_named("sparks").unwrap();
+        sim.world.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let h_before = sim.world.state_hash();
+        sim.world
+            .set_component(
+                e,
+                "Emitter",
+                json!({"kind": "stream", "rate": 30.0, "lifetime": 40, "size": 0.5,
+                       "burst": -1}),
+            )
+            .unwrap();
+        let h_with = sim.world.state_hash();
+        assert_ne!(h_before, h_with, "发射器字段必须进状态哈希");
+        // 跑 120 tick：世界里没有任何东西在动，哈希一动不动（粒子零状态）
+        for _ in 0..120 {
+            sim.step(&mut ()).unwrap();
+        }
+        assert_eq!(sim.world.state_hash(), h_with, "粒子不许往模拟状态里塞任何东西");
+        // burst 触发 = 规则写字段：哈希变化（被录像/快照如实捕获），照样零额外状态
+        sim.world.set_field(e, "Emitter.burst", json!(120)).unwrap();
+        let h_burst = sim.world.state_hash();
+        assert_ne!(h_burst, h_with);
+        for _ in 0..120 {
+            sim.step(&mut ()).unwrap();
+        }
+        assert_eq!(sim.world.state_hash(), h_burst);
+        // snapshot/restore 往返：哈希一致（发射器只是普通组件，快照天然覆盖）
+        let snap = sim.snapshot(&());
+        let mut sim2 = Sim::new(99);
+        sim2.restore(&snap, &mut ()).unwrap();
+        assert_eq!(sim2.world.state_hash(), h_burst);
+        assert_eq!(sim2.tick, sim.tick);
+    }
+
+    #[test]
     fn bad_component_data_is_explicit() {
         let mut sim = Sim::new(1);
         let e = sim.world.spawn().to_owned();

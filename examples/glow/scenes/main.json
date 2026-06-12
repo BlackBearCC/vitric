@@ -2243,6 +2243,29 @@
       }
     },
     {
+      "name": "lantern-sparks",
+      "components": {
+        "Position": {
+          "x": 47,
+          "y": 2.9
+        },
+        "Emitter": {
+          "kind": "stream",
+          "rate": 12,
+          "lifetime": 55,
+          "speed_min": 0.8,
+          "speed_max": 2.2,
+          "dir": 90,
+          "spread": 55,
+          "gravity": -1.2,
+          "color": "#ffd75e",
+          "color_end": "#ff5a20",
+          "size": 0.22,
+          "size_end": 0
+        }
+      }
+    },
+    {
       "name": "goal",
       "components": {
         "Goal": {},

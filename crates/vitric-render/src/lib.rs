@@ -48,6 +48,34 @@
 //!   **泛光的总开关**：场上没有 Bloom 实体 = 完全不跑泛光（旧行为字节不变、零开销）。
 //!   threshold ∈ [0,1]：通道值超过 threshold·255 的部分才进泛光；strength ≥ 0：叠加倍率。
 //!   两个字段都必填（缺了/不是数字显式报错，不静默给缺省值）
+//! - `Emitter` — 粒子发射器（需要 `Position`）。**粒子是纯渲染层产物，不进模拟状态**：
+//!   每个粒子在第 T tick 的位置/颜色/大小是
+//!   `f(发射器字段, 粒子序号, T, 实体id派生的种子)` 的纯函数（[`emitter_particles`]）——
+//!   无积分器（解析式 pos = origin + v0·t + ½g·t²）、无跨帧状态：不进状态哈希、不进存档，
+//!   录像重放/快照回退后粒子画面自动正确。随机数用 SplitMix64 确定性散列
+//!   （种子 = 实体id哈希 ⊕ 粒子序号，见 [`emitter_seed`]），与模拟 RNG 流完全无关。
+//!   字段（语义源头 [`collect_emitters`]，缺/错显式报错）：
+//!   * `kind`：必填，`"stream"`（持续流，按 `rate` 粒子/秒发射，发射时间轴从 tick 0 起算）
+//!     或 `"burst"`（单次爆发：`burst` 字段 = 触发 tick 号，规则往里写当前 tick 即触发，
+//!     `count` 个粒子同时出生；burst < 0 = 未触发。是否在爆发期由字段值纯函数推出，
+//!     不需要记历史）
+//!   * `lifetime`：必填，粒子寿命（tick，整数 ≥ 1）；`size`：必填，起始大小（世界单位 > 0）
+//!   * `rate`（stream 必填 > 0）/ `count` + `burst`（burst 用，count ≥ 1，burst 缺省 -1）
+//!   * `speed_min`/`speed_max`：初速范围（世界单位/秒，缺省 0；speed_max 缺省 = speed_min）
+//!   * `dir`：发射朝向（度数，0 = +x、逆时针为正——和 Sprite.rot 同一约定，缺省 0）；
+//!     `spread`：扩散角全宽（度数 0..=360，缺省 360 = 全方向，此时 dir 无所谓）
+//!   * `gravity`：重力加速度（世界单位/秒²，y 轴，通常负数；缺省 0）
+//!   * `color`/`color_end`：起始/结束颜色（"#rrggbb"；color_end 缺省/空串 = 不渐变）；
+//!     alpha 随寿命线性淡出（内建，255 → 0）
+//!   * `size_end`：结束大小（≥ 0，缺省 = size 不渐变；0 = 缩小到消失）
+//!   * `active`：开关（bool，缺省 true）。false = 一个粒子都不画——**纯函数的取舍**：
+//!     中途关掉会让在途粒子当帧消失（画面只看当前字段值，不记发射历史）
+//!   * 渲染：粒子画成方点（与 GPU 路径的方块顶点几何一致），**自发光**：在光照之后、
+//!     泛光之前画——不被环境光压暗、不被灯衰减、不投影也不受影（简化约定）；
+//!     亮粒子照常进泛光。发射器实体如果移动，所有在途粒子整体跟着移
+//!     （位置相对当前原点——无状态的代价）。场上没有 Emitter = 完全不画
+//!     （旧行为字节不变、零开销）。上限 [`MAX_EMITTERS`] 个发射器、
+//!     单个发射器同屏 [`MAX_PARTICLES_PER_EMITTER`] 粒子，超了显式报错
 //!
 //! 光照公式（CPU 与 GPU 路径必须一致，GPU 侧在 vitric-cli gpu.rs 的 WGSL 里）：
 //!   lit = min(ambient + Σ 各灯贡献, 1.5)
@@ -132,6 +160,20 @@ pub const NORMAL_LIGHT_Z: f64 = 0.6;
 /// 法线光照的光方向 xy 系数：√(1 − 0.6²) = 0.8（与 [`NORMAL_LIGHT_Z`] 配对成单位向量）。
 pub const NORMAL_LIGHT_XY: f64 = 0.8;
 
+/// 粒子发射器数量上限。每帧每个发射器都要展开粒子，CPU 光栅化和 GPU 顶点流
+/// 同时受制于它；超了显式报错，不静默截断。
+pub const MAX_EMITTERS: usize = 64;
+
+/// 单个发射器的同屏粒子预算（stream 按 rate·lifetime 估算、burst 按 count）。
+/// 在 [`collect_emitters`] 里校验——超了显式报错（调低 rate/count 或缩短 lifetime），
+/// 不静默丢粒子。
+pub const MAX_PARTICLES_PER_EMITTER: usize = 1024;
+
+/// 粒子时间换算用的模拟频率（tick/秒）。**必须与 vitric-sim 的 `TICKS_PER_SECOND`
+/// 同值**（render 不依赖 sim，常量各自一份；一致性由 vitric-cli 的跨 crate 测试锁死）。
+/// rate（粒子/秒）和初速/重力（世界单位/秒）都按它换算到 tick。
+pub const PARTICLE_TICKS_PER_SECOND: f64 = 60.0;
+
 /// 清屏背景色：深灰蓝，区别于纯黑（纯黑常被误判为「没渲出来」）。
 /// GPU 路径的清屏/背景方块也用它——两条路径背景同字节。
 pub const BACKGROUND: [u8; 4] = [24, 26, 33, 255];
@@ -152,7 +194,7 @@ pub fn render_world(
     tick: u64,
 ) -> Result<Vec<u8>, String> {
     let cam = camera_of(world, tick, height)?;
-    render_with(world, width, height, assets, cam, &RenderOpts::default())
+    render_with(world, width, height, assets, cam, tick, &RenderOpts::default())
 }
 
 /// 内部渲染变体的开关（对外不暴露——公开 API 只有一种"正常渲染"）。
@@ -170,12 +212,14 @@ struct RenderOpts {
 
 /// 渲染主体（相机已定）。[`render_world`] 用缺省 opts 走到这里——
 /// 正常渲染路径的算术与重构前逐字节相同（向后兼容由测试锁死）。
+/// `tick` 只喂给粒子展开（[`emitter_particles`]，粒子是 tick 的纯函数）。
 fn render_with(
     world: &World,
     width: u32,
     height: u32,
     assets: &Assets,
     (cam_x, cam_y, scale): (f64, f64, f64),
+    tick: u64,
     opts: &RenderOpts,
 ) -> Result<Vec<u8>, String> {
     if width == 0 || height == 0 || width > 4096 || height > 4096 {
@@ -391,6 +435,10 @@ fn render_with(
             normals.as_deref(),
         );
     }
+
+    // 粒子在光照之后、泛光之前画——自发光（不被环境光压暗/灯衰减/投影），
+    // 亮粒子照常进泛光晕开。场上没有 Emitter = 零成本跳过（旧行为字节不变）
+    draw_particles(world, &mut buf, width, height, (cam_x, cam_y, scale), tick)?;
 
     // 泛光按 Bloom 实体的存在与否开关：没有 = 完全跳过（旧行为字节不变、零开销）。
     // 在光照之后跑——亮部是打完光的亮部，灯照亮的东西才会晕开
@@ -1336,6 +1384,392 @@ fn box_blur_pass(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: usize, hor
     }
 }
 
+/// 发射形态（`Emitter.kind` 的解析结果）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EmitterKind {
+    /// 持续流：每秒 `rate` 个粒子，发射时间轴从 tick 0 起算。
+    Stream { rate: f64 },
+    /// 单次爆发：`burst` = 触发 tick 号（负数 = 未触发），`count` 个粒子同时出生。
+    Burst { count: i64, burst: i64 },
+}
+
+impl EmitterKind {
+    /// describe / 错误信息里的字符串名（和 `Emitter.kind` 的合法取值一致）。
+    pub fn name(&self) -> &'static str {
+        match self {
+            EmitterKind::Stream { .. } => "stream",
+            EmitterKind::Burst { .. } => "burst",
+        }
+    }
+}
+
+/// 一个粒子发射器（`Emitter` 实体的解析结果，世界坐标）。字段语义见模块文档；
+/// 校验全在 [`collect_emitters`]，粒子展开（[`emitter_particles`]）只剩纯算术。
+#[derive(Debug)]
+pub struct EmitterSource {
+    pub id: vitric_ecs::EntityId,
+    pub name: Option<String>,
+    /// 发射原点（当前 Position——发射器移动时在途粒子整体跟着移，见模块文档）。
+    pub x: f64,
+    pub y: f64,
+    pub kind: EmitterKind,
+    /// 粒子寿命（tick，≥ 1）。
+    pub lifetime: i64,
+    /// 初速范围（世界单位/秒，0 ≤ min ≤ max）。
+    pub speed_min: f64,
+    pub speed_max: f64,
+    /// 发射朝向（度数，0 = +x、逆时针为正）+ 扩散角全宽（度数 0..=360）。
+    pub dir: f64,
+    pub spread: f64,
+    /// 重力加速度（世界单位/秒²，y 轴）。
+    pub gravity: f64,
+    /// 起始/结束颜色（0..=255 通道值；rgb_end 缺省 = rgb 不渐变）+ 原始色串（describe 用）。
+    pub rgb: [f64; 3],
+    pub rgb_end: [f64; 3],
+    pub color: String,
+    /// 起始/结束大小（世界单位；size_end 缺省 = size 不渐变）。
+    pub size: f64,
+    pub size_end: f64,
+    pub active: bool,
+    /// 实体 id 派生的散列种子（[`emitter_seed`]）。
+    pub seed: u64,
+}
+
+/// SplitMix64 终混器：64 位打散，无状态纯函数。粒子散列和屏幕抖动
+/// （[`shake_offset`]）共用这一个——确定性装饰层的统一随机源，不碰模拟 RNG 流。
+fn mix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// 发射器实体 id → 散列种子。index/generation 拼 64 位再过 SplitMix64——
+/// 两个发射器哪怕槽位相邻，粒子轨迹也互不相似。
+pub fn emitter_seed(id: vitric_ecs::EntityId) -> u64 {
+    mix64(((id.index as u64) << 32) | id.generation as u64)
+}
+
+/// 收集场上全部发射器（带 `Emitter` 组件的实体，槽位序）。校验全在这里做
+/// （kind 合法性、必填字段、范围、粒子预算），热路径只剩纯算术。
+pub fn collect_emitters(world: &World) -> Result<Vec<EmitterSource>, String> {
+    let ids = world.query(&["Emitter"]);
+    if ids.len() > MAX_EMITTERS {
+        return Err(format!(
+            "场上有 {} 个发射器（Emitter 组件），超过上限 {MAX_EMITTERS} 个。\
+             提示：删减/合并发射器",
+            ids.len()
+        ));
+    }
+    ids.into_iter()
+        .map(|id| {
+            // 数值字段读取：缺省值 or 显式报错（带写法提示）
+            let opt_num = |field: &str, default: f64| -> Result<f64, String> {
+                match world.get_field(id, &format!("Emitter.{field}")) {
+                    Err(_) => Ok(default),
+                    Ok(v) => v.as_f64().ok_or_else(|| {
+                        format!("实体 {id} 的 Emitter.{field} 不是数字: {v}")
+                    }),
+                }
+            };
+            let req_int = |field: &str, hint: &str| -> Result<i64, String> {
+                match world.get_field(id, &format!("Emitter.{field}")) {
+                    Err(_) => Err(format!("实体 {id} 的 Emitter 缺 {field} 字段。{hint}")),
+                    Ok(v) => v.as_i64().ok_or_else(|| {
+                        format!("实体 {id} 的 Emitter.{field} 必须是整数: {v}。{hint}")
+                    }),
+                }
+            };
+            let kind_str = match world.get_field(id, "Emitter.kind") {
+                Err(_) => {
+                    return Err(format!(
+                        "实体 {id} 的 Emitter 缺 kind 字段。\
+                         可选: \"stream\"（持续流，配 rate）/ \"burst\"（单次爆发，配 count + burst）"
+                    ))
+                }
+                Ok(v) => v
+                    .as_str()
+                    .map(String::from)
+                    .ok_or_else(|| format!("实体 {id} 的 Emitter.kind 不是文本: {v}"))?,
+            };
+            let lifetime = req_int("lifetime", "粒子寿命（tick，整数 ≥ 1），如 40")?;
+            if lifetime < 1 {
+                return Err(format!(
+                    "实体 {id} 的 Emitter.lifetime 必须 ≥ 1（tick），拿到 {lifetime}"
+                ));
+            }
+            let kind = match kind_str.as_str() {
+                "stream" => {
+                    let rate = match world.get_field(id, "Emitter.rate") {
+                        Err(_) => Err(format!(
+                            "实体 {id} 的 Emitter(kind=\"stream\") 缺 rate 字段（粒子/秒）。\
+                             写法: {{\"kind\": \"stream\", \"rate\": 20, \"lifetime\": 40, \"size\": 0.3}}"
+                        )),
+                        Ok(v) => v
+                            .as_f64()
+                            .ok_or_else(|| format!("实体 {id} 的 Emitter.rate 不是数字: {v}")),
+                    }?;
+                    if !(rate > 0.0 && rate.is_finite()) {
+                        return Err(format!(
+                            "实体 {id} 的 Emitter.rate 必须 > 0（粒子/秒），拿到 {rate}"
+                        ));
+                    }
+                    // 同屏粒子预算：稳态可见数 ≈ rate · lifetime / 60
+                    let steady = (rate * lifetime as f64 / PARTICLE_TICKS_PER_SECOND).ceil();
+                    if steady > MAX_PARTICLES_PER_EMITTER as f64 {
+                        return Err(format!(
+                            "实体 {id} 的 Emitter 稳态同屏约 {steady} 个粒子\
+                             （rate {rate} × lifetime {lifetime} tick），\
+                             超过单发射器预算 {MAX_PARTICLES_PER_EMITTER}。\
+                             提示：调低 rate 或缩短 lifetime"
+                        ));
+                    }
+                    EmitterKind::Stream { rate }
+                }
+                "burst" => {
+                    let count = req_int(
+                        "count",
+                        "爆发粒子数（整数 ≥ 1）。写法: {\"kind\": \"burst\", \"count\": 30, \
+                         \"lifetime\": 40, \"size\": 0.3}（规则往 burst 写当前 tick 即触发）",
+                    )?;
+                    if count < 1 {
+                        return Err(format!(
+                            "实体 {id} 的 Emitter.count 必须 ≥ 1，拿到 {count}"
+                        ));
+                    }
+                    if count > MAX_PARTICLES_PER_EMITTER as i64 {
+                        return Err(format!(
+                            "实体 {id} 的 Emitter.count {count} 超过单发射器预算 \
+                             {MAX_PARTICLES_PER_EMITTER}"
+                        ));
+                    }
+                    // burst 缺省 -1 = 未触发（负数都算未触发）
+                    let burst = match world.get_field(id, "Emitter.burst") {
+                        Err(_) => -1,
+                        Ok(v) => v.as_i64().ok_or_else(|| {
+                            format!(
+                                "实体 {id} 的 Emitter.burst 必须是整数（触发 tick 号，负数 = 未触发）: {v}"
+                            )
+                        })?,
+                    };
+                    EmitterKind::Burst { count, burst }
+                }
+                other => {
+                    return Err(format!(
+                        "实体 {id} 的 Emitter.kind {other:?} 不认识。\
+                         可选: \"stream\"（持续流）/ \"burst\"（单次爆发）"
+                    ));
+                }
+            };
+            // 发射器必须有位置（同 point/spot 光源的约定）
+            let axis = |a: &str| -> Result<f64, String> {
+                match world.get_field(id, &format!("Position.{a}")) {
+                    Err(_) => Err(format!(
+                        "实体 {id} 的 Emitter 需要 Position 组件（发射原点在哪）"
+                    )),
+                    Ok(v) => v
+                        .as_f64()
+                        .ok_or_else(|| format!("实体 {id} 的 Position.{a} 不是数字: {v}")),
+                }
+            };
+            let (x, y) = (axis("x")?, axis("y")?);
+            let speed_min = opt_num("speed_min", 0.0)?;
+            let speed_max = opt_num("speed_max", speed_min)?;
+            if speed_min < 0.0 || speed_max < speed_min {
+                return Err(format!(
+                    "实体 {id} 的 Emitter 初速范围不合法：需要 0 ≤ speed_min ≤ speed_max，\
+                     拿到 [{speed_min}, {speed_max}]"
+                ));
+            }
+            let dir = opt_num("dir", 0.0)?;
+            let spread = opt_num("spread", 360.0)?;
+            if !(0.0..=360.0).contains(&spread) {
+                return Err(format!(
+                    "实体 {id} 的 Emitter.spread 必须在 0..=360（扩散角全宽，度数），拿到 {spread}"
+                ));
+            }
+            let gravity = opt_num("gravity", 0.0)?;
+            let size = match world.get_field(id, "Emitter.size") {
+                Err(_) => Err(format!(
+                    "实体 {id} 的 Emitter 缺 size 字段（粒子起始大小，世界单位 > 0），如 0.3"
+                )),
+                Ok(v) => v
+                    .as_f64()
+                    .ok_or_else(|| format!("实体 {id} 的 Emitter.size 不是数字: {v}")),
+            }?;
+            if size <= 0.0 {
+                return Err(format!("实体 {id} 的 Emitter.size 必须 > 0，拿到 {size}"));
+            }
+            let size_end = opt_num("size_end", size)?;
+            if size_end < 0.0 {
+                return Err(format!(
+                    "实体 {id} 的 Emitter.size_end 必须 ≥ 0（0 = 缩小到消失），拿到 {size_end}"
+                ));
+            }
+            let color = world
+                .get_field(id, "Emitter.color")
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| "#ffffff".to_string());
+            let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Emitter.color: {e}"))?;
+            let rgb = [rgba[0] as f64, rgba[1] as f64, rgba[2] as f64];
+            // color_end 缺省/空串 = 不渐变（同 Camera.follow 空串 = 不跟随的约定）
+            let color_end = world
+                .get_field(id, "Emitter.color_end")
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default();
+            let rgb_end = if color_end.is_empty() {
+                rgb
+            } else {
+                let rgba = parse_color(&color_end)
+                    .map_err(|e| format!("实体 {id} 的 Emitter.color_end: {e}"))?;
+                [rgba[0] as f64, rgba[1] as f64, rgba[2] as f64]
+            };
+            let active = match world.get_field(id, "Emitter.active") {
+                Err(_) => true,
+                Ok(v) => v.as_bool().ok_or_else(|| {
+                    format!("实体 {id} 的 Emitter.active 不是 bool: {v}")
+                })?,
+            };
+            Ok(EmitterSource {
+                id,
+                name: world.name_of(id).map(String::from),
+                x,
+                y,
+                kind,
+                lifetime,
+                speed_min,
+                speed_max,
+                dir,
+                spread,
+                gravity,
+                rgb,
+                rgb_end,
+                color,
+                size,
+                size_end,
+                active,
+                seed: emitter_seed(id),
+            })
+        })
+        .collect()
+}
+
+/// 一个待画的粒子（世界坐标 + 已算好的大小/颜色）。CPU 方点光栅化和 GPU 方块
+/// 顶点流共用——位置/数量/颜色两条路径必然一致。
+pub struct ParticleDot {
+    pub x: f64,
+    pub y: f64,
+    /// 当前大小（世界单位，按寿命进度从 size 渐变到 size_end）。
+    pub size: f64,
+    /// 当前颜色（rgb 按寿命进度渐变，alpha 线性淡出 255 → 0）。
+    pub rgba: [u8; 4],
+}
+
+/// 第 `tick` tick 该发射器的全部在途粒子——**纯函数**：同 (发射器字段, tick) 永远
+/// 给出同一串粒子（顺序：老粒子在前 = 先画在底下；burst 全员同龄按序号排）。
+/// 无积分器：位置是解析式 `pos = origin + v0·t + ½g·t²`，t = 粒龄（秒）。
+/// 每个粒子的方向/初速由 SplitMix64(种子 ⊕ 序号) 散列出（不碰模拟 RNG 流）。
+pub fn emitter_particles(e: &EmitterSource, tick: u64) -> Vec<ParticleDot> {
+    let mut out = Vec::new();
+    if !e.active {
+        return out;
+    }
+    let t = tick as i64;
+    match e.kind {
+        EmitterKind::Stream { rate } => {
+            // 第 b tick 出生的粒子序号 = [n(b), n(b+1))，n(b) = floor(b·rate/60)。
+            // 从最老（age = lifetime-1）往最新画——后生的粒子盖在上面
+            let births_before =
+                |b: i64| -> i64 { (b as f64 * rate / PARTICLE_TICKS_PER_SECOND).floor() as i64 };
+            for age in (0..e.lifetime).rev() {
+                let b = t - age;
+                if b < 0 {
+                    continue; // 世界从 tick 0 开始，没有更早的出生
+                }
+                for k in births_before(b)..births_before(b + 1) {
+                    out.push(particle_at(e, k as u64, age));
+                }
+            }
+        }
+        EmitterKind::Burst { count, burst } => {
+            if burst < 0 {
+                return out; // 未触发
+            }
+            let age = t - burst;
+            if age < 0 || age >= e.lifetime {
+                return out; // 还没到触发 tick / 寿命已尽
+            }
+            for k in 0..count {
+                out.push(particle_at(e, k as u64, age));
+            }
+        }
+    }
+    out
+}
+
+/// 序号 `k`、粒龄 `age`（tick）的粒子——纯算术，无状态。
+fn particle_at(e: &EmitterSource, k: u64, age: i64) -> ParticleDot {
+    let h = mix64(e.seed ^ k);
+    // 高/低 32 位各出一个 [0,1] 均匀数：方向偏移 + 初速
+    let u1 = (h >> 32) as u32 as f64 / u32::MAX as f64;
+    let u2 = h as u32 as f64 / u32::MAX as f64;
+    let dir = e.dir + (u1 - 0.5) * e.spread;
+    let speed = e.speed_min + u2 * (e.speed_max - e.speed_min);
+    let secs = age as f64 / PARTICLE_TICKS_PER_SECOND;
+    let (sn, cs) = dir.to_radians().sin_cos();
+    // 寿命进度 0..<1（age ∈ 0..lifetime）：颜色/大小线性渐变，alpha 线性淡出
+    let s = age as f64 / e.lifetime as f64;
+    let ch = |c: usize| (e.rgb[c] + (e.rgb_end[c] - e.rgb[c]) * s).round() as u8;
+    ParticleDot {
+        x: e.x + cs * speed * secs,
+        y: e.y + sn * speed * secs + 0.5 * e.gravity * secs * secs,
+        size: e.size + (e.size_end - e.size) * s,
+        rgba: [ch(0), ch(1), ch(2), (255.0 * (1.0 - s)).round() as u8],
+    }
+}
+
+/// 粒子光栅化（CPU 路径）：方点，中心在世界坐标、边长 = 当前大小，与精灵同一套
+/// 世界→屏幕变换；src-alpha 混合（与贴图精灵的 alpha 混合同一条算式）。
+/// 在光照之后调用——粒子自发光，不参与法线缓冲。
+fn draw_particles(
+    world: &World,
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    (cam_x, cam_y, scale): (f64, f64, f64),
+    tick: u64,
+) -> Result<(), String> {
+    for e in collect_emitters(world)? {
+        for p in emitter_particles(&e, tick) {
+            let a = p.rgba[3] as u32;
+            if a == 0 {
+                continue;
+            }
+            let cx = (width as f64) / 2.0 + (p.x - cam_x) * scale;
+            let cy = (height as f64) / 2.0 - (p.y - cam_y) * scale;
+            let half = p.size * scale / 2.0;
+            let x0 = (cx - half).floor().max(0.0) as i64;
+            let x1 = (cx + half).ceil().min(width as f64) as i64;
+            let y0 = (cy - half).floor().max(0.0) as i64;
+            let y1 = (cy + half).ceil().min(height as f64) as i64;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y as u32 * width + x as u32) * 4) as usize;
+                    let dst = &mut buf[i..i + 4];
+                    // src-alpha 混合，与贴图精灵的逐通道算式一致
+                    for (d, s) in dst.iter_mut().zip(p.rgba).take(3) {
+                        *d = ((s as u32 * a + *d as u32 * (255 - a)) / 255) as u8;
+                    }
+                    dst[3] = 255;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 可选的 `Sprite.rot`（度数）。缺省 = 0 = 不旋转；字段在但不是数字 → 显式报错。
 /// 角度约定：**世界空间逆时针为正**——屏幕 y 翻转后，画面上看同样是逆时针。
 /// CPU 光栅化、GPU 顶点流、点选三处共用这一个语义源头。
@@ -1866,13 +2300,16 @@ pub fn describe_world_with_assets(
     let mut warning_lines: Vec<String> = Vec::new();
     for c in &candidates {
         // 少画这一条文字渲一帧（其余文字照画——文字叠文字时底色也算数），
-        // 相机用 describe 自己的不抖相机，素材宽容模式见 RenderOpts
+        // 相机用 describe 自己的不抖相机，素材宽容模式见 RenderOpts。
+        // tick 固定 0：describe 没有时间概念，测量帧里的粒子按 tick 0 展开
+        //（stream 在 tick 0 几乎没有粒子）——对比度是 lint 不是色彩学，已知近似
         let frame = render_with(
             world,
             width,
             height,
             assets,
             (cam_x, cam_y, scale),
+            0,
             &RenderOpts { skip_text: Some(c.id), lenient_images: true },
         )?;
         // 包围盒按绘制几何估算（与 draw_texts 的两条路径镜像），裁到屏内
@@ -2028,6 +2465,54 @@ pub fn describe_world_with_assets(
         ));
     }
 
+    // 粒子发射器：按发射器汇总一行（粒子不逐个列——它们是纯函数展开的画面装饰，
+    // 不是可观察的世界状态）。describe 没有时间概念：stream 给稳态可见数估算，
+    // burst 给触发字段原值，agent 自己对照当前 tick
+    let emitters = collect_emitters(world)?;
+    let mut emitters_json: Vec<Value> = Vec::new();
+    for em in &emitters {
+        let label = em.name.clone().unwrap_or_else(|| em.id.to_string());
+        let mut entry = serde_json::Map::new();
+        entry.insert("id".into(), json!(em.id.to_string()));
+        if let Some(n) = &em.name {
+            entry.insert("name".into(), json!(n));
+        }
+        entry.insert("kind".into(), json!(em.kind.name()));
+        entry.insert("active".into(), json!(em.active));
+        entry.insert("world".into(), json!({"x": em.x, "y": em.y}));
+        entry.insert("lifetime".into(), json!(em.lifetime));
+        entry.insert("color".into(), json!(em.color));
+        match em.kind {
+            EmitterKind::Stream { rate } => {
+                let steady =
+                    (rate * em.lifetime as f64 / PARTICLE_TICKS_PER_SECOND).ceil() as i64;
+                entry.insert("rate".into(), json!(rate));
+                entry.insert("visible_estimate".into(), json!(steady));
+                lines.push(if em.active {
+                    format!("- 发射器 {label}: stream 活跃，~{steady} 粒子可见（世界 {},{}）", em.x, em.y)
+                } else {
+                    format!("- 发射器 {label}: stream 关闭（active=false）")
+                });
+            }
+            EmitterKind::Burst { count, burst } => {
+                entry.insert("count".into(), json!(count));
+                entry.insert("burst".into(), json!(burst));
+                let state = if !em.active {
+                    "关闭（active=false）".to_string()
+                } else if burst < 0 {
+                    "未触发".to_string()
+                } else {
+                    format!("触发@tick {burst}")
+                };
+                lines.push(format!(
+                    "- 发射器 {label}: burst {state}（count {count}，寿命 {} tick）",
+                    em.lifetime
+                ));
+            }
+        }
+        emitters_json.push(Value::Object(entry));
+    }
+
     let mut out = json!({
         "camera": {"x": cam_x, "y": cam_y, "scale": scale},
         "viewport": {"width": width, "height": height},
@@ -2048,6 +2533,10 @@ pub fn describe_world_with_assets(
     }
     if let Some(b) = &bloom {
         out["bloom"] = json!({"threshold": b.threshold, "strength": b.strength});
+    }
+    // 没发射器就不出现 emitters 键——同 bloom/warnings 的"没有键 = 没有"约定
+    if !emitters_json.is_empty() {
+        out["emitters"] = json!(emitters_json);
     }
     // 没警告就不出现 warnings 键——"没有这个键 = 没发现问题"，agent 不用扫空数组
     if !warnings.is_empty() {
@@ -2138,10 +2627,7 @@ pub fn shake_offset(tick: u64, amplitude: f64) -> (f64, f64) {
     if amplitude <= 0.0 {
         return (0.0, 0.0);
     }
-    let mut z = tick.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^= z >> 31;
+    let z = mix64(tick); // 同一个 SplitMix64（粒子散列共用），运算序列与重构前逐位相同
     let nx = ((z >> 32) as u32 as f64) / (u32::MAX as f64) * 2.0 - 1.0;
     let ny = (z as u32 as f64) / (u32::MAX as f64) * 2.0 - 1.0;
     (nx * amplitude, ny * amplitude)
@@ -3631,5 +4117,232 @@ mod tests {
         let d = describe_world(&w, 64, 64).unwrap();
         let warns = d["warnings"].as_array().expect("白色块近似底下仍是白底，警告照给");
         assert_eq!(warns[0]["kind"], json!("low-contrast-text"));
+    }
+
+    // ---- 粒子发射器（Emitter，纯渲染层产物）----
+
+    /// 火花流测试场：一个 stream 发射器（每秒 60 粒、寿命 30 tick）。
+    fn world_stream_emitter() -> World {
+        let mut w = World::new();
+        let e = w.spawn_named("sparks").unwrap();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(
+            e,
+            "Emitter",
+            json!({"kind": "stream", "rate": 60.0, "lifetime": 30, "size": 0.5,
+                   "speed_min": 2.0, "speed_max": 5.0, "spread": 360.0,
+                   "color": "#ffcc40", "color_end": "#ff3000"}),
+        )
+        .unwrap();
+        w
+    }
+
+    #[test]
+    fn emitter_same_tick_renders_byte_identical_and_draws_pixels() {
+        let w = world_stream_emitter();
+        let a = render_world(&w, 64, 64, &Assets::empty(), 100).unwrap();
+        let b = render_world(&w, 64, 64, &Assets::empty(), 100).unwrap();
+        assert_eq!(a, b, "同一 tick 两次渲染必须逐字节一致");
+        assert!(
+            a.chunks_exact(4).any(|p| p != BACKGROUND),
+            "稳态 tick 100 必须真的画出粒子"
+        );
+        // 不同 tick 画面演化（粒子在动）
+        let c = render_world(&w, 64, 64, &Assets::empty(), 101).unwrap();
+        assert_ne!(a, c, "粒子是 tick 的函数，下一 tick 画面应不同");
+    }
+
+    #[test]
+    fn emitter_particles_is_a_pure_function_of_tick() {
+        let w = world_stream_emitter();
+        let e = &collect_emitters(&w).unwrap()[0];
+        let p1 = emitter_particles(e, 100);
+        let p2 = emitter_particles(e, 100);
+        assert_eq!(p1.len(), p2.len());
+        for (a, b) in p1.iter().zip(&p2) {
+            assert_eq!((a.x, a.y, a.size, a.rgba), (b.x, b.y, b.size, b.rgba));
+        }
+        // 稳态可见数 = rate·lifetime/60 = 60·30/60 = 30
+        assert_eq!(p1.len(), 30, "稳态在途粒子数");
+        // 早期（tick < lifetime）只有已出生的：tick 5 → 出生 tick 0..=5 共 6 批×1
+        assert_eq!(emitter_particles(e, 5).len(), 6);
+        // 老粒子在前（先画在底下）：首个粒子比末个老 → alpha 更低
+        assert!(p1.first().unwrap().rgba[3] < p1.last().unwrap().rgba[3]);
+    }
+
+    #[test]
+    fn burst_appears_at_trigger_tick_and_expires_after_lifetime() {
+        let mut w = World::new();
+        let e = w.spawn_named("boom").unwrap();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(
+            e,
+            "Emitter",
+            json!({"kind": "burst", "count": 12, "lifetime": 20, "size": 0.5, "burst": 50}),
+        )
+        .unwrap();
+        let em = &collect_emitters(&w).unwrap()[0];
+        assert_eq!(emitter_particles(em, 49).len(), 0, "触发前一无所有");
+        assert_eq!(emitter_particles(em, 50).len(), 12, "触发 tick 全员出生");
+        assert_eq!(emitter_particles(em, 69).len(), 12, "寿命最后一 tick 还在");
+        assert_eq!(emitter_particles(em, 70).len(), 0, "寿命到期当帧消失");
+        // burst 缺省 -1 = 未触发
+        w.set_component(
+            e,
+            "Emitter",
+            json!({"kind": "burst", "count": 12, "lifetime": 20, "size": 0.5}),
+        )
+        .unwrap();
+        let em = &collect_emitters(&w).unwrap()[0];
+        assert_eq!(emitter_particles(em, 100).len(), 0);
+    }
+
+    #[test]
+    fn particle_motion_is_analytic_and_fades() {
+        // spread 0 + 固定初速 + 重力：位置必须严格等于解析式 origin + v0·t + ½g·t²
+        let mut w = World::new();
+        let e = w.spawn_named("jet").unwrap();
+        w.set_component(e, "Position", json!({"x": 1.0, "y": 2.0})).unwrap();
+        w.set_component(
+            e,
+            "Emitter",
+            json!({"kind": "burst", "count": 1, "lifetime": 60, "size": 1.0, "burst": 0,
+                   "dir": 90.0, "spread": 0.0, "speed_min": 6.0, "speed_max": 6.0,
+                   "gravity": -10.0}),
+        )
+        .unwrap();
+        let em = &collect_emitters(&w).unwrap()[0];
+        for age in [0i64, 10, 30, 59] {
+            let p = &emitter_particles(em, age as u64)[0];
+            let t = age as f64 / PARTICLE_TICKS_PER_SECOND;
+            // dir=90（+y）、spread=0：x 不动（cos90 的浮点尾数 ≈ 0）
+            assert!((p.x - 1.0).abs() < 1e-9, "age {age}: x={}", p.x);
+            let expect_y = 2.0 + 6.0 * t + 0.5 * (-10.0) * t * t;
+            assert!((p.y - expect_y).abs() < 1e-9, "age {age}: y={} 应为 {expect_y}", p.y);
+            // alpha 线性淡出
+            let expect_a = (255.0 * (1.0 - age as f64 / 60.0)).round() as u8;
+            assert_eq!(p.rgba[3], expect_a, "age {age}");
+        }
+    }
+
+    #[test]
+    fn emitter_off_or_absent_keeps_bytes_identical() {
+        // 同一世界：没有发射器 vs 挂了 active=false 的发射器 → 输出逐字节相同
+        let base = world_one_red_sprite();
+        let frame_none = render_world(&base, 64, 64, &Assets::empty(), 77).unwrap();
+        let mut with_off = world_one_red_sprite();
+        let e = with_off.spawn_named("muted").unwrap();
+        with_off.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        with_off
+            .set_component(
+                e,
+                "Emitter",
+                json!({"kind": "stream", "rate": 60.0, "lifetime": 30, "size": 0.5,
+                       "active": false}),
+            )
+            .unwrap();
+        let frame_off = render_world(&with_off, 64, 64, &Assets::empty(), 77).unwrap();
+        assert_eq!(frame_none, frame_off, "active=false = 一个粒子都不画 = 旧行为字节不变");
+    }
+
+    #[test]
+    fn particles_are_self_lit_under_darkness() {
+        // 全黑环境光：精灵被压黑，粒子照亮自己（自发光约定）
+        let mut w = world_one_red_sprite();
+        let amb = w.spawn();
+        w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
+        let e = w.spawn_named("sparks").unwrap();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(
+            e,
+            "Emitter",
+            json!({"kind": "burst", "count": 1, "lifetime": 60, "size": 1.0, "burst": 0,
+                   "spread": 0.0, "color": "#00ff00"}),
+        )
+        .unwrap();
+        // burst@0、age 0、speed 0 → 粒子停在原点 = 屏幕中心，alpha 255 纯绿
+        let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
+        assert_eq!(pixel(&buf, 64, 32, 32), [0, 255, 0, 255], "粒子不被全黑环境光压暗");
+        // 粒子边界外的精灵像素确实被压黑了（光照在跑）
+        assert_eq!(pixel(&buf, 64, 26, 26), [0, 0, 0, 255], "精灵照常被打光");
+    }
+
+    #[test]
+    fn emitter_errors_are_explicit_with_hints() {
+        let mut w = World::new();
+        let e = w.spawn_named("bad").unwrap();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        // kind 缺失
+        w.set_component(e, "Emitter", json!({"lifetime": 30, "size": 0.5})).unwrap();
+        let err = collect_emitters(&w).unwrap_err();
+        assert!(err.contains("kind") && err.contains("stream") && err.contains("burst"), "{err}");
+        // kind 不认识
+        w.set_component(e, "Emitter", json!({"kind": "fountain", "lifetime": 30, "size": 0.5}))
+            .unwrap();
+        let err = collect_emitters(&w).unwrap_err();
+        assert!(err.contains("fountain") && err.contains("不认识"), "{err}");
+        // stream 缺 rate
+        w.set_component(e, "Emitter", json!({"kind": "stream", "lifetime": 30, "size": 0.5}))
+            .unwrap();
+        let err = collect_emitters(&w).unwrap_err();
+        assert!(err.contains("rate") && err.contains("写法"), "{err}");
+        // lifetime 非法
+        w.set_component(e, "Emitter", json!({"kind": "stream", "rate": 10.0, "lifetime": 0, "size": 0.5}))
+            .unwrap();
+        assert!(collect_emitters(&w).unwrap_err().contains("lifetime"), "lifetime ≥ 1");
+        // size 缺失
+        w.set_component(e, "Emitter", json!({"kind": "stream", "rate": 10.0, "lifetime": 30}))
+            .unwrap();
+        assert!(collect_emitters(&w).unwrap_err().contains("size"));
+        // 粒子预算超限
+        w.set_component(
+            e,
+            "Emitter",
+            json!({"kind": "stream", "rate": 6000.0, "lifetime": 600, "size": 0.5}),
+        )
+        .unwrap();
+        let err = collect_emitters(&w).unwrap_err();
+        assert!(err.contains("预算") && err.contains("1024"), "{err}");
+        // 没有 Position
+        let mut w2 = World::new();
+        let e2 = w2.spawn_named("floating").unwrap();
+        w2.set_component(e2, "Emitter", json!({"kind": "burst", "count": 5, "lifetime": 30, "size": 0.5}))
+            .unwrap();
+        assert!(collect_emitters(&w2).unwrap_err().contains("Position"));
+    }
+
+    #[test]
+    fn describe_summarizes_emitters_one_line_each() {
+        let mut w = world_stream_emitter();
+        let b = w.spawn_named("boom").unwrap();
+        w.set_component(b, "Position", json!({"x": 3.0, "y": 0.0})).unwrap();
+        w.set_component(
+            b,
+            "Emitter",
+            json!({"kind": "burst", "count": 8, "lifetime": 20, "size": 0.4}),
+        )
+        .unwrap();
+        let d = describe_world(&w, 64, 64).unwrap();
+        let ems = d["emitters"].as_array().expect("有发射器必须给 emitters 键");
+        assert_eq!(ems.len(), 2);
+        assert_eq!(ems[0]["kind"], json!("stream"));
+        assert_eq!(ems[0]["visible_estimate"], json!(30), "rate 60 × lifetime 30 / 60");
+        assert_eq!(ems[1]["kind"], json!("burst"));
+        assert_eq!(ems[1]["burst"], json!(-1));
+        let text = d["text"].as_str().unwrap();
+        assert!(text.contains("发射器 sparks") && text.contains("~30 粒子可见"), "{text}");
+        assert!(text.contains("发射器 boom") && text.contains("未触发"), "{text}");
+        // 没有发射器 = 没有 emitters 键
+        let d2 = describe_world(&world_one_red_sprite(), 64, 64).unwrap();
+        assert!(d2.get("emitters").is_none());
+    }
+
+    #[test]
+    fn emitter_seed_decorrelates_neighbor_entities() {
+        let a = emitter_seed(vitric_ecs::EntityId { index: 1, generation: 1 });
+        let b = emitter_seed(vitric_ecs::EntityId { index: 2, generation: 1 });
+        assert_ne!(a, b);
+        // 同一 id 永远同种子（确定性）
+        assert_eq!(a, emitter_seed(vitric_ecs::EntityId { index: 1, generation: 1 }));
     }
 }

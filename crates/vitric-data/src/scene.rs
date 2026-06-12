@@ -199,6 +199,75 @@ mod tests {
     }
 
     #[test]
+    fn emitter_schema_rejects_bad_fields_with_paths() {
+        // 发射器组件走与其他组件完全相同的 schema 校验：非法 kind（枚举）、
+        // 越界 spread、未知字段都要报错并带完整路径——vitric check 的红灯就是这里
+        let s = Schema::parse(
+            &json!({"components": {
+                "Position": {"fields": {"x": {"type":"number"}, "y": {"type":"number"}}},
+                "Emitter": {"fields": {
+                    "kind": {"type": "enum", "variants": ["stream", "burst"]},
+                    "rate": {"type": "number", "default": 0, "min": 0},
+                    "count": {"type": "int", "default": 0, "min": 0},
+                    "burst": {"type": "int", "default": -1},
+                    "lifetime": {"type": "int", "default": 30, "min": 1},
+                    "speed_min": {"type": "number", "default": 0, "min": 0},
+                    "speed_max": {"type": "number", "default": 0, "min": 0},
+                    "dir": {"type": "number", "default": 0},
+                    "spread": {"type": "number", "default": 360, "min": 0, "max": 360},
+                    "gravity": {"type": "number", "default": 0},
+                    "color": {"type": "text", "default": "#ffffff"},
+                    "color_end": {"type": "text", "default": ""},
+                    "size": {"type": "number", "default": 0.3, "min": 0},
+                    "size_end": {"type": "number", "default": 0, "min": 0},
+                    "active": {"type": "bool", "default": true}
+                }}
+            }}),
+            "schema.json",
+        )
+        .unwrap();
+        let err = Scene::parse(
+            json!({"entities": [
+                {"name": "sparks", "components": {
+                    "Position": {"x": 0, "y": 0},
+                    "Emitter": {"kind": "fountain", "spread": 720, "ttl": 9}
+                }}
+            ]}),
+            "scenes/main.json",
+            &s,
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        // 枚举值非法（VD022）：路径直指 kind 字段
+        assert!(
+            text.contains("VD022") && text.contains("scenes/main.json#/entities/0/components/Emitter/kind"),
+            "{text}"
+        );
+        // 越界（VD021）：spread > 360
+        assert!(
+            text.contains("VD021") && text.contains("Emitter/spread"),
+            "{text}"
+        );
+        // 未知字段（VD003）：ttl 不属于 Emitter
+        assert!(
+            text.contains("VD003") && text.contains("Emitter/ttl"),
+            "{text}"
+        );
+        // 合法写法照常通过
+        Scene::parse(
+            json!({"entities": [
+                {"name": "sparks", "components": {
+                    "Position": {"x": 0, "y": 0},
+                    "Emitter": {"kind": "stream", "rate": 20, "lifetime": 40, "size": 0.3}
+                }}
+            ]}),
+            "scenes/main.json",
+            &s,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn instantiate_resolves_refs_and_defaults() {
         let s = schema();
         let scene = Scene::parse(

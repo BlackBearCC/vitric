@@ -42,3 +42,30 @@ fn collect_gem_then_light_the_lantern() {
     assert!(won, "碰灯笼应发 game-won");
     assert_eq!(sim.world.get_field(hud, "Text.content").unwrap(), &json!("LIT! 1/5 GEMS"));
 }
+
+#[test]
+fn lantern_sparks_emitter_is_visible_and_deterministic() {
+    // 灯笼火花（Emitter，纯渲染层粒子）：传送到灯笼旁、相机跟过去后，
+    // 画面必须真的有粒子在动，且同一 tick 渲两次逐字节一致
+    let (mut sim, mut rt) = Runtime::boot(&dir()).unwrap();
+    let hero = sim.world.entity("hero").unwrap();
+    sim.world.set_field(hero, "Position.x", json!(44.0)).unwrap();
+    sim.world.set_field(hero, "Position.y", json!(2.0)).unwrap();
+    for _ in 0..240 {
+        sim.step(&mut rt).unwrap(); // 相机 lerp 跟到位 + 粒子流进入稳态
+    }
+    let assets = vitric_render::Assets::load_dir(&dir().join("assets")).unwrap();
+    let a = vitric_render::render_world(&sim.world, 320, 180, &assets, sim.tick).unwrap();
+    let b = vitric_render::render_world(&sim.world, 320, 180, &assets, sim.tick).unwrap();
+    assert_eq!(a, b, "同一 tick 两次渲染逐字节一致");
+    // 把发射器关掉再渲同一 tick：画面必须不同——证明火花真的画出来了
+    let sparks = sim.world.entity("lantern-sparks").unwrap();
+    sim.world.set_field(sparks, "Emitter.active", json!(false)).unwrap();
+    let muted = vitric_render::render_world(&sim.world, 320, 180, &assets, sim.tick).unwrap();
+    assert_ne!(a, muted, "active=false 后画面应少了火花");
+    // describe 给发射器汇总行
+    let d = vitric_render::describe_world(&sim.world, 320, 180).unwrap();
+    let ems = d["emitters"].as_array().unwrap();
+    assert_eq!(ems[0]["name"], json!("lantern-sparks"));
+    assert_eq!(ems[0]["kind"], json!("stream"));
+}

@@ -61,6 +61,10 @@ struct Vertex {
 /// 法线 UV 的哨兵矩形：四角全 -1（插值后仍 < 0，片元据此跳过法线路径）。
 const NO_NORMAL: UvRect = [-1.0; 4];
 
+/// 自发光图元的哨兵矩形：四角全 -2（< -1.5，片元据此**整个跳过光照**——粒子专用，
+/// 与 CPU 路径"粒子在光照之后画"的语义镜像）。-1（普通无法线）照旧被打光。
+const UNLIT: UvRect = [-2.0; 4];
+
 /// uniform：viewport = [宽, 高, "表面是 sRGB"标志, "光照开启"标志]（z>0.5 时片元做
 /// sRGB→线性，保证最终字节和 CPU 路径的 sRGB 字节一致；w>0.5 时片元跑光照公式）。
 /// ambient = [环境色 rgb, 灯数]；每盏灯三条 vec4（打包布局，被单测锁死）：
@@ -410,7 +414,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     //   单位方向 ×0.8、z 固定 0.6（NORMAL_LIGHT_XY/Z，语义源头在 vitric-render）。
     // 必须在 sRGB 反算**之前**：CPU 是直接在 sRGB 字节上乘的，这里要在同一数值空间打光，
     // 两条路径才长一个样。in.pos 是帧缓冲像素坐标（中心 +0.5），和 CPU 的像素中心一致。
-    if (globals.viewport.w > 0.5) {
+    // nuv.x < -1.5 = 自发光哨兵（粒子）：整个跳过光照——CPU 路径粒子画在光照之后，
+    // 这里同语义；nuv.x = -1（普通无法线）照旧被打光，旧内容行为不变。
+    if (globals.viewport.w > 0.5 && in.nuv.x > -1.5) {
         let has_n = in.nuv.x >= 0.0;
         var nrm = vec3<f32>(0.0, 0.0, 1.0);
         if (has_n) {
@@ -820,6 +826,9 @@ impl GpuPresenter {
             let split = verts.len();
             let cam = vitric_render::camera_of(world, tick, h)?;
             push_ttf_texts(&mut verts, world, w, h, font, &mut gt.atlas, cam)?;
+            // 粒子在文字之后、描边之前（同 build_vertices）；split 之后的顶点绑
+            // 字形图集，所以白块用字形图集那份（同一布局同一管线，只是换纹理）
+            push_emitter_particles(&mut verts, world, w, h, gt.atlas.white, cam, tick)?;
             if let Some(id) = selection {
                 push_selection_outline(&mut verts, world, w, h, gt.atlas.white, id, cam);
             }
@@ -1620,6 +1629,8 @@ fn build_vertices(
     let (cam_x, cam_y, scale) = vitric_render::camera_of(world, tick, height)?;
     let mut verts = build_scene_vertices(world, width, height, atlas, tick)?;
     push_bitmap_texts(&mut verts, world, width, height, atlas, (cam_x, cam_y, scale))?;
+    // 粒子在文字之后（CPU 路径粒子画在光照之后 = 盖在精灵/文字上，画家序同语义）
+    push_emitter_particles(&mut verts, world, width, height, atlas.white, (cam_x, cam_y, scale), tick)?;
     // 选中描边：青色 2px，画在最上层（几何对齐 vitric_render::draw_selection_outline）。
     // 已知小偏差：光照开启时描边在 GPU 窗口会被一起打光（同一条管线），CPU 窗口路径
     // 是渲完再描所以不被打光——检查器调试装饰，不进截图/断言，不值得为它开第二条管线
@@ -1837,6 +1848,43 @@ fn push_ttf_texts(
             let x0 = ((left + p.x as f64).round() + g.left as f64) as f32;
             let y0 = (baseline + g.top as f64) as f32;
             push_quad(verts, x0, y0, x0 + g.width as f32, y0 + g.height as f32, uv, tint(rgba));
+        }
+    }
+    Ok(())
+}
+
+/// 粒子流：发射器按纯函数展开（语义源头 vitric_render::emitter_particles——
+/// 位置/数量/颜色与 CPU 路径同一份数据），每个粒子一个白块方块 + 染色。
+/// nuv 用 [`UNLIT`] 哨兵：片元跳过光照（自发光，CPU 路径粒子画在光照之后，同语义）。
+fn push_emitter_particles(
+    verts: &mut Vec<Vertex>,
+    world: &World,
+    width: u32,
+    height: u32,
+    white: [f32; 2],
+    (cam_x, cam_y, scale): (f64, f64, f64),
+    tick: u64,
+) -> Result<(), String> {
+    for e in vitric_render::collect_emitters(world)? {
+        for p in vitric_render::emitter_particles(&e, tick) {
+            if p.rgba[3] == 0 {
+                continue;
+            }
+            // 与 CPU 光栅化同一条世界→像素变换（方点中心 + 半边长）
+            let cx = (width as f64) / 2.0 + (p.x - cam_x) * scale;
+            let cy = (height as f64) / 2.0 - (p.y - cam_y) * scale;
+            let half = p.size * scale / 2.0;
+            let (x0, y0) = ((cx - half) as f32, (cy - half) as f32);
+            let (x1, y1) = ((cx + half) as f32, (cy + half) as f32);
+            let [u, v] = white;
+            push_quad_corners_n(
+                verts,
+                [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+                [u, v, u, v],
+                UNLIT,
+                [1.0, 0.0],
+                tint(p.rgba),
+            );
         }
     }
     Ok(())
@@ -2438,6 +2486,58 @@ mod tests {
         let mut sp = Vec::new();
         push_ttf_texts(&mut sp, &w, 64, 64, &font, &mut a, (0.0, 0.0, 8.0)).unwrap();
         assert!(sp.is_empty());
+    }
+
+    #[test]
+    fn particle_quads_match_cpu_dots_and_are_unlit() {
+        // GPU 粒子方块必须与 CPU 真相源（emitter_particles）的位置/数量/颜色一致
+        let mut w = World::new();
+        let e = w.spawn_named("sparks").unwrap();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(
+            e,
+            "Emitter",
+            json!({"kind": "burst", "count": 3, "lifetime": 40, "size": 1.0, "burst": 0,
+                   "speed_min": 2.0, "speed_max": 4.0, "color": "#ffcc40"}),
+        )
+        .unwrap();
+        let tick = 10u64;
+        let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, tick).unwrap();
+        let src = &vitric_render::collect_emitters(&w).unwrap()[0];
+        let dots = vitric_render::emitter_particles(src, tick);
+        assert_eq!(dots.len(), 3);
+        assert_eq!(verts.len(), dots.len() * 6, "每个粒子一个方块（两个三角形）");
+        for (i, p) in dots.iter().enumerate() {
+            let quad = &verts[i * 6..i * 6 + 6];
+            // 与 CPU 同一条变换：中心 = 屏幕中心 + 世界偏移·scale（默认相机 scale=8）
+            let cx = 32.0 + p.x * 8.0;
+            let cy = 32.0 - p.y * 8.0;
+            let half = p.size * 8.0 / 2.0;
+            let x_min = quad.iter().map(|v| v.pos[0]).fold(f32::MAX, f32::min);
+            let y_min = quad.iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
+            assert!((x_min as f64 - (cx - half)).abs() < 1e-4, "粒子 {i} 位置对齐 CPU");
+            assert!((y_min as f64 - (cy - half)).abs() < 1e-4);
+            assert_eq!(quad[0].color, tint(p.rgba), "颜色（含淡出 alpha）一致");
+            // 自发光哨兵：nuv < -1.5，片元跳过光照
+            assert!(quad.iter().all(|v| v.nuv[0] < -1.5 && v.nuv[1] < -1.5), "UNLIT 哨兵");
+        }
+        // 未触发的 burst（burst < 0）一个顶点都不出
+        w.set_component(
+            e,
+            "Emitter",
+            json!({"kind": "burst", "count": 3, "lifetime": 40, "size": 1.0}),
+        )
+        .unwrap();
+        assert!(build_vertices(&w, 64, 64, &fake_atlas(), None, tick).unwrap().is_empty());
+    }
+
+    #[test]
+    fn particle_tick_rate_constant_matches_sim() {
+        // 粒子时间换算常量必须与模拟频率同值（render 不依赖 sim，跨 crate 在这里锁死）
+        assert_eq!(
+            vitric_render::PARTICLE_TICKS_PER_SECOND,
+            vitric_sim::TICKS_PER_SECOND as f64
+        );
     }
 
     #[test]

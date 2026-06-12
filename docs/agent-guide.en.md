@@ -214,7 +214,7 @@ Built-in systems recognize: `Position{x,y}` + `Velocity{x,y}` → integrated mot
 `Position` + `Collider{w,h}` → AABB collision emits `collision` events;
 `Position` + `Sprite{w,h,color,image,rot}` → rendering; `Camera{x,y,scale}` → view.
 `Sprite.rot` is optional (degrees): the sprite rotates around its own Position, counter-clockwise positive in world space (which is also counter-clockwise as seen on screen); default 0 = no rotation. On-screen `Text` never rotates, and picking hits the rotated shape, not the original AABB.
-Game-feel components (Camera `follow`/`lerp`, `Shake`, `Particle`) are covered in the "Game feel" section below.
+Game-feel components (Camera `follow`/`lerp`, `Shake`, `Particle`) are covered in the "Game feel" section below; bulk particles (`Emitter`) in the "Particle emitter" section.
 
 ## Platformer physics
 
@@ -232,7 +232,59 @@ Convention components like Body/Solid: the engine recognizes the names, you defi
   {"id": "hit-shake", "on": {"event": "collision", "between": ["Player", "Enemy"]},
    "do": [{"set": "@camera.Shake.amplitude", "to": 0.5}]}
   ```
-- **Particles**: put `Particle{ttl}` (ticks remaining, integer) on an entity; the engine decrements it each tick and despawns the entity at 0 (despawn order = slot order, deterministic). Confetti / dust / explosions = spawn a batch of Sprite+Velocity+Particle entities and forget them — no cleanup rules needed.
+- **Particles**: put `Particle{ttl}` (ticks remaining, integer) on an entity; the engine decrements it each tick and despawns the entity at 0 (despawn order = slot order, deterministic). Confetti / dust / explosions = spawn a batch of Sprite+Velocity+Particle entities and forget them — no cleanup rules needed. For continuous bulk effects (torch sparks, smoke), use the `Emitter` component below — zero entity overhead, zero state.
+
+## Particle emitter
+
+`Emitter` + `Position`: bulk particles (torch sparks, fountains, bursts). Fundamentally different from spawning `Particle{ttl}` entities — **particles are a pure render-layer product, not entities, and never enter sim state**: every particle's position/color/size at tick T is a pure function `f(emitter fields, particle index, T, seed derived from the entity id)`. No integrator (analytic form `pos = origin + v0·t + ½g·t²`), no cross-frame state. The emitter's fields hash into state / saves like any component, but hundreds of particles add **zero extra state** — recordings replay and snapshot restores (sim/restore) reproduce the particle picture byte-for-byte automatically. Per-particle randomness (direction/speed) uses a deterministic SplitMix64 hash of entity-id ⊕ particle-index; the sim RNG stream is never touched.
+
+Fields (missing/invalid = explicit error; caps: 64 emitters, 1024 particles per emitter on screen):
+
+- `kind` (required): `"stream"` (continuous, `rate` particles/second, emission timeline counted from tick 0) or `"burst"` (one-shot).
+- `lifetime` (required): particle lifetime in ticks (integer ≥ 1). `size` (required): start size (world units > 0).
+- stream uses `rate` (particles/sec, > 0); burst uses `count` (≥ 1) + `burst` (trigger tick number, negative = not fired, default -1). **Firing a burst = a rule/script writing the current tick into the `burst` field** — whether the burst window (burst ≤ T < burst+lifetime) is active is derived purely from the field value, so the render layer keeps no history; the field write is captured by recordings/snapshots and replays reproduce it.
+- `speed_min`/`speed_max`: initial speed range (world units/sec, default 0; `speed_max` defaults to `speed_min`).
+- `dir`: emission heading (degrees, 0 = +x, counter-clockwise positive — same convention as Sprite.rot/Light.dir; default 0); `spread`: cone full width (0..=360, default 360 = omnidirectional).
+- `gravity`: acceleration on the y axis (world units/sec², usually negative; default 0).
+- `color`/`color_end`: start/end color (`color_end` missing/empty = no gradient); alpha fades out linearly over the lifetime (built-in, 255 → 0). `size_end`: end size (≥ 0; 0 = shrink to nothing; field absent = same as `size`).
+- `active`: switch (default true). false = nothing is drawn — the purity trade-off: toggling off mid-flight makes in-flight particles vanish that frame (the picture only reads current field values).
+
+Interplay with lighting (**a simplification, stated explicitly**): particles are **self-lit** — not darkened by Ambient, not attenuated by lights, they neither cast nor receive shadows; they draw after lighting and before bloom, so bright particles bloom normally with a `Bloom` entity (sparks really "burn"). CPU screenshots draw square dots; the GPU window draws the same square geometry — position/count/color come from the same data on both paths. Known trade-offs: if the emitter entity moves, all in-flight particles move with it (positions are relative to the current origin — the price of statelessness); a stream's emission timeline is counted from tick 0 (an emitter spawned mid-game appears already in steady state).
+
+`render/describe` summarizes one line per emitter (particles are never listed individually): `- 发射器 lantern-sparks: stream 活跃，~11 粒子可见（世界 47,2.9）`, plus a structured `emitters[]` field (kind/active/rate or count+burst/lifetime/visible_estimate).
+
+Schema definition (field names are fixed, defaults are yours) — see `examples/glow` (`lantern-sparks`) for a complete example:
+
+```json
+"Emitter": {"fields": {
+  "kind": {"type": "enum", "variants": ["stream", "burst"]},
+  "rate": {"type": "number", "default": 0, "min": 0},
+  "count": {"type": "int", "default": 0, "min": 0},
+  "burst": {"type": "int", "default": -1},
+  "lifetime": {"type": "int", "default": 30, "min": 1},
+  "speed_min": {"type": "number", "default": 0, "min": 0},
+  "speed_max": {"type": "number", "default": 0, "min": 0},
+  "dir": {"type": "number", "default": 0},
+  "spread": {"type": "number", "default": 360, "min": 0, "max": 360},
+  "gravity": {"type": "number", "default": 0},
+  "color": {"type": "text", "default": "#ffffff"},
+  "color_end": {"type": "text", "default": ""},
+  "size": {"type": "number", "default": 0.3, "min": 0},
+  "size_end": {"type": "number", "default": 0, "min": 0},
+  "active": {"type": "bool", "default": true}
+}}
+```
+
+To fire a burst you need "the current tick", which rule actions don't have — use a script system (`ctx.tick`):
+
+```js
+// after a rule marks the hit (e.g. set @boom.Hit.flag = true), the script writes the tick
+vitric.system("fire-burst", { query: ["Emitter", "Hit"], writes: ["Emitter", "Hit"] }, (entities, ctx) => {
+  for (const e of entities) {
+    if (e.Hit.flag) { e.Emitter.burst = ctx.tick; e.Hit.flag = false; }
+  }
+});
+```
 
 ## Lighting
 
