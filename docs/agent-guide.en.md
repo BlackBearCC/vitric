@@ -343,7 +343,7 @@ Swap in a skill flourish, a boss intro, or end credits — all the same blocks w
 
 Menus, inventories, settings, HUDs are built from a set of **declarative, deterministic** widget primitives, modeled on Godot Control / Unity UI. **The engine only ships generic widget primitives; what a specific interface looks like (your main menu, how many inventory columns) is a project's usage of the blocks** — there is no "dialog box", "skill bar" or "results panel" in the engine, same principle as sequences. UI is entities + components too: it enters world state/hash/saves/recordings, and layout is a deterministic pure computation of `(UI tree, viewport)` (no wall clock, no randomness), so snapshot/replay round-trips exactly.
 
-**Current stage = 1.1: layout foundation + static widgets + screen-space rendering (grey-box, non-interactive)**. It nails "laid out correctly, drawn, camera-stable, zero cost when empty". Button state machine, focus navigation, click activation and themes are 1.2 — not in this stage.
+**Current stage = 1.2: interaction (Button state machine + focus navigation + click activation + the `ui-activate` event) and themes, on top of 1.1's layout**. The 1.1 layout foundation (anchors, VBox/HBox/Grid containers, Panel, Label, dirty-marking, screen-space rendering) is below; interaction/themes are the two subsections at the end. **No hover** (v1 is focus-navigation + click only; hover is a mouse-only notion absent on gamepad/touch, deferred to v2).
 
 **Coordinate system: UI is a screen-space overlay.** UI elements anchor to the **viewport (screen)** and render through a screen-space orthographic projection, **bypassing the camera transform** — so UI does not drift when the camera pans/zooms/shakes (like a HUD). This is the opposite of sprites/particles which live in world space. UI is overlaid right after world rendering (including lighting/particles/bloom), is not lit, and uses no offscreen buffer (it reuses the same vertex stream). CPU is the source of truth, GPU mirrors it, and both paths read the same layout result (`solve_layout`) — layout is never recomputed on the GPU.
 
@@ -384,7 +384,45 @@ Layout is dirty-marked + a single tree traversal (O(number of UI nodes)), not a 
 ] }
 ```
 
-Swap in inventory cells (Grid + columns), a settings list (VBox), or a corner minimap (bottom-right anchor) — all the same blocks. Genre-specific interfaces are a project's usage, not in the engine. **1.1 is layout + static widgets; interaction (button presses, focus navigation, click activation, themes) is 1.2.**
+Swap in inventory cells (Grid + columns), a settings list (VBox), or a corner minimap (bottom-right anchor) — all the same blocks. Genre-specific interfaces are a project's usage, not in the engine.
+
+### Interaction: focus navigation + click (dual-track, no hover)
+
+Interactive interfaces add a `Button` component on top of 1.1's layout. **Two activation tracks, both emit the same `ui-activate {id, action}` named event** for rules/sequences to handle (changing scene, opening inventory, etc. all go through emit→rules; the UI hardcodes no genre actions):
+
+- **Focus navigation**: focusable buttons form a focus ring; direction inputs `ui-up`/`ui-down`/`ui-left`/`ui-right` (standard `input/inject`) move focus by **layout adjacency** (rectangle geometry, like Godot's directional focus), stopping at edges without wrapping; `ui-confirm` activates the focused button. In windowed mode, arrow keys/Enter auto-inject `ui-*` when a UI is present (the game's own left/jump are unaffected).
+- **Click activation**: inject **normalized screen coords** `(nx, ny) ∈ [0,1]` (the `input/ui-click` RPC, or window mouse auto-converts = physical pixels / viewport size); the runtime multiplies them back to the 1920×1080 reference space and tests which button rect (`rx/ry/rw/rh`) they land in — a hit activates it and moves focus there. **Note this is a different coordinate system from world clicks `input/click`**: world clicks pick sprites (through the camera), UI clicks pick the screen-space overlay (no camera). Normalization + reference-space conversion decouples hit testing from real resolution; clicks ride the reply channel into the recording and replay bit-for-bit.
+
+`Button{action, theme, state, press_t, min_scale}`:
+
+- `action`: the action name carried by `ui-activate` on activation (non-empty — an empty action has no rule to catch it, check flags it red). Rules catch it with `{"event":"ui-activate","filter":{"action":"start"}}`.
+- `theme`: the theme name to reference (see next subsection; empty = no theme, keep the scene's hardcoded `Panel.color`).
+- `state`: the current state machine value ∈ `normal`/`focused` (selected by focus, highlighted)/`pressed` (the few-tick activation feedback)/`disabled` (not focusable, ignores click/confirm). **The engine writes it**; authors only set the initial value (e.g. the first menu item as `focused`).
+- `press_t`: press-feedback timer (-1 = not in feedback; engine-written). Press feedback = **scale + modulate** (shrink + brighten), an **analytic** pure function of `press_t` (the triangular envelopes of `press_scale`/`press_modulate`, no accumulation) — a render decoration that stays consistent across snapshot/restore.
+- `min_scale`: the scale at the deepest press (default 0.92 = shrink to 92%).
+
+Current focus lives in `UiRoot.focus` (entity name, engine-written, in the hash and the save). Focus / `state` / `press_t` all live in components → snapshot/recording-safe, and a snapshot/restore mid-feedback resumes the focus state consistently. Focus/click resolution is O(focusable button count), not a full scan; an empty UI is still zero-cost.
+
+### Themes (reskinning)
+
+`themes/<name>.json`, declared in the manifest `themes` list, referenced by `Button.theme`. Define once, reference globally; reskinning = swapping one reference. **A theme is an assembly-time constant, not world state**; at runtime the engine takes the per-state background color from the theme by `Button.state` and writes it into `Panel.color` (the renderer only reads `Panel.color`, never the theme table).
+
+```json
+{
+  "colors": { "bg": "#1b1d26", "text": "#f0f0f0", "focus": "#5a7bb5", "disabled": "#555555" },
+  "font_size": 30, "padding": 12, "margin": 24,
+  "button": {
+    "normal":   { "bg": "#3a4a6b", "text": "#e8ecf4" },
+    "focused":  { "bg": "#5a7bb5", "text": "#ffffff" },
+    "pressed":  { "bg": "#9fc0f0", "text": "#10131a" },
+    "disabled": { "bg": "#2a2d36", "text": "#6b6f7a" }
+  }
+}
+```
+
+`colors` is the global color roll; `button.<state>` is the four-state bg/text colors (writing only `colors` works too — the four states fill in from `colors`: focused→focus color, disabled→disabled color, the rest→bg). `vitric check` validates interaction/themes: button state legal (`VD074`), action non-empty (`VD075`), `Button.theme` references an existing theme, theme colors are legal `#rrggbb(aa)` (`VD081`), font size/padding non-negative (`VD082`), button state name legal (`VD083`), `UiRoot.focus` references an existing entity (the entity field's `VD033`).
+
+**A full runnable interactive example lives in examples/ui-menu**: a three-button menu column (Start/Options(disabled)/Quit); the focus-nav and mouse-click gate recordings both activate "Start" → emit `game-started` → a rule `load-scene` into the game scene, replayed bit-for-bit. The buttons carry `Button{action, theme:"dark", state}`, the theme is in `themes/dark.json`.
 
 ## Lighting
 

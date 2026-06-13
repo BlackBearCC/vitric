@@ -1,0 +1,12 @@
+{
+  "entities": [
+    { "name": "camera", "components": { "Camera": { "x": 0, "y": 0, "scale": 8 } } },
+    {
+      "name": "hero",
+      "components": {
+        "Position": { "x": 0, "y": 0 },
+        "Sprite": { "w": 4, "h": 4, "color": "#9fc0f0" }
+      }
+    }
+  ]
+}

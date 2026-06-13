@@ -39,6 +39,10 @@ pub struct ProjectManifest {
     /// 动画定义文件（可选）。
     #[serde(default)]
     pub animations: Option<String>,
+    /// 主题定义文件（可选，每个文件一份主题，`themes/<名>.json`）。
+    /// UI 控件按名字引用主题取样式（check 校验名存在）；不声明 = 项目不用主题。
+    #[serde(default)]
+    pub themes: Vec<String>,
     /// TTF 矢量字体（可选，路径相对项目根目录，如 "fonts/myfont.ttf"）。
     /// 设了它，所有 Text 组件改用该字体渲染（比例字距 + 抗锯齿，支持字体里有的
     /// 任意字形——含 CJK）；不设 = 维持内嵌 8x8 点阵字体的旧行为（输出字节不变）。
@@ -135,6 +139,17 @@ fn default_seed() -> u64 {
     0
 }
 
+/// 主题名 = 文件名去掉目录和 `.json` 后缀（`themes/dark.json` → `dark`）。
+/// 控件引用主题用这个名字。
+fn theme_name(rel: &str) -> String {
+    rel.rsplit('/')
+        .next()
+        .unwrap_or(rel)
+        .strip_suffix(".json")
+        .unwrap_or(rel)
+        .to_string()
+}
+
 /// 加载完成的项目：清单 + schema + 全部场景（已校验）+ 规则/脚本原文。
 ///
 /// 规则的语义校验在 vitric-rules（它认识触发器/动作的结构）；
@@ -154,6 +169,8 @@ pub struct Project {
     pub sequences: BTreeMap<String, Sequence>,
     /// 动画片段（名字 -> 定义）。
     pub animations: BTreeMap<String, Clip>,
+    /// 主题（名字 -> 已校验的样式卷）。装配期常量，不进世界状态。
+    pub themes: BTreeMap<String, crate::Theme>,
 }
 
 impl Project {
@@ -284,7 +301,29 @@ impl Project {
             }
         }
 
-        report.into_result(Project { root, manifest, schema, scenes, rules, scripts, sequences, animations })
+        // 主题：每个文件一份，名字取文件名（去 themes/ 前缀和 .json 后缀）。
+        // 重名显式报错——控件按名字引用，重名无法消歧（和序列同口径）。
+        let mut themes = BTreeMap::new();
+        for rel in &manifest.themes {
+            let name = theme_name(rel);
+            match read_json(&root.join(rel)) {
+                Ok(doc) => {
+                    if themes.contains_key(&name) {
+                        report.push(
+                            "VD084",
+                            rel.as_str(),
+                            format!("主题名 {name:?} 重复"),
+                            "主题名（取文件名）在项目内必须唯一——控件按名字引用",
+                        );
+                    }
+                    let theme = crate::Theme::parse(&doc, &name, rel, &mut report);
+                    themes.insert(name, theme);
+                }
+                Err(e) => report.push("VD040", rel, e, "清单 themes 列表里的文件必须存在"),
+            }
+        }
+
+        report.into_result(Project { root, manifest, schema, scenes, rules, scripts, sequences, animations, themes })
     }
 
     pub fn entry_scene(&self) -> &Scene {

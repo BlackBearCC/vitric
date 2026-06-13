@@ -1900,7 +1900,9 @@ fn push_ui_panels(
     atlas: &Atlas,
 ) -> Result<(), String> {
     for id in world.query(&["Ui", "Panel"]) {
-        let Some(r) = layout.get(&id) else { continue };
+        let Some(base) = layout.get(&id) else { continue };
+        // 按下反馈：CPU/GPU 共用 ui_press_feedback（绕中心缩 + 提亮），公式逐句同构。
+        let (r, modulate) = vitric_render::ui_press_feedback(world, id, *base);
         let (x0, y0) = (r.x as f32, r.y as f32);
         let (x1, y1) = ((r.x + r.w) as f32, (r.y + r.h) as f32);
         let image_name = world
@@ -1915,7 +1917,8 @@ fn push_ui_panels(
                 .ok()
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_else(|| "#ffffff".to_string());
-            let rgba = parse_color_a(&color).map_err(|e| format!("实体 {id} 的 Panel.color: {e}"))?;
+            let mut rgba = parse_color_a(&color).map_err(|e| format!("实体 {id} 的 Panel.color: {e}"))?;
+            vitric_render::modulate_rgb(&mut rgba, modulate);
             let [u, v] = atlas.white;
             push_quad_corners_n(verts, corners, [u, v, u, v], UNLIT, [1.0, 0.0], tint(rgba));
         } else {

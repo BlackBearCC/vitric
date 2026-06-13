@@ -221,6 +221,15 @@ impl WindowedGame {
             }
             Err(e) => eprintln!("[vitric] 鼠标点击坐标换算失败: {e}"),
         }
+        // 场上有 UI 时，同一次点击额外注入 UI 点击（屏幕归一化坐标，拾取推迟到 tick 内
+        // 换算到参照系 1920×1080 比 UI 矩形）。世界点击与 UI 点击两套坐标系并存：
+        // 世界点击拾取 Sprite（经相机），UI 点击拾取屏幕空间叠加层（不经相机）。
+        if w > 0 && h > 0 && vitric_render::has_ui(&self.sim.world) {
+            let (nx, ny) = (px / w as f64, py / h as f64);
+            if let Err(e) = vitric_control::inject_ui_click(&mut self.sim, nx, ny, button) {
+                eprintln!("[vitric] UI 点击注入失败: {e}");
+            }
+        }
     }
 
     /// 拖拽：把选中实体的 Position 写回数据层——人的微调 AI 立刻可见。
@@ -271,6 +280,22 @@ impl WindowedGame {
             ElementState::Released => "released",
         };
         self.sim.inject_input(&action, phase);
+        // 场上有 UI（UiRoot）时，方向键/回车额外注入标准 UI 导航动作（ui-up/down/left/
+        // right/confirm）——交互系统只认 ui-* 前缀，游戏自己的 left/jump 不受影响。
+        // 两条都进输入流、都进录像，重放一致。
+        if vitric_render::has_ui(&self.sim.world) {
+            let ui_action = match action.as_str() {
+                "up" => Some("ui-up"),
+                "down" => Some("ui-down"),
+                "left" => Some("ui-left"),
+                "right" => Some("ui-right"),
+                "enter" => Some("ui-confirm"),
+                _ => None,
+            };
+            if let Some(ua) = ui_action {
+                self.sim.inject_input(ua, phase);
+            }
+        }
     }
 }
 

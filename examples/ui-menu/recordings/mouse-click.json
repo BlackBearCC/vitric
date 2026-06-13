@@ -1,0 +1,23 @@
+{
+  "seed": 1,
+  "inputs": [],
+  "replies": [
+    {
+      "tick": 5,
+      "name": "ui-click",
+      "data": {
+        "button": "left",
+        "nx": 0.5,
+        "ny": 0.44074074074074077
+      }
+    }
+  ],
+  "checkpoints": [
+    [
+      0,
+      17287435799662609292
+    ]
+  ],
+  "ticks": 40,
+  "final_hash": 12163334042497198368
+}

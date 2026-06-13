@@ -1,0 +1,19 @@
+{
+  "rules": [
+    {
+      "id": "start-loads-game",
+      "on": { "event": "ui-activate", "filter": { "action": "start" } },
+      "do": [
+        { "emit": "game-started", "data": {} },
+        { "emit": "load-scene", "data": { "scene": "scenes/game.json" } }
+      ]
+    },
+    {
+      "id": "quit-emits-quit",
+      "on": { "event": "ui-activate", "filter": { "action": "quit" } },
+      "do": [
+        { "emit": "app-quit", "data": {} }
+      ]
+    }
+  ]
+}

@@ -134,12 +134,17 @@
 mod assets;
 mod font;
 mod ui;
+mod ui_interact;
 
 pub use assets::{is_normal_map_name, normal_map_name, Assets, Image};
 pub use font::{revealed_chars, FontStore, GlyphPlacement, RasterGlyph};
 pub use ui::{
     has_ui, layout_input_hash, layout_runs, solve_layout, Align, Anchor, ContainerKind, Layout,
     UiRect, ALIGN_NAMES, ANCHOR_NAMES, CONTAINER_KINDS,
+};
+pub use ui_interact::{
+    modulate_rgb, navigate, press_modulate, press_scale, ui_press_feedback, ButtonState, Dir,
+    Focusable, BUTTON_STATES, PRESS_TICKS,
 };
 
 use serde_json::Value;
@@ -2035,6 +2040,11 @@ fn draw_ui(
     // 精灵 = 最近邻缩放贴图（NinePatch 留 1.2，纯色 + 精灵 1.1 必做）。
     for id in world.query(&["Ui", "Panel"]) {
         let Some(rect) = layout.get(&id) else { continue };
+        // 按下反馈（1.2）：挂了 Button 且 press_t≥0 时，按 press_scale/press_modulate 的
+        // 解析式做 scale（绕矩形中心缩）+ modulate（提亮）。**纯渲染装饰**：只读组件里的
+        // press_t（进哈希进存档），偏移是 press_t 的纯函数，不碰布局矩形/模拟 RNG——
+        // 重放/快照回退一致（同 shake/bloom 的装饰纪律）。CPU/GPU 共用 ui_press_feedback。
+        let (rect, modulate) = ui_interact::ui_press_feedback(world, id, *rect);
         let x0 = rect.x.floor().max(0.0) as i64;
         let y0 = rect.y.floor().max(0.0) as i64;
         let x1 = (rect.x + rect.w).ceil().min(width as f64) as i64;
@@ -2054,7 +2064,8 @@ fn draw_ui(
                 .ok()
                 .and_then(|v| v.as_str().map(String::from))
                 .unwrap_or_else(|| "#ffffff".to_string());
-            let rgba = parse_color_a(&color).map_err(|e| format!("实体 {id} 的 Panel.color: {e}"))?;
+            let mut rgba = parse_color_a(&color).map_err(|e| format!("实体 {id} 的 Panel.color: {e}"))?;
+            modulate_rgb(&mut rgba, modulate);
             let a = rgba[3] as u32;
             if a == 0 {
                 continue; // 全透明 = 不画

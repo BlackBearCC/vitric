@@ -32,6 +32,10 @@ pub struct Runtime {
     /// 序列（时间轴）静态轨道定义。运行时 Sequence 组件按名字引用，
     /// 静态轨道不进每实例快照（组件只存最小播放状态）。
     pub sequences: BTreeMap<String, Sequence>,
+    /// 主题（样式卷）。装配期常量，不进世界状态；UI 控件按名字引用取样式。
+    /// 每 tick 把 Button.state 对应的主题底色解算进 Panel.color（render 读 Panel.color，
+    /// 渲染层不依赖主题表——code 只递交数据）。
+    pub themes: BTreeMap<String, vitric_data::Theme>,
     /// schema（场景切换时实例化新场景用，与规则/脚本持有的是同一份定义）。
     schema: Schema,
     /// 清单里的全部场景（装配期预载的不可变副本）。场景切换从这里取数据
@@ -75,6 +79,7 @@ impl Runtime {
             scripts,
             animations: project.animations.clone(),
             sequences: project.sequences.clone(),
+            themes: project.themes.clone(),
             schema: project.schema.clone(),
             scenes: project.scenes.clone(),
             root: None,
@@ -229,6 +234,24 @@ impl GameLogic for Runtime {
         //     参照视口固定（[`UI_REFERENCE_VIEWPORT`]）——布局状态与渲染分辨率解耦，
         //     跨机器确定；渲染时 CPU/GPU 各自按真实分辨率重解算（纯函数，同一份逻辑）。
         advance_ui_layout(world, UI_REFERENCE_VIEWPORT)?;
+
+        // 4.7 UI 交互（焦点导航 + 点击激活，1.2）：在布局之后跑——拾取/焦点几何要读
+        //     本 tick 解算好的 Ui.rx/ry/rw/rh（参照系 1920×1080）。消费本 tick 的
+        //     ui-up/down/left/right/confirm 输入和 ui-click 回复（坐标已是参照系归一化），
+        //     更新 Button.state / UiRoot.focus / Button.press_t（全进组件 = 快照/录像安全），
+        //     激活按钮 emit `ui-activate {id, action}` 让规则/序列接（UI 不内置题材动作）。
+        //     ui-activate 不是 load-scene，本 tick 进 carryover，规则下一 tick 接龙——
+        //     和序列 emit 同一条跨 tick 约定，确定且重放一致。
+        let ui_events = advance_ui_interaction(world, &seq_inbox, UI_REFERENCE_VIEWPORT)?;
+        collect_loads(&ui_events, &mut loads); // ui-activate 不会是 load-scene，但口径统一
+        self.observed.extend(ui_events.iter().cloned());
+        self.carryover.extend(ui_events);
+
+        // 4.8 主题应用：把 Button.state 对应的主题底色解算进 Panel.color——render 只读
+        //     Panel.color，渲染层不依赖主题表（code 只递交数据）。Panel.color 是确定性
+        //     状态写入（进哈希），不是渲染装饰。按下反馈的 scale/modulate 才是 render 侧
+        //     读 Button.press_t 的纯函数装饰（不进状态、不改布局）。
+        apply_ui_theme(world, &self.themes)?;
 
         // 5. 场景切换（必须在确定性流水线内执行，重放才会在同一 tick 复现）
         if let Some(load) = loads.first() {
@@ -578,6 +601,291 @@ pub fn advance_ui_layout(world: &mut World, viewport: (u32, u32)) -> Result<(), 
         world
             .set_field(root, "UiRoot.layout_hash", json!(format!("0x{want:016x}")))
             .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// UI 交互系统（焦点导航 + 点击激活，1.2）。和动画/序列/布局同级的引擎系统，
+/// **跑在布局之后**——焦点几何和点击拾取都读本 tick 解算好的 `Ui.rx/ry/rw/rh`
+/// （参照系 1920×1080）。
+///
+/// 状态全进组件（快照/录像安全）：
+/// - `UiRoot.focus`：当前焦点按钮的实体名（""=无焦点，引擎首次交互时落第一个可聚焦按钮）；
+/// - `Button.state`：normal/focused/pressed/disabled；
+/// - `Button.press_t`：按下反馈计时（-1=不在反馈中，0..PRESS_TICKS 递增；解析式不累加）。
+///
+/// 消费本 tick 的 `inbox`：
+/// - `input {action: "ui-up"|"ui-down"|"ui-left"|"ui-right"}` → 按布局相邻关系移焦点；
+/// - `input {action: "ui-confirm"}` → 激活当前焦点按钮；
+/// - `ui-click {nx, ny, button}` → 屏幕归一化坐标（0..1）换算到参照系（×1920/×1080）
+///   再判断落在哪个按钮矩形内，命中 = 激活（顺带把焦点移到它）。
+///
+/// **坐标换算链（关键接线）**：布局输出 rx/ry/rw/rh 是参照系 1920×1080 的像素矩形
+/// （进哈希、与渲染分辨率解耦）；而点击源头是物理屏幕/窗口像素。窗口/RPC 注入端先把
+/// 点击除以视口尺寸归一化成 0..1（[`vitric_control::inject_ui_click`]），本系统再乘回
+/// 参照系 1920×1080——这样不管真实分辨率多大，命中判定永远对的是同一份参照系矩形，
+/// 重放（录像里存的就是归一化坐标）逐位一致。**不**拿世界坐标比 UI 矩形（那是两套系）。
+///
+/// 激活 = 按钮置 pressed + press_t=0 + emit `ui-activate {id, action}`（规则/序列接）。
+/// disabled 按钮不可聚焦、不响应点击/确认（合同第四节）。
+///
+/// 性能：焦点环 = query Button 的一趟（O(按钮数)，不全表扫）；空 UI（无 UiRoot）
+/// 第一行零成本 early-return。
+pub fn advance_ui_interaction(
+    world: &mut World,
+    inbox: &[Event],
+    viewport: (u32, u32),
+) -> Result<Vec<Event>, String> {
+    if world.query(&["UiRoot"]).is_empty() {
+        return Ok(Vec::new()); // 空 UI 零成本：没有 UiRoot，零分配零遍历
+    }
+    let root = world.query(&["UiRoot"])[0];
+    let mut events = Vec::new();
+
+    // 焦点环：所有挂 Button 的实体（query 槽位序 = 确定性），读状态 + 矩形。
+    // disabled 不进可聚焦集合（焦点导航跳过它），但仍在表里（点击它要显式忽略）。
+    struct Btn {
+        id: EntityId,
+        action: String,
+        state: vitric_render::ButtonState,
+        rect: vitric_render::UiRect,
+    }
+    let mut btns: Vec<Btn> = Vec::new();
+    for id in world.query(&["Button", "Ui"]) {
+        let state_name = world
+            .get_field(id, "Button.state")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "normal".to_string());
+        let state = vitric_render::ButtonState::parse(&state_name).ok_or_else(|| {
+            format!(
+                "实体 {id} 的 Button.state {state_name:?} 不是合法状态。可选: [{}]",
+                vitric_render::BUTTON_STATES.join(", ")
+            )
+        })?;
+        let action = world
+            .get_field(id, "Button.action")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        let read_num = |path: &str| -> f64 {
+            world.get_field(id, path).ok().and_then(Value::as_f64).unwrap_or(0.0)
+        };
+        let rect = vitric_render::UiRect {
+            x: read_num("Ui.rx"),
+            y: read_num("Ui.ry"),
+            w: read_num("Ui.rw"),
+            h: read_num("Ui.rh"),
+        };
+        btns.push(Btn { id, action, state, rect });
+    }
+
+    // 1) 按下反馈计时推进（解析式不累加：press_t 是 tick 计数，scale/modulate 由它一步算）。
+    //    到点（press_t ≥ PRESS_TICKS）落回 normal（焦点态在第 3 步统一重置，这里只清反馈）。
+    for b in &btns {
+        let pt = world
+            .get_field(b.id, "Button.press_t")
+            .ok()
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+        if pt >= 0 {
+            let next = pt + 1;
+            if next as u64 >= vitric_render::PRESS_TICKS {
+                // 反馈结束：清计时 + 回 normal（若是焦点按钮，第 3 步会再置回 focused）
+                world.set_field(b.id, "Button.press_t", json!(-1)).map_err(|e| e.to_string())?;
+                if b.state == vitric_render::ButtonState::Pressed {
+                    world
+                        .set_field(b.id, "Button.state", json!("normal"))
+                        .map_err(|e| e.to_string())?;
+                }
+            } else {
+                world.set_field(b.id, "Button.press_t", json!(next)).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    // 当前焦点：UiRoot.focus 存的是实体名。空/失效 → 落第一个可聚焦按钮（确定性兜底）。
+    let focus_name = world
+        .get_field(root, "UiRoot.focus")
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+    let focusable: Vec<usize> = btns
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.state != vitric_render::ButtonState::Disabled)
+        .map(|(i, _)| i)
+        .collect();
+    // 当前焦点在 btns 里的下标（按名字找）。空名/找不到 = None。
+    let mut focus_idx: Option<usize> = if focus_name.is_empty() {
+        None
+    } else {
+        btns.iter().position(|b| world.name_of(b.id) == Some(focus_name.as_str()))
+    };
+    // 焦点指向了 disabled / 不存在 → 收回到第一个可聚焦
+    if focus_idx.is_none_or(|i| btns[i].state == vitric_render::ButtonState::Disabled) {
+        focus_idx = focusable.first().copied();
+    }
+
+    // 2) 方向输入：移动焦点（按布局相邻关系，只在可聚焦集合内）。
+    //    多个方向输入同 tick：按到达顺序逐个应用（确定性，inbox 已是固定序）。
+    let focus_geom: Vec<vitric_render::Focusable> = focusable
+        .iter()
+        .map(|&i| vitric_render::Focusable { rect: btns[i].rect })
+        .collect();
+    for e in inbox {
+        if e.name != "input" {
+            continue;
+        }
+        let action = e.data.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let phase = e.data.get("phase").and_then(|v| v.as_str()).unwrap_or("pressed");
+        if phase != "pressed" {
+            continue; // 只在按下沿移焦点（释放不动）
+        }
+        let Some(dir_name) = action.strip_prefix("ui-") else { continue };
+        let Some(dir) = vitric_render::Dir::parse(dir_name) else { continue };
+        let Some(cur) = focus_idx.and_then(|fi| focusable.iter().position(|&x| x == fi)) else {
+            // 还没有焦点：方向键先落到第一个可聚焦（标准菜单手感）
+            focus_idx = focusable.first().copied();
+            continue;
+        };
+        let next_in_ring = vitric_render::navigate(&focus_geom, cur, dir);
+        focus_idx = Some(focusable[next_in_ring]);
+    }
+
+    // 3) 重置焦点态：可聚焦按钮里，焦点那个置 focused，其余非 pressed 的置 normal。
+    //    pressed（反馈中）的不被焦点重置盖掉——反馈结束（第 1 步）才回 normal。
+    let focus_id = focus_idx.map(|i| btns[i].id);
+    for b in &btns {
+        if b.state == vitric_render::ButtonState::Disabled {
+            continue; // disabled 状态固定，不被焦点逻辑动
+        }
+        // 当前组件里的真实状态（第 1 步可能刚改过 press_t/state，重读）
+        let cur = world
+            .get_field(b.id, "Button.state")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "normal".to_string());
+        if cur == "pressed" {
+            continue; // 反馈中，别盖
+        }
+        let want = if Some(b.id) == focus_id { "focused" } else { "normal" };
+        if cur != want {
+            world.set_field(b.id, "Button.state", json!(want)).map_err(|e| e.to_string())?;
+        }
+    }
+    // 焦点名字写回 UiRoot（进哈希进存档）
+    let new_focus_name = focus_id.and_then(|id| world.name_of(id)).unwrap_or("").to_string();
+    if new_focus_name != focus_name {
+        world.set_field(root, "UiRoot.focus", json!(new_focus_name)).map_err(|e| e.to_string())?;
+    }
+
+    // 4) 确认键：激活当前焦点按钮。
+    let confirm = inbox.iter().any(|e| {
+        e.name == "input"
+            && e.data.get("action").and_then(|v| v.as_str()) == Some("ui-confirm")
+            && e.data.get("phase").and_then(|v| v.as_str()).unwrap_or("pressed") == "pressed"
+    });
+    if confirm {
+        if let Some(fid) = focus_id {
+            let b = btns.iter().find(|b| b.id == fid).expect("focus_id 来自 btns");
+            activate_button(world, b.id, &b.action, &mut events)?;
+        }
+    }
+
+    // 5) 点击：屏幕归一化坐标 → 参照系 1920×1080 → 命中按钮矩形 → 激活。
+    let (vw, vh) = viewport;
+    for e in inbox {
+        if e.name != "ui-click" {
+            continue;
+        }
+        let nx = e.data.get("nx").and_then(|v| v.as_f64());
+        let ny = e.data.get("ny").and_then(|v| v.as_f64());
+        let (Some(nx), Some(ny)) = (nx, ny) else { continue };
+        // 归一化 → 参照系像素（和 rx/ry/rw/rh 同坐标系）
+        let px = nx * vw as f64;
+        let py = ny * vh as f64;
+        // 命中判定：query 倒序（后画盖在上面，优先命中），disabled 不响应。
+        let hit = btns.iter().rev().find(|b| {
+            b.state != vitric_render::ButtonState::Disabled
+                && px >= b.rect.x
+                && px < b.rect.x + b.rect.w
+                && py >= b.rect.y
+                && py < b.rect.y + b.rect.h
+        });
+        if let Some(b) = hit {
+            // 点击命中也把焦点移到它（点和焦点统一），再激活
+            let name = world.name_of(b.id).unwrap_or("").to_string();
+            world.set_field(root, "UiRoot.focus", json!(name)).map_err(|e| e.to_string())?;
+            activate_button(world, b.id, &b.action, &mut events)?;
+        }
+    }
+
+    Ok(events)
+}
+
+/// 激活一个按钮：置 pressed + 起按下反馈计时 + emit `ui-activate {id, action}`。
+/// action 空串也照发（check 已拦空 action，运行时不二次拒绝——显式行为）。
+fn activate_button(
+    world: &mut World,
+    id: EntityId,
+    action: &str,
+    events: &mut Vec<Event>,
+) -> Result<(), String> {
+    world.set_field(id, "Button.state", json!("pressed")).map_err(|e| e.to_string())?;
+    // press_t=0：本 tick 就是反馈第 0 帧（解析式 press_scale(0)=1，下一 tick 起缩）
+    world.set_field(id, "Button.press_t", json!(0)).map_err(|e| e.to_string())?;
+    let name = world.name_of(id).map(String::from).unwrap_or_else(|| id.to_string());
+    events.push(Event::new("ui-activate", json!({"id": name, "action": action})));
+    Ok(())
+}
+
+/// 主题应用系统：把每个 Button 的 `state` 对应的主题底色写进它的 `Panel.color`。
+/// 渲染层只读 Panel.color（不认识主题表）——主题在装配期、状态在组件、解算在这里，
+/// 渲染只管画解算好的颜色（code 只递交数据）。
+///
+/// `Panel.color` 是**确定性状态**（进哈希进存档），不是渲染装饰——同 state 同色，
+/// 重放一致。按下反馈的 scale/modulate 才是渲染侧读 `Button.press_t` 的纯函数装饰。
+///
+/// 没有主题（Button 无 theme 字段或引用空）= 跳过该按钮（保留场景里写死的 Panel.color，
+/// 不强加主题）。引用了不存在的主题在 check 期已红灯，这里运行时显式报错兜底。
+pub fn apply_ui_theme(
+    world: &mut World,
+    themes: &BTreeMap<String, vitric_data::Theme>,
+) -> Result<(), String> {
+    let buttons = world.query(&["Button", "Panel"]);
+    if buttons.is_empty() {
+        return Ok(()); // 没有按钮 = 零成本
+    }
+    for id in buttons {
+        let theme_name = world
+            .get_field(id, "Button.theme")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        if theme_name.is_empty() {
+            continue; // 没引用主题：保留场景写死的 Panel.color
+        }
+        let theme = themes.get(&theme_name).ok_or_else(|| {
+            format!(
+                "实体 {id} 的 Button.theme {theme_name:?} 没有定义。已定义主题: [{}]。\
+                 提示：主题文件加进 vitric.json 的 themes 数组",
+                themes.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
+        let state = world
+            .get_field(id, "Button.state")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "normal".to_string());
+        let style = theme.button_style(&state).ok_or_else(|| {
+            format!("实体 {id} 的 Button.state {state:?} 在主题 {theme_name:?} 里没有样式（应已 check 拦截）")
+        })?;
+        // 只在变了才写（避免无谓的"脏"——虽然写同值哈希不变，但少一次写更干净）
+        let cur = world.get_field(id, "Panel.color").ok().and_then(|v| v.as_str().map(String::from));
+        if cur.as_deref() != Some(style.bg.as_str()) {
+            world.set_field(id, "Panel.color", json!(style.bg)).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }
@@ -950,6 +1258,23 @@ pub fn check(dir: &Path) -> Result<Value, String> {
                             id,
                             world.name_of(id).map(|n| format!("({n})")).unwrap_or_default(),
                             project.animations.keys().cloned().collect::<Vec<_>>().join(", "),
+                        ));
+                    }
+                }
+            }
+        }
+        // Button.theme 引用的主题必须在清单 themes 里定义（值级状态/action 校验在
+        // vitric-data 的 validate_ui_components；主题名存在性要项目级表，归这里）
+        for id in world.query(&["Button"]) {
+            if let Ok(theme) = world.get_field(id, "Button.theme") {
+                if let Some(name) = theme.as_str().filter(|s| !s.is_empty()) {
+                    if !project.themes.contains_key(name) {
+                        missing.push(format!(
+                            "场景 {rel} 的实体 {}{} 的 Button.theme 引用了未定义的主题 {name:?}（已定义: [{}]）。\
+                             提示：主题文件加进 vitric.json 的 themes 数组（themes/<名>.json）",
+                            id,
+                            world.name_of(id).map(|n| format!("({n})")).unwrap_or_default(),
+                            project.themes.keys().cloned().collect::<Vec<_>>().join(", "),
                         ));
                     }
                 }

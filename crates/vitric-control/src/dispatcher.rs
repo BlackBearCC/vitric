@@ -399,6 +399,20 @@ impl Dispatcher {
                 let button = params.get("button").and_then(|v| v.as_str()).unwrap_or("left");
                 inject_click(sim, x, y, button)
             }
+            "input/ui-click" => {
+                // 无头 agent 的"UI 点击"：屏幕归一化坐标（0..1），拾取推迟到 tick 内的
+                // UI 交互系统（换算到参照系 1920×1080 再比 UI 矩形）。走回复通道，录制中放行。
+                let nx = params
+                    .get("nx")
+                    .and_then(|v| v.as_f64())
+                    .ok_or("缺少 nx 数字参数（屏幕归一化坐标 0..1）")?;
+                let ny = params
+                    .get("ny")
+                    .and_then(|v| v.as_f64())
+                    .ok_or("缺少 ny 数字参数（屏幕归一化坐标 0..1）")?;
+                let button = params.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+                inject_ui_click(sim, nx, ny, button)
+            }
 
             // ---- 控时间 ----
             "sim/pause" => {
@@ -578,7 +592,7 @@ impl Dispatcher {
 
             other => Err(format!(
                 "未知方法 {other:?}。可用方法: ping, world/entities, world/get, world/set, \
-                 world/spawn, world/despawn, input/inject, input/click, sim/pause, sim/resume, sim/step, \
+                 world/spawn, world/despawn, input/inject, input/click, input/ui-click, sim/pause, sim/resume, sim/step, \
                  sim/speed, sim/quit, sim/snapshot, sim/restore, sim/hash, project/reload, \
                  save/write, save/load, save/list, \
                  inspect/selection, inspect/select, events/recent, perf/stats, render/describe, \
@@ -613,6 +627,25 @@ pub fn inject_click(sim: &mut Sim, x: f64, y: f64, button: &str) -> Result<Value
     };
     sim.inject_reply(event, json!({"x": x, "y": y, "entity": entity}));
     Ok(json!({"event": event, "entity": entity}))
+}
+
+/// 把一次 **UI 点击**注入模拟（屏幕空间叠加层拾取，1.2）——窗口 UI 点击和
+/// `input/ui-click` RPC 共用的唯一路径。
+///
+/// 和 [`inject_click`]（世界坐标拾取 Sprite）是**两套坐标系**：UI 锚定视口、布局矩形
+/// 在参照系 1920×1080（不经相机）。所以这里注入的是**屏幕归一化坐标** `(nx, ny) ∈ [0,1]`
+/// （= 物理像素 / 视口尺寸），拾取**不在注入端做**——推迟到确定性 tick 内的 UI 交互系统
+/// （[`vitric_cli` 的 `advance_ui_interaction`]）把 (nx,ny) 乘回参照系 1920×1080 再比 UI 矩形。
+/// 这样命中判定永远对的是同一份参照系矩形，与真实分辨率解耦，重放逐位一致。
+///
+/// 走回复通道（`Sim::inject_reply`）：点击连同 tick 进录像（`Recording.replies`）、
+/// 重放原 tick 原样注入——UI 点击驱动的录像离线重放逐位一致，零新机制（同 [`inject_click`]）。
+pub fn inject_ui_click(sim: &mut Sim, nx: f64, ny: f64, button: &str) -> Result<Value, String> {
+    if !matches!(button, "left" | "right") {
+        return Err(format!("button 必须是 left 或 right，拿到 {button:?}"));
+    }
+    sim.inject_reply("ui-click", json!({"nx": nx, "ny": ny, "button": button}));
+    Ok(json!({"event": "ui-click", "nx": nx, "ny": ny, "button": button}))
 }
 
 /// 没挂存档仓库时的统一报错（嵌入式/测试装配可能不挂；`vitric run` 一定会挂）。

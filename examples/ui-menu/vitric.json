@@ -1,0 +1,31 @@
+{
+  "name": "ui-menu",
+  "schema": "schema.json",
+  "entry": "scenes/menu.json",
+  "scenes": [
+    "scenes/menu.json",
+    "scenes/game.json"
+  ],
+  "rules": [
+    "rules/menu.json"
+  ],
+  "themes": [
+    "themes/dark.json"
+  ],
+  "font": "fonts/DejaVuSans.ttf",
+  "seed": 1,
+  "gates": {
+    "playthroughs": [
+      {
+        "recording": "recordings/focus-nav.json",
+        "must_emit": "game-started"
+      },
+      {
+        "recording": "recordings/mouse-click.json",
+        "must_emit": "game-started"
+      }
+    ],
+    "check": true,
+    "max_ticks": 2000
+  }
+}

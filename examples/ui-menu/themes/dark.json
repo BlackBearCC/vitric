@@ -1,0 +1,17 @@
+{
+  "colors": {
+    "bg": "#1b1d26",
+    "text": "#f0f0f0",
+    "focus": "#5a7bb5",
+    "disabled": "#555555"
+  },
+  "font_size": 30,
+  "padding": 12,
+  "margin": 24,
+  "button": {
+    "normal":   { "bg": "#3a4a6b", "text": "#e8ecf4" },
+    "focused":  { "bg": "#5a7bb5", "text": "#ffffff" },
+    "pressed":  { "bg": "#9fc0f0", "text": "#10131a" },
+    "disabled": { "bg": "#2a2d36", "text": "#6b6f7a" }
+  }
+}

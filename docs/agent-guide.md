@@ -366,7 +366,7 @@ schema 定义（字段名固定，默认值照抄）：
 
 菜单/背包/设置/HUD 这类界面用一套**声明式、确定性**的控件原语拼，对标 Godot Control / Unity UI。**引擎只给通用控件原语；具体界面（主菜单长什么样、背包几列）是项目用积木拼的用法**，引擎侧没有"对话框""技能栏""结算面板"的字样——和序列同一条原则。UI 也是实体 + 组件，进世界状态/哈希/存档/录像；布局是 `(UI 树, 视口)` 的确定性纯计算（无墙钟无随机），快照/回放往返一致。
 
-**当前阶段 = 1.1：布局地基 + 静态控件 + 屏幕空间渲染（灰盒，不可交互）**。把"摆得对、画得出、镜头不飘、空场零成本"立住。Button 状态机、焦点导航、点击激活、主题 Theme 属于 1.2，本阶段没有。
+**当前阶段 = 1.2：在 1.1 布局之上加交互（Button 状态机 + 焦点导航 + 点击激活 + `ui-activate` 事件）和主题 Theme**。1.1 的布局地基（锚点、VBox/HBox/Grid 容器、Panel、Label、脏标记、屏幕空间渲染）见下，交互/主题见本节末尾两小节。**不做 hover**（v1 只有焦点导航 + 点击双轨；hover 是纯鼠标概念、手柄/触屏没有，留 v2）。
 
 **坐标系：UI 是屏幕空间叠加层**。UI 元素锚定**视口（屏幕）**、渲染走屏幕空间正交投影，**不经相机变换**——镜头移动/缩放/抖动时 UI 不飘（像 HUD）。这与精灵/粒子走世界空间相反。UI 紧接世界渲染（含光照/粒子/泛光）之后叠加，不被打光，无离屏缓冲（复用同一顶点流）。CPU 真相源 + GPU 镜像，两路读同一份布局结果（`solve_layout`），不在 GPU 侧重算布局。
 
@@ -407,7 +407,45 @@ schema 定义（字段名固定，默认值照抄）：
 ] }
 ```
 
-换成背包格子（Grid + columns）、设置项列表（VBox）、角落小地图（bottom-right 锚点），全是同一套积木——题材专属界面是项目用法，不在引擎里。**1.1 是布局 + 静态控件；交互（按钮按下、焦点导航、点击激活、主题换肤）见 1.2**。
+换成背包格子（Grid + columns）、设置项列表（VBox）、角落小地图（bottom-right 锚点），全是同一套积木——题材专属界面是项目用法，不在引擎里。
+
+### 交互：焦点导航 + 点击（双轨，不做 hover）
+
+可交互界面在 1.1 的布局之上加 `Button` 组件。**两条激活轨道，发同一个 `ui-activate {id, action}` 命名事件**，规则/序列接（切场景、开背包都走 emit→规则，UI 不内置题材动作）：
+
+- **焦点导航**：可聚焦按钮组成焦点环，方向输入 `ui-up`/`ui-down`/`ui-left`/`ui-right`（标准 `input/inject`）按**布局相邻关系**（矩形几何，对标 Godot 方向焦点）移焦点，到边停住不环绕；`ui-confirm` 激活当前焦点按钮。窗口模式下方向键/回车在有 UI 时自动注入 `ui-*`（游戏自己的 left/jump 不受影响）。
+- **点击激活**：注入屏幕**归一化坐标** `(nx, ny) ∈ [0,1]`（`input/ui-click` RPC，或窗口鼠标自动换算 = 物理像素 / 视口尺寸），运行时把它乘回参照系 1920×1080 再判断落在哪个按钮矩形（`rx/ry/rw/rh`）内——命中 = 激活，顺带把焦点移过去。**注意这和世界点击 `input/click` 是两套坐标系**：世界点击拾取 Sprite（经相机），UI 点击拾取屏幕空间叠加层（不经相机）。归一化 + 参照系换算让命中判定与真实分辨率解耦，点击走回复通道进录像、重放逐位一致。
+
+`Button{action, theme, state, press_t, min_scale}`：
+
+- `action`：激活时 `ui-activate` 带的 action 名（非空——空 action 没规则能接，check 红灯）。规则按 `{"event":"ui-activate","filter":{"action":"start"}}` 接。
+- `theme`：引用的主题名（见下小节；空 = 不套主题，保留场景写死的 `Panel.color`）。
+- `state`：状态机当前态 ∈ `normal`/`focused`（被焦点选中，高亮）/`pressed`（激活那几 tick 的反馈）/`disabled`（不可聚焦、不响应点击/确认）。**引擎写**，作者只设初始态（如菜单第一项写 `focused`）。
+- `press_t`：按下反馈计时（-1 = 不在反馈中；引擎写）。按下反馈 = **scale + modulate**（缩放 + 提亮），是 `press_t` 的**解析式**纯函数（`press_scale`/`press_modulate` 的三角包络，禁累加）——渲染装饰，快照回退续播一致。
+- `min_scale`：按到最深时的缩放（缺省 0.92 = 缩到 92%）。
+
+当前焦点存在 `UiRoot.focus`（实体名，引擎写、进哈希进存档）。焦点态/`state`/`press_t` 全进组件 → 快照/录像安全，snapshot/restore 中途回退焦点态续播一致。焦点/点击判定 O(可聚焦按钮数)，不全表扫；空 UI 仍零成本。
+
+### 主题 Theme（换肤）
+
+`themes/<名>.json`，清单 `themes` 列表声明，控件 `Button.theme` 按名字引用。一处定义、全局引用，换肤 = 换一份引用。**主题是装配期常量，不进世界状态**；运行时按 `Button.state` 从主题取该状态底色写进 `Panel.color`（渲染只读 `Panel.color`，不依赖主题表）。
+
+```json
+{
+  "colors": { "bg": "#1b1d26", "text": "#f0f0f0", "focus": "#5a7bb5", "disabled": "#555555" },
+  "font_size": 30, "padding": 12, "margin": 24,
+  "button": {
+    "normal":   { "bg": "#3a4a6b", "text": "#e8ecf4" },
+    "focused":  { "bg": "#5a7bb5", "text": "#ffffff" },
+    "pressed":  { "bg": "#9fc0f0", "text": "#10131a" },
+    "disabled": { "bg": "#2a2d36", "text": "#6b6f7a" }
+  }
+}
+```
+
+`colors` 是全局颜色卷，`button.<state>` 是四态背景/文字色（只写 `colors` 也行，四态会从 `colors` 推全：focused→focus 色、disabled→disabled 色、其余→bg）。`vitric check` 验交互/主题：按钮状态合法（`VD074`）、action 非空（`VD075`）、`Button.theme` 引用的主题存在、主题颜色是合法 `#rrggbb(aa)`（`VD081`）、字号/边距非负（`VD082`）、按钮状态名合法（`VD083`）、`UiRoot.focus` 引用的实体存在（entity 字段的 `VD033`）。
+
+**完整可跑交互示例见 examples/ui-menu**：三按钮竖排菜单（Start/Options(disabled)/Quit），focus-nav + mouse-click 两条 gate 录像都激活"开始"→ emit `game-started` → 规则 `load-scene` 切到 game 场景，逐位重放一致。按钮带 `Button{action, theme:"dark", state}`，主题在 `themes/dark.json`。
 
 ## 光照 / Lighting
 

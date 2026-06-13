@@ -1,0 +1,29 @@
+{
+  "seed": 1,
+  "inputs": [
+    {
+      "tick": 5,
+      "action": "ui-down",
+      "phase": "pressed"
+    },
+    {
+      "tick": 10,
+      "action": "ui-up",
+      "phase": "pressed"
+    },
+    {
+      "tick": 15,
+      "action": "ui-confirm",
+      "phase": "pressed"
+    }
+  ],
+  "replies": [],
+  "checkpoints": [
+    [
+      0,
+      17287435799662609292
+    ]
+  ],
+  "ticks": 40,
+  "final_hash": 12163334042497198368
+}

@@ -1,0 +1,81 @@
+{
+  "components": {
+    "Camera": {
+      "fields": {
+        "x": { "type": "number", "default": 0 },
+        "y": { "type": "number", "default": 0 },
+        "scale": { "type": "number", "default": 8 }
+      }
+    },
+    "Sprite": {
+      "fields": {
+        "w": { "type": "number" },
+        "h": { "type": "number" },
+        "color": { "type": "text", "default": "#ffffff" }
+      }
+    },
+    "Position": {
+      "fields": {
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      }
+    },
+    "UiRoot": {
+      "fields": {
+        "layout_hash": { "type": "text", "default": "" },
+        "focus": { "type": "text", "default": "" }
+      }
+    },
+    "Ui": {
+      "fields": {
+        "anchor": { "type": "text", "default": "manual" },
+        "ax": { "type": "number", "default": 0 },
+        "ay": { "type": "number", "default": 0 },
+        "ox": { "type": "number", "default": 0 },
+        "oy": { "type": "number", "default": 0 },
+        "w": { "type": "number", "default": 0 },
+        "h": { "type": "number", "default": 0 },
+        "parent": { "type": "entity" },
+        "weight": { "type": "number", "default": 0 },
+        "rx": { "type": "number", "default": 0 },
+        "ry": { "type": "number", "default": 0 },
+        "rw": { "type": "number", "default": 0 },
+        "rh": { "type": "number", "default": 0 }
+      }
+    },
+    "Container": {
+      "fields": {
+        "kind": { "type": "enum", "variants": ["VBox", "HBox", "Grid"], "default": "VBox" },
+        "gap": { "type": "number", "default": 0 },
+        "pad": { "type": "number", "default": 0 },
+        "columns": { "type": "int", "default": 1, "min": 1 },
+        "main": { "type": "enum", "variants": ["start", "center", "end"], "default": "start" },
+        "cross": { "type": "enum", "variants": ["start", "center", "end"], "default": "start" }
+      }
+    },
+    "Panel": {
+      "fields": {
+        "color": { "type": "text", "default": "#ffffff" },
+        "image": { "type": "text", "default": "" }
+      }
+    },
+    "UiLabel": {
+      "fields": {
+        "content": { "type": "text", "default": "" },
+        "size": { "type": "number", "default": 1 },
+        "color": { "type": "text", "default": "#ffffff" },
+        "reveal": { "type": "number", "default": 1 },
+        "align": { "type": "enum", "variants": ["start", "center", "end"], "default": "center" }
+      }
+    },
+    "Button": {
+      "fields": {
+        "action": { "type": "text", "default": "" },
+        "theme": { "type": "text", "default": "" },
+        "state": { "type": "enum", "variants": ["normal", "focused", "pressed", "disabled"], "default": "normal" },
+        "press_t": { "type": "int", "default": -1 },
+        "min_scale": { "type": "number", "default": 0.92 }
+      }
+    }
+  }
+}

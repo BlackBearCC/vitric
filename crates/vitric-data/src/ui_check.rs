@@ -34,6 +34,10 @@ pub const UI_CONTAINER_KINDS: &[&str] = &["VBox", "HBox", "Grid"];
 /// 合法对齐名。
 pub const UI_ALIGNS: &[&str] = &["start", "center", "end"];
 
+/// 合法按钮状态名（与 vitric-render 的 ButtonState 同步——同样复制纯字符串常量，
+/// 避免 vitric-data 依赖 vitric-render）。
+pub const UI_BUTTON_STATES: &[&str] = &["normal", "focused", "pressed", "disabled"];
+
 /// 校验一个实体上的 UI 组件值。`comps` 是该实体归一化后的组件 → 值映射。
 /// `epath` 是实体路径前缀（如 `scenes/main.json#/entities/2`）。
 /// 把发现的问题推进 `report`（带路径 + VDxxx 码 + 修复提示），一次报全。
@@ -100,6 +104,31 @@ pub fn validate_ui_components(
             }
         }
     }
+    // Button（1.2 交互）：状态名合法 + 激活 action 非空。
+    // theme 名是否存在要项目级主题表，归 vitric check（和 Panel.image 同口径）。
+    if let Some(b) = comps.get("Button").and_then(|v| v.as_object()) {
+        if let Some(state) = b.get("state").and_then(|v| v.as_str()) {
+            if !UI_BUTTON_STATES.contains(&state) {
+                report.push(
+                    "VD074",
+                    format!("{epath}/components/Button/state"),
+                    format!("按钮状态 {state:?} 不合法"),
+                    format!("可选: [{}]（不做 hover，见合同第四节）", UI_BUTTON_STATES.join(", ")),
+                );
+            }
+        }
+        // action 给了就不能是空串（空 action 的 ui-activate 没有规则能接，是死按钮）
+        if let Some(action) = b.get("action").and_then(|v| v.as_str()) {
+            if action.is_empty() {
+                report.push(
+                    "VD075",
+                    format!("{epath}/components/Button/action"),
+                    "按钮 action 是空串——激活发 ui-activate 时 action 为空，没有规则能接",
+                    "填一个 action 名（如 \"start\"），规则按 {\"event\":\"ui-activate\",\"filter\":{\"action\":\"start\"}} 接",
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -146,5 +175,24 @@ mod tests {
     fn bad_align_reported() {
         let errs = check(json!({"Container": {"kind": "VBox", "main": "middle"}}));
         assert!(errs.iter().any(|e| e.starts_with("VD073") && e.contains("main")), "{errs:?}");
+    }
+
+    #[test]
+    fn bad_button_state_reported() {
+        let errs = check(json!({"Button": {"state": "hover", "action": "start"}}));
+        assert!(errs.iter().any(|e| e.starts_with("VD074") && e.contains("Button/state")), "{errs:?}");
+    }
+
+    #[test]
+    fn good_button_state_passes() {
+        for s in UI_BUTTON_STATES {
+            assert!(check(json!({"Button": {"state": s, "action": "go"}})).is_empty(), "{s} 该合法");
+        }
+    }
+
+    #[test]
+    fn empty_button_action_reported() {
+        let errs = check(json!({"Button": {"state": "normal", "action": ""}}));
+        assert!(errs.iter().any(|e| e.starts_with("VD075") && e.contains("Button/action")), "{errs:?}");
     }
 }
