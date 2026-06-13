@@ -7,8 +7,10 @@ mod error;
 mod project;
 mod scene;
 mod schema;
+mod sequence;
 
 pub use error::{ValidationError, ValidationReport};
 pub use project::{Budgets, Clip, Gates, PlaythroughGate, Project, ProjectManifest};
 pub use scene::{instantiate_scene, Scene};
 pub use schema::{ComponentSchema, FieldDef, FieldType, Schema};
+pub use sequence::{SeqStep, Sequence, SEQ_ACTION_KINDS};

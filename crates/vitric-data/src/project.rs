@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{Scene, Schema, ValidationReport};
+use crate::{Scene, Schema, Sequence, ValidationReport};
 
 /// 项目清单 `vitric.json`。
 ///
@@ -32,6 +32,10 @@ pub struct ProjectManifest {
     pub rules: Vec<String>,
     #[serde(default)]
     pub scripts: Vec<String>,
+    /// 序列（时间轴）定义文件（可选，每个文件一条序列，`sequences/<名>.json`）。
+    /// 序列是通用演出原语，运行时由 `Sequence` 组件实例化播放；不声明 = 项目不用序列。
+    #[serde(default)]
+    pub sequences: Vec<String>,
     /// 动画定义文件（可选）。
     #[serde(default)]
     pub animations: Option<String>,
@@ -146,6 +150,8 @@ pub struct Project {
     pub rules: Vec<(String, Value)>,
     /// (相对路径, 脚本源码)
     pub scripts: Vec<(String, String)>,
+    /// 序列（名字 -> 已校验的静态轨道）。
+    pub sequences: BTreeMap<String, Sequence>,
     /// 动画片段（名字 -> 定义）。
     pub animations: BTreeMap<String, Clip>,
 }
@@ -233,6 +239,29 @@ impl Project {
             }
         }
 
+        // 序列（时间轴）：每个文件一条，按 schema 校验（动作名/字段/at 单调等）。
+        // 序列名冲突显式报错——运行时 Sequence 组件按名字引用，重名无法消歧。
+        let mut sequences = BTreeMap::new();
+        for rel in &manifest.sequences {
+            match read_json(&root.join(rel)) {
+                Ok(doc) => match Sequence::parse(&doc, rel, &schema) {
+                    Ok(seq) => {
+                        if sequences.contains_key(&seq.id) {
+                            report.push(
+                                "VD066",
+                                format!("{rel}#/id"),
+                                format!("序列名 {:?} 重复", seq.id),
+                                "序列名（默认取文件名）在项目内必须唯一——Sequence 组件按名字引用",
+                            );
+                        }
+                        sequences.insert(seq.id.clone(), seq);
+                    }
+                    Err(r) => report.merge(r),
+                },
+                Err(e) => report.push("VD040", rel, e, "清单 sequences 列表里的文件必须存在"),
+            }
+        }
+
         // 字体：只查文件存在（解析/损坏校验在 vitric-render 的 FontStore::load，
         // 那边认识 TTF；这里和 scenes/rules 一样只管"清单指的文件必须在"）
         if let Some(rel) = &manifest.font {
@@ -255,7 +284,7 @@ impl Project {
             }
         }
 
-        report.into_result(Project { root, manifest, schema, scenes, rules, scripts, animations })
+        report.into_result(Project { root, manifest, schema, scenes, rules, scripts, sequences, animations })
     }
 
     pub fn entry_scene(&self) -> &Scene {

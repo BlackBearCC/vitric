@@ -135,7 +135,7 @@ mod assets;
 mod font;
 
 pub use assets::{is_normal_map_name, normal_map_name, Assets, Image};
-pub use font::{FontStore, GlyphPlacement, RasterGlyph};
+pub use font::{revealed_chars, FontStore, GlyphPlacement, RasterGlyph};
 
 use serde_json::Value;
 
@@ -1857,6 +1857,18 @@ fn draw_texts(
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "#ffffff".to_string());
         let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Text.color: {e}"))?;
+        // reveal（0..=1 比例，文字显隐的进度）：缺省补 1.0=全显。可见字数 = reveal
+        // 的纯函数；缺字段 / ≥1 与未引入本特性时逐字节相同（向后兼容）。
+        let reveal = world
+            .get_field(id, "Text.reveal")
+            .ok()
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        let total_chars = content.chars().count();
+        let visible = revealed_chars(reveal, total_chars);
+        if visible == 0 {
+            continue; // 一个字都没显（reveal=0）：和 content 为空一样不画
+        }
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;
         // screen=true: HUD 锚定——Position 解释为相对屏幕中心的偏移,不随相机走
@@ -1874,15 +1886,18 @@ fn draw_texts(
 
         // 矢量路径：挂了字体所有 Text 都走这里（per-Text 覆盖不在范围内）
         if let Some(font) = assets.font() {
+            // 整串排版一次（按内容居中、版面缓存），只画前 visible 个字形——
+            // 逐字显示绝不重排，可见字数只是排好后切一刀
             draw_text_vector(
-                buf, width, height, font, &content, size, scale, (cx, cy), rgba, normals,
+                buf, width, height, font, &content, size, scale, (cx, cy), rgba, normals, visible,
             );
             continue;
         }
 
         // —— 点阵路径：这段逻辑不许动——没挂字体时输出字节必须与字体功能
-        //    出现之前逐位相同（向后兼容由测试锁死）
-        let chars: Vec<char> = content.chars().collect();
+        //    出现之前逐位相同（向后兼容由测试锁死）。reveal 只是把要画的字符
+        //    截到前 visible 个（全显时 chars == content.chars()，字节不变）
+        let chars: Vec<char> = content.chars().take(visible).collect();
         let n = chars.len();
         let half_w = n as f64 * size * scale / 2.0;
         let half_h = size * scale / 2.0;
@@ -1939,12 +1954,16 @@ fn draw_text_vector(
     (cx, cy): (f64, f64),
     rgba: [u8; 4],
     normals: &mut Option<Vec<[f32; 3]>>,
+    visible: usize,
 ) {
     let px_size = FontStore::px_size(size, scale);
-    let (placements, total_w) = font.layout(content, px_size);
+    // 缓存版排版：整串排一次进 memo，逐字显示同段文字播 N tick 排版只跑一次。
+    // 居中按整串总宽算（reveal 时文字不左右抖动），只画前 visible 个字形。
+    let laid = font.layout_cached(content, px_size);
+    let (placements, total_w) = (&laid.0, laid.1);
     let left = cx - total_w as f64 / 2.0;
     let baseline = (cy + font.baseline_offset(px_size) as f64).round() as i64;
-    for p in &placements {
+    for p in placements.iter().take(visible) {
         let g = font.raster(p.ch, px_size);
         if g.coverage.is_empty() {
             continue; // 空轮廓（空格等）只占 advance
@@ -2316,7 +2335,7 @@ pub fn describe_world_with_assets(
         let (half_w, half_h) = match assets.font() {
             Some(font) => {
                 let px_size = FontStore::px_size(c.size, scale);
-                let (_, total_w) = font.layout(&c.content, px_size);
+                let total_w = font.layout_cached(&c.content, px_size).1;
                 (total_w as f64 / 2.0, px_size as f64 / 2.0)
             }
             None => {
@@ -3654,6 +3673,91 @@ mod tests {
         let w = world_with_text("中文");
         let buf = render_world(&w, 96, 96, &assets, 0).unwrap();
         assert!(!non_background(&buf, 96, 96).is_empty(), "CJK 文字应有可见像素");
+    }
+
+    /// reveal 缺省 / ≥1 与未引入本特性时逐字节相同（向后兼容，两条路径都验）。
+    #[test]
+    fn reveal_full_or_absent_is_byte_identical() {
+        // 矢量路径
+        let w_plain = world_with_text("REVEAL");
+        let mut w_full = World::new();
+        let e = w_full.spawn_named("label").unwrap();
+        w_full.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w_full
+            .set_component(e, "Text", json!({"content": "REVEAL", "size": 3.0, "color": "#00ff00", "reveal": 1.0}))
+            .unwrap();
+        let assets = assets_with_font();
+        assert_eq!(
+            render_world(&w_plain, 128, 64, &assets, 0).unwrap(),
+            render_world(&w_full, 128, 64, &assets, 0).unwrap(),
+            "矢量路径 reveal=1 必须与无 reveal 字段逐字节相同"
+        );
+        // reveal=2（>1）也全显，等价
+        w_full.set_field(e, "Text.reveal", json!(2.0)).unwrap();
+        assert_eq!(
+            render_world(&w_plain, 128, 64, &assets, 0).unwrap(),
+            render_world(&w_full, 128, 64, &assets, 0).unwrap(),
+        );
+        // 点阵路径同样逐字节相同
+        assert_eq!(
+            render_world(&w_plain, 128, 64, &Assets::empty(), 0).unwrap(),
+            render_world(&w_full, 128, 64, &Assets::empty(), 0).unwrap(),
+        );
+    }
+
+    /// reveal 驱动下可见字数 = 纯函数：reveal 越大画的字越多、像素单调不减，
+    /// 且 reveal<1 画出的是全显的真子集（逐字显示是"往右长"，不重排）。
+    #[test]
+    fn reveal_progressively_shows_more_pixels() {
+        let assets = assets_with_font();
+        let mut w = World::new();
+        let e = w.spawn_named("label").unwrap();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Text", json!({"content": "ABCDEF", "size": 3.0, "color": "#00ff00", "reveal": 0.0}))
+            .unwrap();
+        // reveal=0：一个字都不画
+        let none = render_world(&w, 160, 64, &assets, 0).unwrap();
+        assert!(non_background(&none, 160, 64).is_empty(), "reveal=0 不该画任何字");
+        // 逐步放开：像素数单调不减
+        let mut prev = 0usize;
+        for r in [0.34_f64, 0.67, 1.0] {
+            w.set_field(e, "Text.reveal", json!(r)).unwrap();
+            let buf = render_world(&w, 160, 64, &assets, 0).unwrap();
+            let hits = non_background(&buf, 160, 64).len();
+            assert!(hits >= prev, "reveal={r} 像素数应不少于更小的 reveal（{hits} < {prev}）");
+            prev = hits;
+        }
+        // 半显的字形落在全显的左半区（同一份排版切片，不左右抖）：
+        // reveal=0.5（3 个字 ABC）的最右像素必须 < 全显最右像素
+        w.set_field(e, "Text.reveal", json!(0.5)).unwrap();
+        let half = render_world(&w, 160, 64, &assets, 0).unwrap();
+        w.set_field(e, "Text.reveal", json!(1.0)).unwrap();
+        let full = render_world(&w, 160, 64, &assets, 0).unwrap();
+        let max_x = |buf: &[u8]| non_background(buf, 160, 64).iter().map(|&(x, _)| x).max();
+        assert!(max_x(&half) < max_x(&full), "半显的字应是全显的左前缀，不越过全显右缘");
+    }
+
+    /// 性能预算第 3 条：同一段文字播 N tick，排版（layout 算法）只发生 1 次。
+    #[test]
+    fn typewriter_layout_runs_exactly_once_over_many_ticks() {
+        let assets = assets_with_font();
+        let font = assets.font().unwrap();
+        let mut w = World::new();
+        let e = w.spawn_named("line").unwrap();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(e, "Text", json!({"content": "TYPEWRITER", "size": 2.0, "color": "#ffffff", "reveal": 0.0}))
+            .unwrap();
+        let base = font.layout_runs();
+        // 打字机：reveal 从 0 渐进到 1，渲 40 帧（每帧改可见字数，绝不重排整段）
+        for i in 0..=40u32 {
+            w.set_field(e, "Text.reveal", json!(i as f64 / 40.0)).unwrap();
+            let _ = render_world(&w, 192, 96, &assets, 0).unwrap();
+        }
+        assert_eq!(
+            font.layout_runs() - base,
+            1,
+            "同一段文字（同字号）排版只该算一次，之后命中缓存——逐字显示不许每 tick 重排"
+        );
     }
 
     #[test]

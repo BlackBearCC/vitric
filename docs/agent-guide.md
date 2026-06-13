@@ -309,6 +309,59 @@ vitric.system("fire-burst", { query: ["Emitter", "Hit"], writes: ["Emitter", "Hi
 });
 ```
 
+## 演出层：补间 · 序列（时间轴）
+
+定时演出（淡入、推镜、打字机、开场、Boss 登场、结局演职员表……）由两块通用原语组合，对标 Unity Timeline / Godot AnimationPlayer。**引擎不提供"过场系统"——过场是序列的一种用法**，活在游戏项目里，引擎侧一个"过场""漫画页""卡牌"的字样都没有。动作集只有引擎已有的通用动词，题材专属概念全靠这套积木拼。
+
+**补间 `Tween`**：数值从 A 平滑变到 B 的确定性插值底座（淡入淡出、镜头推拉、UI 弹出、颜色渐变、位移缩放全靠它）。独立实体挂 `Tween{target, field, from, to, duration, ease, start, id}`（schema 定义这些字段，`target` 是目标实体名/句柄、`field` 是 `"组件.字段"` 路径）。曲线固定五条：`linear` / `ease-in` / `ease-out` / `ease-in-out` / `ease-out-back`（末端过冲回弹）。第 T tick 的值是 `from + (to-from)·ease(elapsed/duration)` 的**解析式**（禁累加，快照回退续播逐位一致）；到期那刻精确写终值（不留浮点尾巴）+ 发 `tween-finished {id, target, field}` 事件 + 补间实体自动移除。同实体同字段同时只一个活跃补间，后来者顶掉前者。状态全在组件里，进哈希/存档/快照。
+
+**序列 `Sequence`（通用时间轴）**：一条按相对 tick 推进的动作轨道。序列定义是项目静态数据（`sequences/<名>.json`，清单 `sequences` 列表声明），形态 = 有序条目 `{ "at": <相对 tick>, "do": <动作> }`，`at` 相对序列**起跑点**（同一序列任何时刻起跑都从自己的 t=0 放，区别于规则的绝对 tick 触发），必须按 `at` 单调不减。运行时一个 `Sequence` 组件实例化它（schema 定义 `track`/`cursor`/`start`/`wait`/`id` 五字段），**只持有最小播放状态**——引用哪条序列 + 游标下标 + 起跑 tick + barrier 等待标志；静态轨道不进每实例快照，快照便宜。动作集 v1 固定（不图灵完备、不嵌脚本），全部镜像引擎已有动词：
+
+- `tween`：起一个补间。镜头推拉 = tween 相机字段，淡入淡出 = tween alpha/颜色字段，位移/缩放全靠它。**序列负责编排，补间负责执行**，零重复。
+- `set`：瞬时设字段（`{"set": "@字幕.Text.content", "to": "..."}`，镜像规则 set）。
+- `spawn` / `despawn`：生成/销毁实体（镜像规则）。插画入场 = spawn 一个带 Sprite 的实体。
+- `emit`：发事件让规则/脚本接龙。**序列借此与"场景"解耦**——要切场景就 `{"emit": "load-scene", "data": {"scene": "scenes/next.json"}}`，由项目里一条规则接去 load-scene；序列本身不认识"场景""关卡"。
+- `sound`：播音效（`{"sound": "chime.wav", "volume": 0.6}`，翻成 play-sound 事件，和规则同一条音频通道）。
+- `wait`：barrier——游标停住，直到某命名事件出现（`{"wait": "player-confirm"}`，由一条规则把玩家输入翻成该事件）或 `skip` 输入到达才放行。这是规则不易表达的状态机能力，序列存在的另一半理由。
+
+序列跑到末尾发 `sequence-finished {id, track}` 事件、序列实体自动移除（后续切场景由规则接，不内置）。**跳过**：一条 `skip` 输入（`input/inject {action: "skip"}`）把未执行条目的终态全部落定后发完成事件——skip 是输入、进录像、重放一致。整段推进是普通系统按 tick 走（无墙钟无随机），snapshot/restore 中途回退续播逐位一致。`vitric check` 验序列：`at` 单调不减、动作名在固定集合、动作字段过 schema、spawn 的字面贴图 / sound 的字面音效 / emit load-scene 的目标场景都存在——错误带路径 + VDxxx 码 + 修复提示。
+
+为什么序列不是规则的重复：规则触发器是**绝对 tick**、无游标、无 barrier；序列给的是**相对起跑的有序轨道 + 等待点**，这正是 Timeline 比裸脚本多出来的那层。序列编排"一条定时演出"，规则处理"条件反应"。
+
+schema 定义（字段名固定，默认值照抄）：
+
+```json
+"Sequence": {"fields": {
+  "track":  {"type": "text", "default": ""},
+  "cursor": {"type": "int",  "default": 0},
+  "start":  {"type": "int",  "default": -1},
+  "wait":   {"type": "text", "default": ""},
+  "id":     {"type": "text", "default": ""}
+}}
+```
+
+漫画过场 = 拿原语拼出来（**完整可跑示例见 examples/intro**，纯色占位精灵 + 字幕打字机，引擎零过场代码）：
+
+```json
+{ "id": "opening", "steps": [
+  { "at": 0,   "do": { "spawn": { "name": "illustration", "components": {
+                         "Position": {"x": 0, "y": -12}, "Sprite": {"w": 6, "h": 6, "color": "#5b6ee1"} } } } },
+  { "at": 0,   "do": { "sound": "chime.wav", "volume": 0.6 } },
+  { "at": 0,   "do": { "tween": { "target": "illustration", "field": "Position.y",
+                         "from": -12, "to": 1.5, "duration": 30, "ease": "ease-out" } } },
+  { "at": 30,  "do": { "tween": { "target": "camera", "field": "Camera.view_h",
+                         "from": 18, "to": 15, "duration": 120, "ease": "ease-in-out" } } },
+  { "at": 30,  "do": { "tween": { "target": "subtitle", "field": "Text.reveal",
+                         "from": 0, "to": 1, "duration": 60 } } },
+  { "at": 150, "do": { "wait": "player-confirm" } },
+  { "at": 151, "do": { "tween": { "target": "illustration", "field": "Position.y",
+                         "from": 1.5, "to": -12, "duration": 20, "ease": "ease-in" } } },
+  { "at": 171, "do": { "emit": "intro-done" } }
+]}
+```
+
+换成技能演出、Boss 登场、结局演职员表，全是同一套积木换条 Sequence——这才是通用引擎。
+
 ## 光照 / Lighting
 
 跟 Body/Solid 一样的约定组件：引擎认名字，字段自己在 schema 里定义。
@@ -347,6 +400,8 @@ vitric.system("fire-burst", { query: ["Emitter", "Hit"], writes: ["Emitter", "Hi
 - **清单写 `"font": "fonts/myfont.ttf"`（路径相对项目根目录）**：**所有** Text 改走 TTF 矢量字体——比例字距 + 字距调整，size = 字形总高的世界单位数（像素高 = size×相机 scale），字体里有的字形都能画（**中文/CJK 也行，前提是字体本身含 CJK 字形**——DejaVu 这类拉丁字体没有，中文会画成字体自带的 .notdef 豆腐块；要中文请换 Noto Sans SC 等）。矢量文字带覆盖率**抗锯齿**——这是引擎里唯一刻意平滑的元素，精灵贴图仍是最近邻硬边。手绘/高清画风、运行时 LLM 中文回复都走这条路（示例见 examples/book）。
 - 字体文件缺失/损坏：`vitric check` 和启动都显式报错点名路径，不会跑起来文字消失。
 - 确定性不变：CPU 截图（render/screenshot）同平台同二进制逐字节相同，照常可进断言；GPU 窗口与 CPU 视觉对齐但不逐字节（截图真相源永远是 CPU 路径）。
+
+**文字显隐 `Text.reveal`（逐字显示 / 打字机）**：给 `Text` 加一个可选 `reveal` 字段（schema 里 `"reveal": {"type":"number","default":1}`，0..=1 比例），渲染只画到该进度的字符——`reveal=1`（或不写该字段）全显、`reveal=0` 一个字不画、`0.5` 显前一半（按字符数下取整，CJK 一次显一个字形）。它是**通用文本属性，不绑任何"过场"**：谁来驱动都行——打字机 = 用补间把 reveal 从 0 推到 1（`{"tween": {"target": "subtitle", "field": "Text.reveal", "from": 0, "to": 1, "duration": 60}}`）、瞬显 = `set` 成 1、倒着隐 = 补间回 0。`reveal` 缺省或 ≥1 时输出与该字段出现之前逐字节相同（向后兼容）。性能上整段版面只算一次（按文字 id memo 缓存），逐字显示每 tick 只改"画到第几个字"，绝不重排——再长的台词一字一字蹦也不掉帧。
 
 **可读性警告（describe 的 `warnings`）**：屏上每条文字，`render/describe` 会在内部把"少画这条文字"的画面渲一帧，取文字包围盒内的平均背景亮度，与 `Text.color` 算 WCAG 式对比度 `(L1+0.05)/(L2+0.05)`；低于 2.5 给一条 `{"kind": "low-contrast-text", "entity": ..., "content": ..., "ratio": ..., "hint": ...}`，中文摘要里同步一行 `⚠ 文字"XX"与底色对比度过低`。米色字叠米色卡面这种"渲染正常、人眼读不出来"的事故由它兜住。只测屏内文字；视野外不测。没警告时没有 `warnings` 键。已知近似：文字色取原始值、底色取打光后像素（开光照/泛光时比值略有偏差，阈值已留余量）。
 

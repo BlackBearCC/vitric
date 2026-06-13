@@ -1756,6 +1756,16 @@ fn push_bitmap_texts(
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "#ffffff".to_string());
         let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Text.color: {e}"))?;
+        // reveal：与 CPU 点阵路径同一口径——截到前 visible 个字符、按 visible 居中
+        let reveal = world
+            .get_field(id, "Text.reveal")
+            .ok()
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0);
+        let visible = vitric_render::revealed_chars(reveal, content.chars().count());
+        if visible == 0 {
+            continue;
+        }
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;
         // screen=true: HUD 锚定——与 CPU 路径同语义,坐标相对屏幕中心,不随相机走
@@ -1765,7 +1775,7 @@ fn push_bitmap_texts(
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
 
-        let chars: Vec<char> = content.chars().collect();
+        let chars: Vec<char> = content.chars().take(visible).collect();
         let n = chars.len() as f64;
         let (cx, cy) = if screen_anchored {
             ((width as f64) / 2.0 + px * scale, (height as f64) / 2.0 - py * scale)
@@ -1822,6 +1832,16 @@ fn push_ttf_texts(
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "#ffffff".to_string());
         let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Text.color: {e}"))?;
+        // reveal（与 CPU 路径同一口径）：可见字数 = 纯函数；缺省 1.0=全显
+        let reveal = world
+            .get_field(id, "Text.reveal")
+            .ok()
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0);
+        let visible = vitric_render::revealed_chars(reveal, content.chars().count());
+        if visible == 0 {
+            continue;
+        }
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;
         let screen_anchored = world
@@ -1836,10 +1856,12 @@ fn push_ttf_texts(
         };
 
         let px_size = FontStore::px_size(size, scale);
-        let (placements, total_w) = font.layout(&content, px_size);
+        // 缓存版排版 + 只画前 visible 个字形：与 CPU 路径同一份数据、同一个可见字数
+        let laid = font.layout_cached(&content, px_size);
+        let (placements, total_w) = (&laid.0, laid.1);
         let left = cx - total_w as f64 / 2.0;
         let baseline = (cy + font.baseline_offset(px_size) as f64).round();
-        for p in &placements {
+        for p in placements.iter().take(visible) {
             let g = font.raster(p.ch, px_size);
             if g.coverage.is_empty() {
                 continue; // 空轮廓（空格等）只占 advance，不进图集

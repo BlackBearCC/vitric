@@ -1,0 +1,18 @@
+{
+  "rules": [
+    {
+      "id": "confirm-releases-barrier",
+      "on": { "event": "input", "filter": { "action": "confirm", "phase": "pressed" } },
+      "do": [
+        { "emit": "player-confirm", "data": {} }
+      ]
+    },
+    {
+      "id": "intro-done-finishes-run",
+      "on": { "event": "intro-done" },
+      "do": [
+        { "emit": "run-complete", "data": {} }
+      ]
+    }
+  ]
+}

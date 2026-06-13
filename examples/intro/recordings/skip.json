@@ -1,0 +1,23 @@
+{
+  "seed": 1,
+  "inputs": [
+    {
+      "tick": 40,
+      "action": "skip",
+      "phase": "pressed"
+    }
+  ],
+  "replies": [],
+  "checkpoints": [
+    [
+      0,
+      8929423942930225907
+    ],
+    [
+      60,
+      9824977375496366068
+    ]
+  ],
+  "ticks": 60,
+  "final_hash": 9824977375496366068
+}

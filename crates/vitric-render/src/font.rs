@@ -20,6 +20,26 @@ use std::sync::{Arc, Mutex};
 
 use ab_glyph::{Font, ScaleFont};
 
+/// `Text.reveal`（0..=1 比例）→ 当前应画出的字符数（向下取整）。
+///
+/// 文字显隐的唯一语义点：`reveal` 是通用文本属性，逐字打字机 = 补间把它从 0
+/// 推到 1。约定：
+/// - `reveal >= 1.0`（含字段缺省补的 1.0）→ 全显（`total` 个字），与未引入本特性
+///   时逐字节相同（向后兼容）；
+/// - `reveal <= 0.0` → 一个字都不画；
+/// - 中间 → `(reveal * total).floor()`，下取整保证"补间到 1 才显最后一个字"。
+///
+/// 按字符（非字节）计数，CJK 一次显一个字形，和 [`FontStore::layout`] 同口径。
+pub fn revealed_chars(reveal: f64, total: usize) -> usize {
+    if reveal >= 1.0 {
+        total
+    } else if reveal <= 0.0 {
+        0
+    } else {
+        ((reveal * total as f64).floor() as usize).min(total)
+    }
+}
+
 /// 一个字符在某个像素字号下的栅格化结果（覆盖率位图 + 落笔偏移）。
 pub struct RasterGlyph {
     pub width: u32,
@@ -32,17 +52,30 @@ pub struct RasterGlyph {
 }
 
 /// 串内一个字形的落笔位置（由 [`FontStore::layout`] 给出）。
+#[derive(Clone)]
 pub struct GlyphPlacement {
     pub ch: char,
     /// 笔位 x（像素，相对整串左缘，已含比例字距与字距调整）。
     pub x: f32,
 }
 
+/// 一整串的排版结果：逐字形落笔位置 + 总宽（像素）。共享只读（缓存返回 `Arc`）。
+pub type LayoutResult = (Vec<GlyphPlacement>, f32);
+
 /// 已加载的 TTF 字体 + 按 `(char, 像素字号)` 键的字形缓存。
 pub struct FontStore {
     font: ab_glyph::FontVec,
     path: PathBuf,
     cache: Mutex<BTreeMap<(char, u32), Arc<RasterGlyph>>>,
+    /// 整串排版结果缓存，键 `(整串文字, 像素字号)`。和字形缓存同样的理由
+    /// （`render_world` 拿 `&Assets`，缓存走内部可变性 + Mutex 保 Send+Sync）。
+    /// 存在的硬理由是性能预算：逐字显示（打字机）每 tick 只改"画到第几个字"，
+    /// 整段版面**绝不能每 tick 重排**——首次排一次进缓存，之后命中即返回，
+    /// 可见字数只是在排好的 placements 上切一刀。`layout_calls` 计数器供测试
+    /// 断言"同一段文字播 N tick，排版只发生 1 次"。
+    layout_cache: Mutex<BTreeMap<(String, u32), Arc<LayoutResult>>>,
+    /// 真正跑过排版算法的次数（缓存未命中才 +1）。只为测试可观测，不进任何输出。
+    layout_calls: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for FontStore {
@@ -59,7 +92,13 @@ impl FontStore {
         let font = ab_glyph::FontVec::try_from_vec(bytes).map_err(|e| {
             format!("字体 {} 不是合法的 TTF/OTF: {e}。提示：换一个能正常打开的字体文件", path.display())
         })?;
-        Ok(FontStore { font, path: path.to_path_buf(), cache: Mutex::new(BTreeMap::new()) })
+        Ok(FontStore {
+            font,
+            path: path.to_path_buf(),
+            cache: Mutex::new(BTreeMap::new()),
+            layout_cache: Mutex::new(BTreeMap::new()),
+            layout_calls: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 
     /// 加载来源路径（素材热重载时按它重读磁盘）。
@@ -87,7 +126,10 @@ impl FontStore {
 
     /// 排版一整串（单行，无换行）：每个字符的笔位 + 总宽（像素）。
     /// 比例字距（每字形自己的 advance）+ ab_glyph 字距调整（kern）。
+    /// **未缓存**版本——直接跑排版算法。热路径（每帧画文字）请走 [`FontStore::layout_cached`]，
+    /// 它把结果按 `(文字, 像素字号)` memo 住，逐字显示不会每 tick 重排整段。
     pub fn layout(&self, text: &str, px: u32) -> (Vec<GlyphPlacement>, f32) {
+        self.layout_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let s = self.scaled(px);
         let mut placements = Vec::new();
         let mut pen = 0.0f32;
@@ -102,6 +144,26 @@ impl FontStore {
             prev = Some(id);
         }
         (placements, pen)
+    }
+
+    /// 缓存版排版：命中 `(文字, 像素字号)` 直接给，未命中才真排一次。
+    /// 性能预算第 3 条的落点——逐字显示同一段文字播 N tick，`layout` 算法只跑 1 次
+    /// （`layout_runs` 计数器锁住这个不变量）；可见字数变化只在返回的 placements 上切片，
+    /// 不触发重排。返回 `Arc` 避免每帧克隆整串 placements（热路径零额外分配）。
+    pub fn layout_cached(&self, text: &str, px: u32) -> Arc<LayoutResult> {
+        let key = (text.to_string(), px);
+        if let Some(hit) = self.layout_cache.lock().expect("排版缓存锁").get(&key) {
+            return hit.clone();
+        }
+        let laid = Arc::new(self.layout(text, px));
+        self.layout_cache.lock().expect("排版缓存锁").insert(key, laid.clone());
+        laid
+    }
+
+    /// `layout` 算法真正执行过的次数（缓存未命中才计数）。测试专用——
+    /// 断言"版面只算一次"，不进任何渲染输出。
+    pub fn layout_runs(&self) -> u64 {
+        self.layout_calls.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 栅格化一个字符（命中缓存直接给）。字体没有该字符 → 该字体的 .notdef 字形。
@@ -141,5 +203,27 @@ impl FontStore {
         let raster = Arc::new(raster);
         self.cache.lock().expect("字形缓存锁").insert((ch, px), raster.clone());
         raster
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revealed_chars_endpoints_and_floor() {
+        // 全显（缺省的 1.0 / 超过 1）：与未引入 reveal 时逐字相同
+        assert_eq!(revealed_chars(1.0, 5), 5);
+        assert_eq!(revealed_chars(2.0, 5), 5);
+        // 一个字都没有
+        assert_eq!(revealed_chars(0.0, 5), 0);
+        assert_eq!(revealed_chars(-0.5, 5), 0);
+        // 中间下取整：0.5×5 = 2.5 → 2；0.99×5 = 4.95 → 4（补间到 1 才显第 5 个）
+        assert_eq!(revealed_chars(0.5, 5), 2);
+        assert_eq!(revealed_chars(0.99, 5), 4);
+        assert_eq!(revealed_chars(0.2, 5), 1);
+        // 空串恒 0，不 panic
+        assert_eq!(revealed_chars(0.5, 0), 0);
+        assert_eq!(revealed_chars(1.0, 0), 0);
     }
 }

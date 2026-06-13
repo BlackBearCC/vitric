@@ -286,6 +286,59 @@ vitric.system("fire-burst", { query: ["Emitter", "Hit"], writes: ["Emitter", "Hi
 });
 ```
 
+## Presentation layer: tween · sequence (timeline)
+
+Timed presentation (fade-ins, camera pushes, typewriters, openings, boss intros, end credits…) is built from two generic primitives, the counterparts to Unity Timeline / Godot AnimationPlayer. **The engine does not ship a "cutscene system" — a cutscene is one *use* of a sequence**, living in the game project; there is not a single "cutscene"/"comic page"/"card" word on the engine side. The action set is only the engine's existing generic verbs; genre-specific concepts are assembled from these blocks.
+
+**Tween `Tween`**: the deterministic interpolation base for "smoothly change one value from A to B" (fade in/out, camera push, UI pop, color gradient, move/scale). A standalone entity carries `Tween{target, field, from, to, duration, ease, start, id}` (define these in your schema; `target` is the target entity name/handle, `field` is a `"Component.field"` path). Five fixed curves: `linear` / `ease-in` / `ease-out` / `ease-in-out` / `ease-out-back` (overshoot rebound). The value at tick T is the **analytic** `from + (to-from)·ease(elapsed/duration)` (no accumulation, so snapshot-rewind resumes bit-identically); at the finishing tick it writes the exact endpoint (no float tail), emits `tween-finished {id, target, field}`, and removes itself. Only one active tween per (entity, field) — a latecomer evicts the incumbent. All state lives in the component (hashes / saves / snapshots).
+
+**Sequence `Sequence` (generic timeline)**: an ordered action track advanced by relative tick. A sequence definition is static project data (`sequences/<name>.json`, declared in the manifest `sequences` list): an ordered list of `{ "at": <relative tick>, "do": <action> }`, where `at` is relative to the sequence's **start point** (the same sequence started at any moment plays from its own t=0 — distinct from a rule's absolute-tick trigger), and entries must be non-decreasing by `at`. At runtime a `Sequence` component instantiates it (schema defines five fields `track`/`cursor`/`start`/`wait`/`id`) and holds **only the minimal playback state** — which sequence, cursor index, start tick, barrier flag; the static track never enters the per-instance snapshot, so snapshots stay cheap. The v1 action set is fixed (not Turing-complete, no embedded scripting) and mirrors existing engine verbs:
+
+- `tween`: start a tween. Camera push = tween a camera field, fade = tween an alpha/color field, move/scale via the same. **The sequence orchestrates, the tween executes** — zero duplication.
+- `set`: set a field instantly (`{"set": "@subtitle.Text.content", "to": "..."}`, mirrors the rule `set`).
+- `spawn` / `despawn`: create/destroy entities (mirror the rules). An illustration entering = spawn a Sprite entity.
+- `emit`: emit an event for rules/scripts to pick up. **This is how a sequence decouples from "scenes"** — to switch scenes, `{"emit": "load-scene", "data": {"scene": "scenes/next.json"}}`, handled by a project rule; the sequence itself never knows about "scenes"/"levels".
+- `sound`: play a sound (`{"sound": "chime.wav", "volume": 0.6}`, turned into a play-sound event on the same audio channel as rules).
+- `wait`: a barrier — the cursor parks until a named event appears (`{"wait": "player-confirm"}`, a rule turns player input into that event) or a `skip` input arrives. This is the state-machine ability rules can't easily express — the other half of why sequences exist.
+
+Reaching the end emits `sequence-finished {id, track}` and removes the sequence entity (any scene switch afterward is a rule's job, not built in). **Skip**: a `skip` input (`input/inject {action: "skip"}`) lands the terminal states of all unexecuted entries and then emits the finish event — skip is an input, recorded, replays identically. The whole advance is an ordinary per-tick system (no wall clock, no randomness); snapshot/restore mid-flight resumes bit-identically. `vitric check` validates a sequence: `at` non-decreasing, action names in the fixed set, action fields against the schema, and that literal images in `spawn` / literal sounds in `sound` / the target scene of an `emit "load-scene"` all exist — errors carry a path + a VDxxx code + a fix hint.
+
+Why a sequence is not a duplicate rule: a rule's trigger is an **absolute tick**, with no cursor and no barrier; a sequence gives an **ordered track relative to its start plus wait points** — exactly the layer Timeline adds over a bare script. A sequence orchestrates "one timed performance"; rules handle "conditional reactions".
+
+Schema definition (field names fixed, defaults are yours):
+
+```json
+"Sequence": {"fields": {
+  "track":  {"type": "text", "default": ""},
+  "cursor": {"type": "int",  "default": 0},
+  "start":  {"type": "int",  "default": -1},
+  "wait":   {"type": "text", "default": ""},
+  "id":     {"type": "text", "default": ""}
+}}
+```
+
+A comic cutscene = assembled from primitives (**complete runnable example in examples/intro**: solid-color placeholder sprites + a typewriter subtitle, zero cutscene code in the engine):
+
+```json
+{ "id": "opening", "steps": [
+  { "at": 0,   "do": { "spawn": { "name": "illustration", "components": {
+                         "Position": {"x": 0, "y": -12}, "Sprite": {"w": 6, "h": 6, "color": "#5b6ee1"} } } } },
+  { "at": 0,   "do": { "sound": "chime.wav", "volume": 0.6 } },
+  { "at": 0,   "do": { "tween": { "target": "illustration", "field": "Position.y",
+                         "from": -12, "to": 1.5, "duration": 30, "ease": "ease-out" } } },
+  { "at": 30,  "do": { "tween": { "target": "camera", "field": "Camera.view_h",
+                         "from": 18, "to": 15, "duration": 120, "ease": "ease-in-out" } } },
+  { "at": 30,  "do": { "tween": { "target": "subtitle", "field": "Text.reveal",
+                         "from": 0, "to": 1, "duration": 60 } } },
+  { "at": 150, "do": { "wait": "player-confirm" } },
+  { "at": 151, "do": { "tween": { "target": "illustration", "field": "Position.y",
+                         "from": 1.5, "to": -12, "duration": 20, "ease": "ease-in" } } },
+  { "at": 171, "do": { "emit": "intro-done" } }
+]}
+```
+
+Swap in a skill flourish, a boss intro, or end credits — all the same blocks with a different Sequence. That is what makes it a general-purpose engine.
+
 ## Lighting
 
 Convention components like Body/Solid: the engine recognizes the names, you define the fields in your schema.
@@ -324,6 +377,8 @@ Two rendering paths, chosen by the manifest `font` field:
 - **`"font": "fonts/myfont.ttf"` in the manifest (path relative to the project root)**: **all** Text components switch to the TTF vector font — proportional advances + kerning, size = glyph height in world units (pixel height = size × camera scale), and any glyph the font contains renders (**including Chinese/CJK, provided the font itself has CJK glyphs** — Latin fonts like DejaVu don't; missing glyphs render the font's .notdef tofu box, so use e.g. Noto Sans SC for Chinese). Vector text is coverage-anti-aliased — the one intentionally smooth element in the engine; sprites stay nearest-neighbor crisp. Use this for hand-drawn/HD styles and runtime LLM replies in Chinese (see examples/book).
 - Missing/corrupt font file: `vitric check` and boot both fail with an explicit error naming the path — text never silently disappears at runtime.
 - Determinism is unchanged: CPU screenshots (render/screenshot) stay byte-identical per platform/binary and remain assertable; the GPU window matches visually but not byte-exactly (the CPU path stays the source of truth).
+
+**Text reveal `Text.reveal` (progressive display / typewriter)**: add an optional `reveal` field to `Text` (schema `"reveal": {"type":"number","default":1}`, a 0..=1 ratio); rendering only draws characters up to that progress — `reveal=1` (or the field absent) shows everything, `reveal=0` draws nothing, `0.5` shows the first half (floored by character count; CJK reveals one glyph at a time). It's a **generic text property, not tied to any "cutscene"**: drive it however you like — typewriter = tween reveal from 0 to 1 (`{"tween": {"target": "subtitle", "field": "Text.reveal", "from": 0, "to": 1, "duration": 60}}`), instant = `set` it to 1, un-reveal = tween back to 0. When `reveal` is absent or ≥1 the output is byte-identical to before this field existed (backward compatible). Performance: a line's layout is computed once (memoized by text id); progressive display only changes "how many characters to draw" each tick and never re-lays-out — even a long line typing out one glyph at a time costs nothing extra.
 
 **Legibility warnings (`warnings` in describe)**: for every on-screen text, `render/describe` internally renders the frame with that one text skipped, averages the background luminance inside the text's bounding box, and computes the WCAG-style contrast ratio `(L1+0.05)/(L2+0.05)` against `Text.color`. Below 2.5 it emits `{"kind": "low-contrast-text", "entity": ..., "content": ..., "ratio": ..., "hint": ...}` plus a ⚠ line in the summary. This catches the "renders fine, humans can't read it" class of failure (cream text on a cream card). Off-screen texts are not checked. No warnings ⇒ no `warnings` key. Known approximation: the text color is taken raw while the backdrop is sampled after lighting/bloom — the threshold leaves margin for that.
 

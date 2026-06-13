@@ -1,0 +1,38 @@
+{
+  "entities": [
+    {
+      "name": "camera",
+      "components": {
+        "Position": { "x": 0, "y": 0 },
+        "Camera": { "x": 0, "y": 0, "view_h": 18 }
+      }
+    },
+    {
+      "name": "letterbox-top",
+      "components": {
+        "Position": { "x": 0, "y": 8.2 },
+        "Sprite": { "w": 40, "h": 3, "color": "#000000" }
+      }
+    },
+    {
+      "name": "letterbox-bottom",
+      "components": {
+        "Position": { "x": 0, "y": -8.2 },
+        "Sprite": { "w": 40, "h": 3, "color": "#000000" }
+      }
+    },
+    {
+      "name": "subtitle",
+      "components": {
+        "Position": { "x": 0, "y": -5.5 },
+        "Text": { "content": "he walked into the endless hall", "size": 0.8, "color": "#e8dcc0", "reveal": 0 }
+      }
+    },
+    {
+      "name": "sequencer",
+      "components": {
+        "Sequence": { "track": "opening", "id": "opening" }
+      }
+    }
+  ]
+}

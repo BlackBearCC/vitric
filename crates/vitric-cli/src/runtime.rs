@@ -5,8 +5,8 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use vitric_data::{Clip, Project, Scene, Schema};
-use vitric_ecs::World;
+use vitric_data::{Clip, Project, Scene, Schema, SeqStep, Sequence};
+use vitric_ecs::{EntityId, World};
 use vitric_rules::{Engine, Event, RuleSet, ScriptCall};
 use vitric_script::ScriptEngine;
 use vitric_sim::{GameLogic, Pcg32, Sim};
@@ -23,6 +23,9 @@ pub struct Runtime {
     pub scripts: ScriptEngine,
     /// 动画片段定义。
     pub animations: BTreeMap<String, Clip>,
+    /// 序列（时间轴）静态轨道定义。运行时 Sequence 组件按名字引用，
+    /// 静态轨道不进每实例快照（组件只存最小播放状态）。
+    pub sequences: BTreeMap<String, Sequence>,
     /// schema（场景切换时实例化新场景用，与规则/脚本持有的是同一份定义）。
     schema: Schema,
     /// 清单里的全部场景（装配期预载的不可变副本）。场景切换从这里取数据
@@ -65,6 +68,7 @@ impl Runtime {
             rules,
             scripts,
             animations: project.animations.clone(),
+            sequences: project.sequences.clone(),
             schema: project.schema.clone(),
             scenes: project.scenes.clone(),
             root: None,
@@ -160,6 +164,11 @@ impl GameLogic for Runtime {
     ) -> Result<(), String> {
         let mut inbox = std::mem::take(&mut self.carryover);
         inbox.extend(events);
+        // 序列 wait barrier 要看本 tick 的事件：input（含 skip 跳过）、上一 tick 脚本
+        // 发的 carryover、以及本 tick 规则/脚本 emit 的命名事件（player-confirm 这类
+        // 放行 barrier 的就是它们）。规则 emit 的事件在 process_tick 的级联里消化、
+        // 不进 carryover，序列得在这里**额外**收一份本 tick 全部 emit 的事件副本。
+        let mut seq_inbox = inbox.clone();
 
         // 本 tick 规则/脚本 emit 的 load-scene（场景切换约定事件）。切换推迟到
         // 流水线尾部统一执行——发起方 emit 之后本 tick 的剩余逻辑仍面对旧世界，
@@ -172,6 +181,7 @@ impl GameLogic for Runtime {
         // 1. 规则
         let out = self.rules.process_tick(world, inbox).map_err(|e| e.to_string())?;
         collect_loads(&out.emitted, &mut loads);
+        seq_inbox.extend(out.emitted.iter().cloned());
         self.observed.extend(out.emitted);
 
         // 2. 规则 -> 脚本函数调用
@@ -181,6 +191,7 @@ impl GameLogic for Runtime {
                 .call_fn(&function, &args, self_entity, world, rng, tick)
                 .map_err(|e| e.to_string())?;
             collect_loads(&so.events, &mut loads);
+            seq_inbox.extend(so.events.iter().cloned());
             self.observed.extend(so.events.iter().cloned());
             self.carryover.extend(so.events);
         }
@@ -188,6 +199,7 @@ impl GameLogic for Runtime {
         // 3. 脚本系统
         let so = self.scripts.run_systems(world, rng, tick).map_err(|e| e.to_string())?;
         collect_loads(&so.events, &mut loads);
+        seq_inbox.extend(so.events.iter().cloned());
         self.observed.extend(so.events.iter().cloned());
         self.carryover.extend(so.events);
 
@@ -196,6 +208,14 @@ impl GameLogic for Runtime {
         let anim_events = advance_animations(world, &self.animations)?;
         self.observed.extend(anim_events.iter().cloned());
         self.carryover.extend(anim_events);
+
+        // 4.5 序列推进（通用时间轴）：和动画同级的引擎系统，状态全在 Sequence
+        //     组件里（快照/回放安全），按相对起跑 tick 发动通用动词。序列 emit 的
+        //     load-scene/play-sound 走和规则同一条尾部管道，所以放在场景切换之前。
+        let seq_events = advance_sequences(world, &self.sequences, &self.schema, &seq_inbox, tick)?;
+        collect_loads(&seq_events, &mut loads);
+        self.observed.extend(seq_events.iter().cloned());
+        self.carryover.extend(seq_events);
 
         // 5. 场景切换（必须在确定性流水线内执行，重放才会在同一 tick 复现）
         if let Some(load) = loads.first() {
@@ -359,6 +379,265 @@ pub fn advance_animations(
             .map_err(|e| e.to_string())?;
     }
     Ok(events)
+}
+
+/// 序列系统：通用时间轴原语，每 tick 推进活跃的 `Sequence` 组件。
+///
+/// 状态全在 `Sequence` 组件里（快照/回放安全）：`track`（引用哪条静态序列）、
+/// `cursor`（下一条要发动的条目下标）、`start`（起跑 tick，-1=还没起跑）、
+/// `wait`（在等的命名事件，空串=没在等）、`id`（完成事件带的 id，空=取 track 名）。
+/// 静态轨道（条目数组）在 `catalog` 里，不进组件、不进每实例快照。
+///
+/// 语义合同：
+/// - **空场零成本**：没有任何 Sequence 组件时每 tick 直接 early-return；
+/// - 第一次被处理的 tick 把 `start` 从 -1 盖成当前 tick（elapsed=0）；
+/// - 每 tick 发动所有 `at ≤ elapsed` 且下标 ≥ cursor 的条目（按下标序），
+///   游标随之前进，直到撞上 `wait`（barrier）或没有到点的条目；
+/// - `wait`：游标停在 barrier，直到 `inbox` 里出现那个命名事件才放行；
+/// - **skip 跳过**：inbox 里有 `skip` 输入 → 把剩余条目的终态全部落定（无视 at
+///   和 wait），随即发完成事件。skip 是输入、进录像，重放一致；
+/// - 跑到末尾发 `sequence-finished {id, track}` 事件，序列实体自动 despawn；
+/// - `tween` 动作 = spawn 一个 Tween 组件交给 sim 的 advance_tweens 执行（零重复）。
+///
+/// 序列借 `emit`（含 `sound`→play-sound）与"场景"解耦：切场景就 emit load-scene，
+/// 由项目规则接去 load-scene；序列本身不认识"场景""关卡""过场"。
+pub fn advance_sequences(
+    world: &mut World,
+    catalog: &BTreeMap<String, Sequence>,
+    schema: &Schema,
+    inbox: &[Event],
+    tick: u64,
+) -> Result<Vec<Event>, String> {
+    let ids = world.query(&["Sequence"]);
+    if ids.is_empty() {
+        return Ok(Vec::new()); // 空场零成本：没有序列在播，零分配零遍历
+    }
+    // skip 是输入：录像里就是一条 {"action":"skip","phase":"pressed"} 的 input 事件
+    let skip = inbox
+        .iter()
+        .any(|e| e.name == "input" && e.data.get("action").and_then(|v| v.as_str()) == Some("skip"));
+
+    let mut events = Vec::new();
+    for id in ids {
+        if !world.is_alive(id) {
+            continue; // 前一条序列的动作可能 despawn 了它
+        }
+        let track_name = world
+            .get_field(id, "Sequence.track")
+            .map_err(|e| e.to_string())?
+            .as_str()
+            .ok_or_else(|| format!("实体 {id} 的 Sequence.track 必须是文本（序列名）"))?
+            .to_string();
+        if track_name.is_empty() {
+            continue; // 空 track = 没装序列，跳过
+        }
+        let seq = catalog.get(&track_name).ok_or_else(|| {
+            format!(
+                "实体 {id} 的 Sequence.track {track_name:?} 没有定义。已定义序列: [{}]。\
+                 提示：序列在清单 sequences 列表的文件里定义",
+                catalog.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
+
+        // 起跑盖章：start 从 -1 盖成当前 tick（进组件 = 进哈希进存档）
+        let mut start = world
+            .get_field(id, "Sequence.start")
+            .map_err(|e| e.to_string())?
+            .as_i64()
+            .ok_or_else(|| format!("实体 {id} 的 Sequence.start 必须是整数"))?;
+        if start < 0 {
+            start = tick as i64;
+            world.set_field(id, "Sequence.start", json!(start)).map_err(|e| e.to_string())?;
+        }
+        let elapsed = (tick as i64 - start).max(0) as u64;
+
+        let mut cursor = world
+            .get_field(id, "Sequence.cursor")
+            .map_err(|e| e.to_string())?
+            .as_i64()
+            .ok_or_else(|| format!("实体 {id} 的 Sequence.cursor 必须是整数"))?
+            .max(0) as usize;
+        let mut waiting = world
+            .get_field(id, "Sequence.wait")
+            .map_err(|e| e.to_string())?
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let seq_id = world
+            .get_field(id, "Sequence.id")
+            .ok()
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| track_name.clone());
+
+        // barrier：在等某事件，本 tick inbox 里出现了它才放行（skip 也放行）
+        if !waiting.is_empty() {
+            let released = skip || inbox.iter().any(|e| e.name == waiting);
+            if released {
+                waiting.clear();
+            } else {
+                // 还在等：状态不变，继续下一条序列
+                continue;
+            }
+        }
+
+        // 发动条目。skip 时无视 at/wait 一口气落定剩余全部终态。
+        let finished = loop {
+            if cursor >= seq.steps.len() {
+                break true; // 跑到末尾
+            }
+            let step = &seq.steps[cursor];
+            if !skip && step.at > elapsed {
+                break false; // 还没到点，等下一 tick
+            }
+            if step.kind == "wait" && !skip {
+                // 撞上 barrier：记下要等的事件名，游标越过它，本 tick 停在这
+                let name = step.action.get("wait").and_then(|v| v.as_str()).unwrap_or("");
+                waiting = name.to_string();
+                cursor += 1;
+                break false;
+            }
+            // 执行动作（wait 在 skip 下当空操作直接跳过）
+            if step.kind != "wait" {
+                exec_seq_action(world, schema, step, &mut events)
+                    .map_err(|e| format!("序列 {track_name:?} 第 {cursor} 条（{}）: {e}", step.kind))?;
+            }
+            cursor += 1;
+        };
+
+        if finished {
+            events.push(Event::new(
+                "sequence-finished",
+                json!({"id": seq_id, "track": track_name}),
+            ));
+            if world.is_alive(id) {
+                world.despawn(id).map_err(|e| e.to_string())?;
+            }
+        } else if world.is_alive(id) {
+            // 回写最小播放状态（游标 + barrier 标志）
+            world.set_field(id, "Sequence.cursor", json!(cursor as i64)).map_err(|e| e.to_string())?;
+            world.set_field(id, "Sequence.wait", json!(waiting)).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(events)
+}
+
+/// 执行序列里一条动作（动作集已被 vitric-data 校验过类型/字段）。
+/// 全部镜像引擎已有通用动词，不新造语义。组件值统一过 schema 归一化
+/// （number 一律存浮点形态）——表示唯一，状态哈希不受写入方影响（与场景/规则同口径）。
+fn exec_seq_action(
+    world: &mut World,
+    schema: &Schema,
+    step: &SeqStep,
+    events: &mut Vec<Event>,
+) -> Result<(), String> {
+    let obj = step.action.as_object().expect("校验层已确保动作是对象");
+    match step.kind.as_str() {
+        // tween：起一个 Tween 组件，交给 sim 的 advance_tweens 执行（零重复）
+        "tween" => {
+            let spec = obj["tween"].as_object().expect("校验过");
+            let target = spec.get("target").and_then(|v| v.as_str()).expect("校验过");
+            let target_handle = resolve_entity(world, target)?;
+            let mut comp = serde_json::Map::new();
+            comp.insert("target".into(), json!(target_handle.to_string()));
+            for key in ["field", "from", "to", "duration", "ease"] {
+                if let Some(v) = spec.get(key) {
+                    comp.insert(key.into(), v.clone());
+                }
+            }
+            comp.insert("start".into(), json!(-1)); // 由补间系统起跑时盖章
+            comp.insert("id".into(), spec.get("id").cloned().unwrap_or_else(|| json!("")));
+            let tw = world.spawn();
+            let value = normalize_component(schema, "Tween", Value::Object(comp))?;
+            world.set_component(tw, "Tween", value).map_err(|e| e.to_string())?;
+        }
+        // set：瞬时设字段（镜像规则 set）
+        "set" => {
+            let target = obj["set"].as_str().expect("校验过");
+            let to = obj.get("to").expect("校验过").clone();
+            let (id, path) = resolve_field(world, target)?;
+            world.set_field(id, &path, to).map_err(|e| e.to_string())?;
+        }
+        // spawn：生成实体（镜像规则 spawn）
+        "spawn" => {
+            let spec = obj["spawn"].as_object().expect("校验过");
+            let comps = spec.get("components").and_then(|v| v.as_object()).expect("校验过");
+            let id = match spec.get("name").and_then(|v| v.as_str()) {
+                Some(name) => world.spawn_named(name).map_err(|e| e.to_string())?,
+                None => world.spawn(),
+            };
+            for (cname, cval) in comps {
+                let value = normalize_component(schema, cname, cval.clone())?;
+                world.set_component(id, cname, value).map_err(|e| e.to_string())?;
+            }
+        }
+        // despawn：销毁实体（镜像规则 despawn）
+        "despawn" => {
+            let target = obj["despawn"].as_str().expect("校验过");
+            let id = resolve_entity(world, target)?;
+            world.despawn(id).map_err(|e| e.to_string())?;
+        }
+        // emit：发事件让规则接龙（与场景解耦的正门）
+        "emit" => {
+            let name = obj["emit"].as_str().expect("校验过");
+            let data = obj.get("data").cloned().unwrap_or_else(|| json!({}));
+            events.push(Event::new(name, data));
+        }
+        // sound：播音效（镜像音频，翻成 play-sound 事件——和规则同一条音频通道）
+        "sound" => {
+            let sound = obj["sound"].as_str().expect("校验过");
+            let mut data = serde_json::Map::new();
+            data.insert("sound".into(), json!(sound));
+            if let Some(vol) = obj.get("volume") {
+                data.insert("volume".into(), vol.clone());
+            }
+            events.push(Event::new("play-sound", Value::Object(data)));
+        }
+        other => return Err(format!("未知序列动作 {other:?}（校验层应已拦截）")),
+    }
+    Ok(())
+}
+
+/// 按 schema 归一化一条组件值（number→浮点、填默认值）。组件名未知则显式报错。
+/// 序列 spawn/tween 出来的组件和场景/规则一样走这道归一化，状态哈希才一致。
+fn normalize_component(schema: &Schema, cname: &str, value: Value) -> Result<Value, String> {
+    let cschema = schema.component(cname).ok_or_else(|| {
+        format!(
+            "未知组件 {cname:?}。schema 里的组件: [{}]",
+            schema.components.keys().cloned().collect::<Vec<_>>().join(", ")
+        )
+    })?;
+    let mut report = vitric_data::ValidationReport::default();
+    let normalized = cschema.normalize(&value, &format!("sequence/{cname}"), &mut report);
+    if !report.ok() {
+        return Err(format!("组件值未通过 schema 校验:\n{report}"));
+    }
+    Ok(normalized)
+}
+
+/// 解析实体引用："@名字" / "名字" / "e3v1" 句柄。序列动作里的实体引用走这条。
+fn resolve_entity(world: &World, s: &str) -> Result<EntityId, String> {
+    let name = s.strip_prefix('@').unwrap_or(s);
+    if let Ok(id) = world.entity(name) {
+        return Ok(id);
+    }
+    if let Ok(h) = name.parse::<EntityId>() {
+        if world.is_alive(h) {
+            return Ok(h);
+        }
+    }
+    Err(format!(
+        "实体引用 {s:?} 找不到。提示：填场景/序列里已生成的实体名（可带 @ 前缀）"
+    ))
+}
+
+/// 解析 "实体.字段路径"（如 "@subtitle.Text.content"）成 (句柄, 字段路径)。
+fn resolve_field(world: &World, target: &str) -> Result<(EntityId, String), String> {
+    let (ent, path) = target.split_once('.').ok_or_else(|| {
+        format!("目标 {target:?} 缺少字段路径，写法 \"@实体名.组件.字段\"")
+    })?;
+    Ok((resolve_entity(world, ent)?, path.to_string()))
 }
 
 /// TypeScript → JavaScript（esbuild 子进程，只剥类型不打包）。
@@ -612,6 +891,47 @@ pub fn check(dir: &Path) -> Result<Value, String> {
             }
         }
     }
+    // 序列：结构/动作字段由 Project::load（vitric-data）已校验；这里补跨文件引用——
+    // spawn 的字面贴图、sound 的字面音效、emit "load-scene" 的目标场景都得真存在
+    for seq in project.sequences.values() {
+        for step in &seq.steps {
+            scan_rule_image_refs(&step.action, &seq.file, &assets, &mut missing);
+            scan_sound_refs(&step.action, &seq.file, &dir.join("sounds"), &mut missing);
+            // sound 动作的字面音效
+            if step.kind == "sound" {
+                if let Some(name) = step.action.get("sound").and_then(|v| v.as_str()) {
+                    if !name.is_empty()
+                        && !name.contains("..")
+                        && !name.starts_with('/')
+                        && !dir.join("sounds").join(name).exists()
+                    {
+                        missing.push(format!(
+                            "序列 {} 引用了不存在的音效 {name:?}（应在项目 sounds/ 目录）",
+                            seq.file
+                        ));
+                    }
+                }
+            }
+            // emit "load-scene" 的目标场景必须在清单 scenes 列表里
+            if step.kind == "emit"
+                && step.action.get("emit").and_then(|v| v.as_str()) == Some("load-scene")
+            {
+                if let Some(scene) = step
+                    .action
+                    .get("data")
+                    .and_then(|d| d.get("scene"))
+                    .and_then(|v| v.as_str())
+                {
+                    if !project.scenes.contains_key(scene) {
+                        missing.push(format!(
+                            "序列 {} emit 的 load-scene 目标场景 {scene:?} 不在清单 scenes 列表里",
+                            seq.file
+                        ));
+                    }
+                }
+            }
+        }
+    }
     // 音效：规则里字面引用的 play-sound 音效文件必须存在
     for (file, doc) in &project.rules {
         scan_sound_refs(doc, file, &dir.join("sounds"), &mut missing);
@@ -635,6 +955,7 @@ pub fn check(dir: &Path) -> Result<Value, String> {
     Ok(serde_json::json!({
         "project": project.manifest.name,
         "scenes": project.scenes.keys().collect::<Vec<_>>(),
+        "sequences": project.sequences.keys().collect::<Vec<_>>(),
         "rules": runtime.rules.rules.rules.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
         "systems": runtime.scripts.systems.iter().map(|s| serde_json::json!({
             "name": s.name, "query": s.query, "writes": s.writes,

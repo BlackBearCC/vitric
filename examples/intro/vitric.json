@@ -1,0 +1,30 @@
+{
+  "name": "intro",
+  "schema": "schema.json",
+  "entry": "scenes/stage.json",
+  "scenes": [
+    "scenes/stage.json"
+  ],
+  "rules": [
+    "rules/game.json"
+  ],
+  "sequences": [
+    "sequences/opening.json"
+  ],
+  "font": "fonts/DejaVuSans.ttf",
+  "seed": 1,
+  "gates": {
+    "playthroughs": [
+      {
+        "recording": "recordings/watch.json",
+        "must_emit": "run-complete"
+      },
+      {
+        "recording": "recordings/skip.json",
+        "must_emit": "run-complete"
+      }
+    ],
+    "check": true,
+    "max_ticks": 2000
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "components": {
+    "Position": {
+      "fields": {
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      }
+    },
+    "Sprite": {
+      "fields": {
+        "w": { "type": "number" },
+        "h": { "type": "number" },
+        "color": { "type": "text", "default": "#ffffff" }
+      }
+    },
+    "Camera": {
+      "fields": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "view_h": { "type": "number", "default": 18 }
+      }
+    },
+    "Text": {
+      "fields": {
+        "content": { "type": "text", "default": "" },
+        "size": { "type": "number", "default": 1 },
+        "color": { "type": "text", "default": "#ffffff" },
+        "reveal": { "type": "number", "default": 1 }
+      }
+    },
+    "Sequence": {
+      "fields": {
+        "track": { "type": "text", "default": "" },
+        "cursor": { "type": "int", "default": 0 },
+        "start": { "type": "int", "default": -1 },
+        "wait": { "type": "text", "default": "" },
+        "id": { "type": "text", "default": "" }
+      }
+    },
+    "Tween": {
+      "fields": {
+        "target": { "type": "text", "default": "" },
+        "field": { "type": "text", "default": "" },
+        "from": { "type": "number", "default": 0 },
+        "to": { "type": "number", "default": 0 },
+        "duration": { "type": "int", "default": 1 },
+        "ease": { "type": "text", "default": "linear" },
+        "start": { "type": "int", "default": -1 },
+        "id": { "type": "text", "default": "" }
+      }
+    }
+  }
+}
