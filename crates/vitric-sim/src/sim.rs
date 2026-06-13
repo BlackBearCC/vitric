@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde_json::json;
@@ -5,6 +6,7 @@ use serde_json::json;
 use vitric_ecs::World;
 use vitric_rules::Event;
 
+use crate::tween::{tween_value, Ease};
 use crate::{InputRecord, Pcg32, Recording, ReplyRecord};
 
 /// 模拟频率固定 60Hz。固定步长是确定性的前提：墙钟时间永远不进模拟。
@@ -164,7 +166,9 @@ impl Sim {
     /// 2. 内建重力：Body 实体 Velocity.y += gravity * DT
     /// 3. 内建运动系统：Position += Velocity * DT（带 Body+Collider 的实体被 Solid 挡停）
     /// 4. 游戏感内建系统（跑在运动之后，相机看的是本 tick 的最终位置）：
-    ///    相机跟随 → 抖动衰减 → 粒子寿命
+    ///    相机跟随 → 抖动衰减 → 粒子寿命 → 补间。补间（Tween 组件）跑在全部
+    ///    内建写字段系统之后：补间盯上的字段以补间为准（运动积分/相机跟随写的
+    ///    值被本 tick 的补间值覆盖），碰撞检测和渲染看到的是补间后的最终值
     /// 5. 内建碰撞检测：AABB 重叠 → collision 事件
     /// 6. 游戏逻辑（规则 + 脚本）消化全部事件
     /// 7. tick + 1
@@ -210,6 +214,7 @@ impl Sim {
         self.follow_camera()?;
         self.decay_shake()?;
         self.age_particles()?;
+        self.advance_tweens(&mut events)?;
 
         // 4. 碰撞
         self.detect_collisions(&mut events)?;
@@ -585,6 +590,184 @@ impl Sim {
                 self.world
                     .set_field(id, "Particle.ttl", json!(ttl - 1))
                     .expect("字段刚读过必然存在");
+            }
+        }
+        Ok(())
+    }
+
+    /// 补间：`Tween` 组件（独立实体，由场景文件声明或规则/脚本 spawn）把目标实体的
+    /// 一个数字字段从 from 平滑插到 to。状态全在组件里（进状态哈希、进存档），
+    /// 第 elapsed tick 的值是 `from + (to-from)·ease(elapsed/duration)` 的解析式
+    /// （见 [`crate::tween`]，禁累加积分——快照回退续播逐位一致）。
+    ///
+    /// 语义合同：
+    /// - 第一次被处理的 tick 记下起跑点（`start` 从 -1 盖成当前 tick）并写起始值；
+    /// - 到期 tick（elapsed == duration）把字段**精确**写成 to（不留浮点尾巴），
+    ///   发 `tween-finished {id, target, field}` 事件，补间实体自动移除；
+    /// - 同一目标实体同一字段同时只允许一个活跃补间：后来者顶掉前者（前者直接移除，
+    ///   不发事件不报错——显式语义）。"后来"按起跑点判定，同 tick 并发以槽位序后者为准；
+    /// - 跑在运动/相机跟随之后：补间盯上的字段本 tick 以补间值为准。
+    fn advance_tweens(&mut self, events: &mut Vec<Event>) -> Result<(), SimError> {
+        let ids = self.world.query(&["Tween"]);
+        if ids.is_empty() {
+            return Ok(());
+        }
+        struct Active {
+            ent: vitric_ecs::EntityId,
+            target: vitric_ecs::EntityId,
+            field: String,
+            from: f64,
+            to: f64,
+            duration: u64,
+            ease: Ease,
+            start: i64,
+            event_id: String,
+        }
+        // 解析全部补间——任何数据问题都在动世界之前显式暴露
+        let mut tweens: Vec<Active> = Vec::with_capacity(ids.len());
+        for &id in &ids {
+            let bad = |reason: String| SimError::BadComponent {
+                tick: self.tick,
+                entity: id.to_string(),
+                component: "Tween".to_string(),
+                reason,
+            };
+            let comp = self.world.get_component(id, "Tween").expect("query 给出").clone();
+            let text = |key: &str| comp.get(key).and_then(|v| v.as_str()).map(String::from);
+            let num = |key: &str| comp.get(key).and_then(|v| v.as_f64());
+            let target_ref = text("target").ok_or_else(|| {
+                bad("缺少 target（文本：目标实体的名字，或 e3v1 句柄）".to_string())
+            })?;
+            let field = text("field").ok_or_else(|| {
+                bad("缺少 field（文本：目标字段路径，如 \"Position.x\"）".to_string())
+            })?;
+            if !field.contains('.') {
+                return Err(bad(format!(
+                    "field {field:?} 缺少字段路径。写法: \"组件.字段\"，如 \"Position.x\""
+                )));
+            }
+            let from = num("from").ok_or_else(|| bad("缺少 from（数字：起始值）".to_string()))?;
+            let to = num("to").ok_or_else(|| bad("缺少 to（数字：终值）".to_string()))?;
+            let duration = comp
+                .get("duration")
+                .and_then(|v| v.as_i64())
+                .ok_or_else(|| bad("缺少 duration（整数：时长 tick 数）".to_string()))?;
+            if duration < 1 {
+                return Err(bad(format!("duration 必须 ≥ 1（tick），拿到 {duration}")));
+            }
+            let ease = match comp.get("ease") {
+                None => Ease::Linear,
+                Some(v) => {
+                    let s = v.as_str().ok_or_else(|| {
+                        bad(format!("ease 必须是文本（缓动曲线名），拿到 {v}"))
+                    })?;
+                    Ease::parse(s).map_err(&bad)?
+                }
+            };
+            let start = comp.get("start").and_then(|v| v.as_i64()).unwrap_or(-1);
+            if start > self.tick as i64 {
+                return Err(bad(format!(
+                    "start（{start}）超前当前 tick（{}）。start 由引擎在补间起跑时盖章，\
+                     不要手填——留 -1 即可",
+                    self.tick
+                )));
+            }
+            let event_id = text("id").unwrap_or_default();
+            // 目标解析：先按名字找，找不到再按句柄解析；都不行显式报错
+            let target = match self.world.entity(&target_ref) {
+                Ok(t) => t,
+                Err(_) => match target_ref.parse::<vitric_ecs::EntityId>() {
+                    Ok(h) if self.world.is_alive(h) => h,
+                    _ => {
+                        return Err(bad(format!(
+                            "target 指向的实体 {target_ref:?} 不存在。\
+                             提示：填目标实体的名字（或活句柄）；目标若已被销毁，\
+                             先 despawn 补间实体再销毁目标"
+                        )))
+                    }
+                },
+            };
+            tweens.push(Active { ent: id, target, field, from, to, duration: duration as u64, ease, start, event_id });
+        }
+
+        // 冲突裁决：同 (目标实体, 字段) 只留最新的一个，其余直接移除（顶掉语义）。
+        // "最新" = 未起跑（start = -1，本 tick 才出现）优先于已起跑，已起跑比 start 大小，
+        // 全平则槽位序后者为准——iter 本身就是槽位序，所以 ≥ 即顶掉。
+        let mut winners: BTreeMap<(u32, String), usize> = BTreeMap::new();
+        let mut losers: Vec<usize> = Vec::new();
+        for (i, t) in tweens.iter().enumerate() {
+            let key = (t.target.index, t.field.clone());
+            let rank = |idx: usize| {
+                let s = tweens[idx].start;
+                (if s < 0 { i64::MAX } else { s }, idx)
+            };
+            match winners.get(&key).copied() {
+                None => {
+                    winners.insert(key, i);
+                }
+                Some(old) if rank(i) >= rank(old) => {
+                    losers.push(old);
+                    winners.insert(key, i);
+                }
+                Some(_) => losers.push(i),
+            }
+        }
+        for &i in &losers {
+            self.world.despawn(tweens[i].ent).expect("query 给出的实体必然活着");
+        }
+        losers.sort_unstable();
+
+        // 应用（槽位序，确定性）
+        for (i, t) in tweens.iter().enumerate() {
+            if losers.binary_search(&i).is_ok() {
+                continue;
+            }
+            let bad = |reason: String| SimError::BadComponent {
+                tick: self.tick,
+                entity: t.ent.to_string(),
+                component: "Tween".to_string(),
+                reason,
+            };
+            // 目标字段必须已存在且是数字——补间不创造字段，只动既有真相
+            let cur = self
+                .world
+                .get_field(t.target, &t.field)
+                .map_err(|e| bad(e.to_string()))?;
+            if !cur.is_number() {
+                return Err(bad(format!(
+                    "目标字段 {} 不是数字（当前值 {cur}），补间只能动数字字段",
+                    t.field
+                )));
+            }
+            // 起跑盖章：start 从 -1 盖成当前 tick（进组件 = 进哈希进存档）
+            let start = if t.start < 0 {
+                let mut comp = self
+                    .world
+                    .get_component(t.ent, "Tween")
+                    .expect("上面刚读过")
+                    .clone();
+                comp["start"] = json!(self.tick as i64);
+                self.world.set_component(t.ent, "Tween", comp).expect("实体活着");
+                self.tick
+            } else {
+                t.start as u64
+            };
+            let elapsed = self.tick - start;
+            if elapsed >= t.duration {
+                // 到期：精确终值 + 完成事件 + 自动移除
+                self.world
+                    .set_field(t.target, &t.field, json!(t.to))
+                    .map_err(|e| bad(e.to_string()))?;
+                events.push(Event::new(
+                    "tween-finished",
+                    json!({"id": t.event_id, "target": t.target.to_string(), "field": t.field}),
+                ));
+                self.world.despawn(t.ent).expect("实体活着");
+            } else {
+                let v = tween_value(t.from, t.to, t.ease, elapsed, t.duration);
+                self.world
+                    .set_field(t.target, &t.field, json!(v))
+                    .map_err(|e| bad(e.to_string()))?;
             }
         }
         Ok(())
@@ -1225,6 +1408,213 @@ mod tests {
         sim2.restore(&snap, &mut ()).unwrap();
         assert_eq!(sim2.world.state_hash(), h_burst);
         assert_eq!(sim2.tick, sim.tick);
+    }
+
+    // ---- 补间（Tween 组件，内建系统）----
+
+    /// 补间测试场：一个面板 + 一条把 Position.x 从 1 补到 5 的补间。
+    fn tween_world(sim: &mut Sim, ease: &str, duration: i64) -> vitric_ecs::EntityId {
+        let panel = sim.world.spawn_named("panel").unwrap();
+        sim.world.set_component(panel, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let tw = sim.world.spawn_named("tw").unwrap();
+        sim.world
+            .set_component(
+                tw,
+                "Tween",
+                json!({"target": "panel", "field": "Position.x", "from": 1.0, "to": 5.0,
+                       "duration": duration, "ease": ease, "start": -1, "id": "slide"}),
+            )
+            .unwrap();
+        panel
+    }
+
+    #[test]
+    fn tween_is_analytic_in_progress_and_finishes_exact() {
+        let mut sim = Sim::new(1);
+        let panel = tween_world(&mut sim, "linear", 8);
+        let mut logic = Collect(Vec::new());
+        // 第一个 tick：起始 tick 被记下，字段写成起始值（progress = 0）
+        sim.step(&mut logic).unwrap();
+        assert_eq!(sim.world.get_field(panel, "Position.x").unwrap().as_f64(), Some(1.0));
+        // 中途：第 T tick 的值 = from + (to-from)·ease(elapsed/duration)，纯函数无累加
+        for _ in 0..4 {
+            sim.step(&mut logic).unwrap();
+        }
+        // elapsed = 4, progress = 0.5 → 1 + 4·0.5 = 3
+        assert_eq!(sim.world.get_field(panel, "Position.x").unwrap().as_f64(), Some(3.0));
+        // 到期 tick：字段精确等于终值（不留浮点尾巴）+ 完成事件（带 id）+ 补间自动移除
+        for _ in 0..4 {
+            sim.step(&mut logic).unwrap();
+        }
+        assert_eq!(sim.world.get_field(panel, "Position.x").unwrap().as_f64(), Some(5.0));
+        let tw = sim.world.entity("tw");
+        assert!(tw.is_err(), "完成后补间实体应被移除");
+        let fin: Vec<_> = logic.0.iter().filter(|e| e.name == "tween-finished").collect();
+        assert_eq!(fin.len(), 1, "应恰好发一次完成事件");
+        assert_eq!(fin[0].data.get("id"), Some(&json!("slide")));
+        assert_eq!(fin[0].data.get("field"), Some(&json!("Position.x")));
+        // 之后世界静止：补间没了，字段不再动
+        sim.step(&mut logic).unwrap();
+        assert_eq!(sim.world.get_field(panel, "Position.x").unwrap().as_f64(), Some(5.0));
+    }
+
+    #[test]
+    fn tween_final_value_has_no_float_tail() {
+        // 0 → 0.3 走 7 tick：中间值必然带浮点尾巴，到期那刻必须精确写 0.3
+        let mut sim = Sim::new(1);
+        let panel = sim.world.spawn_named("panel").unwrap();
+        sim.world.set_component(panel, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let tw = sim.world.spawn().to_owned();
+        sim.world
+            .set_component(
+                tw,
+                "Tween",
+                json!({"target": "panel", "field": "Position.x", "from": 0.0, "to": 0.3,
+                       "duration": 7, "ease": "ease-in-out", "start": -1, "id": ""}),
+            )
+            .unwrap();
+        for _ in 0..8 {
+            sim.step(&mut ()).unwrap();
+        }
+        let x = sim.world.get_field(panel, "Position.x").unwrap().as_f64().unwrap();
+        assert!(x == 0.3, "终值必须逐位等于 0.3，实际 {x:?}");
+        assert!(!sim.world.is_alive(tw));
+    }
+
+    #[test]
+    fn tween_ease_out_back_overshoots_then_settles() {
+        let mut sim = Sim::new(1);
+        let panel = tween_world(&mut sim, "ease-out-back", 20);
+        let mut peak = f64::MIN;
+        for _ in 0..21 {
+            sim.step(&mut ()).unwrap();
+            peak = peak.max(sim.world.get_field(panel, "Position.x").unwrap().as_f64().unwrap());
+        }
+        assert!(peak > 5.0, "ease-out-back 必须过冲（峰值 {peak} 应 > 终值 5）");
+        assert_eq!(sim.world.get_field(panel, "Position.x").unwrap().as_f64(), Some(5.0));
+    }
+
+    #[test]
+    fn tween_same_field_latecomer_replaces_incumbent() {
+        let mut sim = Sim::new(1);
+        tween_world(&mut sim, "linear", 60);
+        let panel = sim.world.entity("panel").unwrap();
+        for _ in 0..10 {
+            sim.step(&mut ()).unwrap();
+        }
+        // 后来者：同实体同字段，100 → 200
+        let tw2 = sim.world.spawn_named("tw2").unwrap();
+        sim.world
+            .set_component(
+                tw2,
+                "Tween",
+                json!({"target": "panel", "field": "Position.x", "from": 100.0, "to": 200.0,
+                       "duration": 10, "ease": "linear", "start": -1, "id": "late"}),
+            )
+            .unwrap();
+        let mut logic = Collect(Vec::new());
+        sim.step(&mut logic).unwrap();
+        // 前者被顶掉（无完成事件、实体移除），字段跟着后来者走
+        assert!(sim.world.entity("tw").is_err(), "前者应被顶掉移除");
+        assert_eq!(sim.world.get_field(panel, "Position.x").unwrap().as_f64(), Some(100.0));
+        assert!(
+            logic.0.iter().all(|e| e.name != "tween-finished"),
+            "顶掉不是完成，不发完成事件"
+        );
+        for _ in 0..10 {
+            sim.step(&mut logic).unwrap();
+        }
+        assert_eq!(sim.world.get_field(panel, "Position.x").unwrap().as_f64(), Some(200.0));
+        let fin: Vec<_> = logic.0.iter().filter(|e| e.name == "tween-finished").collect();
+        assert_eq!(fin.len(), 1);
+        assert_eq!(fin[0].data.get("id"), Some(&json!("late")));
+    }
+
+    #[test]
+    fn tween_snapshot_restore_resumes_identically() {
+        let mut sim = Sim::new(3);
+        tween_world(&mut sim, "ease-in-out", 40);
+        for _ in 0..15 {
+            sim.step(&mut ()).unwrap();
+        }
+        let snap = sim.snapshot(&());
+        for _ in 0..40 {
+            sim.step(&mut ()).unwrap();
+        }
+        let h_direct = sim.world.state_hash();
+        // 中途回退再续播：轨迹必须逐位一致（补间状态全在组件里，快照天然覆盖）
+        let mut sim2 = Sim::new(0);
+        sim2.restore(&snap, &mut ()).unwrap();
+        for _ in 0..40 {
+            sim2.step(&mut ()).unwrap();
+        }
+        assert_eq!(sim2.world.state_hash(), h_direct);
+    }
+
+    #[test]
+    fn tween_bad_data_is_explicit() {
+        // 目标实体不存在
+        let mut sim = Sim::new(1);
+        let tw = sim.world.spawn().to_owned();
+        sim.world
+            .set_component(
+                tw,
+                "Tween",
+                json!({"target": "ghost", "field": "Position.x", "from": 0.0, "to": 1.0,
+                       "duration": 10, "ease": "linear", "start": -1, "id": ""}),
+            )
+            .unwrap();
+        let err = sim.step(&mut ()).unwrap_err();
+        assert!(err.to_string().contains("ghost"), "{err}");
+
+        // 未知缓动曲线
+        let mut sim = Sim::new(1);
+        let panel = sim.world.spawn_named("panel").unwrap();
+        sim.world.set_component(panel, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let tw = sim.world.spawn().to_owned();
+        sim.world
+            .set_component(
+                tw,
+                "Tween",
+                json!({"target": "panel", "field": "Position.x", "from": 0.0, "to": 1.0,
+                       "duration": 10, "ease": "bounce", "start": -1, "id": ""}),
+            )
+            .unwrap();
+        let err = sim.step(&mut ()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bounce") && msg.contains("linear"), "要列出可用曲线: {msg}");
+
+        // 字段不是数字
+        let mut sim = Sim::new(1);
+        let panel = sim.world.spawn_named("panel").unwrap();
+        sim.world.set_component(panel, "Label", json!({"text": "hi"})).unwrap();
+        let tw = sim.world.spawn().to_owned();
+        sim.world
+            .set_component(
+                tw,
+                "Tween",
+                json!({"target": "panel", "field": "Label.text", "from": 0.0, "to": 1.0,
+                       "duration": 10, "ease": "linear", "start": -1, "id": ""}),
+            )
+            .unwrap();
+        let err = sim.step(&mut ()).unwrap_err();
+        assert!(err.to_string().contains("Label.text"), "{err}");
+
+        // duration < 1
+        let mut sim = Sim::new(1);
+        let panel = sim.world.spawn_named("panel").unwrap();
+        sim.world.set_component(panel, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let tw = sim.world.spawn().to_owned();
+        sim.world
+            .set_component(
+                tw,
+                "Tween",
+                json!({"target": "panel", "field": "Position.x", "from": 0.0, "to": 1.0,
+                       "duration": 0, "ease": "linear", "start": -1, "id": ""}),
+            )
+            .unwrap();
+        let err = sim.step(&mut ()).unwrap_err();
+        assert!(err.to_string().contains("duration"), "{err}");
     }
 
     #[test]

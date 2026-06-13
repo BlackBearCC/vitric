@@ -11,7 +11,9 @@
 mod pcg;
 mod recording;
 mod sim;
+mod tween;
 
 pub use pcg::Pcg32;
 pub use recording::{InputRecord, Recording, ReplyRecord};
 pub use sim::{GameLogic, Sim, SimError, StepReport, DT, TICKS_PER_SECOND};
+pub use tween::{tween_value, Ease, EASE_NAMES};
