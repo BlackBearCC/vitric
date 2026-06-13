@@ -30,6 +30,10 @@
 | VD051 | 动画片段解析失败 | 片段写法 `{"frames": ["a.png"], "fps": 8, "loop": true}` |
 | VD052 | 片段 frames 为空 | 至少一帧 |
 | VD053 | 片段 fps 为 0 | 常用 4-12 |
+| VD070 | UI 锚点预设名不合法 | 可选: top-left/top-center/top-right/center-left/center/center-right/bottom-left/bottom-center/bottom-right/stretch/manual |
+| VD071 | UI 容器类型不认识/缺 kind | 可选: VBox/HBox/Grid |
+| VD072 | Grid 列数 < 1 | columns 必须 ≥ 1（VBox/HBox 不用 columns） |
+| VD073 | UI 容器对齐名不合法 | main/cross 可选: start/center/end |
 
 ## VR —— 规则层
 

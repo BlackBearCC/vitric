@@ -11,6 +11,12 @@ use vitric_rules::{Engine, Event, RuleSet, ScriptCall};
 use vitric_script::ScriptEngine;
 use vitric_sim::{GameLogic, Pcg32, Sim};
 
+/// UI 布局在模拟状态里参照的视口尺寸（像素）。布局是相对比例 + 像素偏移，
+/// 解算结果写进组件（进哈希进存档）必须与具体窗口分辨率解耦——否则同一局在
+/// 不同分辨率机器上状态哈希分歧。约定 1920×1080：跨机器确定。渲染时 CPU/GPU
+/// 各自用真实窗口分辨率重解算（同一份 solve_layout 纯函数），UI 锚定视口自然缩放。
+pub const UI_REFERENCE_VIEWPORT: (u32, u32) = (1920, 1080);
+
 /// 游戏逻辑装配体：规则为正门，脚本兜复杂逻辑。
 ///
 /// 每 tick 的执行顺序（固定，确定性的一部分）：
@@ -216,6 +222,13 @@ impl GameLogic for Runtime {
         collect_loads(&seq_events, &mut loads);
         self.observed.extend(seq_events.iter().cloned());
         self.carryover.extend(seq_events);
+
+        // 4.6 UI 布局（通用控件）：和动画/序列同级的引擎系统。在序列推进之后跑——
+        //     序列可能 spawn/改 UI 节点，布局要看到本 tick 的最终 UI 树。脏标记保证
+        //     静止 UI 零重算；解算结果写回 Ui.rx/ry/rw/rh（进哈希进存档，快照安全）。
+        //     参照视口固定（[`UI_REFERENCE_VIEWPORT`]）——布局状态与渲染分辨率解耦，
+        //     跨机器确定；渲染时 CPU/GPU 各自按真实分辨率重解算（纯函数，同一份逻辑）。
+        advance_ui_layout(world, UI_REFERENCE_VIEWPORT)?;
 
         // 5. 场景切换（必须在确定性流水线内执行，重放才会在同一 tick 复现）
         if let Some(load) = loads.first() {
@@ -521,6 +534,52 @@ pub fn advance_sequences(
         }
     }
     Ok(events)
+}
+
+/// UI 布局系统（每 tick，和动画/序列同级的引擎系统）。**脏标记 + 一趟树遍历**：
+/// 只在 UI 树的结构/尺寸（或视口尺寸）变了才真解算，把每个 Ui 节点的解算矩形
+/// 写回 `Ui.rx/ry/rw/rh`（进组件 = 进哈希进存档，快照/录像安全）。
+///
+/// 脏判定靠 `UiRoot.layout_hash`：当前输入哈希（[`vitric_render::layout_input_hash`]，
+/// 不含 rx/ry/rw/rh 输出本身）和上次存的相等 = 静止 = 跳过重算（"静止 UI 连播 N tick
+/// 布局重算 0 次"的落点）。哈希变了才解算 + 回写 + 盖章新哈希。
+///
+/// 性能：场上没有 UI（无 UiRoot）= 第一行零成本 early-return（零分配零遍历）。
+/// `viewport`：布局参照的视口尺寸（像素）。窗口/截图用真实分辨率，无头逻辑测试用
+/// 一个约定的参照分辨率——布局是相对比例 + 像素偏移，参照尺寸进哈希一并跟踪。
+pub fn advance_ui_layout(world: &mut World, viewport: (u32, u32)) -> Result<(), String> {
+    let roots = world.query(&["UiRoot"]);
+    if roots.is_empty() {
+        return Ok(()); // 空 UI 零成本：没有 UiRoot，零分配零遍历
+    }
+    let (vw, vh) = viewport;
+    let want = vitric_render::layout_input_hash(world, vw, vh);
+    // 上次盖的哈希（取第一个 UiRoot 上的 layout_hash 字段，缺/不同 = 脏）
+    let root = roots[0];
+    let have = world
+        .get_field(root, "UiRoot.layout_hash")
+        .ok()
+        .and_then(|v| v.as_str())
+        .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok());
+    if have == Some(want) {
+        return Ok(()); // 静止：输入没变，布局结果就是上次写回的，跳过重算
+    }
+    // 脏：真解算一趟，把矩形写回每个节点
+    let layout = vitric_render::solve_layout(world, vw, vh)?;
+    for (id, r) in &layout {
+        world.set_field(*id, "Ui.rx", json!(r.x)).map_err(|e| e.to_string())?;
+        world.set_field(*id, "Ui.ry", json!(r.y)).map_err(|e| e.to_string())?;
+        world.set_field(*id, "Ui.rw", json!(r.w)).map_err(|e| e.to_string())?;
+        world.set_field(*id, "Ui.rh", json!(r.h)).map_err(|e| e.to_string())?;
+    }
+    // 盖章新哈希（仅当 UiRoot 有 layout_hash 字段时——schema 没声明就不写，
+    // 退化成"每 tick 都解算"，仍然正确，只是不省那一趟；声明了才享受脏标记）
+    if world.has_component(root, "UiRoot") && world.get_field(root, "UiRoot.layout_hash").is_ok() {
+        world
+            .set_field(root, "UiRoot.layout_hash", json!(format!("0x{want:016x}")))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// 执行序列里一条动作（动作集已被 vitric-data 校验过类型/字段）。
@@ -860,6 +919,20 @@ pub fn check(dir: &Path) -> Result<Value, String> {
                     if assets.image(name).is_none() {
                         missing.push(format!(
                             "场景 {rel} 的实体 {}{} 引用了不存在的素材 {name:?}",
+                            id,
+                            world.name_of(id).map(|n| format!("({n})")).unwrap_or_default(),
+                        ));
+                    }
+                }
+            }
+        }
+        // UI Panel.image 引用的精灵都在素材库（和 Sprite.image 同口径）
+        for id in world.query(&["Panel"]) {
+            if let Ok(image) = world.get_field(id, "Panel.image") {
+                if let Some(name) = image.as_str().filter(|s| !s.is_empty()) {
+                    if assets.image(name).is_none() {
+                        missing.push(format!(
+                            "场景 {rel} 的实体 {}{} 的 Panel.image 引用了不存在的素材 {name:?}",
                             id,
                             world.name_of(id).map(|n| format!("({n})")).unwrap_or_default(),
                         ));

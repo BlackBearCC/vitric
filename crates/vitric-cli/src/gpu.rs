@@ -818,23 +818,37 @@ impl GpuPresenter {
 
         // 顶点流：没挂字体 = 老的单流单 draw；挂了字体 = 精灵流（主图集）+
         // 字形流（字形图集，含选中描边——它用字形图集的白块），按 glyph_from 切两段
+        // UI 屏幕空间叠加：布局在真实窗口分辨率上解算（与 CPU 路径同一份纯函数，
+        // 不经相机），UI 节点锚定视口自然随窗口缩放。空 UI = 空 layout，零成本。
+        let ui_layout = if vitric_render::has_ui(world) {
+            vitric_render::solve_layout(world, w, h)?
+        } else {
+            vitric_render::Layout::new()
+        };
         let (verts, glyph_from) = if let Some(font) = assets.font() {
             let gt = self.glyphs.as_mut().ok_or(
                 "内部不一致：素材仓库挂了字体但字形图集未建（素材代次没推进？）",
             )?;
             let mut verts = build_scene_vertices(world, w, h, &self.atlas, tick)?;
+            // UI Panel（主图集）在 split 之前——画在世界之上、文字之下（同一管线，主图集绑定）
+            push_ui_panels(&mut verts, world, &ui_layout, &self.atlas)?;
             let split = verts.len();
             let cam = vitric_render::camera_of(world, tick, h)?;
             push_ttf_texts(&mut verts, world, w, h, font, &mut gt.atlas, cam)?;
             // 粒子在文字之后、描边之前（同 build_vertices）；split 之后的顶点绑
             // 字形图集，所以白块用字形图集那份（同一布局同一管线，只是换纹理）
             push_emitter_particles(&mut verts, world, w, h, gt.atlas.white, cam, tick)?;
+            // UI 矢量 label（字形图集，split 之后）——画在最上层（HUD）
+            push_ui_ttf_labels(&mut verts, world, &ui_layout, font, &mut gt.atlas)?;
             if let Some(id) = selection {
                 push_selection_outline(&mut verts, world, w, h, gt.atlas.white, id, cam);
             }
             (verts, split)
         } else {
-            let verts = build_vertices(world, w, h, &self.atlas, selection, tick)?;
+            let mut verts = build_vertices(world, w, h, &self.atlas, selection, tick)?;
+            // 没挂字体：UI Panel + UI 点阵 label 全在主图集（单流），画在世界之后
+            push_ui_panels(&mut verts, world, &ui_layout, &self.atlas)?;
+            push_ui_bitmap_labels(&mut verts, world, &ui_layout, &self.atlas)?;
             let split = verts.len();
             (verts, split)
         };
@@ -1875,6 +1889,182 @@ fn push_ttf_texts(
     Ok(())
 }
 
+/// UI Panel 流（屏幕空间，主图集）：背景框，纯色或精灵贴图。布局由
+/// vitric_render::solve_layout 给出（与 CPU 路径同一份纯函数，不经相机）。
+/// 全部用 [`UNLIT`] 哨兵——UI 是叠加层，CPU 路径画在光照/泛光之后不被打光，同语义。
+/// 屏幕空间 = 直接用解算出的屏幕像素矩形落顶点，无离屏 target、复用同一顶点流。
+fn push_ui_panels(
+    verts: &mut Vec<Vertex>,
+    world: &World,
+    layout: &vitric_render::Layout,
+    atlas: &Atlas,
+) -> Result<(), String> {
+    for id in world.query(&["Ui", "Panel"]) {
+        let Some(r) = layout.get(&id) else { continue };
+        let (x0, y0) = (r.x as f32, r.y as f32);
+        let (x1, y1) = ((r.x + r.w) as f32, (r.y + r.h) as f32);
+        let image_name = world
+            .get_field(id, "Panel.image")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        let corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        if image_name.is_empty() {
+            let color = world
+                .get_field(id, "Panel.color")
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| "#ffffff".to_string());
+            let rgba = parse_color_a(&color).map_err(|e| format!("实体 {id} 的 Panel.color: {e}"))?;
+            let [u, v] = atlas.white;
+            push_quad_corners_n(verts, corners, [u, v, u, v], UNLIT, [1.0, 0.0], tint(rgba));
+        } else {
+            let uv = atlas.images.get(&image_name).ok_or_else(|| {
+                format!(
+                    "实体 {id} 的 Panel.image {image_name:?} 不在素材仓库里。现有素材: [{}]",
+                    atlas.images.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+            })?;
+            push_quad_corners_n(verts, corners, *uv, UNLIT, [1.0, 0.0], [1.0; 4]);
+        }
+    }
+    Ok(())
+}
+
+/// UI Label 点阵文字流（没挂字体，主图集）：每字符一个字形方块，按 align 在节点框内
+/// 水平对齐、竖向居中。与 CPU draw_ui_label 点阵路径同一套几何。全部 [`UNLIT`]。
+fn push_ui_bitmap_labels(
+    verts: &mut Vec<Vertex>,
+    world: &World,
+    layout: &vitric_render::Layout,
+    atlas: &Atlas,
+) -> Result<(), String> {
+    for id in world.query(&["Ui", "UiLabel"]) {
+        let Some(r) = layout.get(&id) else { continue };
+        let Some((chars, size, rgba, _align)) = read_ui_label(world, id)? else { continue };
+        let n = chars.len() as f64;
+        let total_w = n * size;
+        let left = ui_label_left(world, id, r, total_w)?;
+        let top = r.y + r.h / 2.0 - size / 2.0;
+        let (y0, y1) = (top as f32, (top + size) as f32);
+        for (i, &c) in chars.iter().enumerate() {
+            let x0 = (left + i as f64 * size) as f32;
+            let x1 = (left + (i + 1) as f64 * size) as f32;
+            let corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+            let cp = c as usize;
+            if cp < 128 {
+                push_quad_corners_n(verts, corners, atlas.glyphs[cp], UNLIT, [1.0, 0.0], tint(rgba));
+            } else {
+                let [u, v] = atlas.white;
+                push_quad_corners_n(verts, corners, [u, v, u, v], UNLIT, [1.0, 0.0], tint(rgba));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// UI Label 矢量文字流（挂了字体，字形图集）：与 CPU draw_ui_label 矢量路径同一套
+/// 排版/栅格化/取整（vitric_render::FontStore），字号 = 屏幕像素（scale=1）。全部 [`UNLIT`]。
+fn push_ui_ttf_labels(
+    verts: &mut Vec<Vertex>,
+    world: &World,
+    layout: &vitric_render::Layout,
+    font: &vitric_render::FontStore,
+    glyph_atlas: &mut GlyphAtlas,
+) -> Result<(), String> {
+    use vitric_render::FontStore;
+    for id in world.query(&["Ui", "UiLabel"]) {
+        let Some(r) = layout.get(&id) else { continue };
+        let Some((chars, size, rgba, _align)) = read_ui_label(world, id)? else { continue };
+        let content: String = chars.iter().collect();
+        let px_size = FontStore::px_size(size, 1.0);
+        let laid = font.layout_cached(&content, px_size);
+        let (placements, total_w) = (&laid.0, laid.1);
+        let left = ui_label_left(world, id, r, total_w as f64)?;
+        let cy = r.y + r.h / 2.0;
+        let baseline = (cy + font.baseline_offset(px_size) as f64).round();
+        for p in placements.iter() {
+            let g = font.raster(p.ch, px_size);
+            if g.coverage.is_empty() {
+                continue;
+            }
+            let uv = glyph_atlas.glyph_uv(font, p.ch, px_size)?;
+            let x0 = ((left + p.x as f64).round() + g.left as f64) as f32;
+            let y0 = (baseline + g.top as f64) as f32;
+            push_quad_corners_n(
+                verts,
+                [[x0, y0], [x0 + g.width as f32, y0], [x0 + g.width as f32, y0 + g.height as f32], [x0, y0 + g.height as f32]],
+                uv,
+                UNLIT,
+                [1.0, 0.0],
+                tint(rgba),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 读 UiLabel 的可见字符（已按 reveal 截断）+ 字号 + 颜色 + 对齐。
+/// 空/全隐/零字号 = None（调用方 continue）。两条 GPU 文字路径共用。
+#[allow(clippy::type_complexity)]
+fn read_ui_label(
+    world: &World,
+    id: vitric_ecs::EntityId,
+) -> Result<Option<(Vec<char>, f64, [u8; 4], String)>, String> {
+    let content = world
+        .get_field(id, "UiLabel.content")
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+    if content.is_empty() {
+        return Ok(None);
+    }
+    let size = num(world, id, "UiLabel.size").unwrap_or(1.0);
+    if size <= 0.0 {
+        return Ok(None);
+    }
+    let color = world
+        .get_field(id, "UiLabel.color")
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "#ffffff".to_string());
+    let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 UiLabel.color: {e}"))?;
+    let reveal = world
+        .get_field(id, "UiLabel.reveal")
+        .ok()
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(1.0);
+    let visible = vitric_render::revealed_chars(reveal, content.chars().count());
+    if visible == 0 {
+        return Ok(None);
+    }
+    let align = world
+        .get_field(id, "UiLabel.align")
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "center".to_string());
+    Ok(Some((content.chars().take(visible).collect(), size, rgba, align)))
+}
+
+/// 文字在节点框内的水平起点（按 align）。与 CPU draw_ui_label 同口径。
+fn ui_label_left(
+    world: &World,
+    id: vitric_ecs::EntityId,
+    r: &vitric_render::UiRect,
+    total_w: f64,
+) -> Result<f64, String> {
+    let align = world
+        .get_field(id, "UiLabel.align")
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| "center".to_string());
+    Ok(match align.as_str() {
+        "start" => r.x,
+        "end" => r.x + r.w - total_w,
+        _ => r.x + (r.w - total_w) / 2.0,
+    })
+}
+
 /// 粒子流：发射器按纯函数展开（语义源头 vitric_render::emitter_particles——
 /// 位置/数量/颜色与 CPU 路径同一份数据），每个粒子一个白块方块 + 染色。
 /// nuv 用 [`UNLIT`] 哨兵：片元跳过光照（自发光，CPU 路径粒子画在光照之后，同语义）。
@@ -2024,6 +2214,20 @@ fn parse_color(s: &str) -> Result<[u8; 4], String> {
     Ok([p(0), p(2), p(4), 255])
 }
 
+/// 颜色解析（带可选 alpha）：`#rrggbb` 或 `#rrggbbaa`。UI Panel 背景常要半透明遮罩。
+/// 与 CPU 路径 vitric_render 的 parse_color_a 同口径（视觉对齐）。
+fn parse_color_a(s: &str) -> Result<[u8; 4], String> {
+    let hex = s
+        .strip_prefix('#')
+        .ok_or_else(|| format!("颜色 {s:?} 格式不对。写法: \"#rrggbb\" 或带透明度 \"#rrggbbaa\""))?;
+    if (hex.len() != 6 && hex.len() != 8) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("颜色 {s:?} 必须是 6 位 \"#rrggbb\" 或 8 位 \"#rrggbbaa\" 十六进制"));
+    }
+    let p = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).expect("已校验十六进制");
+    let a = if hex.len() == 8 { p(6) } else { 255 };
+    Ok([p(0), p(2), p(4), a])
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -2069,6 +2273,39 @@ mod tests {
         // 世界 y=+2、scale 8 → 屏幕 y 上移 16 像素（y 向上 → 像素行更小）
         let y_min = verts.iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
         assert_eq!(y_min, 24.0 - 16.0);
+    }
+
+    #[test]
+    fn ui_panel_quad_is_screen_space_unlit_matching_layout() {
+        // GPU 镜像：UI Panel 顶点落在 solve_layout 算出的屏幕像素矩形上（不经相机），
+        // 且用 UNLIT 哨兵（UI 叠加层不被打光，对齐 CPU 路径"画在光照之后"）。
+        let mut w = World::new();
+        let root = w.spawn_named("ui").unwrap();
+        w.set_component(root, "UiRoot", json!({})).unwrap();
+        let panel = w.spawn_named("p").unwrap();
+        w.set_component(
+            panel,
+            "Ui",
+            json!({"anchor": "center", "w": 40.0, "h": 20.0, "parent": "ui",
+                   "rx": 0.0, "ry": 0.0, "rw": 0.0, "rh": 0.0}),
+        )
+        .unwrap();
+        w.set_component(panel, "Panel", json!({"color": "#ff0000", "image": ""})).unwrap();
+
+        // 在 200x100 视口上解算：居中 40x20 → x∈[80,120], y∈[40,60]
+        let layout = vitric_render::solve_layout(&w, 200, 100).unwrap();
+        let mut verts = Vec::new();
+        push_ui_panels(&mut verts, &w, &layout, &fake_atlas()).unwrap();
+        assert_eq!(verts.len(), 6, "一个 Panel = 两个三角形");
+        let xs: Vec<f32> = verts.iter().map(|v| v.pos[0]).collect();
+        let ys: Vec<f32> = verts.iter().map(|v| v.pos[1]).collect();
+        assert_eq!(xs.iter().cloned().fold(f32::MAX, f32::min), 80.0);
+        assert_eq!(xs.iter().cloned().fold(f32::MIN, f32::max), 120.0);
+        assert_eq!(ys.iter().cloned().fold(f32::MAX, f32::min), 40.0);
+        assert_eq!(ys.iter().cloned().fold(f32::MIN, f32::max), 60.0);
+        // UNLIT 哨兵：nuv = [-2,-2,-2,-2]（片元据此跳过光照）
+        assert_eq!(verts[0].nuv, [-2.0, -2.0], "UI 用 UNLIT 哨兵不被打光");
+        assert_eq!(verts[0].color, [1.0, 0.0, 0.0, 1.0], "纯色 Panel 染红");
     }
 
     #[test]

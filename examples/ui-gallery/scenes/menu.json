@@ -1,0 +1,86 @@
+{
+  "entities": [
+    { "name": "camera", "components": { "Camera": { "x": 0, "y": 0, "scale": 8 } } },
+
+    {
+      "name": "ui",
+      "components": { "UiRoot": {} }
+    },
+
+    {
+      "name": "menu-panel",
+      "components": {
+        "Ui": { "anchor": "center", "w": 600, "h": 420, "parent": "ui" },
+        "Panel": { "color": "#1b1d26" }
+      }
+    },
+    {
+      "name": "menu-title",
+      "components": {
+        "Ui": { "anchor": "top-center", "ox": 0, "oy": 28, "w": 560, "h": 56, "parent": "menu-panel" },
+        "UiLabel": { "content": "VITRIC", "size": 40, "color": "#f0f0f0", "align": "center" }
+      }
+    },
+
+    {
+      "name": "menu-vbox",
+      "components": {
+        "Ui": { "anchor": "stretch", "ox": 40, "oy": 110, "parent": "menu-panel" },
+        "Container": { "kind": "VBox", "gap": 24, "pad": 0, "main": "start", "cross": "center" }
+      }
+    },
+
+    {
+      "name": "btn-start",
+      "components": {
+        "Ui": { "anchor": "top-left", "w": 480, "h": 72, "parent": "menu-vbox" },
+        "Panel": { "color": "#3a4a6b" }
+      }
+    },
+    {
+      "name": "btn-start-label",
+      "components": {
+        "Ui": { "anchor": "stretch", "parent": "btn-start" },
+        "UiLabel": { "content": "Start", "size": 30, "color": "#ffffff", "align": "center" }
+      }
+    },
+
+    {
+      "name": "btn-options",
+      "components": {
+        "Ui": { "anchor": "top-left", "w": 480, "h": 72, "parent": "menu-vbox" },
+        "Panel": { "color": "#3a4a6b" }
+      }
+    },
+    {
+      "name": "btn-options-label",
+      "components": {
+        "Ui": { "anchor": "stretch", "parent": "btn-options" },
+        "UiLabel": { "content": "Options", "size": 30, "color": "#ffffff", "align": "center" }
+      }
+    },
+
+    {
+      "name": "btn-quit",
+      "components": {
+        "Ui": { "anchor": "top-left", "w": 480, "h": 72, "parent": "menu-vbox" },
+        "Panel": { "color": "#3a4a6b" }
+      }
+    },
+    {
+      "name": "btn-quit-label",
+      "components": {
+        "Ui": { "anchor": "stretch", "parent": "btn-quit" },
+        "UiLabel": { "content": "Quit", "size": 30, "color": "#ffffff", "align": "center" }
+      }
+    },
+
+    {
+      "name": "hint",
+      "components": {
+        "Ui": { "anchor": "bottom-center", "ox": 0, "oy": -40, "w": 700, "h": 40, "parent": "ui" },
+        "UiLabel": { "content": "1.1 grey-box: layout only, not interactive", "size": 22, "color": "#8a8f9c", "align": "center" }
+      }
+    }
+  ]
+}

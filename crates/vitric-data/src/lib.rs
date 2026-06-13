@@ -8,9 +8,11 @@ mod project;
 mod scene;
 mod schema;
 mod sequence;
+mod ui_check;
 
 pub use error::{ValidationError, ValidationReport};
 pub use project::{Budgets, Clip, Gates, PlaythroughGate, Project, ProjectManifest};
 pub use scene::{instantiate_scene, Scene};
 pub use schema::{ComponentSchema, FieldDef, FieldType, Schema};
 pub use sequence::{SeqStep, Sequence, SEQ_ACTION_KINDS};
+pub use ui_check::{validate_ui_components, UI_ALIGNS, UI_ANCHORS, UI_CONTAINER_KINDS};

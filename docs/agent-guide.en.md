@@ -339,6 +339,53 @@ A comic cutscene = assembled from primitives (**complete runnable example in exa
 
 Swap in a skill flourish, a boss intro, or end credits — all the same blocks with a different Sequence. That is what makes it a general-purpose engine.
 
+## UI widgets (layout)
+
+Menus, inventories, settings, HUDs are built from a set of **declarative, deterministic** widget primitives, modeled on Godot Control / Unity UI. **The engine only ships generic widget primitives; what a specific interface looks like (your main menu, how many inventory columns) is a project's usage of the blocks** — there is no "dialog box", "skill bar" or "results panel" in the engine, same principle as sequences. UI is entities + components too: it enters world state/hash/saves/recordings, and layout is a deterministic pure computation of `(UI tree, viewport)` (no wall clock, no randomness), so snapshot/replay round-trips exactly.
+
+**Current stage = 1.1: layout foundation + static widgets + screen-space rendering (grey-box, non-interactive)**. It nails "laid out correctly, drawn, camera-stable, zero cost when empty". Button state machine, focus navigation, click activation and themes are 1.2 — not in this stage.
+
+**Coordinate system: UI is a screen-space overlay.** UI elements anchor to the **viewport (screen)** and render through a screen-space orthographic projection, **bypassing the camera transform** — so UI does not drift when the camera pans/zooms/shakes (like a HUD). This is the opposite of sprites/particles which live in world space. UI is overlaid right after world rendering (including lighting/particles/bloom), is not lit, and uses no offscreen buffer (it reuses the same vertex stream). CPU is the source of truth, GPU mirrors it, and both paths read the same layout result (`solve_layout`) — layout is never recomputed on the GPU.
+
+Convention components (engine knows the names; you declare the fields in your schema):
+
+- `UiRoot{layout_hash}`: marks the root of a UI tree; layout starts here against the viewport. **No UiRoot in the world = no UI = a zero-cost early-return every tick** (no allocation, no traversal). `layout_hash` (optional text field) caches the structural hash of the last layout inputs — if structure/size is unchanged, the recompute is skipped (a static UI plays N ticks with 0 layout recomputes). Declare it to get dirty-marking; omit it and layout runs every tick (still correct, just doesn't save that pass).
+- `Ui{anchor, ax, ay, ox, oy, w, h, parent, weight, rx, ry, rw, rh}`: every UI node.
+  - `anchor`: a preset name — `top-left`/`top-center`/`top-right`/`center-left`/`center`/`center-right`/`bottom-left`/`bottom-center`/`bottom-right` (corners/edges/center), `stretch` (fill the parent box; `ox`/`oy` inset each side, `w`/`h` ignored), or `manual` (use your own `ax`/`ay` as a 0..1 ratio anchor inside the parent box).
+  - `ox`/`oy`: pixel offset; `w`/`h`: size in pixels (overridden when stretched / sized by a container).
+  - `parent`: entity reference to the parent UI node (`entity` type; empty = anchored to the viewport).
+  - `weight`: stretch weight along the container main axis (0 = use own size; >0 = split the remaining main-axis space by weight).
+  - `rx`/`ry`/`rw`/`rh`: the **layout output** — the resolved screen-pixel rectangle (top-left origin). The layout system writes them, the renderer reads them, and they enter the hash and saves (snapshot/recording safe). The engine fills these in; just write 0 as a placeholder.
+- `Container{kind, gap, pad, columns, main, cross}`: when present, child nodes (Ui nodes whose `parent` points at this entity) are **auto-arranged**; children don't place themselves. `kind` ∈ `{VBox, HBox, Grid}` (vertical / horizontal / grid); `gap` is the inter-child spacing, `pad` the inner padding on all sides; `Grid` uses `columns` (≥1, equal cell widths/heights); `main`/`cross` are the main/cross-axis alignment (`start`/`center`/`end`).
+- `Panel{color, image}`: a background box. `color` is a solid fill (`#rrggbb`, or `#rrggbbaa` with alpha), or `image` is a sprite (nearest-neighbor scaled). **NinePatch is deferred to 1.2** (solid + sprite are required in 1.1).
+- `UiLabel{content, size, color, reveal, align}`: a text widget, reusing the vector-font layout cache + typewriter reveal (`reveal` 0..1, same as `Text.reveal`). `size` is the font height in **screen pixels** (no camera scale); `align` aligns text horizontally inside the node box (`start`/`center`/`end`), vertically centered in the box.
+
+Layout is dirty-marked + a single tree traversal (O(number of UI nodes)), not a full recompute every tick. The reference viewport in simulation state is fixed at 1920×1080 (so the layout result that enters the hash is decoupled from window resolution and is deterministic across machines); at render time the CPU/GPU each re-solve at the real window resolution (the same `solve_layout` pure function), and the viewport-anchored UI scales naturally.
+
+`vitric check` validates UI: anchor preset name legal (`VD070`), container kind in `{VBox,HBox,Grid}` (`VD071`), Grid columns ≥1 (`VD072`), alignment name legal (`VD073`), `Panel.image` references an existing sprite (same as `Sprite.image`), fields pass the schema — errors carry a path + a VDxxx code + a fix hint.
+
+**A full runnable grey-box example lives in examples/ui-gallery**: a centered menu panel + title + three buttons (a VBox column; each button is a Panel plus a stretched UiLabel) + a bottom hint. It looks like a main menu, built entirely from the blocks above, with zero interface code in the engine. Scene snippet:
+
+```json
+{ "entities": [
+  { "name": "ui", "components": { "UiRoot": {} } },
+  { "name": "menu-panel", "components": {
+      "Ui": { "anchor": "center", "w": 600, "h": 420, "parent": "ui" },
+      "Panel": { "color": "#1b1d26" } } },
+  { "name": "menu-vbox", "components": {
+      "Ui": { "anchor": "stretch", "ox": 40, "oy": 110, "parent": "menu-panel" },
+      "Container": { "kind": "VBox", "gap": 24, "main": "start", "cross": "center" } } },
+  { "name": "btn-start", "components": {
+      "Ui": { "anchor": "top-left", "w": 480, "h": 72, "parent": "menu-vbox" },
+      "Panel": { "color": "#3a4a6b" } } },
+  { "name": "btn-start-label", "components": {
+      "Ui": { "anchor": "stretch", "parent": "btn-start" },
+      "UiLabel": { "content": "Start", "size": 30, "color": "#ffffff", "align": "center" } } }
+] }
+```
+
+Swap in inventory cells (Grid + columns), a settings list (VBox), or a corner minimap (bottom-right anchor) — all the same blocks. Genre-specific interfaces are a project's usage, not in the engine. **1.1 is layout + static widgets; interaction (button presses, focus navigation, click activation, themes) is 1.2.**
+
 ## Lighting
 
 Convention components like Body/Solid: the engine recognizes the names, you define the fields in your schema.

@@ -362,6 +362,53 @@ schema 定义（字段名固定，默认值照抄）：
 
 换成技能演出、Boss 登场、结局演职员表，全是同一套积木换条 Sequence——这才是通用引擎。
 
+## UI 控件（布局）/ UI widgets (layout)
+
+菜单/背包/设置/HUD 这类界面用一套**声明式、确定性**的控件原语拼，对标 Godot Control / Unity UI。**引擎只给通用控件原语；具体界面（主菜单长什么样、背包几列）是项目用积木拼的用法**，引擎侧没有"对话框""技能栏""结算面板"的字样——和序列同一条原则。UI 也是实体 + 组件，进世界状态/哈希/存档/录像；布局是 `(UI 树, 视口)` 的确定性纯计算（无墙钟无随机），快照/回放往返一致。
+
+**当前阶段 = 1.1：布局地基 + 静态控件 + 屏幕空间渲染（灰盒，不可交互）**。把"摆得对、画得出、镜头不飘、空场零成本"立住。Button 状态机、焦点导航、点击激活、主题 Theme 属于 1.2，本阶段没有。
+
+**坐标系：UI 是屏幕空间叠加层**。UI 元素锚定**视口（屏幕）**、渲染走屏幕空间正交投影，**不经相机变换**——镜头移动/缩放/抖动时 UI 不飘（像 HUD）。这与精灵/粒子走世界空间相反。UI 紧接世界渲染（含光照/粒子/泛光）之后叠加，不被打光，无离屏缓冲（复用同一顶点流）。CPU 真相源 + GPU 镜像，两路读同一份布局结果（`solve_layout`），不在 GPU 侧重算布局。
+
+约定组件（引擎认名字，字段自己在 schema 里定义）：
+
+- `UiRoot{layout_hash}`：标记一棵 UI 树的根，布局从它起、对着视口解算。**场上没有 UiRoot = 完全没有 UI = 每 tick 零成本 early-return**（零分配零遍历）。`layout_hash`（可选文本字段）缓存上次布局输入的结构哈希——结构/尺寸没变就跳过重算（静止 UI 连播 N tick，布局重算 0 次）。声明它才享受脏标记；不声明退化成每 tick 解算，仍正确只是不省那一趟。
+- `Ui{anchor, ax, ay, ox, oy, w, h, parent, weight, rx, ry, rw, rh}`：每个 UI 节点。
+  - `anchor`：锚点预设名——`top-left`/`top-center`/`top-right`/`center-left`/`center`/`center-right`/`bottom-left`/`bottom-center`/`bottom-right`（贴四角/四边/居中）、`stretch`（拉伸填满父框，`ox`/`oy` 当四边内缩、忽略 `w`/`h`）、`manual`（用自己的 `ax`/`ay` 当父框内 0..1 比例锚点）。
+  - `ox`/`oy`：像素偏移；`w`/`h`：尺寸（像素，stretch/容器拉伸时被覆盖）。
+  - `parent`：父 UI 节点的实体引用（`entity` 类型；空 = 锚到视口）。
+  - `weight`：容器主轴拉伸权重（0 = 用自身尺寸；>0 = 按权重瓜分剩余主轴空间）。
+  - `rx`/`ry`/`rw`/`rh`：**布局输出**——解算后的屏幕像素矩形（左上原点）。布局系统写、渲染读，进哈希进存档（快照/录像安全）。这些是引擎填的，作者写 0 占位即可。
+- `Container{kind, gap, pad, columns, main, cross}`：挂了它，子节点（`parent` 指向本实体的 Ui 节点）由容器**自动排版**，子节点不自摆坐标。`kind` ∈ `{VBox, HBox, Grid}`（竖排/横排/网格）；`gap` 子间距、`pad` 四边内边距；`Grid` 用 `columns`（≥1，行高列宽等分）；`main`/`cross` 主轴/交叉轴对齐（`start`/`center`/`end`）。
+- `Panel{color, image}`：背景框。`color` 纯色（支持 `#rrggbb` 或带透明度 `#rrggbbaa`），或 `image` 精灵贴图（最近邻缩放）。**NinePatch 九宫格留 1.2**（纯色 + 精灵 1.1 必做）。
+- `UiLabel{content, size, color, reveal, align}`：文字控件，复用矢量字体版面缓存 + 逐字显示（`reveal` 0..1，同 `Text.reveal`）。`size` = **屏幕像素**字号（不经相机）；`align` 在节点框内水平对齐（`start`/`center`/`end`），竖向居中于框。
+
+布局是脏标记 + 一趟树遍历（O(UI 节点数)），不每 tick 全量。布局参照视口在模拟状态里固定为 1920×1080（解算结果进哈希要与窗口分辨率解耦，跨机器确定）；渲染时 CPU/GPU 各自按真实窗口分辨率重解算（同一份 `solve_layout` 纯函数），UI 锚定视口自然缩放。
+
+`vitric check` 验 UI：锚点预设名合法（`VD070`）、容器类型在 `{VBox,HBox,Grid}`（`VD071`）、Grid 列数 ≥1（`VD072`）、对齐名合法（`VD073`）、`Panel.image` 引用的贴图存在（和 `Sprite.image` 同口径）、字段过 schema——错误带路径 + VDxxx 码 + 修复提示。
+
+**完整可跑灰盒示例见 examples/ui-gallery**：居中菜单面板 + 标题 + 三个按钮（VBox 竖排，每个按钮 = 一个 Panel + 一个 stretch 的 UiLabel）+ 底部提示。一个主菜单的样子，全是上面的积木拼出来的，引擎零界面代码。场景写法（节选）：
+
+```json
+{ "entities": [
+  { "name": "ui", "components": { "UiRoot": {} } },
+  { "name": "menu-panel", "components": {
+      "Ui": { "anchor": "center", "w": 600, "h": 420, "parent": "ui" },
+      "Panel": { "color": "#1b1d26" } } },
+  { "name": "menu-vbox", "components": {
+      "Ui": { "anchor": "stretch", "ox": 40, "oy": 110, "parent": "menu-panel" },
+      "Container": { "kind": "VBox", "gap": 24, "main": "start", "cross": "center" } } },
+  { "name": "btn-start", "components": {
+      "Ui": { "anchor": "top-left", "w": 480, "h": 72, "parent": "menu-vbox" },
+      "Panel": { "color": "#3a4a6b" } } },
+  { "name": "btn-start-label", "components": {
+      "Ui": { "anchor": "stretch", "parent": "btn-start" },
+      "UiLabel": { "content": "Start", "size": 30, "color": "#ffffff", "align": "center" } } }
+] }
+```
+
+换成背包格子（Grid + columns）、设置项列表（VBox）、角落小地图（bottom-right 锚点），全是同一套积木——题材专属界面是项目用法，不在引擎里。**1.1 是布局 + 静态控件；交互（按钮按下、焦点导航、点击激活、主题换肤）见 1.2**。
+
 ## 光照 / Lighting
 
 跟 Body/Solid 一样的约定组件：引擎认名字，字段自己在 schema 里定义。

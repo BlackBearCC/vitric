@@ -1,0 +1,10 @@
+{
+  "name": "ui-gallery",
+  "schema": "schema.json",
+  "entry": "scenes/menu.json",
+  "scenes": [
+    "scenes/menu.json"
+  ],
+  "font": "fonts/DejaVuSans.ttf",
+  "seed": 1
+}

@@ -133,9 +133,14 @@
 
 mod assets;
 mod font;
+mod ui;
 
 pub use assets::{is_normal_map_name, normal_map_name, Assets, Image};
 pub use font::{revealed_chars, FontStore, GlyphPlacement, RasterGlyph};
+pub use ui::{
+    has_ui, layout_input_hash, layout_runs, solve_layout, Align, Anchor, ContainerKind, Layout,
+    UiRect, ALIGN_NAMES, ANCHOR_NAMES, CONTAINER_KINDS,
+};
 
 use serde_json::Value;
 
@@ -445,6 +450,12 @@ fn render_with(
     if let Some(bloom) = bloom_of(world)? {
         apply_bloom(&mut buf, width, height, &bloom);
     }
+
+    // UI 屏幕空间叠加层：紧接世界渲染（含光照/粒子/泛光）之后画，**不经相机变换**
+    // ——镜头移动/缩放/抖动 UI 不飘（像 HUD）。屏幕空间正交投影 = 直接用 layout
+    // 算出的屏幕像素矩形落笔，无离屏缓冲、复用同一块 buf。场上没有 UI（无 UiRoot）
+    // = 零成本跳过（旧行为字节不变）。
+    draw_ui(world, &mut buf, width, height, assets)?;
     Ok(buf)
 }
 
@@ -2001,6 +2012,253 @@ fn draw_text_vector(
     }
 }
 
+/// UI 屏幕空间叠加渲染（CPU 真相源）。布局由 [`ui::solve_layout`] 给出（纯函数，
+/// 不经相机），这里只把解算好的屏幕像素矩形画出来：Panel = 背景框（纯色/精灵），
+/// UiLabel = 文字（复用 font.rs 版面缓存 + Text.reveal）。
+///
+/// 性能：场上没有 UI（无 UiRoot）= 第一行 early-return，零分配零遍历（空 UI 零成本）。
+/// 复用现有 buf，无离屏缓冲。画家序按 query 槽位序（确定性，后画盖前画）。
+/// `normals` 不传——UI 是叠加层，画在光照/泛光之后，自身不参与打光（HUD 语义）。
+fn draw_ui(
+    world: &World,
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    assets: &Assets,
+) -> Result<(), String> {
+    if !ui::has_ui(world) {
+        return Ok(()); // 空 UI 零成本：没有 UiRoot，整条 UI 路径零分配零遍历
+    }
+    let layout = ui::solve_layout(world, width, height)?;
+
+    // Panel：背景框。按实体序画（后画盖前画）。纯色 = 直接 alpha 混合方块；
+    // 精灵 = 最近邻缩放贴图（NinePatch 留 1.2，纯色 + 精灵 1.1 必做）。
+    for id in world.query(&["Ui", "Panel"]) {
+        let Some(rect) = layout.get(&id) else { continue };
+        let x0 = rect.x.floor().max(0.0) as i64;
+        let y0 = rect.y.floor().max(0.0) as i64;
+        let x1 = (rect.x + rect.w).ceil().min(width as f64) as i64;
+        let y1 = (rect.y + rect.h).ceil().min(height as f64) as i64;
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        let image_name = world
+            .get_field(id, "Panel.image")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        if image_name.is_empty() {
+            // 纯色框（含 alpha）——Panel.color 缺省不透明白
+            let color = world
+                .get_field(id, "Panel.color")
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| "#ffffff".to_string());
+            let rgba = parse_color_a(&color).map_err(|e| format!("实体 {id} 的 Panel.color: {e}"))?;
+            let a = rgba[3] as u32;
+            if a == 0 {
+                continue; // 全透明 = 不画
+            }
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = ((y as u32 * width + x as u32) * 4) as usize;
+                    if a == 255 {
+                        buf[i..i + 4].copy_from_slice(&rgba);
+                    } else {
+                        let dst = &mut buf[i..i + 4];
+                        for c in 0..3 {
+                            dst[c] = ((rgba[c] as u32 * a + dst[c] as u32 * (255 - a)) / 255) as u8;
+                        }
+                        dst[3] = 255;
+                    }
+                }
+            }
+        } else {
+            // 精灵背景：图不存在直接报错（不画占位）——口径对齐 Sprite.image
+            let img = assets.image(&image_name).ok_or_else(|| {
+                format!(
+                    "实体 {id} 的 Panel.image {image_name:?} 不在素材仓库里。现有素材: [{}]",
+                    assets.names().join(", ")
+                )
+            })?;
+            let span_x = rect.w;
+            let span_y = rect.h;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let u = ((x as f64 + 0.5) - rect.x) / span_x;
+                    let v = ((y as f64 + 0.5) - rect.y) / span_y;
+                    let sx = ((u * img.width as f64) as i64).clamp(0, img.width as i64 - 1) as usize;
+                    let sy = ((v * img.height as f64) as i64).clamp(0, img.height as i64 - 1) as usize;
+                    let s = (sy * img.width as usize + sx) * 4;
+                    let src = &img.rgba[s..s + 4];
+                    let sa = src[3] as u32;
+                    if sa == 0 {
+                        continue;
+                    }
+                    let i = ((y as u32 * width + x as u32) * 4) as usize;
+                    let dst = &mut buf[i..i + 4];
+                    for c in 0..3 {
+                        dst[c] = ((src[c] as u32 * sa + dst[c] as u32 * (255 - sa)) / 255) as u8;
+                    }
+                    dst[3] = 255;
+                }
+            }
+        }
+    }
+
+    // UiLabel：文字。整串排版后画在节点框里，按 align 水平对齐、竖向居中于框。
+    // 复用 font.rs（挂字体走矢量，否则点阵）+ Text.reveal（逐字显示已落地）。
+    let mut no_normals: Option<Vec<[f32; 3]>> = None;
+    for id in world.query(&["Ui", "UiLabel"]) {
+        let Some(rect) = layout.get(&id) else { continue };
+        let content = world
+            .get_field(id, "UiLabel.content")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        if content.is_empty() {
+            continue;
+        }
+        let size = world.get_field(id, "UiLabel.size").ok().and_then(Value::as_f64).unwrap_or(1.0);
+        if size <= 0.0 {
+            continue;
+        }
+        let color = world
+            .get_field(id, "UiLabel.color")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "#ffffff".to_string());
+        let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 UiLabel.color: {e}"))?;
+        let reveal = world.get_field(id, "UiLabel.reveal").ok().and_then(Value::as_f64).unwrap_or(1.0);
+        let total = content.chars().count();
+        let visible = revealed_chars(reveal, total);
+        if visible == 0 {
+            continue;
+        }
+        let align = world
+            .get_field(id, "UiLabel.align")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "center".to_string());
+        // UI 字号是**屏幕像素**字号（不经相机 scale）——size 直接当像素高用。
+        // 文字竖向居中于节点框，水平按 align 在框内对齐。
+        draw_ui_label(buf, width, height, assets, &content, size, &align, *rect, rgba, &mut no_normals, visible);
+    }
+    Ok(())
+}
+
+/// 画一条 UI 文字（屏幕空间，字号 = 像素高，不经相机）。挂字体走矢量、否则点阵——
+/// 与世界文字 [`draw_texts`] 同两条路径，但坐标是 UI layout 的屏幕矩形。
+#[allow(clippy::too_many_arguments)]
+fn draw_ui_label(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    assets: &Assets,
+    content: &str,
+    size: f64,
+    align: &str,
+    rect: ui::UiRect,
+    rgba: [u8; 4],
+    normals: &mut Option<Vec<[f32; 3]>>,
+    visible: usize,
+) {
+    let cy = rect.y + rect.h / 2.0; // 竖向居中于框
+    if let Some(font) = assets.font() {
+        // UI 字号直接是像素（scale=1）：px_size = size 像素的字形总高
+        let px_size = FontStore::px_size(size, 1.0);
+        let laid = font.layout_cached(content, px_size);
+        let (placements, total_w) = (&laid.0, laid.1);
+        // 水平对齐：在框宽内放整串
+        let left = match align {
+            "start" => rect.x,
+            "end" => rect.x + rect.w - total_w as f64,
+            _ => rect.x + (rect.w - total_w as f64) / 2.0,
+        };
+        let baseline = (cy + font.baseline_offset(px_size) as f64).round() as i64;
+        for p in placements.iter().take(visible) {
+            let g = font.raster(p.ch, px_size);
+            if g.coverage.is_empty() {
+                continue;
+            }
+            let gx0 = (left + p.x as f64).round() as i64 + g.left as i64;
+            let gy0 = baseline + g.top as i64;
+            blit_coverage(buf, width, height, &g, gx0, gy0, rgba, normals);
+        }
+    } else {
+        // 点阵路径：等宽 size×size 像素方格
+        let chars: Vec<char> = content.chars().take(visible).collect();
+        let n = chars.len();
+        let total_w = n as f64 * size;
+        let left = match align {
+            "start" => rect.x,
+            "end" => rect.x + rect.w - total_w,
+            _ => rect.x + (rect.w - total_w) / 2.0,
+        };
+        let top = cy - size / 2.0;
+        let x0 = left.floor().max(0.0) as i64;
+        let x1 = (left + total_w).ceil().min(width as f64) as i64;
+        let y0 = top.floor().max(0.0) as i64;
+        let y1 = (top + size).ceil().min(height as f64) as i64;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let u = ((x as f64 + 0.5) - left) / total_w;
+                let v = ((y as f64 + 0.5) - top) / size;
+                if !(0.0..1.0).contains(&u) || !(0.0..1.0).contains(&v) {
+                    continue;
+                }
+                let idx = ((u * n as f64) as usize).min(n - 1);
+                let col = (((u * n as f64 - idx as f64) * 8.0) as usize).min(7);
+                let row = ((v * 8.0) as usize).min(7);
+                if glyph_of(chars[idx])[row] & (1 << col) != 0 {
+                    let i = ((y as u32 * width + x as u32) * 4) as usize;
+                    buf[i..i + 4].copy_from_slice(&rgba);
+                }
+            }
+        }
+    }
+}
+
+/// 把一个栅格化字形的覆盖率位图混进 buf（抗锯齿），落笔在 (gx0,gy0)。
+/// 抽出来给 UI 文字复用（与 [`draw_text_vector`] 的内层混合逻辑同口径）。
+#[allow(clippy::too_many_arguments)]
+fn blit_coverage(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    g: &RasterGlyph,
+    gx0: i64,
+    gy0: i64,
+    rgba: [u8; 4],
+    normals: &mut Option<Vec<[f32; 3]>>,
+) {
+    for row in 0..g.height as i64 {
+        let y = gy0 + row;
+        if y < 0 || y >= height as i64 {
+            continue;
+        }
+        for col in 0..g.width as i64 {
+            let x = gx0 + col;
+            if x < 0 || x >= width as i64 {
+                continue;
+            }
+            let cov = g.coverage[(row * g.width as i64 + col) as usize] as u32;
+            if cov == 0 {
+                continue;
+            }
+            let i = ((y as u32 * width + x as u32) * 4) as usize;
+            let dst = &mut buf[i..i + 4];
+            for c in 0..3 {
+                dst[c] = ((rgba[c] as u32 * cov + dst[c] as u32 * (255 - cov)) / 255) as u8;
+            }
+            dst[3] = 255;
+            if let Some(ns) = normals.as_mut() {
+                ns[i / 4] = [0.0; 3];
+            }
+        }
+    }
+}
+
 /// 屏幕像素 → 世界坐标（检查器拖拽、点选用）。
 /// 用不抖的相机：点选/拖拽对的是世界本体，抖动只是几帧的视觉装饰。
 pub fn screen_to_world(
@@ -2666,6 +2924,21 @@ fn parse_color(s: &str) -> Result<[u8; 4], String> {
     }
     let p = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).expect("已校验十六进制");
     Ok([p(0), p(2), p(4), 255])
+}
+
+/// 颜色解析（带可选 alpha）：`#rrggbb`（不透明）或 `#rrggbbaa`（带透明度）。
+/// UI Panel 背景常要半透明遮罩，所以单独一条支持 8 位 hex；世界精灵/文字仍走
+/// [`parse_color`]（只认 6 位，alpha 恒 255，字节锁死的旧行为不动）。
+fn parse_color_a(s: &str) -> Result<[u8; 4], String> {
+    let hex = s.strip_prefix('#').ok_or_else(|| {
+        format!("颜色 {s:?} 格式不对。写法: \"#rrggbb\" 或带透明度 \"#rrggbbaa\"")
+    })?;
+    if (hex.len() != 6 && hex.len() != 8) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("颜色 {s:?} 必须是 6 位 \"#rrggbb\" 或 8 位 \"#rrggbbaa\" 十六进制"));
+    }
+    let p = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).expect("已校验十六进制");
+    let a = if hex.len() == 8 { p(6) } else { 255 };
+    Ok([p(0), p(2), p(4), a])
 }
 
 fn fill(buf: &mut [u8], rgba: [u8; 4]) {

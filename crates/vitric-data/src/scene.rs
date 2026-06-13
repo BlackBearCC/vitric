@@ -62,6 +62,8 @@ fn validate_scene(doc: &Value, file: &str, schema: &Schema, report: &mut Validat
             );
             continue;
         };
+        // 归一化后的组件值收一份，供 UI 值级校验跨字段看（锚点/容器类型/Grid 列数）
+        let mut normalized_comps = serde_json::Map::new();
         for (cname, cval) in comps {
             let cpath = format!("{epath}/components/{cname}");
             let Some(cschema) = schema.component(cname) else {
@@ -95,7 +97,11 @@ fn validate_scene(doc: &Value, file: &str, schema: &Schema, report: &mut Validat
                     }
                 }
             }
+            normalized_comps.insert(cname.clone(), normalized);
         }
+        // UI 值级语义校验（锚点预设名 / 容器类型 / Grid 列数 / 对齐名）——引擎兜底，
+        // 不依赖作者把字段声明成 enum。组件存在性已由上面的 schema 校验保证。
+        crate::ui_check::validate_ui_components(&normalized_comps, &epath, report);
     }
 }
 
@@ -259,6 +265,56 @@ mod tests {
                 {"name": "sparks", "components": {
                     "Position": {"x": 0, "y": 0},
                     "Emitter": {"kind": "stream", "rate": 20, "lifetime": 40, "size": 0.3}
+                }}
+            ]}),
+            "scenes/main.json",
+            &s,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ui_semantic_errors_surface_with_paths() {
+        // UI 值级校验走完整场景路径：非法锚点名 / 未知容器类型 / Grid 列数 0 都带
+        // 路径 + VD07x 码报出来（schema 字段先过类型，再过 UI 语义）。
+        let s = Schema::parse(
+            &json!({"components": {
+                "UiRoot": {"fields": {}},
+                "Ui": {"fields": {
+                    "anchor": {"type":"text", "default":"manual"},
+                    "parent": {"type":"entity"},
+                    "w": {"type":"number", "default":0}, "h": {"type":"number", "default":0}
+                }},
+                "Container": {"fields": {
+                    "kind": {"type":"text", "default":"VBox"},
+                    "columns": {"type":"int", "default":1}
+                }}
+            }}),
+            "schema.json",
+        )
+        .unwrap();
+        let err = Scene::parse(
+            json!({"entities": [
+                {"name": "ui", "components": {"UiRoot": {}}},
+                {"name": "bad-anchor", "components": {"Ui": {"anchor": "top-middle"}}},
+                {"name": "bad-box", "components": {"Container": {"kind": "Flex"}}},
+                {"name": "bad-grid", "components": {"Container": {"kind": "Grid", "columns": 0}}}
+            ]}),
+            "scenes/main.json",
+            &s,
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("VD070") && text.contains("Ui/anchor"), "非法锚点: {text}");
+        assert!(text.contains("VD071") && text.contains("Container/kind"), "未知容器: {text}");
+        assert!(text.contains("VD072") && text.contains("Container/columns"), "Grid 列数 0: {text}");
+        // 合法 UI 照常通过
+        Scene::parse(
+            json!({"entities": [
+                {"name": "ui", "components": {"UiRoot": {}}},
+                {"name": "p", "components": {
+                    "Ui": {"anchor": "center", "parent": "ui", "w": 100, "h": 50},
+                    "Container": {"kind": "Grid", "columns": 3}
                 }}
             ]}),
             "scenes/main.json",
