@@ -1,0 +1,171 @@
+{
+  "atlas": "slide-atlas.png",
+  "atlas_size": [
+    64,
+    8
+  ],
+  "clip": "slide",
+  "compressed": "slide-atlas.bc7",
+  "frames": [
+    {
+      "image": "slide/frame000.png",
+      "rect": [
+        0,
+        0,
+        8,
+        8
+      ],
+      "stay": 1,
+      "trim_offset": [
+        2,
+        12
+      ],
+      "uv": [
+        0.0,
+        0.0,
+        0.125,
+        1.0
+      ]
+    },
+    {
+      "image": "slide/frame001.png",
+      "rect": [
+        8,
+        0,
+        8,
+        8
+      ],
+      "stay": 1,
+      "trim_offset": [
+        4,
+        12
+      ],
+      "uv": [
+        0.125,
+        0.0,
+        0.25,
+        1.0
+      ]
+    },
+    {
+      "image": "slide/frame002.png",
+      "rect": [
+        16,
+        0,
+        8,
+        8
+      ],
+      "stay": 1,
+      "trim_offset": [
+        6,
+        12
+      ],
+      "uv": [
+        0.25,
+        0.0,
+        0.375,
+        1.0
+      ]
+    },
+    {
+      "image": "slide/frame003.png",
+      "rect": [
+        24,
+        0,
+        8,
+        8
+      ],
+      "stay": 1,
+      "trim_offset": [
+        8,
+        12
+      ],
+      "uv": [
+        0.375,
+        0.0,
+        0.5,
+        1.0
+      ]
+    },
+    {
+      "image": "slide/frame004.png",
+      "rect": [
+        32,
+        0,
+        8,
+        8
+      ],
+      "stay": 3,
+      "trim_offset": [
+        10,
+        12
+      ],
+      "uv": [
+        0.5,
+        0.0,
+        0.625,
+        1.0
+      ]
+    },
+    {
+      "image": "slide/frame005.png",
+      "rect": [
+        40,
+        0,
+        8,
+        8
+      ],
+      "stay": 1,
+      "trim_offset": [
+        12,
+        12
+      ],
+      "uv": [
+        0.625,
+        0.0,
+        0.75,
+        1.0
+      ]
+    },
+    {
+      "image": "slide/frame006.png",
+      "rect": [
+        48,
+        0,
+        8,
+        8
+      ],
+      "stay": 1,
+      "trim_offset": [
+        14,
+        12
+      ],
+      "uv": [
+        0.75,
+        0.0,
+        0.875,
+        1.0
+      ]
+    },
+    {
+      "image": "slide/frame007.png",
+      "rect": [
+        56,
+        0,
+        8,
+        8
+      ],
+      "stay": 1,
+      "trim_offset": [
+        16,
+        12
+      ],
+      "uv": [
+        0.875,
+        0.0,
+        1.0,
+        1.0
+      ]
+    }
+  ]
+}

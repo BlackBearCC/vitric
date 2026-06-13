@@ -143,7 +143,34 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 ## 动画
 
 清单挂 `"animations": "animations.json"`，文件里定义片段：`{"clips": {"walk": {"frames": ["w0.png","w1.png"], "fps": 6, "loop": true}}}`。
-实体挂 `Anim` 组件（schema 需定义 clip/prev/t/done 四字段），**引擎独占 Sprite.image 的写权**——换动画唯一正路是改 `Anim.clip`（规则 set 即可），切换自动从头播；非循环片段播完发 `anim-finished` 事件并停末帧。状态全在组件里，快照/回放安全。
+实体挂 `Anim` 组件（schema 需定义 clip/prev/t/done 四字段，`t` 用 `int`），**引擎独占 Sprite.image 的写权**——换动画唯一正路是改 `Anim.clip`（规则 set 即可），切换自动从头播；非循环片段播完发 `anim-finished` 事件并停末帧。状态全在组件里，快照/回放安全。
+
+### 帧动画进口（`--frames`）
+
+AI 出动画的现实路径 = 生成视频/序列图 → 切帧（骨骼绑定是 AI 最不擅长的活）。`vitric assets <项目> --frames <序列图目录>` 把一堆帧图一键变成优化过的动画素材，全程确定性（同输入逐字节同产物）：
+
+1. **相邻帧去重**：逐像素近乎相同的相邻帧只留一张，记「停留多少帧」（AI 动画常有静止段，去重砍磁盘+显存）。
+2. **裁空白边 trim**：每帧裁透明边、记偏移（播放摆回原位，视觉不变）。
+3. **打包图集 atlas**：所有帧拼一张大图（减 GPU 纹理切换），记每帧 uv 矩形。
+4. **统一色板**：复用 median-cut，整组帧一套（`--colors N`，默认 32；`--colors 0` 跳过）。
+5. **写动画配置**：
+   - `animations.json` 标准 clip——去重后的帧名，**停留 = 在 frames 列表里重复帧名**，`advance_animations` 按 fps=60（每 tick 一帧）逐帧确定播放，render 核心一字不改。
+   - `<片段>-atlas.png` + `<片段>-atlas.json`（帧表：uv + rect + trim 偏移 + 停留）——极致内存路径产物。
+
+产物落进项目 `assets/`（去重帧 `assets/<片段>/frameNNN.png`）和清单旁的 `animations.json`。片段名取序列图**目录名**。视频不内置解码器：检测到 mp4/mov 等会明确提示先 `ffmpeg -i in.mp4 frame%04d.png` 转序列图（不静默失败）。`--frames` 与色板和谐化/法线互斥；它自己接受 `--colors` 和 `--no-compress`。
+
+`vitric check` 校验帧进口产物：图集存在、帧表合法、uv/rect 不越界、引用的帧图都在——缺了红灯并点名路径 + VDxxx 码。
+
+示例项目：`examples/frame-anim`（程序生成的滑动+静止段占位帧跑 `--frames` 出的产物）。
+
+### 压缩纹理（BC7）
+
+显存大头是 RGBA8 全驻留（前车之鉴：桌宠 2400 帧不压缩 → 8.5G 显存）。`--frames` 默认把图集离线压成 **BC7（BPTC）**：一块 4×4 像素恒 16 字节 = 8bpp，是 RGBA8（32bpp）的 **1/4（4×）**，加去重额外省。产物 `<片段>-atlas.bc7`（自描述头 + 块数据），报告里给 `compression_ratio`。`--no-compress` 关掉只出 RGBA8 图集。
+
+- **离线压、运行时只上传**：BC7 编码在 assets 流水线做，不在运行时实时压。
+- **GPU 上传需要 device feature `TEXTURE_COMPRESSION_BC`**；不支持的设备**显式报错、不 fallback** 到 RGBA8 静默膨胀（让问题暴露）。
+- **CPU 真相源路径不变**：CPU 参考渲染仍用 RGBA8（它不吃显存，截图逐字节确定）。
+- **确定性**：压缩纹理只影响 GPU 视觉，**不进模拟状态/哈希**——模拟只认帧索引/clip 名，不认像素。
 
 ## 场景与流程 / Scenes & flow
 

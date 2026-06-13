@@ -1343,6 +1343,12 @@ pub fn check(dir: &Path) -> Result<Value, String> {
     for (file, doc) in &project.rules {
         scan_rule_image_refs(doc, file, &assets, &mut missing);
     }
+    // 帧进口产物（vitric assets --frames 出的 *-atlas.json sidecar）：图集存在、
+    // 帧表合法、uv/rect 不越界、引用的帧图都在、压缩产物头合法。纯新增——没有
+    // 帧进口产物的老项目这里零成本（assets/ 里没有 *-atlas.json）。
+    for atlas_rel in discover_atlas_sidecars(&dir.join("assets")) {
+        crate::frames::check_atlas_products(dir, &atlas_rel, &mut missing);
+    }
     if !missing.is_empty() {
         return Err(format!(
             "素材/动画/音效/贴图引用校验失败:\n  {}\n现有素材: [{}]",
@@ -1368,6 +1374,23 @@ pub fn check(dir: &Path) -> Result<Value, String> {
         "font": project.manifest.font.clone().unwrap_or_else(|| "内嵌 8x8 点阵".to_string()),
         "initial_hash": format!("{:#018x}", sim.world.state_hash()),
     }))
+}
+
+/// 找出 assets/ 顶层的帧进口图集 sidecar（`*-atlas.json`），返回相对 assets/ 的名字。
+/// 不存在/读不了 = 空（合法：没用过 --frames 的项目）。只扫顶层（产物落在那）。
+fn discover_atlas_sidecars(assets_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(assets_dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.ends_with("-atlas.json") {
+            out.push(name);
+        }
+    }
+    out.sort(); // 确定的报错顺序
+    out
 }
 
 #[cfg(test)]

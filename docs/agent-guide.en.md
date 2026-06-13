@@ -143,7 +143,34 @@ What the engine guarantees, and where the guarantee ends:
 ## Animation
 
 Manifest: `"animations": "animations.json"`; clips: `{"clips": {"walk": {"frames": ["w0.png","w1.png"], "fps": 6, "loop": true}}}`.
-Entities carry an `Anim` component (schema must define `clip/prev/t/done`). **The engine owns `Sprite.image` exclusively** — the only way to change animation is setting `Anim.clip` (a rule `set` works); switching restarts the clip; non-looping clips emit `anim-finished` and hold the last frame. All state lives in the component, so snapshots and replays are safe.
+Entities carry an `Anim` component (schema must define `clip/prev/t/done`; `t` is `int`). **The engine owns `Sprite.image` exclusively** — the only way to change animation is setting `Anim.clip` (a rule `set` works); switching restarts the clip; non-looping clips emit `anim-finished` and hold the last frame. All state lives in the component, so snapshots and replays are safe.
+
+### Frame import (`--frames`)
+
+The realistic path for AI-made animation is generate video/sprite-sheet → slice frames (skeletal rigging is exactly what AI is worst at). `vitric assets <project> --frames <frames-dir>` turns a pile of frame images into optimized animation assets, fully deterministically (same input → byte-identical output):
+
+1. **Adjacent-frame dedup**: near-identical adjacent frames collapse to one, recording "how many frames it stays" (AI animation often has static runs; dedup cuts disk + VRAM).
+2. **Trim**: each frame's transparent border is cropped, the offset recorded (playback puts it back in place, visually unchanged).
+3. **Atlas pack**: all frames packed into one big texture (fewer GPU texture switches), each frame's UV rect recorded.
+4. **Unified palette**: reuses median-cut, one palette for the whole set (`--colors N`, default 32; `--colors 0` skips it).
+5. **Write animation config**:
+   - `animations.json` standard clip — deduped frame names, where **stay = repeating the frame name in the `frames` list**; `advance_animations` plays it deterministically at fps=60 (one frame per tick), the render core untouched.
+   - `<clip>-atlas.png` + `<clip>-atlas.json` (frame table: uv + rect + trim offset + stay) — the extreme-memory artifact.
+
+Artifacts land in the project `assets/` (deduped frames at `assets/<clip>/frameNNN.png`) and `animations.json` next to the manifest. The clip name is taken from the **directory name**. No built-in video decoder: detecting mp4/mov etc. prints an explicit hint to first run `ffmpeg -i in.mp4 frame%04d.png` (no silent failure). `--frames` is mutually exclusive with palette harmonization / normals; it accepts `--colors` and `--no-compress` itself.
+
+`vitric check` validates the import artifacts: atlas exists, frame table is legal, uv/rect in bounds, referenced frame images present — failures turn it red and name the path + VDxxx code.
+
+Example project: `examples/frame-anim` (artifacts produced by running `--frames` over procedurally generated slide + static-run placeholder frames).
+
+### Compressed textures (BC7)
+
+VRAM is dominated by RGBA8 fully resident (cautionary tale: a desktop pet with 2400 uncompressed frames → 8.5 GB VRAM). `--frames` by default compresses the atlas offline to **BC7 (BPTC)**: one 4×4-pixel block is a fixed 16 bytes = 8bpp, **1/4 (4×)** of RGBA8 (32bpp), plus the extra savings from dedup. Artifact `<clip>-atlas.bc7` (self-describing header + block data); the report gives `compression_ratio`. `--no-compress` turns it off and emits only the RGBA8 atlas.
+
+- **Compress offline, only upload at runtime**: BC7 encoding happens in the assets pipeline, never at runtime.
+- **GPU upload requires device feature `TEXTURE_COMPRESSION_BC`**; unsupported devices **error explicitly, no fallback** to silent RGBA8 bloat (expose the problem).
+- **CPU truth-source path unchanged**: CPU reference rendering still uses RGBA8 (it doesn't cost VRAM; screenshots stay byte-deterministic).
+- **Determinism**: compressed textures only affect GPU visuals, **never enter simulation state/hash** — the sim only knows frame index / clip name, not pixels.
 
 ## Audio
 

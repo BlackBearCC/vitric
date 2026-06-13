@@ -1,0 +1,20 @@
+{
+  "clips": {
+    "slide": {
+      "fps": 60,
+      "frames": [
+        "slide/frame000.png",
+        "slide/frame001.png",
+        "slide/frame002.png",
+        "slide/frame003.png",
+        "slide/frame004.png",
+        "slide/frame004.png",
+        "slide/frame004.png",
+        "slide/frame005.png",
+        "slide/frame006.png",
+        "slide/frame007.png"
+      ],
+      "loop": true
+    }
+  }
+}

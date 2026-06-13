@@ -14,7 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// 解码后的图片（RGBA8），和 vitric-render 的约定一致。
-/// pub(crate)：法线生成（normals.rs）复用同一套解码/编码，不再造一份。
+/// pub(crate)：法线生成（normals.rs）、帧进口（frames.rs）复用同一套解码/编码，
+/// 不再造一份。
+#[derive(Clone)]
 pub(crate) struct Img {
     pub(crate) width: u32,
     pub(crate) height: u32,
@@ -67,16 +69,29 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut normals = false;
     let mut normals_ai = false;
     let mut palette_opts_given = false;
+    // 帧进口模式：--frames <序列图目录>，与色板/法线互斥
+    let mut frames_dir: Option<String> = None;
+    let mut frames_compress = true;
+    let mut frames_colors: Option<usize> = None;
     let mut i = 1;
     while i < args.len() {
         let need = |key: &str| format!("{key} 缺少参数值");
         match args[i].as_str() {
+            "--frames" => {
+                frames_dir = Some(args.get(i + 1).ok_or(need("--frames"))?.clone());
+                i += 2;
+            }
+            "--no-compress" => {
+                frames_compress = false;
+                i += 1;
+            }
             "--colors" => {
                 opts.colors = args
                     .get(i + 1)
                     .ok_or(need("--colors"))?
                     .parse()
                     .map_err(|e| format!("--colors: {e}"))?;
+                frames_colors = Some(opts.colors);
                 palette_opts_given = true;
                 i += 2;
             }
@@ -107,10 +122,32 @@ pub fn run(args: &[String]) -> Result<(), String> {
             }
             other => {
                 return Err(format!(
-                    "未知选项 {other:?}。可用: --colors --height --palette-lock --normals --normals-ai"
+                    "未知选项 {other:?}。可用: --frames --no-compress --colors --height --palette-lock --normals --normals-ai"
                 ))
             }
         }
+    }
+    // 帧进口模式：与色板/法线互斥（一次只做一件事，报告才说得清——和已有互斥同风格）。
+    // --frames 自己接受 --colors（整组色板数）和 --no-compress，所以这两个不算冲突。
+    if let Some(fdir) = frames_dir {
+        if normals {
+            return Err("--frames 与 --normals 不能混用（一次只做一件事）。\
+                        提示：先 --frames 出动画素材，再单独跑 --normals 生成法线".into());
+        }
+        if opts.height.is_some() || opts.palette_lock {
+            return Err("--frames 与 --height/--palette-lock 不能混用。\
+                        提示：trim 在引擎内做，色板由 --colors 控制（整组一套）".into());
+        }
+        let fopts = crate::frames::FramesOptions {
+            colors: frames_colors.unwrap_or(32),
+            compress: frames_compress,
+        };
+        let report = crate::frames::run(&PathBuf::from(dir), &PathBuf::from(fdir), &fopts)?;
+        println!("{}", serde_json::to_string_pretty(&report.to_json()).expect("报告可序列化"));
+        return Ok(());
+    }
+    if !frames_compress {
+        return Err("--no-compress 只在 --frames 模式下有意义（它控制图集是否压 BC7）".into());
     }
     if normals && palette_opts_given {
         return Err("--normals 和色板选项（--colors/--height/--palette-lock）不能混用。\
@@ -192,20 +229,7 @@ pub fn harmonize(project_dir: &Path, opts: &Options) -> Result<Report, String> {
     let palette: Vec<[u8; 3]> = if opts.palette_lock {
         read_palette(&palette_path)?
     } else {
-        let mut freq: BTreeMap<[u8; 3], u64> = BTreeMap::new();
-        for (_, img) in &images {
-            for px in img.rgba.chunks_exact(4) {
-                if px[3] > 0 {
-                    *freq.entry([px[0], px[1], px[2]]).or_insert(0) += 1;
-                }
-            }
-        }
-        if freq.is_empty() {
-            return Err(
-                "所有图片都是全透明，提取不出色板。提示：检查抠图这步是不是把内容抠没了".into(),
-            );
-        }
-        median_cut(&freq, opts.colors)
+        extract_palette(images.iter().map(|(_, img)| img), opts.colors)?
     };
 
     // 先备份再动手：备份没写全就报错退出，assets/ 一个字节都没改。
@@ -223,7 +247,7 @@ pub fn harmonize(project_dir: &Path, opts: &Options) -> Result<Report, String> {
     // 量化回写：不透明像素吸附最近色板色，alpha 原样保留。
     let mut bytes_after = 0u64;
     for (rel, img) in &images {
-        let q = quantize(img, &palette);
+        let q = quantize_with(img, &palette);
         let path = assets_dir.join(rel);
         save_png(&path, &q).map_err(|e| format!("素材 {rel}: {e}"))?;
         bytes_after += std::fs::metadata(&path)
@@ -348,9 +372,32 @@ fn box_average(entries: &[([u8; 3], u64)]) -> [u8; 3] {
     out
 }
 
+/// 从一组图的不透明像素提取共享色板（按频次加权的中位切分）。
+/// 和谐化、帧进口（frames.rs）共用——整组一套色板 = 视觉和谐 + 为压缩铺路。
+/// 全透明（提不出色）显式报错，不静默给空色板。
+pub(crate) fn extract_palette<'a>(
+    imgs: impl IntoIterator<Item = &'a Img>,
+    colors: usize,
+) -> Result<Vec<[u8; 3]>, String> {
+    let mut freq: BTreeMap<[u8; 3], u64> = BTreeMap::new();
+    for img in imgs {
+        for px in img.rgba.chunks_exact(4) {
+            if px[3] > 0 {
+                *freq.entry([px[0], px[1], px[2]]).or_insert(0) += 1;
+            }
+        }
+    }
+    if freq.is_empty() {
+        return Err(
+            "所有图片都是全透明，提取不出色板。提示：检查抠图这步是不是把内容抠没了".into(),
+        );
+    }
+    Ok(median_cut(&freq, colors))
+}
+
 /// 把每个不透明像素吸附到最近的色板色（RGB 欧氏距离，平方比较即可）。
 /// alpha=0 → 整像素归零（RGB 无意义，归零利于压缩）；0<alpha<255 → 保留 alpha 只换 RGB。
-fn quantize(img: &Img, palette: &[[u8; 3]]) -> Img {
+pub(crate) fn quantize_with(img: &Img, palette: &[[u8; 3]]) -> Img {
     let mut rgba = Vec::with_capacity(img.rgba.len());
     for px in img.rgba.chunks_exact(4) {
         if px[3] == 0 {

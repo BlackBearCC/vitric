@@ -636,8 +636,18 @@ impl GpuPresenter {
             force_fallback_adapter: false,
         }))
         .map_err(|e| format!("找不到可用的 GPU 适配器: {e}"))?;
+        // BC7（压缩纹理）：适配器**支持**就请求 TEXTURE_COMPRESSION_BC，让压缩图集
+        // 能直接上传（几百帧角色几十 MB 显存 vs RGBA8 全驻留的 8.5G）。适配器不支持
+        // 就不请求（设备照常创建，普通 RGBA8 路径不受影响）——真要上传压缩图集时
+        // 在 upload_bc7_texture 里**显式报错**，不静默回退 RGBA8 膨胀显存。
+        let bc_supported = adapter.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("vitric"),
+            required_features: if bc_supported {
+                wgpu::Features::TEXTURE_COMPRESSION_BC
+            } else {
+                wgpu::Features::empty()
+            },
             ..Default::default()
         }))
         .map_err(|e| format!("创建 GPU 设备失败: {e}"))?;
@@ -1359,6 +1369,99 @@ fn create_fullscreen_pipeline(
         multiview_mask: None,
         cache: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// 压缩纹理上传（BC7）：帧进口图集的极致内存路径
+// ---------------------------------------------------------------------------
+
+/// 把帧进口的 BC7 图集产物（VBC7 文件字节，见 frames::write_bc7）上传成一张
+/// 压缩纹理。**显存只占 BC7 字节本身**（8bpp，RGBA8 的 1/4，加去重额外省）——
+/// 这是「几百帧角色控制在几十 MB」对照桌宠 8.5G 的落点。
+///
+/// 设备不支持 `TEXTURE_COMPRESSION_BC` 时**显式报错、不 fallback** 到 RGBA8
+/// 静默膨胀（合同第六节：让问题暴露，用户知道这台机器没 BC 支持）。
+///
+/// 真机显存实测 + 视觉验证留 Windows GPU 机；容器无 GPU 跑不到这里（present 路径
+/// 才调），但整段随 `cargo check --target x86_64-pc-windows-gnu` 一起交叉编译过。
+///
+/// 确定性：压缩纹理只影响 GPU 视觉，**不进模拟状态/哈希**——模拟只认帧索引/clip 名。
+#[allow(dead_code)] // 上传链路接入 present 留阶段 1 之后；先把可交叉编译的上传路径锁住
+pub(crate) fn upload_bc7_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    vbc7: &[u8],
+) -> Result<wgpu::Texture, String> {
+    // 设备能力门：不支持 BC 显式报错（不静默回退）
+    bc7_support_gate(device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC))?;
+    let (w, h, bx, by, off) = vitric_cli_parse_bc7(vbc7)?;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("vitric-atlas-bc7"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        // BC7 非 sRGB：采样回原始字节空间，和主图集 Rgba8Unorm 同口径（染色乘法在字节空间）
+        format: wgpu::TextureFormat::Bc7RgbaUnorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    // BC7 一块 4x4 像素 = 16 字节；bytes_per_row = 每行块数 × 16
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &vbc7[off..],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bx * 16),
+            rows_per_image: Some(by),
+        },
+        // 拷贝范围按块网格的像素尺寸（4 的倍数），不是裁回的真实尺寸
+        wgpu::Extent3d { width: bx * 4, height: by * 4, depth_or_array_layers: 1 },
+    );
+    Ok(texture)
+}
+
+/// 解析 VBC7 头（薄封装 frames::parse_bc7_header，gpu 侧只要这一处）。
+fn vitric_cli_parse_bc7(bytes: &[u8]) -> Result<(u32, u32, u32, u32, usize), String> {
+    vitric_cli::frames::parse_bc7_header(bytes)
+}
+
+/// BC 支持门（纯函数，无 GPU 可单测）：不支持就**显式报错、不 fallback**。
+/// 抽出来因为容器无 GPU 造不出 wgpu::Device——错误路径靠这条单测锁住。
+fn bc7_support_gate(bc_supported: bool) -> Result<(), String> {
+    if bc_supported {
+        return Ok(());
+    }
+    Err(
+        "本机 GPU 不支持 BC 压缩纹理（缺 TEXTURE_COMPRESSION_BC）。\
+         压缩图集上传需要它——不静默回退 RGBA8（那会让显存悄悄膨胀回 4 倍）。\
+         提示：换支持 BC 的桌面 GPU，或用未压缩 RGBA8 图集（--no-compress 出的产物）"
+            .to_string(),
+    )
+}
+
+#[cfg(test)]
+mod bc7_gate_tests {
+    use super::*;
+
+    /// 不支持 BC 的设备：显式报错（带修法提示），不静默回退 RGBA8。
+    #[test]
+    fn unsupported_device_errors_explicitly() {
+        let err = bc7_support_gate(false).unwrap_err();
+        assert!(err.contains("TEXTURE_COMPRESSION_BC"), "点名缺的 feature: {err}");
+        assert!(err.contains("不静默回退"), "明说不 fallback: {err}");
+    }
+
+    /// 支持 BC 的设备：放行。
+    #[test]
+    fn supported_device_passes() {
+        assert!(bc7_support_gate(true).is_ok());
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,13 @@
+{
+  "name": "frame-anim",
+  "schema": "schema.json",
+  "entry": "scenes/main.json",
+  "scenes": [
+    "scenes/main.json"
+  ],
+  "rules": [
+    "rules/game.json"
+  ],
+  "animations": "animations.json",
+  "seed": 3
+}

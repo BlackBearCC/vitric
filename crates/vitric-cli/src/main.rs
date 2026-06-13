@@ -17,6 +17,12 @@
 //!   --normals        给没有 _n 配对的 PNG 生成法线贴图（程序化，确定性；与色板选项互斥）
 //!   --normals-ai     法线生成改走豆包 Ark Seedream 图生图（需要环境变量 ARK_API_KEY；
 //!                    模型 VITRIC_NORMALS_MODEL，默认 doubao-seedream-5-0-260128）
+//!   --frames <目录>   帧进口流水线：把一组序列图（png，自然排序）一键变优化过的动画
+//!                    素材——相邻帧去重（记停留）+ 裁透明边（记偏移）+ 打包图集 +
+//!                    统一色板 + 写 animations.json + BC7 压缩图集。片段名取目录名。
+//!                    视频先用 ffmpeg 转序列图（不内置解码器）。与色板/法线互斥；
+//!                    自己接受 --colors（整组色板数）和 --no-compress（不压 BC7）。
+//!   --no-compress    （仅 --frames）不离线压 BC7，只出未压缩 RGBA8 图集
 //!
 //! run 选项：
 //!   --port <N>       控制面端口（默认 6173，0=自动分配）

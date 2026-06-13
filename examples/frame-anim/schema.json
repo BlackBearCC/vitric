@@ -1,0 +1,26 @@
+{
+  "components": {
+    "Position": {
+      "fields": {
+        "x": { "type": "number" },
+        "y": { "type": "number" }
+      }
+    },
+    "Sprite": {
+      "fields": {
+        "w": { "type": "number" },
+        "h": { "type": "number" },
+        "image": { "type": "text", "default": "" },
+        "color": { "type": "text", "default": "#ffffff" }
+      }
+    },
+    "Anim": {
+      "fields": {
+        "clip": { "type": "text", "default": "" },
+        "prev": { "type": "text", "default": "" },
+        "t": { "type": "int", "default": 0 },
+        "done": { "type": "bool", "default": false }
+      }
+    }
+  }
+}

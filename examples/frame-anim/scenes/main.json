@@ -1,0 +1,12 @@
+{
+  "entities": [
+    {
+      "name": "actor",
+      "components": {
+        "Position": { "x": 0, "y": 0 },
+        "Sprite": { "w": 4, "h": 4, "image": "", "color": "#ffffff" },
+        "Anim": { "clip": "slide", "prev": "", "t": 0, "done": false }
+      }
+    }
+  ]
+}
