@@ -10,6 +10,10 @@ use serde_json::{json, Map, Value};
 use vitric_ecs::World;
 use vitric_rules::{Engine, Trigger};
 
+use crate::config::{
+    DerivedSpec, DistanceMetric, ObservationConfig, PlaytestConfig, TerminalOverride,
+};
+
 /// 一个可注入的动作（输入词汇里的一项）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Action {
@@ -60,6 +64,20 @@ impl Default for TerminalSpec {
 }
 
 impl TerminalSpec {
+    /// 套一份 `playtest.json` 的 terminal 覆盖：写了哪个集合就替换哪个，没写的回退到 self
+    /// （= 默认集合）。覆盖是「替换」不是「叠加」——游戏声明了自己的胜负名就以它为准，
+    /// 不再混进通用默认（否则 game-won 之类会误判）。
+    pub fn apply_override(&self, ovr: &TerminalOverride) -> TerminalSpec {
+        TerminalSpec {
+            win_events: ovr.win_events.clone().unwrap_or_else(|| self.win_events.clone()),
+            lose_events: ovr.lose_events.clone().unwrap_or_else(|| self.lose_events.clone()),
+            ending_prefixes: ovr
+                .ending_prefixes
+                .clone()
+                .unwrap_or_else(|| self.ending_prefixes.clone()),
+        }
+    }
+
     /// 一个事件名命中终止？命中返回对应结局，没命中返回 None。
     /// win/ending 都归 Win（达成结局=通到一个尽头），lose 归 Lose。
     pub fn classify(&self, event_name: &str) -> Option<Outcome> {
@@ -97,9 +115,12 @@ pub struct SceneView {
 }
 
 impl SceneView {
-    /// 从世界 + 规则引擎 + 终止规格派生一份视图。`done` 始终为 None——
-    /// 终止是「事件命中」才知道的，由 session 在 step 后扫事件判，不由静态世界态判。
-    /// （静态世界投影不含「刚发生了 game-won」这种瞬时信息。）
+    /// 从世界 + 规则引擎 + 终止规格派生一份视图（**自动推**，无 config 覆盖）。
+    /// `done` 始终为 None——终止是「事件命中」才知道的，由 session 在 step 后扫事件判，
+    /// 不由静态世界态判。（静态世界投影不含「刚发生了 game-won」这种瞬时信息。）
+    ///
+    /// 等价于 `derive_with_config(.., &PlaytestConfig::default())`——默认 config 逐字节
+    /// 还原本函数的输出（向后兼容由测试 `default_config_derive_byte_identical_to_plain_derive` 锁）。
     pub fn derive(world: &World, engine: &Engine, _terminal: &TerminalSpec) -> SceneView {
         SceneView {
             observation: project_observation(world),
@@ -107,6 +128,159 @@ impl SceneView {
             done: None,
         }
     }
+
+    /// 带 `playtest.json` 覆盖的派生（设计稿一节「自动推 + 可选覆盖」、十一节第 6 条）。
+    /// 仍是**纯投影**：只读世界/规则，不改 world、不进哈希、不影响确定性。
+    ///
+    /// observation 按 config 调整：先按 include/exclude 选组件、按 relabel 改人话名，
+    /// 再把声明的派生量算进一个 `"derived"` 子对象（默认 config 不注入 derived 键——
+    /// 保证向后兼容逐字节一致）。actions/terminal 的覆盖由调用方（session）用 config 配的
+    /// TerminalSpec 处理，这里只管观测。
+    pub fn derive_with_config(
+        world: &World,
+        engine: &Engine,
+        _terminal: &TerminalSpec,
+        config: &PlaytestConfig,
+    ) -> SceneView {
+        let mut observation = project_observation_with_config(world, &config.observation);
+        // 派生量非空才注入 derived 键（空时不写——默认 config 的输出必须和老 derive 逐字节一致）
+        if !config.observation.derived.is_empty() {
+            let derived = compute_derived(world, &config.observation.derived);
+            if let Some(obj) = observation.as_object_mut() {
+                obj.insert("derived".to_string(), Value::Object(derived));
+            }
+        }
+        SceneView { observation, actions: derive_actions(engine), done: None }
+    }
+}
+
+/// 带 config 的观测投影：在自动剔装饰的基础上叠加 include/exclude/relabel。
+/// config.observation 全空时与 [`project_observation`] 逐字节一致（向后兼容）。
+fn project_observation_with_config(world: &World, cfg: &ObservationConfig) -> Value {
+    let use_include = !cfg.include.is_empty();
+    let mut entities = Vec::new();
+    for id in world.entities() {
+        let ent_label = world.name_of(id).map(|s| s.to_string());
+        let mut comps = Map::new();
+        for cname in world.components_of(id) {
+            // 组件取舍：白名单优先（启用时只留白名单内）；否则剔默认装饰 + 用户 exclude
+            let keep = if use_include {
+                cfg.include.iter().any(|c| c == &cname)
+            } else {
+                !is_decorative(&cname) && !cfg.exclude.iter().any(|c| c == &cname)
+            };
+            if !keep {
+                continue;
+            }
+            if let Ok(v) = world.get_component(id, &cname) {
+                let mut cval = v.clone();
+                // relabel：把命中 `<实体>/<组件>.<字段>` 的叶子键换成人话名（不改值/层级）
+                if let Some(label) = &ent_label {
+                    apply_relabel(&mut cval, &cname, label, cfg);
+                }
+                comps.insert(cname, cval);
+            }
+        }
+        let mut e = Map::new();
+        e.insert("id".to_string(), json!(id.to_string()));
+        if let Some(name) = &ent_label {
+            e.insert("name".to_string(), json!(name));
+        }
+        e.insert("components".to_string(), Value::Object(comps));
+        entities.push(Value::Object(e));
+    }
+    json!({ "entities": entities })
+}
+
+/// 对一个组件值套 relabel：遍历 cfg.relabel，凡 path 形如 `<实体>/<本组件>.<字段路径>` 的，
+/// 把那个叶子的最末键换成人话名。只支持顶层字段重命名（`组件.字段`）——够覆盖派生量配套用法。
+fn apply_relabel(cval: &mut Value, cname: &str, ent_label: &str, cfg: &ObservationConfig) {
+    let prefix = format!("{ent_label}/{cname}.");
+    if let Some(obj) = cval.as_object_mut() {
+        for r in &cfg.relabel {
+            if let Some(field) = r.path.strip_prefix(&prefix) {
+                // 只处理顶层字段（field 不含再下一层 '.'）；嵌套字段保持原样（够用即可）
+                if !field.contains('.') {
+                    if let Some(v) = obj.remove(field) {
+                        obj.insert(r.name.clone(), v);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 算所有派生量，归到一个 `derived` 子对象（键=派生量名，确定序由声明序保证）。
+fn compute_derived(world: &World, specs: &[DerivedSpec]) -> Map<String, Value> {
+    let mut out = Map::new();
+    for spec in specs {
+        let v = match spec {
+            DerivedSpec::Distance { from, to, metric, .. } => {
+                derived_distance(world, from, to, *metric)
+            }
+            DerivedSpec::Alias { path, .. } => derived_alias(world, path),
+            DerivedSpec::Count { component, .. } => derived_count(world, component),
+        };
+        out.insert(spec.name().to_string(), v);
+    }
+    out
+}
+
+/// 两个命名实体的 Position 距离。任一实体不存在/无 Position/坐标非数 → Null。
+fn derived_distance(world: &World, from: &str, to: &str, metric: DistanceMetric) -> Value {
+    let Some((ax, ay)) = entity_position(world, from) else { return Value::Null };
+    let Some((bx, by)) = entity_position(world, to) else { return Value::Null };
+    let d = match metric {
+        DistanceMetric::Manhattan => (ax - bx).abs() + (ay - by).abs(),
+        DistanceMetric::Euclidean => ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt(),
+    };
+    json!(d)
+}
+
+/// 读一个命名实体的 Position.{x,y}（都得是数才算）。
+fn entity_position(world: &World, name: &str) -> Option<(f64, f64)> {
+    let (_, id) = world.entity_names().find(|(n, _)| *n == name)?;
+    let pos = world.get_component(id, "Position").ok()?;
+    let x = pos.get("x").and_then(|v| v.as_f64())?;
+    let y = pos.get("y").and_then(|v| v.as_f64())?;
+    Some((x, y))
+}
+
+/// 字段别名：把 observation 路径 `<实体>/<组件>.<字段路径>` 指向的值原样镜像出来。
+/// 取不到（实体/组件/字段不存在）→ Null。
+fn derived_alias(world: &World, path: &str) -> Value {
+    let Some((ent, rest)) = path.split_once('/') else { return Value::Null };
+    let Some((comp, field_path)) = rest.split_once('.') else { return Value::Null };
+    let Some((_, id)) = world.entity_names().find(|(n, _)| *n == ent) else {
+        return Value::Null;
+    };
+    let Ok(cval) = world.get_component(id, comp) else { return Value::Null };
+    // 沿字段路径逐层钻（支持 a.b.c 嵌套；数组下标也走对象/数组通用 step）
+    let mut cur = cval;
+    for seg in field_path.split('.') {
+        cur = match cur {
+            Value::Object(m) => match m.get(seg) {
+                Some(v) => v,
+                None => return Value::Null,
+            },
+            Value::Array(a) => match seg.parse::<usize>().ok().and_then(|i| a.get(i)) {
+                Some(v) => v,
+                None => return Value::Null,
+            },
+            _ => return Value::Null,
+        };
+    }
+    cur.clone()
+}
+
+/// 带某组件的存活实体数。
+fn derived_count(world: &World, component: &str) -> Value {
+    let n = world
+        .entities()
+        .into_iter()
+        .filter(|&id| world.components_of(id).iter().any(|c| c == component))
+        .count();
+    json!(n)
 }
 
 /// 观测投影：遍历存活实体（槽位序=确定性），每个实体投影成
@@ -240,6 +414,253 @@ mod tests {
         assert!(comps.contains_key("Velocity"), "玩法组件保留: {comps:?}");
         assert!(!comps.contains_key("Sprite"), "装饰组件剔除: {comps:?}");
         assert_eq!(ents[0].get("name").unwrap(), &json!("hero"));
+    }
+
+    // ---- 第 6 阶段：config 覆盖（include/exclude/relabel/derived/terminal） ----
+
+    use crate::config::{
+        DerivedSpec, DistanceMetric, ObservationConfig, PlaytestConfig, Relabel, TerminalOverride,
+    };
+
+    /// 造一个带 Position 的世界（hero 在原点，flag 在 (3,4)）+ 一些装饰组件。
+    fn pos_world() -> World {
+        let mut w = World::new();
+        let hero = w.spawn_named("hero").unwrap();
+        w.set_component(hero, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(hero, "Velocity", json!({"x": 1.0, "y": 0.0})).unwrap();
+        w.set_component(hero, "Sprite", json!({"w": 1.0})).unwrap();
+        let flag = w.spawn_named("flag").unwrap();
+        w.set_component(flag, "Position", json!({"x": 3.0, "y": 4.0})).unwrap();
+        w.set_component(flag, "Goal", json!({})).unwrap();
+        w
+    }
+
+    #[test]
+    fn default_config_derive_byte_identical_to_plain_derive() {
+        // 向后兼容铁律：默认 config 的 derive_with_config 必须和老 derive 逐字节一致
+        let eng = jump_like_engine();
+        let w = pos_world();
+        let a = SceneView::derive(&w, &eng, &TerminalSpec::default());
+        let b = SceneView::derive_with_config(
+            &w,
+            &eng,
+            &TerminalSpec::default(),
+            &PlaytestConfig::default(),
+        );
+        let ja = serde_json::to_string(&a).unwrap();
+        let jb = serde_json::to_string(&b).unwrap();
+        assert_eq!(ja, jb, "默认 config 必须和老行为逐字节一致");
+    }
+
+    #[test]
+    fn config_include_whitelist_keeps_only_listed() {
+        let eng = jump_like_engine();
+        let w = pos_world();
+        let cfg = PlaytestConfig {
+            observation: ObservationConfig {
+                include: vec!["Position".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let view = SceneView::derive_with_config(&w, &eng, &TerminalSpec::default(), &cfg);
+        let ents = view.observation.get("entities").unwrap().as_array().unwrap();
+        let hero = ents.iter().find(|e| e.get("name") == Some(&json!("hero"))).unwrap();
+        let comps = hero.get("components").unwrap().as_object().unwrap();
+        assert!(comps.contains_key("Position"), "白名单内保留: {comps:?}");
+        assert!(!comps.contains_key("Velocity"), "白名单外剔除: {comps:?}");
+    }
+
+    #[test]
+    fn config_exclude_drops_extra_components() {
+        let eng = jump_like_engine();
+        let w = pos_world();
+        let cfg = PlaytestConfig {
+            observation: ObservationConfig {
+                exclude: vec!["Velocity".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let view = SceneView::derive_with_config(&w, &eng, &TerminalSpec::default(), &cfg);
+        let ents = view.observation.get("entities").unwrap().as_array().unwrap();
+        let hero = ents.iter().find(|e| e.get("name") == Some(&json!("hero"))).unwrap();
+        let comps = hero.get("components").unwrap().as_object().unwrap();
+        assert!(comps.contains_key("Position"), "未排除的留: {comps:?}");
+        assert!(!comps.contains_key("Velocity"), "exclude 的额外剔除: {comps:?}");
+    }
+
+    #[test]
+    fn config_relabel_renames_leaf_key() {
+        let eng = jump_like_engine();
+        let w = pos_world();
+        let cfg = PlaytestConfig {
+            observation: ObservationConfig {
+                relabel: vec![Relabel {
+                    path: "hero/Position.x".to_string(),
+                    name: "横坐标".to_string(),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let view = SceneView::derive_with_config(&w, &eng, &TerminalSpec::default(), &cfg);
+        let ents = view.observation.get("entities").unwrap().as_array().unwrap();
+        let hero = ents.iter().find(|e| e.get("name") == Some(&json!("hero"))).unwrap();
+        let pos = hero.get("components").unwrap().get("Position").unwrap().as_object().unwrap();
+        assert!(pos.contains_key("横坐标"), "x 被改人话名: {pos:?}");
+        assert!(!pos.contains_key("x"), "原键被改掉: {pos:?}");
+        assert!(pos.contains_key("y"), "没动的字段保留");
+    }
+
+    #[test]
+    fn config_derived_distance_manhattan() {
+        let eng = jump_like_engine();
+        let w = pos_world(); // hero(0,0) flag(3,4)
+        let cfg = PlaytestConfig {
+            observation: ObservationConfig {
+                derived: vec![DerivedSpec::Distance {
+                    name: "to_exit".to_string(),
+                    from: "hero".to_string(),
+                    to: "flag".to_string(),
+                    metric: DistanceMetric::Manhattan,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let view = SceneView::derive_with_config(&w, &eng, &TerminalSpec::default(), &cfg);
+        let derived = view.observation.get("derived").unwrap();
+        assert_eq!(derived.get("to_exit").unwrap().as_f64().unwrap(), 7.0, "|3|+|4|=7");
+    }
+
+    #[test]
+    fn config_derived_distance_euclidean() {
+        let eng = jump_like_engine();
+        let w = pos_world(); // hero(0,0) flag(3,4)
+        let cfg = PlaytestConfig {
+            observation: ObservationConfig {
+                derived: vec![DerivedSpec::Distance {
+                    name: "d".to_string(),
+                    from: "hero".to_string(),
+                    to: "flag".to_string(),
+                    metric: DistanceMetric::Euclidean,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let view = SceneView::derive_with_config(&w, &eng, &TerminalSpec::default(), &cfg);
+        let d = view.observation.get("derived").unwrap().get("d").unwrap().as_f64().unwrap();
+        assert!((d - 5.0).abs() < 1e-9, "sqrt(9+16)=5，实际 {d}");
+    }
+
+    #[test]
+    fn config_derived_distance_null_when_entity_missing() {
+        let eng = jump_like_engine();
+        let w = pos_world();
+        let cfg = PlaytestConfig {
+            observation: ObservationConfig {
+                derived: vec![DerivedSpec::Distance {
+                    name: "d".to_string(),
+                    from: "hero".to_string(),
+                    to: "nonexistent".to_string(),
+                    metric: DistanceMetric::Manhattan,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let view = SceneView::derive_with_config(&w, &eng, &TerminalSpec::default(), &cfg);
+        let d = view.observation.get("derived").unwrap().get("d").unwrap();
+        assert!(d.is_null(), "缺实体 → null: {d:?}");
+    }
+
+    #[test]
+    fn config_derived_alias_mirrors_value() {
+        let eng = jump_like_engine();
+        let w = pos_world();
+        let cfg = PlaytestConfig {
+            observation: ObservationConfig {
+                derived: vec![DerivedSpec::Alias {
+                    name: "vx".to_string(),
+                    path: "hero/Velocity.x".to_string(),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let view = SceneView::derive_with_config(&w, &eng, &TerminalSpec::default(), &cfg);
+        let vx = view.observation.get("derived").unwrap().get("vx").unwrap().as_f64().unwrap();
+        assert_eq!(vx, 1.0, "alias 镜像 hero/Velocity.x=1.0");
+    }
+
+    #[test]
+    fn config_derived_count_entities_with_component() {
+        let eng = jump_like_engine();
+        let w = pos_world(); // hero+flag 都有 Position
+        let cfg = PlaytestConfig {
+            observation: ObservationConfig {
+                derived: vec![
+                    DerivedSpec::Count {
+                        name: "positioned".to_string(),
+                        component: "Position".to_string(),
+                    },
+                    DerivedSpec::Count {
+                        name: "goals".to_string(),
+                        component: "Goal".to_string(),
+                    },
+                ],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let view = SceneView::derive_with_config(&w, &eng, &TerminalSpec::default(), &cfg);
+        let derived = view.observation.get("derived").unwrap();
+        assert_eq!(derived.get("positioned").unwrap().as_u64().unwrap(), 2);
+        assert_eq!(derived.get("goals").unwrap().as_u64().unwrap(), 1);
+    }
+
+    #[test]
+    fn config_alias_reads_relabeled_or_original_path() {
+        // alias 的 path 用原始（未 relabel）路径——派生量在投影后追加，引用原始字段名
+        let eng = jump_like_engine();
+        let w = pos_world();
+        let cfg = PlaytestConfig {
+            observation: ObservationConfig {
+                relabel: vec![Relabel {
+                    path: "hero/Velocity.x".to_string(),
+                    name: "速度".to_string(),
+                }],
+                derived: vec![DerivedSpec::Alias {
+                    name: "vx".to_string(),
+                    path: "hero/Velocity.x".to_string(),
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let view = SceneView::derive_with_config(&w, &eng, &TerminalSpec::default(), &cfg);
+        // relabel 改了观测里的键，但 alias 仍按原始 path 取到值（派生在原始世界上算）
+        let vx = view.observation.get("derived").unwrap().get("vx").unwrap().as_f64().unwrap();
+        assert_eq!(vx, 1.0);
+    }
+
+    #[test]
+    fn terminal_override_applies_custom_events() {
+        // TerminalSpec::apply_override 把自定义 win/lose 名套进去
+        let ovr = TerminalOverride {
+            win_events: Some(vec!["reached-exit".to_string()]),
+            lose_events: Some(vec!["fell".to_string()]),
+            ending_prefixes: None,
+        };
+        let spec = TerminalSpec::default().apply_override(&ovr);
+        assert_eq!(spec.classify("reached-exit"), Some(Outcome::Win));
+        assert_eq!(spec.classify("fell"), Some(Outcome::Lose));
+        // 没覆盖的 ending 前缀回退默认
+        assert_eq!(spec.classify("ending-x"), Some(Outcome::Win));
+        // 老的默认 win 名被覆盖掉了（不再认 game-won）
+        assert_eq!(spec.classify("game-won"), None);
     }
 
     #[test]

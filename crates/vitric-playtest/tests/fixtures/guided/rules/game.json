@@ -1,0 +1,31 @@
+{
+  "rules": [
+    {
+      "id": "go-right",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "pressed" } },
+      "do": [{ "set": "@hero.Velocity.x", "to": 16 }]
+    },
+    {
+      "id": "stop-right",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "released" } },
+      "do": [{ "set": "@hero.Velocity.x", "to": 0 }]
+    },
+    {
+      "id": "go-left",
+      "on": { "event": "input", "filter": { "action": "left", "phase": "pressed" } },
+      "do": [{ "set": "@hero.Velocity.x", "to": -16 }]
+    },
+    {
+      "id": "stop-left",
+      "on": { "event": "input", "filter": { "action": "left", "phase": "released" } },
+      "do": [{ "set": "@hero.Velocity.x", "to": 0 }]
+    },
+    {
+      "id": "reach-exit",
+      "on": "tick",
+      "each": ["Player"],
+      "if": [["self.Position.x", ">=", 8]],
+      "do": [{ "emit": "game-won", "data": {} }]
+    }
+  ]
+}

@@ -67,7 +67,7 @@ fn runaway_economy_is_flagged() {
     assert!(gold.hits > 0, "命中局数应 > 0");
     // 每条结论挂可重放录像（结论挂证据）
     let (mut sim, mut rt) = Runtime::boot(&fixture("runaway")).unwrap();
-    sim.replay(&gold.sample_recording, &mut rt).expect("跑飞代表录像必须可重放");
+    sim.replay(&gold.representative.recording, &mut rt).expect("跑飞代表录像必须可重放");
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn collapse_economy_is_flagged() {
     assert!(!rep.stuck_clusters.is_empty(), "归零后冻结应同时被软锁维度逮到");
     // 可重放
     let (mut sim, mut rt) = Runtime::boot(&fixture("collapse")).unwrap();
-    sim.replay(&fuel.sample_recording, &mut rt).expect("崩盘代表录像必须可重放");
+    sim.replay(&fuel.representative.recording, &mut rt).expect("崩盘代表录像必须可重放");
 }
 
 /// 健康项目不冤判：winnable 没有数值崩字段（runaway/collapse/non_finite 全空）。

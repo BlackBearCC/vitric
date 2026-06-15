@@ -67,11 +67,15 @@ impl StrategyKind {
     }
 
     /// 按种类 + seed 造一个策略实例（PCG 播种，确定可复现）。
-    /// Scripted 不走这条路（脚本不在 seed 里）——调用即 bug，明确 panic 不静默退化。
-    fn build(self, seed: u64) -> Box<dyn Strategy> {
+    /// `goal`：greedy 的派生目标（playtest.json 声明）——有目标时 greedy 朝它走，无则退化随机。
+    /// 其他策略不看 goal。Scripted/Llm 不走这条路（脚本/client 不在 seed 里）——明确 panic 不静默退化。
+    fn build(self, seed: u64, goal: &Option<crate::config::GoalSpec>) -> Box<dyn Strategy> {
         match self {
             StrategyKind::Random => Box::new(RandomStrategy::new(seed)),
-            StrategyKind::Greedy => Box::new(GreedyStrategy::new(seed)),
+            StrategyKind::Greedy => match goal {
+                Some(g) => Box::new(GreedyStrategy::with_goal(seed, g.clone())),
+                None => Box::new(GreedyStrategy::new(seed)),
+            },
             StrategyKind::Coverage => Box::new(CoverageStrategy::new(seed)),
             StrategyKind::Economy => Box::new(EconomyStrategy::new(seed)),
             StrategyKind::Scripted => {
@@ -117,18 +121,25 @@ impl LabeledResult {
 
 /// 跑一条 spec（在调用线程内 boot 一份运行时，跑一局，出标签结果）。
 /// swarm 的串行/并行两条路都收敛到这一个函数——保证「怎么跑都跑出同一份结果」。
-fn run_one<R, F>(factory: &F, spec: &SessionSpec) -> Result<LabeledResult, String>
+/// `config`：每游戏视图覆盖（include/exclude/relabel/派生量/goal/terminal）。greedy 用它的 goal
+/// 找目标；session 用它走 derive_with_config。默认空配置=自动推，行为同阶段 1~5。
+fn run_one<R, F>(
+    factory: &F,
+    spec: &SessionSpec,
+    config: &crate::config::PlaytestConfig,
+) -> Result<LabeledResult, String>
 where
     R: GameLogic,
     F: Fn() -> Result<(Sim, R, Engine), String>,
 {
     // 每局自己 boot：运行时不跨局复用（录可重放录像必须冷启动），更不跨线程
     let (mut sim, mut logic, engine) = factory()?;
-    let mut strategy = spec.strategy_kind.build(spec.seed);
+    let mut strategy = spec.strategy_kind.build(spec.seed, &config.goal);
     let cfg = SessionConfig {
         max_ticks: spec.max_ticks,
         seed: spec.seed,
         terminal: spec.terminal.clone(),
+        playtest: config.clone(),
     };
     let result = run_session(&mut sim, &mut logic, &engine, strategy.as_mut(), &cfg)?;
     Ok(LabeledResult { spec: spec.clone(), result })
@@ -148,8 +159,25 @@ where
     R: GameLogic,
     F: Fn() -> Result<(Sim, R, Engine), String> + Sync,
 {
-    // 按下标跑：每条 spec 在调用线程内 boot 一份运行时 + build 策略，跑一局
-    run_indexed(plan.len(), threads, |i| run_one::<R, F>(&factory, &plan[i]))
+    // 默认空配置（自动推视图、greedy 无目标退化随机）——和阶段 1~5 行为一致。
+    run_swarm_with_config(factory, plan, &crate::config::PlaytestConfig::default(), threads)
+}
+
+/// 带每游戏视图覆盖的 swarm（设计稿一节「自动推 + 可选覆盖」、十一节第 6 条）。
+/// `config` 对整批生效：策略看到 include/exclude/relabel/派生量调整后的视图，greedy 朝
+/// config.goal 走。其余确定性/并行/归位保证同 [`run_swarm`]。
+pub fn run_swarm_with_config<R, F>(
+    factory: F,
+    plan: &[SessionSpec],
+    config: &crate::config::PlaytestConfig,
+    threads: usize,
+) -> Result<Vec<LabeledResult>, String>
+where
+    R: GameLogic,
+    F: Fn() -> Result<(Sim, R, Engine), String> + Sync,
+{
+    // 按下标跑：每条 spec 在调用线程内 boot 一份运行时 + build 策略（带 config.goal），跑一局
+    run_indexed(plan.len(), threads, |i| run_one::<R, F>(&factory, &plan[i], config))
 }
 
 /// 种子探索批跑（设计稿三节）：把一组**扰动脚本**铺到并行线程，每条用
@@ -183,7 +211,7 @@ where
             None
         };
         let mut strategy = ScriptedStrategy::new(pert.script.clone(), then_explore);
-        let cfg = SessionConfig { max_ticks, seed: i as u64, terminal: terminal.clone() };
+        let cfg = SessionConfig { max_ticks, seed: i as u64, terminal: terminal.clone(), ..Default::default() };
         let result = run_session(&mut sim, &mut logic, &engine, &mut strategy, &cfg)?;
         // spec 标 Scripted + seed=下标，便于把结果对回具体哪条扰动
         let spec = SessionSpec {
@@ -225,7 +253,7 @@ where
         let seed = base_seed.wrapping_add(i as u64);
         // 每局一个新 LlmStrategy，共享同一个 client（Arc 包成 Box<dyn LlmClient> 喂构造）
         let mut strategy = LlmStrategy::new(Box::new(SharedClient(client.clone())), goal, seed);
-        let cfg = SessionConfig { max_ticks, seed, terminal: terminal.clone() };
+        let cfg = SessionConfig { max_ticks, seed, terminal: terminal.clone(), ..Default::default() };
         let result = run_session(&mut sim, &mut logic, &engine, &mut strategy, &cfg)?;
         let spec = SessionSpec {
             strategy_kind: StrategyKind::Llm,

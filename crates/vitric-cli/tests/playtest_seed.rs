@@ -52,7 +52,7 @@ fn baseline_seed_reaches_ending_bad() {
     let (mut sim, mut rt) = Runtime::boot(&dir).unwrap();
     let engine = rt.rules.clone();
     let mut strat = ScriptedStrategy::from_inputs(&seed_to_bad().inputs, None);
-    let cfg = SessionConfig { max_ticks: 50, seed: 0, terminal: TerminalSpec::default() };
+    let cfg = SessionConfig { max_ticks: 50, seed: 0, terminal: TerminalSpec::default(), ..Default::default() };
     let res = run_session(&mut sim, &mut rt, &engine, &mut strat, &cfg).unwrap();
     assert_eq!(res.outcome, Outcome::Win, "ending-bad 是一个结局（归 Win），基线应到达");
     assert!(
@@ -115,7 +115,7 @@ fn seed_exploration_flags_unreachable_good_ending_and_softlock() {
     assert!(total_hits > 0, "软锁命中局数应 > 0");
     // 每簇挂得到可重放录像（结论挂证据）
     for c in &report.stuck_clusters {
-        assert!(c.sample_recording.ticks > 0, "卡死簇应带一条可重放代表录像");
+        assert!(c.representative.ticks > 0, "卡死簇应带一条可重放代表录像");
     }
 }
 

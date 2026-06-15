@@ -83,7 +83,7 @@ fn softlock_is_clustered() {
     assert!(total_hits > 0, "命中局数应 > 0");
     // 每簇都挂得到一条可重放录像（结论挂证据）
     for c in &rep.stuck_clusters {
-        assert_eq!(c.sample_recording.ticks, 200, "代表录像应跑满 max_ticks（卡死=超时）");
+        assert_eq!(c.representative.ticks, 200, "代表录像应跑满 max_ticks（卡死=超时）");
     }
 }
 

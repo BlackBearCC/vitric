@@ -64,26 +64,106 @@ impl Strategy for RandomStrategy {
     }
 }
 
-/// 贪心策略：朝目标的派生量贪心（设计稿二节）。
+/// 贪心策略：朝目标的派生量贪心（设计稿二节、十一节第 6 条）。
 ///
-/// 第 1 阶段还没有「通用目标量」（距出口距离/敌人血量这些要 playtest.json 声明派生量，
-/// 是阶段 4 的活）。所以现在退化成「带 PCG 的随机」——结构留好，等阶段 4 接入派生目标量
-/// 后，这里改成读 view 里的目标量做贪心即可，接口不变。刻意不在此过度设计启发式：
-/// 没有目标量时任何「启发」都是瞎猜，不如老实退化成可复现的随机。
+/// **有目标时**（playtest.json 声明了 `goal:{quantity, direction}`）：每 tick 读
+/// `view.observation.derived[quantity]`，和上一 tick 比，判这一步「往目标方向走了没」。
+///
+/// **近似说明（第 6 阶段）**：本阶段没有「一步前瞻」基建（要 clone world + 试注入每个动作
+/// 再 step 看哪个让目标更优——那要把 sim 借进策略，破坏「策略只看 Scene View」的纯逻辑边界）。
+/// 所以退而求其次用**轻量启发**：维护「上一个动作 + 上一 tick 的目标值」，
+/// - 若上个动作让目标**朝期望方向改善**了 → 这一 tick **重复**那个动作（锁住有效方向）；
+/// - 若没改善（持平/变差）→ **换一个动作**（PCG 随机挑，跳出无效方向）。
+///
+/// 这不是最优贪心（没真前瞻），但足以让 greedy「朝目标走」而非纯随机乱晃——持续有效时它会
+/// 锁住推进目标的那个动作连按。确定性：动作选择全由独立 Pcg32 播种，同 seed + 同目标轨迹
+/// 必出同一序列。
+///
+/// **无目标时**退化为「带 PCG 的随机」（和阶段 1~5 逐字节一致，向后兼容由测试锁）——
+/// 没有目标量时任何「启发」都是瞎猜，老实退化成可复现随机。
 pub struct GreedyStrategy {
-    inner: RandomStrategy,
+    /// 动作选择用的 PCG（无目标时直接当 RandomStrategy 用；有目标时用于「换动作」）。
+    rng: Pcg32,
+    /// 优化目标（None=无目标，退化随机）。
+    goal: Option<crate::config::GoalSpec>,
+    /// 上一 tick 选的动作（重复有效动作用）。None=还没选过。
+    last_action: Option<Action>,
+    /// 上一 tick 观测到的目标量值（比较改善方向用）。None=还没观测过。
+    last_value: Option<f64>,
 }
 
 impl GreedyStrategy {
+    /// 无目标 greedy（退化为可复现随机，行为同 RandomStrategy）。
     pub fn new(seed: u64) -> GreedyStrategy {
-        GreedyStrategy { inner: RandomStrategy::new(seed) }
+        GreedyStrategy { rng: Pcg32::new(seed), goal: None, last_action: None, last_value: None }
+    }
+
+    /// 带派生目标的 greedy（朝 goal.quantity 的 goal.direction 方向走）。
+    pub fn with_goal(seed: u64, goal: crate::config::GoalSpec) -> GreedyStrategy {
+        GreedyStrategy {
+            rng: Pcg32::new(seed),
+            goal: Some(goal),
+            last_action: None,
+            last_value: None,
+        }
+    }
+
+    /// 从 view 读目标派生量的当前值（取不到/非数 → None）。
+    fn read_goal_value(&self, view: &SceneView) -> Option<f64> {
+        let goal = self.goal.as_ref()?;
+        view.observation
+            .get("derived")
+            .and_then(|d| d.get(&goal.quantity))
+            .and_then(|v| v.as_f64())
+    }
+
+    /// 随机挑一个合法动作（含「不操作」槽）——和 RandomStrategy::choose 同口径，
+    /// 保证无目标 greedy 和 RandomStrategy 同 seed 逐项一致。
+    fn random_pick(&mut self, view: &SceneView) -> Option<Action> {
+        let n = view.actions.len() as i64;
+        let pick = self.rng.range_i64(0, n);
+        if pick == n {
+            None
+        } else {
+            Some(view.actions[pick as usize].clone())
+        }
     }
 }
 
 impl Strategy for GreedyStrategy {
     fn choose(&mut self, view: &SceneView) -> Option<Action> {
-        // TODO(阶段4)：view 带派生目标量后，这里改成朝目标贪心；现在退化为随机。
-        self.inner.choose(view)
+        if view.actions.is_empty() {
+            return None;
+        }
+        // 无目标：纯随机（向后兼容，行为同 RandomStrategy）
+        if self.goal.is_none() {
+            return self.random_pick(view);
+        }
+
+        let cur = self.read_goal_value(view);
+        // 判上一步有没有让目标朝期望方向改善
+        let improved = match (self.last_value, cur, &self.goal) {
+            (Some(prev), Some(now), Some(g)) => match g.direction {
+                crate::config::GoalDirection::Min => now < prev,
+                crate::config::GoalDirection::Max => now > prev,
+            },
+            _ => false, // 没有可比的前值/当前值 → 当作「没改善」，去探索
+        };
+
+        let action = if improved {
+            // 上个动作有效：重复它（锁住推进方向）。last_action 理论上有；保险起见无则随机。
+            match &self.last_action {
+                Some(a) => Some(a.clone()),
+                None => self.random_pick(view),
+            }
+        } else {
+            // 没改善：换一个动作探索
+            self.random_pick(view)
+        };
+
+        self.last_action = action.clone();
+        self.last_value = cur;
+        action
     }
 }
 
@@ -334,6 +414,111 @@ mod tests {
         let seq_a: Vec<_> = (0..300).map(|_| a.choose(&view)).collect();
         let seq_b: Vec<_> = (0..300).map(|_| b.choose(&view)).collect();
         assert_eq!(seq_a, seq_b);
+    }
+
+    // ---- 第 6 阶段：greedy 接派生目标 ----
+
+    use crate::config::{GoalDirection, GoalSpec};
+
+    /// 造一个带 derived[quantity]=val 的视图（模拟 SceneView 注入的派生量）。
+    fn view_with_goal(names: &[&str], quantity: &str, val: f64) -> SceneView {
+        let actions = names
+            .iter()
+            .map(|n| Action { action: n.to_string(), phase: "pressed".to_string() })
+            .collect();
+        SceneView {
+            observation: serde_json::json!({ "entities": [], "derived": { quantity: val } }),
+            actions,
+            done: None,
+        }
+    }
+
+    #[test]
+    fn greedy_with_goal_is_deterministic() {
+        let goal = GoalSpec { quantity: "d".to_string(), direction: GoalDirection::Min };
+        let mut a = GreedyStrategy::with_goal(5, goal.clone());
+        let mut b = GreedyStrategy::with_goal(5, goal);
+        let mut sa = Vec::new();
+        let mut sb = Vec::new();
+        let mut d = 100.0;
+        for _ in 0..200 {
+            sa.push(a.choose(&view_with_goal(&["x", "y", "z"], "d", d)));
+            sb.push(b.choose(&view_with_goal(&["x", "y", "z"], "d", d)));
+            d -= 1.0;
+        }
+        assert_eq!(sa, sb, "同 seed + 同目标轨迹必出同一序列");
+    }
+
+    #[test]
+    fn greedy_with_goal_repeats_action_when_improving() {
+        // 目标 min：每 tick 距离都在下降（动作有效）→ greedy 应倾向重复同一个有效动作，
+        // 表现为「同一动作连续出现的最长段」明显比无目标随机长。
+        let goal = GoalSpec { quantity: "d".to_string(), direction: GoalDirection::Min };
+        let mut g = GreedyStrategy::with_goal(7, goal);
+        let mut seq: Vec<String> = Vec::new();
+        let mut d = 100.0;
+        for _ in 0..60 {
+            if let Some(a) = g.choose(&view_with_goal(&["x", "y", "z"], "d", d)) {
+                seq.push(a.action);
+            }
+            d -= 1.0; // 一直在改善
+        }
+        // 最长连续同动作段
+        let mut max_run = 1usize;
+        let mut run = 1usize;
+        for w in seq.windows(2) {
+            if w[0] == w[1] {
+                run += 1;
+                max_run = max_run.max(run);
+            } else {
+                run = 1;
+            }
+        }
+        assert!(max_run >= 10, "持续改善时应锁住有效动作连按，最长连段 {max_run}");
+    }
+
+    #[test]
+    fn greedy_with_goal_differs_from_no_goal() {
+        // 有目标 vs 无目标：在同一份「持续改善」轨迹上，两者的动作序列应不同
+        // （有目标会锁动作，无目标是均匀随机）——证明 goal 真的改变了行为。
+        let goal = GoalSpec { quantity: "d".to_string(), direction: GoalDirection::Min };
+        let mut with = GreedyStrategy::with_goal(3, goal);
+        let mut without = GreedyStrategy::new(3);
+        let mut sw = Vec::new();
+        let mut swo = Vec::new();
+        let mut d = 100.0;
+        for _ in 0..80 {
+            let v = view_with_goal(&["x", "y", "z"], "d", d);
+            sw.push(with.choose(&v).map(|a| a.action));
+            swo.push(without.choose(&v).map(|a| a.action));
+            d -= 1.0;
+        }
+        assert_ne!(sw, swo, "有 goal 的 greedy 行为必须和无 goal（随机）不同");
+    }
+
+    #[test]
+    fn greedy_with_goal_only_picks_legal_actions() {
+        let goal = GoalSpec { quantity: "d".to_string(), direction: GoalDirection::Max };
+        let mut g = GreedyStrategy::with_goal(11, goal);
+        let mut d = 0.0;
+        for _ in 0..300 {
+            let v = view_with_goal(&["a", "b"], "d", d);
+            if let Some(act) = g.choose(&v) {
+                assert!(v.actions.contains(&act), "只选合法动作: {act:?}");
+            }
+            d += 0.5;
+        }
+    }
+
+    #[test]
+    fn greedy_without_goal_still_random() {
+        // 无目标的 greedy 退化为随机：和 RandomStrategy 同 seed 同序列（行为不变铁律）
+        let view = view_with_actions(&["a", "b", "c"]);
+        let mut g = GreedyStrategy::new(42);
+        let mut r = RandomStrategy::new(42);
+        let sg: Vec<_> = (0..200).map(|_| g.choose(&view)).collect();
+        let sr: Vec<_> = (0..200).map(|_| r.choose(&view)).collect();
+        assert_eq!(sg, sr, "无目标 greedy 必须和 random 同 seed 逐项一致");
     }
 
     #[test]

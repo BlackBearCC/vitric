@@ -1,0 +1,19 @@
+{
+  "entities": [
+    {
+      "name": "hero",
+      "components": {
+        "Player": {},
+        "Position": { "x": 0, "y": 0 },
+        "Velocity": { "x": 0, "y": 0 }
+      }
+    },
+    {
+      "name": "exit",
+      "components": {
+        "Goal": {},
+        "Position": { "x": 8, "y": 0 }
+      }
+    }
+  ]
+}

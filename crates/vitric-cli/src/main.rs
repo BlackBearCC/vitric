@@ -156,6 +156,12 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
 ///                                需 VITRIC_LLM_URL/KEY/MODEL 配齐，没配齐报明确错误（不静默跳过）
 ///   --seed-recording <录像.json> 种子式探索：拿这条录像当种子，扰动它的输入序列跑 N 局
 ///   --out <路径>                 N=1 写录像；N>1 / 种子探索 / --llm 写完整报告 JSON
+///   --report-dir <目录>          代表录像落盘目录（默认 <项目>/playtest-report/）；报告主体只挂相对路径
+///
+/// **每游戏视图覆盖**（设计稿一节、十一节第 6 条）：自动加载项目根 `playtest.json`（存在即用，
+/// 否则默认 config=自动推视图、行为不变）——可挑组件/重命名/声明派生量（距离/别名/计数）/给
+/// greedy 指目标（朝某派生量 min/max 走）/覆盖终止事件名。报告里 stuck/runaway 等维度的代表
+/// 录像不再内联进报告主体，改成各存一份 json 落 report-dir，报告只挂相对路径（主体干净可读）。
 ///
 /// 行为分档（优先级从上到下）：
 /// - `--llm N>0`：swarm（sessions 局策略档）+ N 局 LLM 档拟人玩，合并聚合出报告。LLM 局的
@@ -174,9 +180,9 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     use std::sync::Arc;
 
     use vitric_playtest::{
-        aggregate, aggregate_with_endings, perturb_plan, run_llm_sessions, run_seed_swarm,
-        run_session, run_swarm, EconomyStrategy, GreedyStrategy, LlmClient, RandomStrategy,
-        SessionConfig, SessionSpec, Strategy, StrategyKind, TerminalSpec,
+        aggregate_with_endings, perturb_plan, run_llm_sessions, run_seed_swarm, run_session,
+        run_swarm_with_config, EconomyStrategy, GreedyStrategy, LlmClient, PlaytestConfig,
+        RandomStrategy, SessionConfig, SessionSpec, Strategy, StrategyKind, TerminalSpec,
     };
 
     let dir = args.first().ok_or("playtest 缺少项目目录参数")?;
@@ -189,10 +195,15 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     let mut llm_sessions: u64 = 0;
     let mut out_path: Option<PathBuf> = None;
     let mut seed_recording: Option<PathBuf> = None;
+    let mut report_dir: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
         let need = |key: &str| format!("{key} 缺少参数值");
         match args[i].as_str() {
+            "--report-dir" => {
+                report_dir = Some(PathBuf::from(args.get(i + 1).ok_or(need("--report-dir"))?));
+                i += 2;
+            }
             "--strategy" => {
                 strategy_name = args.get(i + 1).ok_or(need("--strategy"))?.clone();
                 i += 2;
@@ -225,10 +236,36 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
                 i += 2;
             }
             other => {
-                return Err(format!("未知选项 {other:?}。可用: --strategy --seed --max-ticks --sessions --llm --seed-recording --out"))
+                return Err(format!("未知选项 {other:?}。可用: --strategy --seed --max-ticks --sessions --llm --seed-recording --out --report-dir"))
             }
         }
     }
+
+    // 自动加载项目根 playtest.json（存在即用，否则默认 config=自动推视图、行为不变）。
+    // 解析失败带路径明确报错（vitric check 风格），不静默跳过。
+    let config = PlaytestConfig::load(&dir)?.unwrap_or_default();
+    // 终止规格：playtest.json 的 terminal 覆盖（没写就是默认集合）。
+    let terminal = match &config.terminal {
+        Some(ovr) => TerminalSpec::default().apply_override(ovr),
+        None => TerminalSpec::default(),
+    };
+    // 代表录像落盘目录：默认 <项目>/playtest-report/。报告主体只挂相对路径，录像各自一份文件。
+    let report_dir = report_dir.unwrap_or_else(|| dir.join("playtest-report"));
+
+    // 报告产出口径统一：外置代表录像到 report-dir（回填相对路径）→ 打干净 JSON 到 stdout →
+    // --out 时另存一份完整报告 JSON。录像不内联进报告主体（设计稿十一节第 6 条）。
+    let emit_report = |mut report: vitric_playtest::Report,
+                       out_path: &Option<PathBuf>|
+     -> Result<(), String> {
+        report.externalize_recordings(&report_dir)?;
+        let json = serde_json::to_string_pretty(&report).expect("报告可序列化");
+        if let Some(out) = out_path {
+            std::fs::write(out, &json)
+                .map_err(|e| format!("写报告 {} 失败: {e}", out.display()))?;
+        }
+        println!("{json}");
+        Ok(())
+    };
 
     // --llm N>0：在 swarm 里额外跑 N 局 LLM 拟人玩（设计稿五阶段）。LLM 局的 note 进报告
     // 的 qualitative_notes，它选的输入进录像（可重放）。装真 client（VITRIC_LLM_* 没配齐
@@ -237,7 +274,6 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         let client: Arc<dyn LlmClient> = Arc::new(
             vitric_cli::playtest_llm::PlaytestLlmClient::from_env()?,
         );
-        let terminal = TerminalSpec::default();
         let factory = || -> Result<(_, _, _), String> {
             let (sim, rt) = Runtime::boot(&dir)?;
             let engine = rt.rules.clone();
@@ -250,16 +286,23 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         let mut plan: Vec<SessionSpec> = Vec::with_capacity(sessions as usize);
         for k in 0..sessions {
             let kind = StrategyKind::ALL[(k as usize) % StrategyKind::ALL.len()];
-            plan.push(SessionSpec::new(kind, seed + k, max_ticks));
+            // spec.terminal 用 config 覆盖后的终止规格
+            plan.push(SessionSpec { strategy_kind: kind, seed: seed + k, max_ticks, terminal: terminal.clone() });
         }
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        let mut results = run_swarm(factory_ref, &plan, threads)?;
-        // LLM 档：N 局拟人玩，结果并进同一个集合喂聚合器
+        // 带 config：greedy 朝 config.goal 走，视图按 include/exclude/relabel/派生量调整
+        let mut results = run_swarm_with_config(factory_ref, &plan, &config, threads)?;
+        // LLM 档：N 局拟人玩，结果并进同一个集合喂聚合器。目标描述拼 config.goal（有则给 LLM 指向）
+        let goal_hint = config
+            .goal
+            .as_ref()
+            .map(|g| format!("{:?} {}", g.direction, g.quantity))
+            .unwrap_or_default();
         let llm_results = run_llm_sessions(
             factory_ref,
             client,
             llm_sessions as usize,
-            "", // 目标用通用默认（playtest.json 覆盖留到第 6 阶段）
+            &goal_hint,
             seed,
             max_ticks,
             terminal.clone(),
@@ -269,12 +312,7 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         // 有声明结局就一并算结局覆盖（叙事项目尤其需要）
         let (_, rt) = Runtime::boot(&dir)?;
         let report = aggregate_with_endings(&results, &rt.rules, &terminal);
-        let json = serde_json::to_string_pretty(&report).expect("报告可序列化");
-        if let Some(out) = &out_path {
-            std::fs::write(out, &json).map_err(|e| format!("写报告 {} 失败: {e}", out.display()))?;
-        }
-        println!("{json}");
-        return Ok(());
+        return emit_report(report, &out_path);
     }
 
     // 给了 --seed-recording：种子式探索（第 3 阶段）。加载种子录像 → perturb_plan 生成
@@ -288,7 +326,6 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         // 变异条数 = --sessions（第 0 条是基线=原种子）。--seed 复用为扰动 PCG 播种，
         // 截断脚本的 random 发散用 seed+1 错开（与扰动 PCG 不同源）。
         let plan = perturb_plan(&seed_rec, sessions as usize, seed);
-        let terminal = TerminalSpec::default();
         let factory = || -> Result<(_, _, _), String> {
             let (sim, rt) = Runtime::boot(&dir)?;
             let engine = rt.rules.clone();
@@ -301,24 +338,18 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         // 结局覆盖要扫规则声明的结局集合，单独 boot 一份只读 Engine 喂聚合器
         let (_, rt) = Runtime::boot(&dir)?;
         let report = aggregate_with_endings(&results, &rt.rules, &terminal);
-
-        let json = serde_json::to_string_pretty(&report).expect("报告可序列化");
-        if let Some(out) = &out_path {
-            std::fs::write(out, &json).map_err(|e| format!("写报告 {} 失败: {e}", out.display()))?;
-        }
-        println!("{json}");
-        return Ok(());
+        return emit_report(report, &out_path);
     }
 
     // N>1：swarm 跑批 + 聚合报告
     if sessions > 1 {
-        // 计划：三策略轮流 × 递增 seed，凑够 N 局。每条 spec 自带 (策略,seed,max_ticks)，
-        // 一局结果只由 spec 决定（确定性铁律）——串行/并行结果一致。
+        // 计划：四策略轮流 × 递增 seed，凑够 N 局。每条 spec 自带 (策略,seed,max_ticks,terminal)，
+        // 一局结果只由 spec + config 决定（确定性铁律）——串行/并行结果一致。
         let mut plan: Vec<SessionSpec> = Vec::with_capacity(sessions as usize);
         for k in 0..sessions {
             let kind = StrategyKind::ALL[(k as usize) % StrategyKind::ALL.len()];
-            // seed 从 --seed 起递增：每条 spec 一个不同 seed，覆盖更广
-            plan.push(SessionSpec::new(kind, seed + k, max_ticks));
+            // seed 从 --seed 起递增：每条 spec 一个不同 seed，覆盖更广；terminal 用 config 覆盖后的
+            plan.push(SessionSpec { strategy_kind: kind, seed: seed + k, max_ticks, terminal: terminal.clone() });
         }
 
         // 工厂闭包：每个工作线程在自己线程内调它 boot 一份全新运行时。
@@ -332,22 +363,22 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
 
         // 线程数默认机器并行度（run_swarm 内部再取 min(plan, cpu)）
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        let results = run_swarm(factory, &plan, threads)?;
-        let report = aggregate(&results);
-
-        let json = serde_json::to_string_pretty(&report).expect("报告可序列化");
-        if let Some(out) = &out_path {
-            std::fs::write(out, &json).map_err(|e| format!("写报告 {} 失败: {e}", out.display()))?;
-        }
-        // 报告 JSON 永远打 stdout（人和机器同一份，与 gate/team 同口径）
-        println!("{json}");
-        return Ok(());
+        // 带 config：greedy 朝 config.goal 走，视图按 include/exclude/relabel/派生量调整。
+        // 有声明结局就算结局覆盖（用 config 覆盖后的 terminal 扫声明集合）。
+        let results = run_swarm_with_config(factory, &plan, &config, threads)?;
+        let (_, rt) = Runtime::boot(&dir)?;
+        let report = aggregate_with_endings(&results, &rt.rules, &terminal);
+        return emit_report(report, &out_path);
     }
 
     // N=1：单局旧行为（出可重放录像）。economy 也能选——单局压一种策略看它怎么跑。
+    // greedy 有 config.goal 时朝目标走（playtest.json 声明派生量 + goal），否则退化随机。
     let mut strategy: Box<dyn Strategy> = match strategy_name.as_str() {
         "random" => Box::new(RandomStrategy::new(seed)),
-        "greedy" => Box::new(GreedyStrategy::new(seed)),
+        "greedy" => match &config.goal {
+            Some(g) => Box::new(GreedyStrategy::with_goal(seed, g.clone())),
+            None => Box::new(GreedyStrategy::new(seed)),
+        },
         "economy" => Box::new(EconomyStrategy::new(seed)),
         other => return Err(format!("--strategy 只认 random / greedy / economy，拿到 {other:?}")),
     };
@@ -355,7 +386,8 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     let out = out_path.unwrap_or_else(|| dir.join("playtest-session.json"));
     // boot 一对全新的 (sim, runtime)：录可重放录像必须从冷启动起录
     let (mut sim, mut rt) = Runtime::boot(&dir)?;
-    let cfg = SessionConfig { max_ticks, seed, ..Default::default() };
+    // 单局也走 config：终止覆盖 + 派生量视图（greedy 找目标）。
+    let cfg = SessionConfig { max_ticks, seed, terminal: terminal.clone(), playtest: config.clone() };
     // run_session 要同时可变借 logic(rt) 和不可变借 engine(rt.rules)——同一对象借不动。
     // Engine 是装配期无状态副本，复制一份只读的传进去最干净（见 Engine 的 derive 注释）。
     let engine = rt.rules.clone();

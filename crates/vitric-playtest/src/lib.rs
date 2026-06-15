@@ -20,6 +20,7 @@
 //! 装配运行时（`Runtime::boot`）住在 vitric-cli，依赖方向是 cli → playtest，所以本 crate
 //! 不 boot 项目，由调用方 boot 好再把 `(Sim, GameLogic, Engine)` 交给 [`session::run_session`]。
 
+pub mod config;
 pub mod llm_agent;
 pub mod report;
 pub mod scene_view;
@@ -28,10 +29,15 @@ pub mod session;
 pub mod strategy;
 pub mod swarm;
 
+pub use config::{
+    DerivedSpec, DistanceMetric, GoalDirection, GoalSpec, ObservationConfig, PlaytestConfig,
+    Relabel, TerminalOverride,
+};
 pub use llm_agent::{LlmClient, LlmStrategy};
 pub use report::{
     aggregate, aggregate_with_endings, CollapseField, DominantAction, EndingCoverage,
-    NonFiniteField, NoteCluster, NumericBreakage, QualitativeNotes, Report, RunawayField,
+    NonFiniteField, NoteCluster, NumericBreakage, QualitativeNotes, RecordingRef, Report,
+    RunawayField,
 };
 pub use scene_view::{Action, Outcome, SceneView, TerminalSpec};
 pub use seed::{perturb_plan, PerturbOp, Perturbation};
@@ -41,5 +47,6 @@ pub use strategy::{
     ScriptedStrategy, Strategy,
 };
 pub use swarm::{
-    run_llm_sessions, run_seed_swarm, run_swarm, LabeledResult, SessionSpec, StrategyKind,
+    run_llm_sessions, run_seed_swarm, run_swarm, run_swarm_with_config, LabeledResult, SessionSpec,
+    StrategyKind,
 };

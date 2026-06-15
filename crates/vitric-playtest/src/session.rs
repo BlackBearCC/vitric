@@ -162,11 +162,20 @@ pub struct SessionConfig {
     pub seed: u64,
     /// 哪些事件算终止。
     pub terminal: TerminalSpec,
+    /// 每游戏视图覆盖（设计稿一节「自动推 + 可选覆盖」）。默认=空配置（自动推，行为不变）。
+    /// session 用它走 `SceneView::derive_with_config`——策略/LLM 看到 include/exclude/relabel/
+    /// 派生量调整后的视图（尤其 greedy 靠派生量找目标）。**仍是纯投影**，不进哈希/录像。
+    pub playtest: crate::config::PlaytestConfig,
 }
 
 impl Default for SessionConfig {
     fn default() -> SessionConfig {
-        SessionConfig { max_ticks: 600, seed: 0, terminal: TerminalSpec::default() }
+        SessionConfig {
+            max_ticks: 600,
+            seed: 0,
+            terminal: TerminalSpec::default(),
+            playtest: crate::config::PlaytestConfig::default(),
+        }
     }
 }
 
@@ -232,8 +241,9 @@ pub fn run_session(
 
     let mut outcome = Outcome::Timeout;
     while sim.tick < cfg.max_ticks {
-        // Scene View 是纯投影：只读世界/规则，绝不改 world、不进哈希
-        let view = SceneView::derive(&sim.world, engine, &cfg.terminal);
+        // Scene View 是纯投影：只读世界/规则，绝不改 world、不进哈希。
+        // 带 config 派生：策略看到 include/exclude/relabel/派生量调整后的视图（greedy 靠派生量找目标）。
+        let view = SceneView::derive_with_config(&sim.world, engine, &cfg.terminal, &cfg.playtest);
         if let Some(done) = view.done {
             // 理论上 done 由 step 后扫事件判（见 SceneView::derive 注释），
             // 这里保留分支以防后续阶段让 derive 也能判静态终止。
@@ -255,9 +265,9 @@ pub fn run_session(
         // 事件名累进去重集。遥测只读、不回写世界，不影响录像/哈希。
         state_trace.push(sim.world.state_hash());
         // 数值遥测：step 后对当前世界投影一份观测，抽数值叶子增量并入摘要。
-        // 用 SceneView::derive 的同款投影（剔装饰、按槽位序），保证 key 路径与策略所见一致；
+        // 用同款带 config 投影（剔装饰、按槽位序、含派生量），保证 key 路径与策略所见一致；
         // 只取 observation（不用 actions），增量更新 O(数值叶子数)，不存逐 tick 历史。
-        let post = SceneView::derive(&sim.world, engine, &cfg.terminal);
+        let post = SceneView::derive_with_config(&sim.world, engine, &cfg.terminal, &cfg.playtest);
         collect_numeric_leaves(&post.observation, &mut numeric_summary);
         note_events(&mut report.events.iter().map(|e| e.name.as_str()));
 

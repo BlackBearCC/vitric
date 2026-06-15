@@ -1,0 +1,18 @@
+{
+  "components": {
+    "Player": { "fields": {} },
+    "Goal": { "fields": {} },
+    "Position": {
+      "fields": {
+        "x": { "type": "number", "default": 0 },
+        "y": { "type": "number", "default": 0 }
+      }
+    },
+    "Velocity": {
+      "fields": {
+        "x": { "type": "number", "default": 0 },
+        "y": { "type": "number", "default": 0 }
+      }
+    }
+  }
+}

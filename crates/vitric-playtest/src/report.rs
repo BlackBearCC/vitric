@@ -18,6 +18,50 @@ use vitric_sim::Recording;
 use crate::scene_view::{Outcome, TerminalSpec};
 use crate::swarm::{LabeledResult, StrategyKind};
 
+/// 一条「代表录像」的轻量引用（设计稿五节「每条结论挂可重放录像」、十一节第 6 条报告打磨）。
+///
+/// **报告主体不再内联整坨录像**：以前每个维度（卡死/跑飞/note…）的 `sample_recording` 把
+/// 一整段录像 JSON 塞进报告，几十个维度叠起来报告就成了「一大坨录像」，人话主体被淹没。
+/// 现在维度只挂这个轻量引用——序列化进报告 JSON 的只有 `path`（落盘后的相对路径）+ `ticks` +
+/// `outcome`，报告主体干净可读。
+///
+/// 真录像字节存在 `recording` 里供调用方写文件 / 离线重放，但 `#[serde(skip)]`——**不进报告
+/// JSON**。聚合时 `path=None`（还没落盘），由 `cmd_playtest`/调用方写进 `--report-dir` 后回填
+/// 相对路径。`key` 是这条代表录像的稳定文件名（维度+字段+策略+seed 拼出来，确定可复现）。
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordingRef {
+    /// 落盘后的相对路径（相对 report-dir）。聚合时为 None，调用方写文件后回填。
+    pub path: Option<String>,
+    /// 录像跑了多少 tick（不读文件也能看个大概）。
+    pub ticks: u64,
+    /// 这局的结局。
+    pub outcome: Outcome,
+    /// 稳定文件名键（确定可复现）——调用方按它落盘成 `<key>.json`。不进报告 JSON。
+    #[serde(skip)]
+    pub key: String,
+    /// 真录像字节（供离线重放/写文件）。**不进报告 JSON**（报告主体只挂路径）。
+    #[serde(skip)]
+    pub recording: Recording,
+}
+
+impl RecordingRef {
+    /// 从一局代表结果造引用：key 由维度标签 + 代表策略/seed 拼成（稳定、确定）。
+    fn from_sample(dimension: &str, rep: &LabeledResult) -> RecordingRef {
+        let key = format!(
+            "{dimension}-{}-{}",
+            rep.spec.strategy_kind.name(),
+            rep.spec.seed
+        );
+        RecordingRef {
+            path: None,
+            ticks: rep.result.recording.ticks,
+            outcome: rep.result.outcome,
+            key,
+            recording: rep.result.recording.clone(),
+        }
+    }
+}
+
 /// 「末尾连续多少 tick 状态哈希完全不变」算冻结候选的阈值（设计稿：K 默认 60）。
 pub const DEFAULT_FREEZE_K: usize = 60;
 
@@ -57,6 +101,13 @@ const BUILTIN_EVENTS: &[&str] = &[
 
 fn is_builtin_event(name: &str) -> bool {
     BUILTIN_EVENTS.contains(&name)
+}
+
+/// 把字段路径/标签里的非文件名字符（`/` `.` 等）换成 `_`，拼稳定文件名用。
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect()
 }
 
 /// 结局分布 + 通关率。
@@ -106,8 +157,8 @@ pub struct StuckCluster {
     /// 该死态对应策略/seed（拿一局当代表，能据此重放）。
     pub sample_strategy: String,
     pub sample_seed: u64,
-    /// 一条可重放录像（该桶里的代表局）——「每条结论挂可重放录像」。
-    pub sample_recording: Recording,
+    /// 代表录像引用（落盘后只挂路径，不内联整坨录像）——「每条结论挂可重放录像」。
+    pub representative: RecordingRef,
 }
 
 /// 节奏：到终止的 tick 分布（Timeout 局单列，不混进「到终止用了多久」）。
@@ -188,7 +239,7 @@ pub struct RunawayField {
     /// 代表局（拿一局的策略/seed/录像，能据此重放看跑飞过程）。
     pub sample_strategy: String,
     pub sample_seed: u64,
-    pub sample_recording: Recording,
+    pub representative: RecordingRef,
 }
 
 /// 一个崩盘字段（按字段名聚类的若干局）。
@@ -199,7 +250,7 @@ pub struct CollapseField {
     pub hits: usize,
     pub sample_strategy: String,
     pub sample_seed: u64,
-    pub sample_recording: Recording,
+    pub representative: RecordingRef,
 }
 
 /// 一个出现过非有限值的字段。
@@ -209,7 +260,7 @@ pub struct NonFiniteField {
     pub hits: usize,
     pub sample_strategy: String,
     pub sample_seed: u64,
-    pub sample_recording: Recording,
+    pub representative: RecordingRef,
 }
 
 /// LLM 定性 note 汇总（设计稿五节「LLM 定性 note」、十一节第 5 阶段）。
@@ -219,7 +270,7 @@ pub struct NonFiniteField {
 /// 结构破绽」（软锁/不可达/数值崩那些确定性结论）分开摆，不混为一谈。
 ///
 /// LLM 局的 note 本就不要求跨次复现（LLM 非确定），所以这块**不**进确定性保证；但每条 note
-/// 都挂得到它那局的可重放录像（`sample_recording`），人能回放到那一刻看 LLM 在说哪一幕。
+/// 都挂得到它那局的可重放录像（`representative`），人能回放到那一刻看 LLM 在说哪一幕。
 #[derive(Debug, Clone, Serialize)]
 pub struct QualitativeNotes {
     /// 收到的 note 总条数（含重复）。
@@ -242,8 +293,8 @@ pub struct NoteCluster {
     /// 代表局的策略/seed（对回是哪局 LLM 说的）。
     pub sample_strategy: String,
     pub sample_seed: u64,
-    /// 代表局的可重放录像——回放到那一幕看 LLM 在说什么（结论挂证据）。
-    pub sample_recording: Recording,
+    /// 代表录像引用——回放到那一幕看 LLM 在说什么（结论挂证据，落盘后只挂路径）。
+    pub representative: RecordingRef,
 }
 
 /// 地板报告（机器 JSON + 人话 summary）。第 2 阶段的几个扎实维度。
@@ -268,6 +319,54 @@ pub struct Report {
     pub qualitative_notes: QualitativeNotes,
     /// 人话摘要：一两句把上面最关键的几条说清。
     pub summary: String,
+}
+
+impl Report {
+    /// 走遍报告里所有维度的代表录像引用（可变借）——调用方据此把录像写进 report-dir 并回填
+    /// 相对路径。顺序确定（按维度声明序），每条只出现一次。报告里没有重复持有同一 RecordingRef
+    /// 的地方，所以遍历即全集。
+    pub fn representatives_mut(&mut self) -> Vec<&mut RecordingRef> {
+        let mut refs: Vec<&mut RecordingRef> = Vec::new();
+        for c in &mut self.stuck_clusters {
+            refs.push(&mut c.representative);
+        }
+        for r in &mut self.numeric_breakage.runaway {
+            refs.push(&mut r.representative);
+        }
+        for c in &mut self.numeric_breakage.collapse {
+            refs.push(&mut c.representative);
+        }
+        for n in &mut self.numeric_breakage.non_finite {
+            refs.push(&mut n.representative);
+        }
+        for c in &mut self.qualitative_notes.clusters {
+            refs.push(&mut c.representative);
+        }
+        refs
+    }
+
+    /// 把所有代表录像写进 `report_dir` 下的单独 json 文件，并把每条引用的 `path` 回填成相对
+    /// 路径（相对 report_dir）。报告主体 JSON 因此只挂路径、不内联整坨录像。文件名 = `<key>.json`
+    /// （key 确定可复现）。report_dir 不存在则创建。返回写出的文件数。
+    pub fn externalize_recordings(&mut self, report_dir: &std::path::Path) -> Result<usize, String> {
+        let refs = self.representatives_mut();
+        if refs.is_empty() {
+            return Ok(0);
+        }
+        std::fs::create_dir_all(report_dir)
+            .map_err(|e| format!("创建 report-dir {} 失败: {e}", report_dir.display()))?;
+        let mut written = 0usize;
+        for r in refs {
+            let filename = format!("{}.json", r.key);
+            let full = report_dir.join(&filename);
+            let json = serde_json::to_string(&r.recording).expect("录像可序列化");
+            std::fs::write(&full, json)
+                .map_err(|e| format!("写代表录像 {} 失败: {e}", full.display()))?;
+            r.path = Some(filename);
+            written += 1;
+        }
+        Ok(written)
+    }
 }
 
 /// 聚合入口：一批标签结果 → 一份报告。用默认冻结阈值 K，不算结局覆盖
@@ -456,7 +555,7 @@ fn aggregate_stuck(results: &[LabeledResult], freeze_k: usize) -> Vec<StuckClust
             hits,
             sample_strategy: rep.spec.strategy_kind.name().to_string(),
             sample_seed: rep.spec.seed,
-            sample_recording: rep.result.recording.clone(),
+            representative: RecordingRef::from_sample(&format!("stuck-{hash:#018x}"), rep),
         })
         .collect()
 }
@@ -510,7 +609,10 @@ fn aggregate_numeric_breakage(
                 peak_max: peak,
                 sample_strategy: rep.spec.strategy_kind.name().to_string(),
                 sample_seed: rep.spec.seed,
-                sample_recording: rep.result.recording.clone(),
+                representative: RecordingRef::from_sample(
+                    &format!("runaway-{}", sanitize(field)),
+                    rep,
+                ),
             })
             .collect(),
         collapse: collapse
@@ -520,7 +622,10 @@ fn aggregate_numeric_breakage(
                 hits,
                 sample_strategy: rep.spec.strategy_kind.name().to_string(),
                 sample_seed: rep.spec.seed,
-                sample_recording: rep.result.recording.clone(),
+                representative: RecordingRef::from_sample(
+                    &format!("collapse-{}", sanitize(field)),
+                    rep,
+                ),
             })
             .collect(),
         non_finite: non_finite
@@ -530,7 +635,10 @@ fn aggregate_numeric_breakage(
                 hits,
                 sample_strategy: rep.spec.strategy_kind.name().to_string(),
                 sample_seed: rep.spec.seed,
-                sample_recording: rep.result.recording.clone(),
+                representative: RecordingRef::from_sample(
+                    &format!("nonfinite-{}", sanitize(field)),
+                    rep,
+                ),
             })
             .collect(),
     }
@@ -573,14 +681,18 @@ fn aggregate_notes(results: &[LabeledResult]) -> QualitativeNotes {
     }
     let clusters = buckets
         .into_iter()
-        .map(|((kind, text), (count, tick, rep))| NoteCluster {
-            kind,
-            text,
-            count,
-            sample_tick: tick,
-            sample_strategy: rep.spec.strategy_kind.name().to_string(),
-            sample_seed: rep.spec.seed,
-            sample_recording: rep.result.recording.clone(),
+        .map(|((kind, text), (count, tick, rep))| {
+            let representative =
+                RecordingRef::from_sample(&format!("note-{}", sanitize(&kind)), rep);
+            NoteCluster {
+                kind,
+                text,
+                count,
+                sample_tick: tick,
+                sample_strategy: rep.spec.strategy_kind.name().to_string(),
+                sample_seed: rep.spec.seed,
+                representative,
+            }
         })
         .collect();
     QualitativeNotes { total, clusters }
@@ -1429,5 +1541,87 @@ mod tests {
         assert!(json.contains("numeric_breakage"));
         assert!(json.contains("runaway"));
         assert!(rep.summary.contains("跑飞"), "summary 应提跑飞: {}", rep.summary);
+    }
+
+    // ---- 第 6 阶段：代表录像外置（不再内联进报告 JSON） ----
+
+    /// 造一个末尾冻结 ≥K 的卡死局（让报告里有一条 stuck 代表录像）。
+    fn stuck_labeled(kind: StrategyKind, seed: u64) -> LabeledResult {
+        let mut trace = vec![1u64, 2, 3];
+        trace.extend(std::iter::repeat_n(42u64, 70));
+        let n = trace.len() as u64;
+        labeled(kind, seed, Outcome::Timeout, n, trace, vec![], vec!["left", "left"])
+    }
+
+    #[test]
+    fn report_json_does_not_inline_recordings() {
+        // 报告主体 JSON 里不该出现录像的内联字段（checkpoints/inputs 那些大块）
+        let rep = aggregate(&[stuck_labeled(StrategyKind::Random, 0)]);
+        assert_eq!(rep.stuck_clusters.len(), 1, "应有一簇卡死");
+        let json = serde_json::to_string(&rep).unwrap();
+        assert!(!json.contains("checkpoints"), "报告 JSON 不该内联录像 checkpoints: {json}");
+        // representative 里序列化出来的只有 path/ticks/outcome，没有 recording/key
+        assert!(json.contains("representative"));
+        assert!(json.contains("\"ticks\""));
+        assert!(!json.contains("\"recording\""), "recording 字段必须 serde skip");
+        assert!(!json.contains("\"key\""), "key 字段必须 serde skip");
+    }
+
+    #[test]
+    fn representative_path_is_none_before_externalize() {
+        let rep = aggregate(&[stuck_labeled(StrategyKind::Random, 0)]);
+        assert!(rep.stuck_clusters[0].representative.path.is_none(), "落盘前 path=None");
+        // 但内存里录像和 ticks/outcome 仍在（供重放/写文件）
+        assert!(rep.stuck_clusters[0].representative.ticks > 0);
+        assert_eq!(rep.stuck_clusters[0].representative.outcome, Outcome::Timeout);
+    }
+
+    #[test]
+    fn externalize_writes_files_and_fills_paths() {
+        let mut rep = aggregate(&[stuck_labeled(StrategyKind::Random, 7)]);
+        // 写进临时目录（测试后清理，不污染 repo）
+        let dir = std::env::temp_dir()
+            .join(format!("vitric-playtest-report-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let written = rep.externalize_recordings(&dir).unwrap();
+        assert_eq!(written, 1, "应写出 1 个代表录像文件");
+        let r = &rep.stuck_clusters[0].representative;
+        let path = r.path.as_ref().expect("落盘后 path 应被回填");
+        assert!(path.ends_with(".json"), "路径是 json 文件: {path}");
+        // 文件真存在且能解析回录像
+        let full = dir.join(path);
+        assert!(full.exists(), "代表录像文件应真写出: {}", full.display());
+        let text = std::fs::read_to_string(&full).unwrap();
+        let rec: vitric_sim::Recording = serde_json::from_str(&text).unwrap();
+        assert_eq!(rec.ticks, r.ticks, "落盘录像与引用 ticks 一致");
+        // 清理
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn externalize_key_is_deterministic_same_input() {
+        // 同输入两次聚合，代表录像 key 一致（确定可复现的文件名）
+        let a = aggregate(&[stuck_labeled(StrategyKind::Random, 3)]);
+        let b = aggregate(&[stuck_labeled(StrategyKind::Random, 3)]);
+        assert_eq!(
+            a.stuck_clusters[0].representative.key,
+            b.stuck_clusters[0].representative.key,
+            "代表录像文件名 key 必须确定可复现"
+        );
+    }
+
+    #[test]
+    fn externalize_no_op_when_no_representatives() {
+        // 没有任何代表录像维度时，externalize 写 0 个文件、不建目录
+        let rep_results =
+            vec![labeled(StrategyKind::Random, 0, Outcome::Win, 5, vec![], vec![], vec![])];
+        let mut rep = aggregate(&rep_results);
+        assert!(rep.stuck_clusters.is_empty());
+        let dir = std::env::temp_dir()
+            .join(format!("vitric-playtest-noop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let written = rep.externalize_recordings(&dir).unwrap();
+        assert_eq!(written, 0);
+        assert!(!dir.exists(), "无录像时不该建目录");
     }
 }

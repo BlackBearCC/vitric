@@ -116,7 +116,7 @@ fn llm_note_lands_in_report_and_its_recording_replays() {
         .find(|c| c.text.contains("矛盾"))
         .expect("矛盾 note 必须出现在 qualitative_notes");
     assert_eq!(contradiction.kind, "continuity", "kind 应归一为 continuity");
-    assert!(contradiction.sample_recording.ticks > 0, "note 簇应挂得到可重放代表录像");
+    assert!(contradiction.representative.ticks > 0, "note 簇应挂得到可重放代表录像");
     // summary 诚实标「待人复核」
     assert!(report.summary.contains("待人复核"), "summary 应标 LLM note 待复核: {}", report.summary);
 
@@ -135,7 +135,7 @@ fn llm_session_recording_replays_via_direct_strategy() {
     let engine = rt.rules.clone();
     let client: Box<dyn LlmClient> = Box::new(ScriptedFake::new());
     let mut strat = LlmStrategy::new(client, "玩到结局", 7);
-    let cfg = SessionConfig { max_ticks: 50, seed: 7, terminal: TerminalSpec::default() };
+    let cfg = SessionConfig { max_ticks: 50, seed: 7, terminal: TerminalSpec::default(), ..Default::default() };
     let res = run_session(&mut sim, &mut rt, &engine, &mut strat, &cfg).unwrap();
 
     assert_eq!(res.outcome, Outcome::Win, "LLM 应玩到 ending-bad");
@@ -169,7 +169,7 @@ fn non_llm_path_unchanged_no_notes() {
         ..Default::default()
     };
     let mut strat = ScriptedStrategy::from_inputs(&seed.inputs, None);
-    let cfg = SessionConfig { max_ticks: 50, seed: 0, terminal: TerminalSpec::default() };
+    let cfg = SessionConfig { max_ticks: 50, seed: 0, terminal: TerminalSpec::default(), ..Default::default() };
     let res = run_session(&mut sim, &mut rt, &engine, &mut strat, &cfg).unwrap();
     assert_eq!(res.outcome, Outcome::Win, "脚本回放应到 ending-bad");
     assert!(res.notes.is_empty(), "非 LLM 策略不产 note，notes 必须空");
