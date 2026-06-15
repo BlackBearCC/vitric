@@ -79,9 +79,11 @@ const RUNAWAY_ABS: f64 = 1e6;
 /// 增长（物理微移/微小累积）会被冤判。真跑飞总会涨到一个有意义的大数。
 const RUNAWAY_RATIO_MIN_ABS: f64 = 1000.0;
 
-/// 空间/物理组件：坐标和速度不是经济资源，单调移动 ≠ 经济无界增长。numeric_breakage 把
-/// 这些字段整个排除（dogfood 实测：重力下落让 Position.y 从近 0 涨到几十就被误报 runaway）。
-const SPATIAL_COMPONENTS: &[&str] = &["Position", "Velocity", "Camera", "Shake"];
+/// 非经济组件：坐标/速度/相机/灯光这些不是经济资源——坐标单调移动不是「无界增长」、
+/// 灯光角度归零不是「崩盘」。numeric_breakage 把这些组件的字段整个排除（dogfood 实测：
+/// 重力下落让 Position.y 被误报 runaway；菜单灯 Light.angle=0 + 卡死被误报 collapse）。
+const NON_ECONOMY_COMPONENTS: &[&str] =
+    &["Position", "Velocity", "Camera", "Shake", "Light", "Ambient"];
 
 /// 字段 key 形如 `<实体>/<组件>.<字段>`，取出组件名；非该格式时退化用整串首段。
 fn field_component(field: &str) -> Option<&str> {
@@ -89,9 +91,9 @@ fn field_component(field: &str) -> Option<&str> {
     comp_field.split('.').next()
 }
 
-/// 该字段是否属于空间/物理组件（经济崩判定要整个跳过它）。
-fn is_spatial_field(field: &str) -> bool {
-    field_component(field).is_some_and(|c| SPATIAL_COMPONENTS.contains(&c))
+/// 该字段是否属于非经济组件（经济崩判定要整个跳过它）。
+fn is_non_economy_field(field: &str) -> bool {
+    field_component(field).is_some_and(|c| NON_ECONOMY_COMPONENTS.contains(&c))
 }
 
 /// 一招鲜判据：某动作在通关局注入里的占比阈值（≥ 这个比例 → 候选）。
@@ -598,8 +600,8 @@ fn aggregate_numeric_breakage(
     for (i, lr) in results.iter().enumerate() {
         let is_stuck = stuck_idx.contains(&i);
         for (field, stat) in &lr.result.numeric_summary {
-            // 空间/物理字段（坐标/速度）不是经济资源，整个跳过经济崩判定（避免下落/移动冤报）
-            if is_spatial_field(field) {
+            // 非经济字段（坐标/速度/灯光等）不是经济资源，整个跳过经济崩判定（避免移动/灯光冤报）
+            if is_non_economy_field(field) {
                 continue;
             }
             // 溢出：出现过非有限值
@@ -615,8 +617,10 @@ fn aggregate_numeric_breakage(
                     e.1 = stat.max; // 桶里保最大的峰值（最能说明跑多飞）
                 }
             }
-            // 崩盘软锁：归零 + 那局卡死（光归零不算——很多游戏资源正常会到 0 又回来）
-            if stat.hit_zero && is_stuck {
+            // 崩盘软锁：曾 >0 后归零 + 那局卡死。要求 first>0（dogfood：Run.node/Light.angle
+            // 初值就是 0，不是「崩」只是从没涨起来，那是 stuck 信号不是 collapse）；
+            // 光归零也不算（很多资源正常会到 0 又回来），必须叠加那局卡死。
+            if stat.first > 0.0 && stat.hit_zero && is_stuck {
                 let e = collapse.entry(field.as_str()).or_insert((0, lr));
                 e.0 += 1;
             }
@@ -1441,6 +1445,34 @@ mod tests {
         assert_eq!(rep.numeric_breakage.collapse.len(), 1, "只卡死那局算崩盘");
         assert_eq!(rep.numeric_breakage.collapse[0].field, "base/Res.fuel");
         assert_eq!(rep.numeric_breakage.collapse[0].hits, 1);
+    }
+
+    #[test]
+    fn numeric_breakage_collapse_excludes_light_and_zero_start() {
+        // dogfood echo 教训：菜单态卡死时，任何当时为 0 的字段都被误报 collapse。
+        // 非经济字段(Light)整个排除；初值就是 0 的字段(Run.node 从没涨起来)不是「崩」而是
+        // stuck 信号；只有「曾 >0 后归零 + 卡死」的真经济资源才算 collapse。
+        let mut frozen = vec![1u64, 2];
+        frozen.extend(std::iter::repeat_n(7u64, 70)); // 末尾冻结 → 卡死
+        let r = vec![labeled_numeric(
+            StrategyKind::Random,
+            0,
+            Outcome::Timeout,
+            frozen.len() as u64,
+            frozen,
+            vec![
+                // 灯光归零(非经济) → 排除
+                ("menu-lamp/Light.angle", nstat(0.5, 0.0, 0.0, 0.5, false, true, false)),
+                // 进度初值就是 0(从没涨起来) → 不算崩，是 stuck
+                ("progress/Run.node", nstat(0.0, 0.0, 0.0, 0.0, false, true, false)),
+                // 真经济资源:曾 >0 后归零 + 卡死 → 这个才算 collapse（回归保护）
+                ("base/Res.fuel", nstat(100.0, 0.0, 0.0, 100.0, false, true, false)),
+            ],
+        )];
+        let rep = aggregate(&r);
+        let fields: Vec<&str> =
+            rep.numeric_breakage.collapse.iter().map(|c| c.field.as_str()).collect();
+        assert_eq!(fields, vec!["base/Res.fuel"], "只真经济崩盘算，灯光/初值0 不冤判: {fields:?}");
     }
 
     #[test]
