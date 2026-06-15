@@ -17,9 +17,21 @@ fn demo_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/ui-gallery")
 }
 
-/// layout_runs() 是进程级全局计数——并行测试会互相增。读"恰好 +N"增量的测试
-/// 必须互斥串行（拿这把锁），否则别的测试的 solve 会污染计数。
-static COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// `layout_runs()` 背后是 vitric-render 里一个进程级全局原子计数器 `LAYOUT_RUNS`，
+/// 每次真解算布局就 +1（给测试观测用，不是产品逻辑）。集成测试默认在同一个测试
+/// binary 里并行跑：A 在数"重算了几次"时，B 只要也触发了一次布局 solve，就会把
+/// 这个全局计数器 +1，污染 A 的断言 → 间歇性失败（单线程跑必过，并行偶发挂）。
+///
+/// 这把进程级串行锁让"所有会触发布局解算或读取 layout_runs 计数的测试"在函数开头
+/// 各自拿锁、守卫活到函数结束，从而彼此串行、计数器不再被并发污染。它只串行这些
+/// 计数敏感的测试，不碰产品代码（全局计数器保留）。锁中毒（持锁测试 panic）不影响
+/// 后续测试——下面统一用 `.unwrap_or_else(|e| e.into_inner())` 兜 poisoned。
+static LAYOUT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 拿测试串行锁；锁被前一个 panic 的测试毒化时仍取回内层守卫，不连累后续测试。
+fn lock_layout_tests() -> std::sync::MutexGuard<'static, ()> {
+    LAYOUT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 // ---- 系统级：advance_ui_layout 直接驱动一个 World ----
 
@@ -42,6 +54,9 @@ fn ui_world() -> (World, vitric_ecs::EntityId) {
 
 #[test]
 fn layout_system_writes_rects_into_components() {
+    // 本测试不读 layout_runs，但 advance_ui_layout 会让全局计数器 +1，会污染并行
+    // 跑的计数敏感测试，故也拿这把串行锁，与它们错开。
+    let _guard = lock_layout_tests();
     let (mut w, panel) = ui_world();
     advance_ui_layout(&mut w, (1000, 600)).unwrap();
     // 居中 400x200 于 1000x600 视口 → x=300, y=200
@@ -54,7 +69,7 @@ fn layout_system_writes_rects_into_components() {
 #[test]
 fn static_ui_recomputes_zero_times_across_many_ticks() {
     // 性能硬要求：静止 UI 连播 N tick，布局重算 0 次（脏标记）。
-    let _guard = COUNTER_LOCK.lock().unwrap();
+    let _guard = lock_layout_tests();
     let (mut w, _panel) = ui_world();
     // 第一次：脏（layout_hash 空），解算一次
     let before = layout_runs();
@@ -70,7 +85,7 @@ fn static_ui_recomputes_zero_times_across_many_ticks() {
 
 #[test]
 fn mutating_ui_marks_dirty_and_recomputes_once() {
-    let _guard = COUNTER_LOCK.lock().unwrap();
+    let _guard = lock_layout_tests();
     let (mut w, panel) = ui_world();
     advance_ui_layout(&mut w, (1000, 600)).unwrap();
     let settled = layout_runs();
@@ -88,7 +103,7 @@ fn mutating_ui_marks_dirty_and_recomputes_once() {
 #[test]
 fn empty_ui_world_is_zero_cost() {
     // 没有 UiRoot：advance_ui_layout 不解算（layout_runs 不增）。
-    let _guard = COUNTER_LOCK.lock().unwrap();
+    let _guard = lock_layout_tests();
     let mut w = World::new();
     let before = layout_runs();
     advance_ui_layout(&mut w, (1000, 600)).unwrap();
@@ -98,7 +113,7 @@ fn empty_ui_world_is_zero_cost() {
 #[test]
 fn snapshot_restore_preserves_layout_state() {
     // 快照/回放：布局态（rx/ry/rw/rh + layout_hash）随组件进快照，回放后续播一致。
-    let _guard = COUNTER_LOCK.lock().unwrap();
+    let _guard = lock_layout_tests();
     let (mut w, panel) = ui_world();
     advance_ui_layout(&mut w, (1000, 600)).unwrap();
     let snap = w.snapshot();
@@ -122,6 +137,8 @@ fn snapshot_restore_preserves_layout_state() {
 fn layout_is_independent_of_camera() {
     // UI 屏幕空间：镜头移动/缩放/抖动 UI 屏幕位置不变（证明不经相机变换）。
     // 在同一个世界里加一个会动的相机，solve_layout 的结果不随相机变。
+    // 两次 solve_layout 会让全局计数器 +2，会污染计数敏感测试，故也拿锁串行。
+    let _guard = lock_layout_tests();
     let (mut w, panel) = ui_world();
     let cam = w.spawn_named("camera").unwrap();
     w.set_component(cam, "Camera", json!({"x": 0.0, "y": 0.0, "scale": 8.0})).unwrap();
@@ -144,6 +161,8 @@ fn layout_is_independent_of_camera() {
 
 #[test]
 fn gallery_demo_boots_and_lays_out_three_buttons() {
+    // step + solve_layout 都让全局计数器 +1，拿锁避免污染计数敏感测试。
+    let _guard = lock_layout_tests();
     let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
     // 跑一 tick：布局系统把 menu-vbox 的三个按钮排好（参照视口 = UI_REFERENCE_VIEWPORT）
     sim.step(&mut rt).unwrap();
@@ -182,6 +201,8 @@ fn gallery_demo_boots_and_lays_out_three_buttons() {
 #[test]
 fn gallery_demo_renders_without_error_and_ui_overlay_present() {
     // 渲染一帧（CPU 真相源）：UI 灰盒画出来，画面非空背景（菜单面板覆盖中心）。
+    // step + render_world 内部都会 solve_layout，让全局计数器增长，拿锁串行。
+    let _guard = lock_layout_tests();
     let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
     sim.step(&mut rt).unwrap();
     let (w, h) = (960u32, 540u32);
@@ -209,6 +230,8 @@ fn gallery_demo_renders_without_error_and_ui_overlay_present() {
 #[test]
 fn gallery_demo_ui_does_not_drift_with_camera_in_render() {
     // 渲染层证明：移动相机后，UI 中心像素颜色不变（UI 不随镜头飘）。
+    // step + 两次 render_world 都会 solve_layout，让全局计数器增长，拿锁串行。
+    let _guard = lock_layout_tests();
     let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
     sim.step(&mut rt).unwrap();
     let (w, h) = (960u32, 540u32);
