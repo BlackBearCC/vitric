@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use vitric_cli::runtime::Runtime;
 use vitric_playtest::{
-    aggregate, run_swarm, Report, SessionSpec, StrategyKind,
+    aggregate, aggregate_with_endings, run_swarm, Report, SessionSpec, StrategyKind, TerminalSpec,
 };
 
 /// 埋雷项目目录（住在 vitric-playtest 的 tests/fixtures 下）。
@@ -25,9 +25,15 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// 在某埋雷项目上跑一批（三策略轮流 × 递增 seed 凑够 sessions 局），聚合成报告。
-fn playtest_report(name: &str, sessions: u64, max_ticks: u64) -> Report {
-    let dir = fixture(name);
+/// 仓库内的示例游戏目录（examples/ 在 workspace 根，本测试 crate 在 crates/vitric-cli 下）。
+fn example(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(name)
+}
+
+/// 在某项目目录上跑一批（三策略轮流 × 递增 seed 凑够 sessions 局），聚合成报告。
+/// `with_engine=true` 走 `aggregate_with_endings`（CLI 默认路径，inert_actions 用静态判据）；
+/// false 走裸 `aggregate`（inert_actions 退化用旧运行时启发式）。
+fn playtest_report_at(dir: PathBuf, sessions: u64, max_ticks: u64, with_engine: bool) -> Report {
     // 计划：random+greedy+coverage 轮流，seed 0..sessions
     let mut plan: Vec<SessionSpec> = Vec::with_capacity(sessions as usize);
     for k in 0..sessions {
@@ -35,14 +41,27 @@ fn playtest_report(name: &str, sessions: u64, max_ticks: u64) -> Report {
         plan.push(SessionSpec::new(kind, k, max_ticks));
     }
     // 工厂：每线程自己 boot 一份全新运行时 + 复制只读 Engine
-    let factory = move || -> Result<(_, _, _), String> {
-        let (sim, rt) = Runtime::boot(&dir)?;
-        let engine = rt.rules.clone();
-        Ok((sim, rt, engine))
+    let factory = {
+        let dir = dir.clone();
+        move || -> Result<(_, _, _), String> {
+            let (sim, rt) = Runtime::boot(&dir)?;
+            let engine = rt.rules.clone();
+            Ok((sim, rt, engine))
+        }
     };
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let results = run_swarm(factory, &plan, threads).expect("swarm 应跑通");
-    aggregate(&results)
+    if with_engine {
+        let (_, rt) = Runtime::boot(&dir).expect("boot 引擎");
+        aggregate_with_endings(&results, &rt.rules, &TerminalSpec::default())
+    } else {
+        aggregate(&results)
+    }
+}
+
+/// 在某埋雷项目上跑一批（裸 aggregate 路径，沿用老用例）。
+fn playtest_report(name: &str, sessions: u64, max_ticks: u64) -> Report {
+    playtest_report_at(fixture(name), sessions, max_ticks, false)
 }
 
 #[test]
@@ -89,13 +108,41 @@ fn softlock_is_clustered() {
 
 #[test]
 fn dead_action_is_inert() {
-    // "useless" 是唯一声明的输入动作，规则只 set 一个没人读的字段、不 emit 任何事件
+    // "useless" 是唯一声明的输入动作，规则把 Scratch.v set 成它本来就有的初值 0（自我无效操作），
+    // 不产生任何真实效果。裸 aggregate（运行时启发式）路径下应判惰性。
     let rep = playtest_report("dead-action", 9, 100);
     assert!(
         rep.inert_actions.contains(&"useless".to_string()),
-        "声明了输入但没引发响应的废动作应出现在 inert_actions，实际 {:?}",
+        "声明了输入但没引发响应的废动作应出现在 inert_actions（运行时路径），实际 {:?}",
         rep.inert_actions
     );
+}
+
+#[test]
+fn dead_action_is_inert_static_path() {
+    // 回归保护：换成静态判据（aggregate_with_endings = CLI 默认路径）后，"useless" 仍被判惰性
+    // ——它把字段 set 成初值是自我无效操作，没有真实效果。
+    let rep = playtest_report_at(fixture("dead-action"), 9, 100, true);
+    assert!(
+        rep.inert_actions.contains(&"useless".to_string()),
+        "静态判据下 useless（set 成初值的自我无效操作）仍应判惰性，实际 {:?}",
+        rep.inert_actions
+    );
+}
+
+#[test]
+fn jump_movement_keys_not_inert() {
+    // dogfood 修的假阳性：jump 的移动键 left/right/space/up 只 set Velocity（改状态）不 emit 事件，
+    // 旧运行时判据会冤标它们惰性。静态判据（CLI 默认路径）按「set 成 ≠ 初值的新值 = 有真实效果」
+    // 判定，这些键都不该再进 inert_actions。
+    let rep = playtest_report_at(example("jump"), 12, 120, true);
+    for key in ["left", "right", "space", "up"] {
+        assert!(
+            !rep.inert_actions.contains(&key.to_string()),
+            "移动键 {key} 改了 Velocity（真实效果），不该被冤标惰性，实际 inert={:?}",
+            rep.inert_actions
+        );
+    }
 }
 
 /// swarm 串行 vs 并行结果逐项一致（确定性铁律），在真 boot 的埋雷项目上验。

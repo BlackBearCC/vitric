@@ -12,7 +12,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
-use vitric_rules::Engine;
+use serde_json::Value;
+use vitric_rules::{Engine, Trigger};
 use vitric_sim::Recording;
 
 use crate::scene_view::{Outcome, TerminalSpec};
@@ -392,38 +393,45 @@ impl Report {
 
 /// 聚合入口：一批标签结果 → 一份报告。用默认冻结阈值 K，不算结局覆盖
 /// （不传引擎=不知道声明结局集合，`ending_coverage` 为 None）。
+/// 不传引擎也意味着 `inert_actions` 退化用旧的运行时启发式（没规则可做静态判据）。
 pub fn aggregate(results: &[LabeledResult]) -> Report {
-    aggregate_inner(results, DEFAULT_FREEZE_K, None)
+    aggregate_inner(results, DEFAULT_FREEZE_K, None, None)
 }
 
 /// 聚合（可调冻结阈值 K，给测试用）。一趟扫，不做平方比对。
 pub fn aggregate_with_freeze_k(results: &[LabeledResult], freeze_k: usize) -> Report {
-    aggregate_inner(results, freeze_k, None)
+    aggregate_inner(results, freeze_k, None, None)
 }
 
 /// 聚合 + 结局覆盖（种子探索专用）。`engine`/`terminal` 用来扫规则声明的结局集合，
 /// 报告含 `ending_coverage`（哪些声明结局不可达）。这是设计稿三节验收的入口。
+///
+/// 传了引擎，`inert_actions` 也改走**静态判据**（扫规则的 `do` 看有没有真实效果），
+/// 而不是旧的运行时「有没有 emit 过事件」启发式——后者会把「只 set 状态不 emit」的
+/// 移动键（left/right/space/up）冤标惰性。默认 CLI 路径走这个入口，所以默认就是静态判据。
 pub fn aggregate_with_endings(
     results: &[LabeledResult],
     engine: &Engine,
     terminal: &TerminalSpec,
 ) -> Report {
     let declared = declared_endings(engine, terminal);
-    aggregate_inner(results, DEFAULT_FREEZE_K, Some(declared))
+    aggregate_inner(results, DEFAULT_FREEZE_K, Some(declared), Some(engine))
 }
 
 /// 聚合内核：declared=Some 时算结局覆盖，None 时跳过。
+/// `engine=Some` 时 `inert_actions` 走静态判据，None 时退化用运行时启发式。
 fn aggregate_inner(
     results: &[LabeledResult],
     freeze_k: usize,
     declared: Option<Vec<String>>,
+    engine: Option<&Engine>,
 ) -> Report {
     let outcome_distribution = aggregate_outcomes(results);
     let reachability = aggregate_reachability(results, &outcome_distribution);
     let ending_coverage = declared.map(|d| aggregate_ending_coverage(d, results));
     let stuck_clusters = aggregate_stuck(results, freeze_k);
     let pacing = aggregate_pacing(results);
-    let inert_actions = aggregate_inert(results);
+    let inert_actions = aggregate_inert(results, engine);
     let dominant_strategy = aggregate_dominant(results);
     // 数值崩要知道「哪些局卡死了」来判 collapse——用同一套冻结判据算出卡死局下标集合。
     let stuck_idx = stuck_session_indices(results, freeze_k);
@@ -780,36 +788,161 @@ fn build_histogram(sorted: &[u64], min: u64, max: u64) -> Vec<HistogramBucket> {
         .collect()
 }
 
-/// 惰性动作候选：在所有局里被注入过、但从没和任何**非内建**事件同局出现的 input 动作。
+/// 惰性动作候选：声明了输入、但**没有任何规则在它身上产生真实效果**的 input 动作。
 ///
-/// 诚实的局限（轻量启发式，不是数据流分析）：
-/// - 动作词汇取「所有局录像里实际注入过的 action 并集」——coverage 策略保证每个声明的
-///   动作都被注入到，所以这个并集 ≈ 完整词汇；但若某动作连一次都没被任何策略注入（理论上
-///   coverage 会注入），它不会出现在这里。
-/// - 「同局出现非内建事件」是粗判：只要那局有任何非内建事件，就认为该局的动作「可能」引发了
-///   响应——不追因到具体哪个动作。所以一个真废动作只有在「它**单独**被注入、且那些局没有
-///   任何非内建事件」时才会被逮到。dead-action 埋雷正是这种构造（声明输入但 rules 没人接）。
-fn aggregate_inert(results: &[LabeledResult]) -> Vec<String> {
-    // 词汇：所有局注入过的动作并集
+/// **判据从运行时改成静态**（dogfood examples/jump 实测的假阳性根因）：旧判据看「这个动作在
+/// 所有局里有没有引发过非内建事件（emit）」，但平台游戏的移动键（left/right/space/up）只
+/// `set Velocity`（改状态）**不 emit 事件**，于是被冤标惰性——任何「只 set/改状态不 emit」的
+/// 动作都会中招，是高频假阳性。新判据不看运行时发没发事件，而是**静态扫规则**：一个 input 动作
+/// 真惰性，当且仅当它触发的所有规则的 `do` 都不产生任何真实效果（空 `do`、或只有自我无效操作，
+/// 比如把字段 set 成它本来就有的初值）。只要有一条触发规则含真实效果动作（spawn/despawn/emit/
+/// call、非零 add、或把字段 set 成≠初值的新值）→ 不惰性。这是保守判据：宁可漏判也别冤判常用动作。
+///
+/// `engine=Some` 走静态判据（默认 CLI 路径）；`engine=None`（裸 `aggregate`，没规则信息）退化用
+/// 旧的运行时启发式——「被注入过、但从没和任何非内建事件同局出现」的动作。诚实标「候选/待复核」
+/// 措辞不变：合法地不产生可观测效果的动作也可能命中，留人复核。
+fn aggregate_inert(results: &[LabeledResult], engine: Option<&Engine>) -> Vec<String> {
+    // 词汇：所有局注入过的动作并集（候选只从真被注入过的动作里出，不臆测没跑过的动作）。
     let mut vocab: BTreeSet<String> = BTreeSet::new();
-    // 「引发过非内建事件」的动作集合：某局有非内建事件 → 该局注入过的动作都记一笔可能有响应
+    for lr in results {
+        for r in &lr.result.recording.inputs {
+            vocab.insert(r.action.clone());
+        }
+    }
+
+    // 静态判据（有引擎时）：扫规则，逐个 input 动作看它触发的规则有没有真实效果。
+    if let Some(engine) = engine {
+        let inert_set = static_inert_actions(engine);
+        // 与注入词汇求交：只报真被跑到过、且静态判定无效果的动作（避免报从没注入的动作）。
+        return vocab.intersection(&inert_set).cloned().collect();
+    }
+
+    // 退化路径（无引擎）：旧的运行时启发式。「引发过非内建事件」的动作集合——某局有非内建
+    // 事件 → 该局注入过的动作都记一笔可能有响应；惰性 = 词汇里从没出现在有响应局里的动作。
     let mut responsive: BTreeSet<String> = BTreeSet::new();
     for lr in results {
         let actions_this: BTreeSet<&str> =
             lr.result.recording.inputs.iter().map(|r| r.action.as_str()).collect();
-        for a in &actions_this {
-            vocab.insert(a.to_string());
-        }
-        let has_non_builtin =
-            lr.result.fired_events.iter().any(|e| !is_builtin_event(e));
+        let has_non_builtin = lr.result.fired_events.iter().any(|e| !is_builtin_event(e));
         if has_non_builtin {
             for a in &actions_this {
                 responsive.insert(a.to_string());
             }
         }
     }
-    // 惰性 = 词汇里、从没出现在「有响应的局」里的动作
     vocab.difference(&responsive).cloned().collect()
+}
+
+/// 静态判据：扫引擎规则，返回「所有触发规则都没有真实效果」的 input 动作集合。
+///
+/// 对每个被 input 规则声明的动作（按 `filter.action` 收集），看挂在它名下的全部规则：
+/// 只要有**一条**规则的 `do` 含真实效果动作 → 这个动作不惰性；全部规则都无真实效果 → 惰性。
+/// （某动作压根没有任何规则接——理论上 derive_actions 不会把它列进词汇，但若出现也算惰性，
+/// 因为「没规则接 = 没效果」。）输出 BTreeSet 自动排序去重，确定。
+fn static_inert_actions(engine: &Engine) -> BTreeSet<String> {
+    // 动作 -> 它名下有没有任意一条「有真实效果」的规则
+    let mut has_effect: BTreeMap<&str, bool> = BTreeMap::new();
+    for rule in &engine.rules.rules {
+        let Trigger::Event { name, filter, .. } = &rule.trigger else {
+            continue; // 只看 input 触发的规则
+        };
+        if name != "input" {
+            continue;
+        }
+        let Some(action) = filter.get("action").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let effectful = rule.actions.iter().any(|a| action_has_effect(a, &engine.schema));
+        let entry = has_effect.entry(action).or_insert(false);
+        *entry = *entry || effectful;
+    }
+    // 惰性 = 名下没有任何有效果规则的动作
+    has_effect
+        .into_iter()
+        .filter(|(_, eff)| !*eff)
+        .map(|(a, _)| a.to_string())
+        .collect()
+}
+
+/// 一个 `do` 动作（JSON 对象）静态上是否**可能产生真实效果**。保守：判不准就算「有效果」
+/// （宁可漏判惰性也别冤判常用动作）。
+/// - `spawn`/`despawn`/`emit`/`call`：必有效果（建/删实体、发事件、调脚本）。
+/// - `add`：`by` 不是字面 0 就算有效果（加 0 是无效操作）。`by` 取不到/非字面数 → 当有效果。
+/// - `set`：把目标字段 set 成它的 schema 初值（effective_default）= 自我无效操作，无效果；
+///   set 成 ≠ 初值、或 `to` 是动态引用/格式串、或目标解析不出 schema 字段 → 当有效果。
+fn action_has_effect(action: &Value, schema: &vitric_data::Schema) -> bool {
+    let Some(obj) = action.as_object() else {
+        return true; // 不是对象（理论上解析期已挡掉），保守当有效果
+    };
+    // 状态创建/销毁/发事件/调脚本——一律有效果
+    if obj.contains_key("spawn")
+        || obj.contains_key("despawn")
+        || obj.contains_key("emit")
+        || obj.contains_key("call")
+    {
+        return true;
+    }
+    // add：by 是字面 0 才算无效；其余（非零、引用、缺失）都当有效果
+    if obj.contains_key("add") {
+        return match obj.get("by").and_then(|v| v.as_f64()) {
+            Some(by) => by != 0.0,
+            None => true, // by 是引用/格式串等动态值 → 当有效果（保守）
+        };
+    }
+    // set：判是不是「把字段 set 成它本来就有的初值」这种自我无效操作
+    if let Some(target) = obj.get("set").and_then(|v| v.as_str()) {
+        let Some(to) = obj.get("to") else {
+            return true; // 缺 to（解析期已挡），保守
+        };
+        // to 是动态引用（字符串引用 self./other./@/event.）或 format 对象 → 当有效果
+        if !is_static_literal(to) {
+            return true;
+        }
+        match field_def(schema, target) {
+            // 解析得到 schema 字段：把 to 按字段类型归一后和初值比（绕开 0 vs 0.0 这种
+            // int/float 表示差异——初值已 canonicalize 成浮点，to 也要同样归一才比得对）。
+            // 归一后 = 初值 → 自我无效操作，无效果；≠ 初值 → 有效果。
+            Some(fdef) => fdef.ty.canonicalize(to) != fdef.effective_default(),
+            // 目标路径解析不出 schema 字段（自定义路径/组件未声明）→ 保守当有效果
+            None => true,
+        }
+    } else {
+        // 走到这说明是未知动作类型（解析期已挡），保守当有效果
+        true
+    }
+}
+
+/// `to` 的值是不是「静态字面常量」（能直接和初值比）。字符串里带引用前缀（self./other./@/
+/// event.）或是对象/数组（如 {"format":...}）都算动态，不算静态字面。
+fn is_static_literal(v: &Value) -> bool {
+    match v {
+        Value::String(s) => {
+            !(s.starts_with("self.")
+                || s.starts_with("other.")
+                || s.starts_with('@')
+                || s.starts_with("event."))
+        }
+        // 对象/数组可能是 format/引用结构，不当静态字面
+        Value::Object(_) | Value::Array(_) => false,
+        // 数字/布尔/null 都是静态字面
+        _ => true,
+    }
+}
+
+/// 解析 set 目标路径 `<实体引用>.<组件>.<字段>`，查它在 schema 里的字段定义。
+/// 实体引用是首段（@名字 / self / other / 句柄），组件是第二段，剩下是字段路径。
+/// 只支持顶层字段（组件.字段，不含再下一层嵌套）——够覆盖埋雷/移动键这类用法；
+/// 解析不出组件/字段则返回 None（调用方保守当「有效果」）。
+fn field_def<'a>(schema: &'a vitric_data::Schema, target: &str) -> Option<&'a vitric_data::FieldDef> {
+    let mut segs = target.split('.');
+    let _entity = segs.next()?; // 实体引用段，跳过
+    let component = segs.next()?;
+    let field = segs.next()?;
+    // 还有更深的嵌套字段（vec2.x 这种）就不判初值——保守，让调用方当有效果
+    if segs.next().is_some() {
+        return None;
+    }
+    schema.components.get(component)?.fields.get(field)
 }
 
 fn aggregate_dominant(results: &[LabeledResult]) -> DominantStrategy {
@@ -1181,6 +1314,95 @@ mod tests {
         let rep = aggregate(&r);
         assert!(rep.inert_actions.contains(&"dead".to_string()), "{:?}", rep.inert_actions);
         assert!(!rep.inert_actions.contains(&"left".to_string()));
+    }
+
+    /// 造一个引擎：给定若干 input 规则（action, do 动作列表）+ schema。
+    fn inert_engine(rules: serde_json::Value, schema: serde_json::Value) -> Engine {
+        let schema = Schema::parse(&schema, "s.json").unwrap();
+        Engine::new(RuleSet::parse(&rules, "r.json").unwrap(), schema)
+    }
+
+    #[test]
+    fn static_inert_set_to_default_is_inert_but_set_to_new_value_is_not() {
+        // useless: set Scratch.v 成它的初值 0（自我无效操作）→ 惰性
+        // live:    set Vel.x 成 ≠ 初值(0) 的 -8（真实状态变更）→ 不惰性
+        let eng = inert_engine(
+            serde_json::json!({"rules": [
+                {"id": "useless", "on": {"event": "input", "filter": {"action": "useless", "phase": "pressed"}},
+                 "do": [{"set": "@s.Scratch.v", "to": 0}]},
+                {"id": "live", "on": {"event": "input", "filter": {"action": "live", "phase": "pressed"}},
+                 "do": [{"set": "@h.Vel.x", "to": -8}]}
+            ]}),
+            serde_json::json!({"components": {
+                "Scratch": {"fields": {"v": {"type": "number", "default": 0}}},
+                "Vel": {"fields": {"x": {"type": "number"}}}
+            }}),
+        );
+        // 两个动作都注入过（让候选词汇含它们）
+        let r = vec![
+            labeled(StrategyKind::Coverage, 0, Outcome::Timeout, 5, vec![], vec![], vec!["useless"]),
+            labeled(StrategyKind::Coverage, 1, Outcome::Timeout, 5, vec![], vec![], vec!["live"]),
+        ];
+        let rep = aggregate_with_endings(&r, &eng, &TerminalSpec::default());
+        assert!(rep.inert_actions.contains(&"useless".to_string()), "set 成初值=惰性: {:?}", rep.inert_actions);
+        assert!(!rep.inert_actions.contains(&"live".to_string()), "set 成新值=不惰性: {:?}", rep.inert_actions);
+    }
+
+    #[test]
+    fn static_inert_emit_and_spawn_are_effectful() {
+        // 含 emit / spawn 的规则一律有真实效果 → 对应动作不惰性
+        let eng = inert_engine(
+            serde_json::json!({"rules": [
+                {"id": "fire", "on": {"event": "input", "filter": {"action": "fire", "phase": "pressed"}},
+                 "do": [{"emit": "boom", "data": {}}]},
+                {"id": "make", "on": {"event": "input", "filter": {"action": "make", "phase": "pressed"}},
+                 "do": [{"spawn": "Bullet", "components": {}}]}
+            ]}),
+            serde_json::json!({"components": {}}),
+        );
+        let r = vec![
+            labeled(StrategyKind::Coverage, 0, Outcome::Timeout, 5, vec![], vec![], vec!["fire"]),
+            labeled(StrategyKind::Coverage, 1, Outcome::Timeout, 5, vec![], vec![], vec!["make"]),
+        ];
+        let rep = aggregate_with_endings(&r, &eng, &TerminalSpec::default());
+        assert!(rep.inert_actions.is_empty(), "emit/spawn 都有效果，无惰性: {:?}", rep.inert_actions);
+    }
+
+    #[test]
+    fn static_inert_multi_rule_one_effectful_wins() {
+        // 同一动作两条规则：一条自我无效(set 成初值)、一条有效果(emit) → 整体不惰性
+        let eng = inert_engine(
+            serde_json::json!({"rules": [
+                {"id": "noop", "on": {"event": "input", "filter": {"action": "act", "phase": "pressed"}},
+                 "do": [{"set": "@s.Scratch.v", "to": 0}]},
+                {"id": "real", "on": {"event": "input", "filter": {"action": "act", "phase": "pressed"}},
+                 "do": [{"emit": "ping", "data": {}}]}
+            ]}),
+            serde_json::json!({"components": {
+                "Scratch": {"fields": {"v": {"type": "number", "default": 0}}}
+            }}),
+        );
+        let r = vec![labeled(StrategyKind::Coverage, 0, Outcome::Timeout, 5, vec![], vec![], vec!["act"])];
+        let rep = aggregate_with_endings(&r, &eng, &TerminalSpec::default());
+        assert!(!rep.inert_actions.contains(&"act".to_string()), "有一条有效果就不惰性: {:?}", rep.inert_actions);
+    }
+
+    #[test]
+    fn static_inert_only_reports_injected_actions() {
+        // 静态上 useless 惰性，但若它从没被注入过 → 不报（候选只从真跑过的动作里出）
+        let eng = inert_engine(
+            serde_json::json!({"rules": [
+                {"id": "useless", "on": {"event": "input", "filter": {"action": "useless", "phase": "pressed"}},
+                 "do": [{"set": "@s.Scratch.v", "to": 0}]}
+            ]}),
+            serde_json::json!({"components": {
+                "Scratch": {"fields": {"v": {"type": "number", "default": 0}}}
+            }}),
+        );
+        // 没注入任何动作
+        let r = vec![labeled(StrategyKind::Coverage, 0, Outcome::Timeout, 5, vec![], vec![], vec![])];
+        let rep = aggregate_with_endings(&r, &eng, &TerminalSpec::default());
+        assert!(rep.inert_actions.is_empty(), "没注入过的动作不进候选: {:?}", rep.inert_actions);
     }
 
     #[test]
