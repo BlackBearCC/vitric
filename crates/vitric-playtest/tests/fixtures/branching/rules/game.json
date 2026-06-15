@@ -1,0 +1,57 @@
+{
+  "rules": [
+    {
+      "id": "take-key",
+      "on": { "event": "input", "filter": { "action": "take-key", "phase": "pressed" } },
+      "if": [
+        ["@world.Story.locked", "==", false]
+      ],
+      "do": [
+        { "set": "@world.Story.key", "to": true }
+      ]
+    },
+    {
+      "id": "open-door",
+      "on": { "event": "input", "filter": { "action": "open-door", "phase": "pressed" } },
+      "if": [
+        ["@world.Story.key", "==", true],
+        ["@world.Story.locked", "==", false]
+      ],
+      "do": [
+        { "set": "@world.Story.door_open", "to": true }
+      ]
+    },
+    {
+      "id": "go-bad",
+      "on": { "event": "input", "filter": { "action": "go-bad", "phase": "pressed" } },
+      "if": [
+        ["@world.Story.door_open", "==", true]
+      ],
+      "do": [
+        { "set": "@world.Story.path", "to": 2 },
+        { "emit": "ending-bad", "data": {} }
+      ]
+    },
+    {
+      "id": "go-good",
+      "on": { "event": "input", "filter": { "action": "go-good", "phase": "pressed" } },
+      "if": [
+        ["@world.Story.door_open", "==", true],
+        ["@world.Story.path", "==", 99]
+      ],
+      "do": [
+        { "emit": "ending-good", "data": {} }
+      ]
+    },
+    {
+      "id": "seal",
+      "on": { "event": "input", "filter": { "action": "seal", "phase": "pressed" } },
+      "if": [
+        ["@world.Story.locked", "==", false]
+      ],
+      "do": [
+        { "set": "@world.Story.locked", "to": true }
+      ]
+    }
+  ]
+}

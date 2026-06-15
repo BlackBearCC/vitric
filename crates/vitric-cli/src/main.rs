@@ -4,7 +4,7 @@
 //! - `vitric check <项目目录>`            校验项目（schema/场景/规则/脚本），出报告
 //! - `vitric run <项目目录> [选项]`        无头运行 + AI 控制面
 //! - `vitric replay <项目目录> <录像.json>` 重放录像并校验确定性
-//! - `vitric playtest <项目目录> [选项]`     进程内自动试玩：单局出可重放录像（默认），或 --sessions N 并行跑批聚合地板报告
+//! - `vitric playtest <项目目录> [选项]`     进程内自动试玩：单局出可重放录像（默认），--sessions N 并行跑批聚合地板报告，--seed-recording 种子式探索（扰动证书录像逮不可达结局/顺序软锁）
 //! - `vitric gate <项目目录>`              交付门禁：check + 通关录像重放 + 断言集，全过才出证书
 //! - `vitric bundle <项目目录> [选项]`      发行打包：gate PASS 后把项目附进引擎副本，出自包含单文件（无证书不发行）
 //! - `vitric assets <项目目录> [选项]`      全项目 PNG 统一色板（AI 出图规整成一个调）
@@ -152,16 +152,22 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
 ///   --seed <N>                   策略 PCG 播种（默认 0；swarm 模式从此起递增）
 ///   --max-ticks <N>              超时上限（默认 600）
 ///   --sessions <N>               跑 N 局 swarm 聚合出报告（默认 1=单局旧行为）
-///   --out <路径>                 N=1 写录像；N>1 写完整报告 JSON
+///   --seed-recording <录像.json> 种子式探索：拿这条录像当种子，扰动它的输入序列跑 N 局
+///   --out <路径>                 N=1 写录像；N>1 / 种子探索写完整报告 JSON
 ///
-/// 单局（N=1）保持旧行为：派生场景视图喂策略、循环步进、出可重放录像。
-/// 多局（N>1）走 swarm：random+greedy+coverage 三策略轮流 × 递增 seed 凑够 N 局，
-/// 各局在自己线程内 boot 一份运行时并行跑（QuickJS 非 Send，运行时绝不跨线程），
-/// 聚合成地板报告打到 stdout（设计稿第 2 阶段）。
+/// 三档行为：
+/// - 给了 `--seed-recording`：**种子式探索**（设计稿第 3 阶段）——加载录像当种子，
+///   `perturb_plan` 生成 N 条变异脚本（drop/swap/substitute/truncate 轮换 + 截断接 random 发散），
+///   `run_seed_swarm` 并行跑，聚合报告含 `ending_coverage`（哪些声明结局不可达）。`--sessions`=变异条数。
+/// - 没给但 `--sessions>1`：第 2 阶段 swarm——random+greedy+coverage 三策略轮流 × 递增 seed。
+/// - 没给且 `--sessions=1`：单局旧行为，出一条可重放录像。
+///
+/// 各局都在自己线程内 boot 一份运行时并行跑（QuickJS 非 Send，运行时绝不跨线程）。
 fn cmd_playtest(args: &[String]) -> Result<(), String> {
     use vitric_playtest::{
-        aggregate, run_session, run_swarm, GreedyStrategy, RandomStrategy, SessionConfig,
-        SessionSpec, Strategy, StrategyKind,
+        aggregate, aggregate_with_endings, perturb_plan, run_seed_swarm, run_session, run_swarm,
+        GreedyStrategy, RandomStrategy, SessionConfig, SessionSpec, Strategy, StrategyKind,
+        TerminalSpec,
     };
 
     let dir = args.first().ok_or("playtest 缺少项目目录参数")?;
@@ -172,6 +178,7 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     let mut max_ticks: u64 = 600;
     let mut sessions: u64 = 1;
     let mut out_path: Option<PathBuf> = None;
+    let mut seed_recording: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
         let need = |key: &str| format!("{key} 缺少参数值");
@@ -195,14 +202,51 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
                 }
                 i += 2;
             }
+            "--seed-recording" => {
+                seed_recording = Some(PathBuf::from(args.get(i + 1).ok_or(need("--seed-recording"))?));
+                i += 2;
+            }
             "--out" => {
                 out_path = Some(PathBuf::from(args.get(i + 1).ok_or(need("--out"))?));
                 i += 2;
             }
             other => {
-                return Err(format!("未知选项 {other:?}。可用: --strategy --seed --max-ticks --sessions --out"))
+                return Err(format!("未知选项 {other:?}。可用: --strategy --seed --max-ticks --sessions --seed-recording --out"))
             }
         }
+    }
+
+    // 给了 --seed-recording：种子式探索（第 3 阶段）。加载种子录像 → perturb_plan 生成
+    // N 条变异 → ScriptedStrategy（截断接 random 发散）并行跑 → 聚合含 ending_coverage。
+    if let Some(seed_path) = &seed_recording {
+        let rec_text = std::fs::read_to_string(seed_path)
+            .map_err(|e| format!("读取种子录像 {} 失败: {e}", seed_path.display()))?;
+        let seed_rec: Recording =
+            serde_json::from_str(&rec_text).map_err(|e| format!("种子录像解析失败: {e}"))?;
+
+        // 变异条数 = --sessions（第 0 条是基线=原种子）。--seed 复用为扰动 PCG 播种，
+        // 截断脚本的 random 发散用 seed+1 错开（与扰动 PCG 不同源）。
+        let plan = perturb_plan(&seed_rec, sessions as usize, seed);
+        let terminal = TerminalSpec::default();
+        let factory = || -> Result<(_, _, _), String> {
+            let (sim, rt) = Runtime::boot(&dir)?;
+            let engine = rt.rules.clone();
+            Ok((sim, rt, engine))
+        };
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let results =
+            run_seed_swarm(factory, &plan, max_ticks, terminal.clone(), seed.wrapping_add(1), threads)?;
+
+        // 结局覆盖要扫规则声明的结局集合，单独 boot 一份只读 Engine 喂聚合器
+        let (_, rt) = Runtime::boot(&dir)?;
+        let report = aggregate_with_endings(&results, &rt.rules, &terminal);
+
+        let json = serde_json::to_string_pretty(&report).expect("报告可序列化");
+        if let Some(out) = &out_path {
+            std::fs::write(out, &json).map_err(|e| format!("写报告 {} 失败: {e}", out.display()))?;
+        }
+        println!("{json}");
+        return Ok(());
     }
 
     // N>1：swarm 跑批 + 聚合报告

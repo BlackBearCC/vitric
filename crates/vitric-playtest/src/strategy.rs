@@ -1,7 +1,7 @@
 //! 策略库——消费 Scene View、产出动作的纯逻辑。每个策略都用**独立的 Pcg32**
 //! 播种（从 playtest seed 来，不碰 sim.rng），所以同 seed 同序列、完全可复现。
 
-use vitric_sim::Pcg32;
+use vitric_sim::{InputRecord, Pcg32};
 
 use crate::scene_view::{Action, SceneView};
 
@@ -96,6 +96,87 @@ impl Strategy for CoverageStrategy {
         let idx = ((self.start_offset + self.cursor as u64) % n) as usize;
         self.cursor = self.cursor.wrapping_add(1);
         Some(view.actions[idx].clone())
+    }
+}
+
+/// 脚本策略：按一条固定的输入序列在**录制的 tick** 上注入动作，**不看 SceneView**
+/// （设计稿三节「种子式探索」的回放部分）。种子录像本身就是一段「在第 N tick 按了什么」
+/// 的脚本——把它原样喂回去就复现那一局；扰动过的脚本喂回去就是「在原解附近走一步岔路」。
+///
+/// 怎么追 tick：`Strategy::choose` 每 tick 被调一次（session 循环里），策略自己维护一个
+/// 计数器 `cur_tick`，每调一次 +1。当 `cur_tick` 命中脚本里某条 `InputRecord.tick` 时吐它的
+/// 动作。**同一 tick 多条输入**：种子录像允许一个 tick 注入多个动作（如 left+space 同帧），
+/// 但 `choose` 每 tick 只能返一个动作——所以本策略对「同 tick 多条」只注入第一条（按脚本序）。
+/// 这是已知局限：种子录像里同帧多输入会被截到一条。绝大多数解谜/剧情脚本是「一帧一动作」的
+/// 序列，不受影响；真要逐字节复现同帧多输入得走 `sim.replay`（那是另一条路，非策略路）。
+///
+/// `then_explore`：脚本放完后改用该策略继续（截断 + 发散）——种子探索的 truncate 算子靠它，
+/// 「照脚本走到第 K 步，之后交给 random 乱走」。None = 脚本放完就什么都不按（纯复现/纯前缀）。
+pub struct ScriptedStrategy {
+    /// 脚本：(tick, 动作)，按 tick 升序。choose 时 cur_tick 命中某条就吐它。
+    script: Vec<(u64, Action)>,
+    /// 当前 tick（每 choose 一次 +1）——session 每 tick 调一次 choose，与 sim.tick 同步。
+    cur_tick: u64,
+    /// 脚本里已放到第几条（脚本按 tick 升序，游标单调前进，避免每 tick 全表扫）。
+    cursor: usize,
+    /// 脚本放完后接力的策略（截断+发散）。None=放完就静默。
+    then_explore: Option<Box<dyn Strategy>>,
+}
+
+impl ScriptedStrategy {
+    /// 从一串 (tick, Action) 造脚本策略。脚本会按 tick 升序稳定排序（容忍调用方乱序传入）。
+    /// `then_explore`：脚本放完后接力的策略，None=放完静默。
+    pub fn new(
+        mut script: Vec<(u64, Action)>,
+        then_explore: Option<Box<dyn Strategy>>,
+    ) -> ScriptedStrategy {
+        // 稳定排序：同 tick 的多条保持原相对序（取第一条时才确定）
+        script.sort_by_key(|(t, _)| *t);
+        ScriptedStrategy { script, cur_tick: 0, cursor: 0, then_explore }
+    }
+
+    /// 从一条录像的输入序列造脚本（种子录像→脚本）。phase 一并带上（pressed/released）。
+    pub fn from_inputs(
+        inputs: &[InputRecord],
+        then_explore: Option<Box<dyn Strategy>>,
+    ) -> ScriptedStrategy {
+        let script = inputs
+            .iter()
+            .map(|r| (r.tick, Action { action: r.action.clone(), phase: r.phase.clone() }))
+            .collect();
+        ScriptedStrategy::new(script, then_explore)
+    }
+}
+
+impl Strategy for ScriptedStrategy {
+    fn choose(&mut self, view: &SceneView) -> Option<Action> {
+        let tick = self.cur_tick;
+        self.cur_tick += 1;
+
+        // 脚本游标越过当前 tick：脚本到此为止，交给接力策略（或静默）
+        if self.cursor >= self.script.len() {
+            return match &mut self.then_explore {
+                // 接力策略仍要看 view（它是 random/coverage 这类反应式策略）
+                Some(s) => s.choose(view),
+                None => None,
+            };
+        }
+        // 脚本按 tick 升序：游标这条的 tick 就是「下一个该放的 tick」
+        let (script_tick, action) = &self.script[self.cursor];
+        if *script_tick == tick {
+            let out = action.clone();
+            self.cursor += 1;
+            // 跳过同 tick 的其余条目（每 tick 只注一个动作，见类型注释的局限）
+            while self.cursor < self.script.len() && self.script[self.cursor].0 == tick {
+                self.cursor += 1;
+            }
+            Some(out)
+        } else {
+            // 还没到这条的 tick（中间这些 tick 脚本没安排动作）——本 tick 不操作。
+            // 注意：不接力——脚本还没放完，中间的空 tick 就该是「按兵不动」，
+            // 不能让 then_explore 在脚本中途乱插（那会破坏脚本复现）。
+            None
+        }
     }
 }
 
@@ -209,5 +290,108 @@ mod tests {
             let a = s.choose(&view).unwrap();
             assert!(view.actions.contains(&a), "{a:?}");
         }
+    }
+
+    fn act(name: &str) -> Action {
+        Action { action: name.to_string(), phase: "pressed".to_string() }
+    }
+
+    #[test]
+    fn scripted_injects_action_on_its_recorded_tick() {
+        // 脚本：tick 2 按 a，tick 5 按 b。其余 tick 不操作。
+        let script = vec![(2u64, act("a")), (5u64, act("b"))];
+        let mut s = ScriptedStrategy::new(script, None);
+        let view = view_with_actions(&["a", "b", "c"]);
+        let mut got: Vec<Option<String>> = Vec::new();
+        for _ in 0..8 {
+            got.push(s.choose(&view).map(|a| a.action));
+        }
+        // tick 0,1 无；tick2=a；tick3,4 无；tick5=b；tick6,7 无
+        assert_eq!(
+            got,
+            vec![
+                None,
+                None,
+                Some("a".to_string()),
+                None,
+                None,
+                Some("b".to_string()),
+                None,
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn scripted_ignores_scene_view() {
+        // 脚本吐的动作即便不在 view.actions 里也照吐（脚本不受合法集合约束——它是回放）
+        let script = vec![(0u64, act("offscreen"))];
+        let mut s = ScriptedStrategy::new(script, None);
+        let view = view_with_actions(&["only-this"]);
+        assert_eq!(s.choose(&view).map(|a| a.action), Some("offscreen".to_string()));
+    }
+
+    #[test]
+    fn scripted_then_explore_takes_over_after_script_ends() {
+        // 脚本只到 tick 0；之后交给 random 接力（截断+发散）
+        let script = vec![(0u64, act("scripted"))];
+        let mut s = ScriptedStrategy::new(script, Some(Box::new(RandomStrategy::new(7))));
+        let view = view_with_actions(&["x", "y", "z"]);
+        // tick0 = 脚本的 scripted
+        assert_eq!(s.choose(&view).map(|a| a.action), Some("scripted".to_string()));
+        // tick1 起交给 random：选出的动作（若有）必须来自 view 合法集合
+        let mut saw_explore = false;
+        for _ in 0..200 {
+            if let Some(a) = s.choose(&view) {
+                assert!(view.actions.contains(&a), "接力策略只选合法动作: {a:?}");
+                saw_explore = true;
+            }
+        }
+        assert!(saw_explore, "脚本放完后接力策略应注入过动作");
+    }
+
+    #[test]
+    fn scripted_no_explore_goes_silent_after_script() {
+        let script = vec![(0u64, act("a"))];
+        let mut s = ScriptedStrategy::new(script, None);
+        let view = view_with_actions(&["a"]);
+        assert_eq!(s.choose(&view).map(|a| a.action), Some("a".to_string()));
+        // 脚本放完、无接力：之后永远不操作
+        for _ in 0..50 {
+            assert_eq!(s.choose(&view), None);
+        }
+    }
+
+    #[test]
+    fn scripted_from_inputs_round_trips_ticks_and_phases() {
+        use vitric_sim::InputRecord;
+        let inputs = vec![
+            InputRecord { tick: 1, action: "left".to_string(), phase: "pressed".to_string() },
+            InputRecord { tick: 3, action: "left".to_string(), phase: "released".to_string() },
+        ];
+        let mut s = ScriptedStrategy::from_inputs(&inputs, None);
+        let view = view_with_actions(&["left"]);
+        let mut seq = Vec::new();
+        for _ in 0..5 {
+            seq.push(s.choose(&view).map(|a| (a.action, a.phase)));
+        }
+        assert_eq!(seq[1], Some(("left".to_string(), "pressed".to_string())));
+        assert_eq!(seq[3], Some(("left".to_string(), "released".to_string())));
+        assert_eq!(seq[0], None);
+        assert_eq!(seq[2], None);
+        assert_eq!(seq[4], None);
+    }
+
+    #[test]
+    fn scripted_same_tick_multiple_keeps_first_only() {
+        // 同 tick 两条：只注第一条（已知局限），第二条被跳过
+        let script = vec![(2u64, act("first")), (2u64, act("second"))];
+        let mut s = ScriptedStrategy::new(script, None);
+        let view = view_with_actions(&["first", "second"]);
+        let mut seq = Vec::new();
+        for _ in 0..4 {
+            seq.push(s.choose(&view).map(|a| a.action));
+        }
+        assert_eq!(seq, vec![None, None, Some("first".to_string()), None]);
     }
 }

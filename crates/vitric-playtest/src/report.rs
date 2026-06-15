@@ -12,9 +12,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
+use vitric_rules::Engine;
 use vitric_sim::Recording;
 
-use crate::scene_view::Outcome;
+use crate::scene_view::{Outcome, TerminalSpec};
 use crate::swarm::{LabeledResult, StrategyKind};
 
 /// 「末尾连续多少 tick 状态哈希完全不变」算冻结候选的阈值（设计稿：K 默认 60）。
@@ -60,6 +61,23 @@ pub struct Reachability {
     pub reached_events: Vec<String>,
     /// 0 局 Win → true（最强信号之一：声明了能赢但 swarm 谁都没赢到）。
     pub unbeatable_by_swarm: bool,
+}
+
+/// 结局覆盖（设计稿三节种子探索验收的核心：不可达结局）。
+///
+/// **「声明结局集合」从哪来**（注释说明，见任务三）：扫规则里所有 `emit` 动作的事件名，
+/// 凡命中 `TerminalSpec`（win/lose 命名集合或 `ending-*` 前缀）的，就是这游戏**声明它能产出**
+/// 的结局。这一步是静态扫规则——所以即便某个结局在所有局里**一次都没被 emit 过**，我们照样
+/// 知道它「被声明了」，从而能判它**不可达**（声明了但 0 局触达）。光看 `fired_events`（运行时
+/// 真发过的事件）做不到这点：没发过的事件压根不在里面，会被「没声明」和「声明了但没到」混为一谈。
+#[derive(Debug, Clone, Serialize)]
+pub struct EndingCoverage {
+    /// 这游戏声明能产出的全部结局事件名（扫规则 emit ∩ TerminalSpec，排序去重）。
+    pub declared_endings: Vec<String>,
+    /// 至少被一局触达过的结局（declared ∩ 任意局 fired_events，排序）。
+    pub reached_endings: Vec<String>,
+    /// **声明了但 0 局可达的结局**——种子探试的头号靶子（设计稿三节「不可达结局」）。
+    pub unreachable_endings: Vec<String>,
 }
 
 /// 一簇软锁候选：一批局在同一个「冻结状态哈希」上卡死且没到终止。
@@ -121,6 +139,9 @@ pub struct Report {
     pub sessions: usize,
     pub outcome_distribution: OutcomeDistribution,
     pub reachability: Reachability,
+    /// 结局覆盖：声明了哪些结局、到了哪些、哪些 0 局可达（不可达结局）。
+    /// 没传引擎（不知道声明集合）时为 None——空 declared 和「没算过」是两回事。
+    pub ending_coverage: Option<EndingCoverage>,
     /// 软锁候选（诚实标注：候选，不是定论）。
     pub stuck_clusters: Vec<StuckCluster>,
     pub pacing: Pacing,
@@ -131,15 +152,37 @@ pub struct Report {
     pub summary: String,
 }
 
-/// 聚合入口：一批标签结果 → 一份报告。用默认冻结阈值 K。
+/// 聚合入口：一批标签结果 → 一份报告。用默认冻结阈值 K，不算结局覆盖
+/// （不传引擎=不知道声明结局集合，`ending_coverage` 为 None）。
 pub fn aggregate(results: &[LabeledResult]) -> Report {
-    aggregate_with_freeze_k(results, DEFAULT_FREEZE_K)
+    aggregate_inner(results, DEFAULT_FREEZE_K, None)
 }
 
 /// 聚合（可调冻结阈值 K，给测试用）。一趟扫，不做平方比对。
 pub fn aggregate_with_freeze_k(results: &[LabeledResult], freeze_k: usize) -> Report {
+    aggregate_inner(results, freeze_k, None)
+}
+
+/// 聚合 + 结局覆盖（种子探索专用）。`engine`/`terminal` 用来扫规则声明的结局集合，
+/// 报告含 `ending_coverage`（哪些声明结局不可达）。这是设计稿三节验收的入口。
+pub fn aggregate_with_endings(
+    results: &[LabeledResult],
+    engine: &Engine,
+    terminal: &TerminalSpec,
+) -> Report {
+    let declared = declared_endings(engine, terminal);
+    aggregate_inner(results, DEFAULT_FREEZE_K, Some(declared))
+}
+
+/// 聚合内核：declared=Some 时算结局覆盖，None 时跳过。
+fn aggregate_inner(
+    results: &[LabeledResult],
+    freeze_k: usize,
+    declared: Option<Vec<String>>,
+) -> Report {
     let outcome_distribution = aggregate_outcomes(results);
     let reachability = aggregate_reachability(results, &outcome_distribution);
+    let ending_coverage = declared.map(|d| aggregate_ending_coverage(d, results));
     let stuck_clusters = aggregate_stuck(results, freeze_k);
     let pacing = aggregate_pacing(results);
     let inert_actions = aggregate_inert(results);
@@ -147,6 +190,7 @@ pub fn aggregate_with_freeze_k(results: &[LabeledResult], freeze_k: usize) -> Re
     let summary = build_summary(
         &outcome_distribution,
         &reachability,
+        &ending_coverage,
         &stuck_clusters,
         &inert_actions,
         &dominant_strategy,
@@ -155,12 +199,52 @@ pub fn aggregate_with_freeze_k(results: &[LabeledResult], freeze_k: usize) -> Re
         sessions: results.len(),
         outcome_distribution,
         reachability,
+        ending_coverage,
         stuck_clusters,
         pacing,
         inert_actions,
         dominant_strategy,
         summary,
     }
+}
+
+/// 扫规则里所有 `emit` 动作的事件名，凡命中 TerminalSpec（win/lose 命名或 ending 前缀）的
+/// 就是「声明的结局」。排序去重——确定且便于对账。**静态扫规则**，不看运行时是否真发过，
+/// 所以从没被 emit 的结局也能被认定为「声明了」（这正是判不可达的前提，见 EndingCoverage 注释）。
+fn declared_endings(engine: &Engine, terminal: &TerminalSpec) -> Vec<String> {
+    let mut declared: BTreeSet<String> = BTreeSet::new();
+    for rule in &engine.rules.rules {
+        for action in &rule.actions {
+            // 动作是 JSON 对象；emit 动作形如 {"emit": "<事件名>", "data": {...}}
+            if let Some(name) = action.get("emit").and_then(|v| v.as_str()) {
+                if terminal.classify(name).is_some() {
+                    declared.insert(name.to_string());
+                }
+            }
+        }
+    }
+    declared.into_iter().collect()
+}
+
+/// 结局覆盖：declared ∩ 任意局 fired_events = 触达；declared − 触达 = 不可达。
+fn aggregate_ending_coverage(declared: Vec<String>, results: &[LabeledResult]) -> EndingCoverage {
+    // 所有局触发过的事件并集（含终止与里程碑）
+    let mut fired: BTreeSet<&str> = BTreeSet::new();
+    for lr in results {
+        for ev in &lr.result.fired_events {
+            fired.insert(ev.as_str());
+        }
+    }
+    let mut reached: Vec<String> = Vec::new();
+    let mut unreachable: Vec<String> = Vec::new();
+    for end in &declared {
+        if fired.contains(end.as_str()) {
+            reached.push(end.clone());
+        } else {
+            unreachable.push(end.clone());
+        }
+    }
+    EndingCoverage { declared_endings: declared, reached_endings: reached, unreachable_endings: unreachable }
 }
 
 fn aggregate_outcomes(results: &[LabeledResult]) -> OutcomeDistribution {
@@ -378,6 +462,7 @@ fn find_dominant(stats: &[StrategyStats]) -> Option<String> {
 fn build_summary(
     dist: &OutcomeDistribution,
     reach: &Reachability,
+    ending: &Option<EndingCoverage>,
     stuck: &[StuckCluster],
     inert: &[String],
     dominant: &DominantStrategy,
@@ -393,6 +478,22 @@ fn build_summary(
     ));
     if reach.unbeatable_by_swarm {
         parts.push("⚠ swarm 一局都没通关——声明了能赢但谁也赢不到，疑似不可达通关条件。".to_string());
+    }
+    if let Some(ec) = ending {
+        if !ec.declared_endings.is_empty() {
+            if ec.unreachable_endings.is_empty() {
+                parts.push(format!(
+                    "结局覆盖：声明 {} 个结局，全部被触达。",
+                    ec.declared_endings.len()
+                ));
+            } else {
+                parts.push(format!(
+                    "⚠ 不可达结局 {} 个：{}（声明了但任何扰动都到不了，疑似 flag bug）。",
+                    ec.unreachable_endings.len(),
+                    ec.unreachable_endings.join("/")
+                ));
+            }
+        }
     }
     if !stuck.is_empty() {
         let hits: usize = stuck.iter().map(|c| c.hits).sum();
@@ -593,6 +694,75 @@ mod tests {
         ];
         let rep = aggregate(&r);
         assert_eq!(rep.dominant_strategy.dominant, None);
+    }
+
+    use crate::scene_view::TerminalSpec;
+    use vitric_data::Schema;
+    use vitric_rules::{Engine, RuleSet};
+
+    /// 造一个声明了若干结局事件（rules 里 emit）的引擎。
+    fn engine_with_emits(emit_events: &[&str]) -> Engine {
+        let rules: Vec<serde_json::Value> = emit_events
+            .iter()
+            .enumerate()
+            .map(|(i, ev)| {
+                serde_json::json!({
+                    "id": format!("end-{i}"),
+                    "on": {"event": "input", "filter": {"action": format!("a{i}"), "phase": "pressed"}},
+                    "do": [{"emit": ev, "data": {}}]
+                })
+            })
+            .collect();
+        let schema = Schema::parse(&serde_json::json!({"components": {}}), "s.json").unwrap();
+        Engine::new(
+            RuleSet::parse(&serde_json::json!({"rules": rules}), "r.json").unwrap(),
+            schema,
+        )
+    }
+
+    #[test]
+    fn ending_coverage_flags_declared_but_unreached() {
+        // 引擎声明能 emit ending-good 和 ending-bad；运行里只触达过 ending-bad
+        let eng = engine_with_emits(&["ending-good", "ending-bad"]);
+        let r = vec![
+            labeled(StrategyKind::Random, 0, Outcome::Win, 10, vec![], vec!["ending-bad"], vec![]),
+        ];
+        let rep = aggregate_with_endings(&r, &eng, &TerminalSpec::default());
+        let ec = rep.ending_coverage.expect("传了引擎应算结局覆盖");
+        assert_eq!(ec.declared_endings, vec!["ending-bad".to_string(), "ending-good".to_string()]);
+        assert_eq!(ec.reached_endings, vec!["ending-bad".to_string()]);
+        assert_eq!(ec.unreachable_endings, vec!["ending-good".to_string()], "声明了没到的算不可达");
+    }
+
+    #[test]
+    fn ending_coverage_all_reached_is_empty_unreachable() {
+        let eng = engine_with_emits(&["ending-a", "ending-b"]);
+        let r = vec![
+            labeled(StrategyKind::Random, 0, Outcome::Win, 10, vec![], vec!["ending-a"], vec![]),
+            labeled(StrategyKind::Random, 1, Outcome::Win, 12, vec![], vec!["ending-b"], vec![]),
+        ];
+        let rep = aggregate_with_endings(&r, &eng, &TerminalSpec::default());
+        let ec = rep.ending_coverage.unwrap();
+        assert!(ec.unreachable_endings.is_empty(), "两个都到了，无不可达: {ec:?}");
+        assert_eq!(ec.reached_endings.len(), 2);
+    }
+
+    #[test]
+    fn ending_coverage_only_counts_terminal_emits() {
+        // 引擎 emit 了一个非结局事件 milestone 和一个结局 ending-x：只 ending-x 算声明结局
+        let eng = engine_with_emits(&["milestone", "ending-x"]);
+        let r = vec![labeled(StrategyKind::Random, 0, Outcome::Timeout, 50, vec![], vec!["milestone"], vec![])];
+        let rep = aggregate_with_endings(&r, &eng, &TerminalSpec::default());
+        let ec = rep.ending_coverage.unwrap();
+        assert_eq!(ec.declared_endings, vec!["ending-x".to_string()], "milestone 不是结局，不算声明");
+        assert_eq!(ec.unreachable_endings, vec!["ending-x".to_string()]);
+    }
+
+    #[test]
+    fn ending_coverage_none_without_engine() {
+        let r = vec![labeled(StrategyKind::Random, 0, Outcome::Win, 10, vec![], vec!["game-won"], vec![])];
+        let rep = aggregate(&r);
+        assert!(rep.ending_coverage.is_none(), "不传引擎=不算结局覆盖");
     }
 
     #[test]

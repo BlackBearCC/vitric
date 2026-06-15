@@ -1,0 +1,12 @@
+{
+  "components": {
+    "Story": {
+      "fields": {
+        "key": { "type": "bool", "default": false },
+        "door_open": { "type": "bool", "default": false },
+        "locked": { "type": "bool", "default": false },
+        "path": { "type": "number", "default": 0 }
+      }
+    }
+  }
+}

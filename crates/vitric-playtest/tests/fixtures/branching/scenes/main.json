@@ -1,0 +1,10 @@
+{
+  "entities": [
+    {
+      "name": "world",
+      "components": {
+        "Story": { "key": false, "door_open": false, "locked": false, "path": 0 }
+      }
+    }
+  ]
+}

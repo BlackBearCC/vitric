@@ -17,8 +17,11 @@ use vitric_rules::Engine;
 use vitric_sim::{GameLogic, Sim};
 
 use crate::scene_view::{Outcome, TerminalSpec};
+use crate::seed::Perturbation;
 use crate::session::{run_session, SessionConfig, SessionResult};
-use crate::strategy::{CoverageStrategy, GreedyStrategy, RandomStrategy, Strategy};
+use crate::strategy::{
+    CoverageStrategy, GreedyStrategy, RandomStrategy, ScriptedStrategy, Strategy,
+};
 
 /// 策略种类（spec 里用名字指定，跑的时候据此 new 出策略实例）。
 /// 是可序列化的纯标签——结果带回它，聚合器按 strategy_kind 分组。
@@ -27,10 +30,14 @@ pub enum StrategyKind {
     Random,
     Greedy,
     Coverage,
+    /// 种子探索的脚本回放局——只作**标签**（结果归类用）。脚本本身不在 SessionSpec 里
+    /// （脚本是变长的，且每条不同），由 `run_seed_swarm` 直接持有 Perturbation 构造策略。
+    Scripted,
 }
 
 impl StrategyKind {
-    /// 全部策略种类（CLI 默认轮流跑这几种用）。
+    /// 廉价策略档全集（CLI 默认轮流跑这几种用）。**不含 Scripted**——脚本回放走种子探索
+    /// 专路（`run_seed_swarm`），不进「广度覆盖」的策略轮换。
     pub const ALL: [StrategyKind; 3] =
         [StrategyKind::Random, StrategyKind::Greedy, StrategyKind::Coverage];
 
@@ -40,15 +47,20 @@ impl StrategyKind {
             StrategyKind::Random => "random",
             StrategyKind::Greedy => "greedy",
             StrategyKind::Coverage => "coverage",
+            StrategyKind::Scripted => "scripted",
         }
     }
 
     /// 按种类 + seed 造一个策略实例（PCG 播种，确定可复现）。
+    /// Scripted 不走这条路（脚本不在 seed 里）——调用即 bug，明确 panic 不静默退化。
     fn build(self, seed: u64) -> Box<dyn Strategy> {
         match self {
             StrategyKind::Random => Box::new(RandomStrategy::new(seed)),
             StrategyKind::Greedy => Box::new(GreedyStrategy::new(seed)),
             StrategyKind::Coverage => Box::new(CoverageStrategy::new(seed)),
+            StrategyKind::Scripted => {
+                panic!("Scripted 策略要带脚本，必须走 run_seed_swarm，不能用 StrategyKind::build")
+            }
         }
     }
 }
@@ -103,7 +115,7 @@ where
     Ok(LabeledResult { spec: spec.clone(), result })
 }
 
-/// 跑一整批。`factory` 必须 `Sync`（多个线程共享同一个闭包引用、各自调一次）；
+/// 跑一整批策略局。`factory` 必须 `Sync`（多个线程共享同一个闭包引用、各自调一次）；
 /// `threads` 是想用的并行度上限（实际取 `min(threads, plan 长度, available_parallelism)`）。
 ///
 /// 结果顺序与 `plan` 一致（按原始下标归位），与线程调度无关——所以串行结果和并行结果
@@ -117,35 +129,92 @@ where
     R: GameLogic,
     F: Fn() -> Result<(Sim, R, Engine), String> + Sync,
 {
-    if plan.is_empty() {
+    // 按下标跑：每条 spec 在调用线程内 boot 一份运行时 + build 策略，跑一局
+    run_indexed(plan.len(), threads, |i| run_one::<R, F>(&factory, &plan[i]))
+}
+
+/// 种子探索批跑（设计稿三节）：把一组**扰动脚本**铺到并行线程，每条用
+/// [`ScriptedStrategy`] 跑一局——脚本喂回去复现/走岔，截断的接 random 发散。
+/// 复用 `run_swarm` 同款下标并行核（`run_indexed`），所以**串行/并行结果逐项一致**，
+/// 结果可直接喂 `aggregate_with_endings`（含不可达结局）。
+///
+/// 每条结果的 spec 标 `StrategyKind::Scripted`、seed=该脚本在 plan 里的下标
+/// （让结果可对账到具体哪条扰动；脚本本身不进 spec，太长且变长）。
+/// 截断脚本（`truncate_at=Some`）的发散随机用 `explore_seed + 下标` 播种——确定可复现。
+pub fn run_seed_swarm<R, F>(
+    factory: F,
+    plan: &[Perturbation],
+    max_ticks: u64,
+    terminal: TerminalSpec,
+    explore_seed: u64,
+    threads: usize,
+) -> Result<Vec<LabeledResult>, String>
+where
+    R: GameLogic,
+    F: Fn() -> Result<(Sim, R, Engine), String> + Sync,
+{
+    run_indexed(plan.len(), threads, |i| {
+        let pert = &plan[i];
+        let (mut sim, mut logic, engine) = factory()?;
+        // 截断脚本接 random 发散；非截断脚本放完即止（None）。
+        // 发散 random 用 explore_seed + 下标播种：每条脚本一个独立可复现的发散序列。
+        let then_explore: Option<Box<dyn Strategy>> = if pert.truncate_at.is_some() {
+            Some(Box::new(RandomStrategy::new(explore_seed.wrapping_add(i as u64))))
+        } else {
+            None
+        };
+        let mut strategy = ScriptedStrategy::new(pert.script.clone(), then_explore);
+        let cfg = SessionConfig { max_ticks, seed: i as u64, terminal: terminal.clone() };
+        let result = run_session(&mut sim, &mut logic, &engine, &mut strategy, &cfg)?;
+        // spec 标 Scripted + seed=下标，便于把结果对回具体哪条扰动
+        let spec = SessionSpec {
+            strategy_kind: StrategyKind::Scripted,
+            seed: i as u64,
+            max_ticks,
+            terminal: terminal.clone(),
+        };
+        Ok(LabeledResult { spec, result })
+    })
+}
+
+/// 下标并行核：跑 `len` 个任务，第 i 个任务由 `task(i)` 定义，结果按下标归位。
+/// `run_swarm` 和 `run_seed_swarm` 共用它——线程切分/归位/fail-fast 只此一份，
+/// 保证两条路「串行/并行逐项一致」的确定性铁律是同一套保证。
+fn run_indexed<T>(
+    len: usize,
+    threads: usize,
+    task: T,
+) -> Result<Vec<LabeledResult>, String>
+where
+    T: Fn(usize) -> Result<LabeledResult, String> + Sync,
+{
+    if len == 0 {
         return Ok(Vec::new());
     }
 
     // 实际线程数：不超过想要的、不超过任务数、不超过机器核数（默认拿 available_parallelism）
     let cpu = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let n_threads = threads.max(1).min(plan.len()).min(cpu.max(1));
+    let n_threads = threads.max(1).min(len).min(cpu.max(1));
 
     // 单线程：直接串行，连 scope 都不开（小批量/单核常态，零线程开销）
     if n_threads <= 1 {
-        let mut out = Vec::with_capacity(plan.len());
-        for spec in plan {
-            out.push(run_one::<R, F>(&factory, spec)?);
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            out.push(task(i)?);
         }
         return Ok(out);
     }
 
-    // 多线程：把 plan 的**下标**轮流分给 n_threads 个桶（round-robin 切分），
-    // 每个线程跑自己那批，结果连同原始下标一起回收，最后按下标归位。
-    // 用下标而不是切片连续分段：哪种切法结果都一样（确定性不依赖切分），轮转分布更均。
+    // 多线程：把下标轮流分给 n_threads 个桶（round-robin 切分），每个线程跑自己那批，
+    // 结果连同原始下标一起回收，最后按下标归位。切法不影响结果（确定性不依赖切分）。
     let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); n_threads];
-    for (i, _) in plan.iter().enumerate() {
+    for i in 0..len {
         buckets[i % n_threads].push(i);
     }
 
-    // scope 让工作线程能借 plan/factory（栈上引用），无需 'static / Arc
+    // scope 让工作线程能借 task（栈上引用），无需 'static / Arc
     let collected: Vec<Result<Vec<(usize, LabeledResult)>, String>> = thread::scope(|scope| {
-        let factory_ref = &factory;
-        let plan_ref = plan;
+        let task_ref = &task;
         let handles: Vec<_> = buckets
             .into_iter()
             .map(|idxs| {
@@ -153,8 +222,7 @@ where
                     let mut local = Vec::with_capacity(idxs.len());
                     for i in idxs {
                         // 任一局出错就把错带出来（fail-fast，不静默丢）
-                        let lr = run_one::<R, F>(factory_ref, &plan_ref[i])?;
-                        local.push((i, lr));
+                        local.push((i, task_ref(i)?));
                     }
                     Ok(local)
                 })
@@ -164,7 +232,7 @@ where
     });
 
     // 汇总：先把所有线程的错收掉（有错就返回第一个），再按原始下标排回去
-    let mut indexed: Vec<(usize, LabeledResult)> = Vec::with_capacity(plan.len());
+    let mut indexed: Vec<(usize, LabeledResult)> = Vec::with_capacity(len);
     for chunk in collected {
         indexed.extend(chunk?);
     }
@@ -280,5 +348,73 @@ mod tests {
         let out = run_swarm(factory_winning(Some(3)), &plan, 4).unwrap();
         assert!(out.iter().all(|lr| lr.outcome() == Outcome::Win), "全部应通关");
         assert!(out.iter().all(|lr| lr.result.ticks == 4));
+    }
+
+    use crate::scene_view::Action;
+    use crate::seed::{PerturbOp, Perturbation};
+
+    fn pert(op: PerturbOp, script: Vec<(u64, &str)>, trunc: Option<u64>) -> Perturbation {
+        Perturbation {
+            op,
+            script: script
+                .into_iter()
+                .map(|(t, a)| (t, Action { action: a.to_string(), phase: "pressed".to_string() }))
+                .collect(),
+            truncate_at: trunc,
+        }
+    }
+
+    fn seed_plan() -> Vec<Perturbation> {
+        vec![
+            pert(PerturbOp::Baseline, vec![(1, "go")], None),
+            pert(PerturbOp::Drop, vec![], None),
+            pert(PerturbOp::Truncate, vec![(1, "go")], Some(2)), // 截断后 random 发散
+        ]
+    }
+
+    #[test]
+    fn seed_swarm_results_follow_plan_order_and_label_scripted() {
+        let plan = seed_plan();
+        let out = run_seed_swarm(
+            factory_winning(Some(3)),
+            &plan,
+            50,
+            TerminalSpec::default(),
+            7,
+            4,
+        )
+        .unwrap();
+        assert_eq!(out.len(), plan.len());
+        for (i, lr) in out.iter().enumerate() {
+            assert_eq!(lr.spec.strategy_kind, StrategyKind::Scripted, "脚本局标 Scripted");
+            assert_eq!(lr.spec.seed, i as u64, "seed=下标，便于对账");
+        }
+    }
+
+    #[test]
+    fn seed_swarm_serial_and_parallel_identical() {
+        let plan = seed_plan();
+        let serial =
+            run_seed_swarm(factory_winning(Some(3)), &plan, 80, TerminalSpec::default(), 11, 1)
+                .unwrap();
+        let parallel =
+            run_seed_swarm(factory_winning(Some(3)), &plan, 80, TerminalSpec::default(), 11, 8)
+                .unwrap();
+        assert_eq!(serial.len(), parallel.len());
+        for (a, b) in serial.iter().zip(parallel.iter()) {
+            assert_eq!(a.result.outcome, b.result.outcome, "结局一致");
+            assert_eq!(a.result.ticks, b.result.ticks, "tick 数一致");
+            assert_eq!(a.result.state_trace, b.result.state_trace, "状态轨迹逐项一致");
+            let ja = serde_json::to_string(&a.result.recording).unwrap();
+            let jb = serde_json::to_string(&b.result.recording).unwrap();
+            assert_eq!(ja, jb, "种子探索串/并行录像逐字节一致");
+        }
+    }
+
+    #[test]
+    fn seed_swarm_empty_plan_yields_empty() {
+        let out =
+            run_seed_swarm(factory_winning(Some(3)), &[], 50, TerminalSpec::default(), 0, 4).unwrap();
+        assert!(out.is_empty());
     }
 }
