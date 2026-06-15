@@ -605,6 +605,8 @@ pub struct GpuPresenter {
     glyphs: Option<GlyphTexture>,
     /// 已见过的素材代次——和 Dispatcher::assets_generation 比，变了就重建图集。
     seen_generation: u64,
+    /// 本机 GPU 是否支持 BC 压缩纹理（启动期定死）——热重载重建图集时照同样口径压 BC7。
+    bc_supported: bool,
     /// 顶点缓冲按需扩容（容量字节数）。
     vertex_buf: wgpu::Buffer,
     vertex_cap: u64,
@@ -636,10 +638,10 @@ impl GpuPresenter {
             force_fallback_adapter: false,
         }))
         .map_err(|e| format!("找不到可用的 GPU 适配器: {e}"))?;
-        // BC7（压缩纹理）：适配器**支持**就请求 TEXTURE_COMPRESSION_BC，让压缩图集
-        // 能直接上传（几百帧角色几十 MB 显存 vs RGBA8 全驻留的 8.5G）。适配器不支持
-        // 就不请求（设备照常创建，普通 RGBA8 路径不受影响）——真要上传压缩图集时
-        // 在 upload_bc7_texture 里**显式报错**，不静默回退 RGBA8 膨胀显存。
+        // BC7（压缩纹理）：适配器**支持**就请求 TEXTURE_COMPRESSION_BC，build_atlas 据此
+        // 把**整张运行时图集**压成 BC7 上传（几百帧角色几十 MB 显存 vs RGBA8 全驻留的 8.5G）。
+        // 适配器不支持就不请求，build_atlas 退普通 RGBA8 路径，但启动期**明说**未压缩
+        // （不硬失败整局——白块/字形/UI 也在这张图集里；也不静默膨胀，让用户知道）。
         let bc_supported = adapter.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("vitric"),
@@ -749,7 +751,7 @@ impl GpuPresenter {
             mapped_at_creation: false,
         });
         let (atlas, bind_group) =
-            build_atlas(&device, &queue, &bind_layout, &globals_buf, &sampler, assets)?;
+            build_atlas(&device, &queue, &bind_layout, &globals_buf, &sampler, assets, bc_supported)?;
         // 项目挂了矢量字体才建字形图集（没挂 = 零开销，点阵字形已在主图集里）
         let glyphs = assets
             .font()
@@ -777,6 +779,7 @@ impl GpuPresenter {
             atlas,
             glyphs,
             seen_generation: generation,
+            bc_supported,
             vertex_buf,
             vertex_cap: INITIAL_VB,
             clear,
@@ -805,6 +808,7 @@ impl GpuPresenter {
                 &self.globals_buf,
                 &self.sampler,
                 assets,
+                self.bc_supported,
             )?;
             self.atlas = atlas;
             self.bind_group = bind_group;
@@ -1372,104 +1376,23 @@ fn create_fullscreen_pipeline(
 }
 
 // ---------------------------------------------------------------------------
-// 压缩纹理上传（BC7）：帧进口图集的极致内存路径
-// ---------------------------------------------------------------------------
-
-/// 把帧进口的 BC7 图集产物（VBC7 文件字节，见 frames::write_bc7）上传成一张
-/// 压缩纹理。**显存只占 BC7 字节本身**（8bpp，RGBA8 的 1/4，加去重额外省）——
-/// 这是「几百帧角色控制在几十 MB」对照桌宠 8.5G 的落点。
-///
-/// 设备不支持 `TEXTURE_COMPRESSION_BC` 时**显式报错、不 fallback** 到 RGBA8
-/// 静默膨胀（合同第六节：让问题暴露，用户知道这台机器没 BC 支持）。
-///
-/// 真机显存实测 + 视觉验证留 Windows GPU 机；容器无 GPU 跑不到这里（present 路径
-/// 才调），但整段随 `cargo check --target x86_64-pc-windows-gnu` 一起交叉编译过。
-///
-/// 确定性：压缩纹理只影响 GPU 视觉，**不进模拟状态/哈希**——模拟只认帧索引/clip 名。
-#[allow(dead_code)] // 上传链路接入 present 留阶段 1 之后；先把可交叉编译的上传路径锁住
-pub(crate) fn upload_bc7_texture(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    vbc7: &[u8],
-) -> Result<wgpu::Texture, String> {
-    // 设备能力门：不支持 BC 显式报错（不静默回退）
-    bc7_support_gate(device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC))?;
-    let (w, h, bx, by, off) = vitric_cli_parse_bc7(vbc7)?;
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("vitric-atlas-bc7"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        // BC7 非 sRGB：采样回原始字节空间，和主图集 Rgba8Unorm 同口径（染色乘法在字节空间）
-        format: wgpu::TextureFormat::Bc7RgbaUnorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    // BC7 一块 4x4 像素 = 16 字节；bytes_per_row = 每行块数 × 16
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &vbc7[off..],
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(bx * 16),
-            rows_per_image: Some(by),
-        },
-        // 拷贝范围按块网格的像素尺寸（4 的倍数），不是裁回的真实尺寸
-        wgpu::Extent3d { width: bx * 4, height: by * 4, depth_or_array_layers: 1 },
-    );
-    Ok(texture)
-}
-
-/// 解析 VBC7 头（薄封装 frames::parse_bc7_header，gpu 侧只要这一处）。
-fn vitric_cli_parse_bc7(bytes: &[u8]) -> Result<(u32, u32, u32, u32, usize), String> {
-    vitric_cli::frames::parse_bc7_header(bytes)
-}
-
-/// BC 支持门（纯函数，无 GPU 可单测）：不支持就**显式报错、不 fallback**。
-/// 抽出来因为容器无 GPU 造不出 wgpu::Device——错误路径靠这条单测锁住。
-fn bc7_support_gate(bc_supported: bool) -> Result<(), String> {
-    if bc_supported {
-        return Ok(());
-    }
-    Err(
-        "本机 GPU 不支持 BC 压缩纹理（缺 TEXTURE_COMPRESSION_BC）。\
-         压缩图集上传需要它——不静默回退 RGBA8（那会让显存悄悄膨胀回 4 倍）。\
-         提示：换支持 BC 的桌面 GPU，或用未压缩 RGBA8 图集（--no-compress 出的产物）"
-            .to_string(),
-    )
-}
-
-#[cfg(test)]
-mod bc7_gate_tests {
-    use super::*;
-
-    /// 不支持 BC 的设备：显式报错（带修法提示），不静默回退 RGBA8。
-    #[test]
-    fn unsupported_device_errors_explicitly() {
-        let err = bc7_support_gate(false).unwrap_err();
-        assert!(err.contains("TEXTURE_COMPRESSION_BC"), "点名缺的 feature: {err}");
-        assert!(err.contains("不静默回退"), "明说不 fallback: {err}");
-    }
-
-    /// 支持 BC 的设备：放行。
-    #[test]
-    fn supported_device_passes() {
-        assert!(bc7_support_gate(true).is_ok());
-    }
-}
-
-// ---------------------------------------------------------------------------
 // 图集构建：白块 + 128 字形 + 全部素材，一次性打进一张纹理
 // ---------------------------------------------------------------------------
 
 /// 图集固定宽度：单图上限 2048（Assets 导入时拦的）+ 两侧 1px 复制边。
 const ATLAS_W: u32 = 2050;
+
+/// 图集纹理的**真实尺寸**：BC7 按 4×4 块编码，宽高各向上取整到 4 的倍数（块网格），
+/// RGBA8 原样。UV 归一化分母必须用这个尺寸——否则 BC7 的取整 padding 会让整张采样
+/// 整体偏移（内容仍在 (0..逻辑宽, 0..逻辑高) 子区，分母用取整后尺寸 UV 才精确指进内容）。
+/// 纯函数，容器无 GPU 也能单测锁住「分母=纹理真实尺寸」这条不变量。
+fn atlas_tex_dims(bc7: bool, w: u32, h: u32) -> (u32, u32) {
+    if bc7 {
+        (w.div_ceil(4) * 4, h.div_ceil(4) * 4)
+    } else {
+        (w, h)
+    }
+}
 
 fn build_atlas(
     device: &wgpu::Device,
@@ -1478,6 +1401,7 @@ fn build_atlas(
     globals_buf: &wgpu::Buffer,
     sampler: &wgpu::Sampler,
     assets: &Assets,
+    bc_supported: bool,
 ) -> Result<(Atlas, wgpu::BindGroup), String> {
     // 待打包项：(键, 宽, 高, RGBA 像素)。顺序固定：白块、字形、素材（BTreeMap 已排序）
     let mut items: Vec<(String, u32, u32, Vec<u8>)> = Vec::new();
@@ -1538,39 +1462,84 @@ fn build_atlas(
         }
     }
 
+    // 格式选择：设备支持 BC 就把**整张运行时图集**压成 BC7（显存 1/4，正面攻 8.5G 那种
+    // RGBA8 全驻留的根）。白块/点阵字形/任何纯色区在本编码器的 min/max 端点下**无损**——
+    // 白=通道最大、透明黑=最小，都精确落在端点上；只有精灵美术的平滑渐变块有损，那正是
+    // BC7 设计来扛、也是合同里选 BC7 时已接受的取舍。不支持 BC 的设备不硬失败整局（白块/
+    // 字形/UI 也在这张图集里），保持 RGBA8——但启动期**明说**，不让显存悄悄膨胀回 4 倍。
+    let mb = |w: u32, h: u32| w as u64 * h as u64 * 4 / 1_048_576;
+    let bc7 = bc_supported.then(|| vitric_cli::bc7::encode_rgba8(ATLAS_W, atlas_h, &pixels)).transpose()?;
+    let (tex_w, tex_h) = atlas_tex_dims(bc7.is_some(), ATLAS_W, atlas_h);
+    match &bc7 {
+        Some((bx, by, _)) => eprintln!(
+            "[vitric] 素材图集 {ATLAS_W}x{atlas_h} → BC7 压缩纹理（显存 {}MB → {}MB，1/4）",
+            mb(ATLAS_W, atlas_h),
+            (*bx as u64 * *by as u64 * vitric_cli::bc7::BLOCK_BYTES as u64) / 1_048_576
+        ),
+        None => eprintln!(
+            "[vitric] 素材图集 {ATLAS_W}x{atlas_h} 保持 RGBA8（本机 GPU 不支持 BC 压缩，\
+             显存未压缩 {}MB；换支持 BC 的桌面 GPU 可砍 4 倍）",
+            mb(ATLAS_W, atlas_h)
+        ),
+    }
+
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("vitric-atlas"),
-        size: wgpu::Extent3d { width: ATLAS_W, height: atlas_h, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm, // 非 sRGB：采样回原始字节，染色乘法在字节空间
+        // 两路都非 sRGB：采样回原始字节空间，染色乘法在字节空间（和 CPU 路径同口径）
+        format: match &bc7 {
+            Some(_) => wgpu::TextureFormat::Bc7RgbaUnorm,
+            None => wgpu::TextureFormat::Rgba8Unorm,
+        },
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &pixels,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(ATLAS_W * 4),
-            rows_per_image: Some(atlas_h),
-        },
-        wgpu::Extent3d { width: ATLAS_W, height: atlas_h, depth_or_array_layers: 1 },
-    );
+    match &bc7 {
+        // BC7：一块 4×4=16 字节，bytes_per_row=每行块数×16，拷贝范围按块网格的取整尺寸
+        Some((bx, by, blocks)) => queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            blocks,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bx * vitric_cli::bc7::BLOCK_BYTES as u32),
+                rows_per_image: Some(*by),
+            },
+            wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
+        ),
+        None => queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(ATLAS_W * 4),
+                rows_per_image: Some(atlas_h),
+            },
+            wgpu::Extent3d { width: ATLAS_W, height: atlas_h, depth_or_array_layers: 1 },
+        ),
+    }
 
-    // UV 索引表
+    // UV 索引表：按**纹理真实尺寸** tex_w/tex_h 归一化（见 atlas_tex_dims——BC7 取整后
+    // 分母更大，内容子区的 UV 精确指进内容，padding 行列永不被采样）。RGBA8 路径
+    // tex_w/tex_h == ATLAS_W/atlas_h，UV 与改动前逐位相同（零回退）。
     let uv = |ox: u32, oy: u32, w: u32, h: u32| -> UvRect {
         [
-            ox as f32 / ATLAS_W as f32,
-            oy as f32 / atlas_h as f32,
-            (ox + w) as f32 / ATLAS_W as f32,
-            (oy + h) as f32 / atlas_h as f32,
+            ox as f32 / tex_w as f32,
+            oy as f32 / tex_h as f32,
+            (ox + w) as f32 / tex_w as f32,
+            (oy + h) as f32 / tex_h as f32,
         ]
     };
     let mut images = std::collections::BTreeMap::new();
@@ -1578,8 +1547,8 @@ fn build_atlas(
     let mut glyphs = [[0.0f32; 4]; 128];
     for ((key, w, h, _), (ox, oy)) in items.iter().zip(&placements) {
         if key == "\u{0}white" {
-            // 白块取中心点（2x2 的正中），四角同 UV 平采样
-            white = [(*ox as f32 + 1.0) / ATLAS_W as f32, (*oy as f32 + 1.0) / atlas_h as f32];
+            // 白块取中心点（2x2 的正中），四角同 UV 平采样；分母同 uv 闭包用纹理真实尺寸
+            white = [(*ox as f32 + 1.0) / tex_w as f32, (*oy as f32 + 1.0) / tex_h as f32];
         } else if let Some(i) = key.strip_prefix('\u{0}').and_then(|k| k.strip_prefix("glyph")) {
             glyphs[i.parse::<usize>().expect("字形键自己拼的")] = uv(*ox, *oy, *w, *h);
         } else {
@@ -2339,6 +2308,42 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// RGBA8 路径：纹理真实尺寸 == 逻辑尺寸（UV 分母不变，改动前后逐位相同）。
+    #[test]
+    fn atlas_tex_dims_rgba8_unchanged() {
+        assert_eq!(atlas_tex_dims(false, ATLAS_W, 100), (ATLAS_W, 100));
+        assert_eq!(atlas_tex_dims(false, ATLAS_W, 101), (ATLAS_W, 101));
+    }
+
+    /// BC7 路径：宽高各向上取整到 4 的倍数（块网格），分母必须用取整后尺寸。
+    #[test]
+    fn atlas_tex_dims_bc7_rounds_up_to_block_grid() {
+        // 2050 不是 4 的倍数 → 2052；高 100 已是 4 的倍数 → 不变
+        assert_eq!(atlas_tex_dims(true, ATLAS_W, 100), (2052, 100));
+        // 高 101 → 104
+        assert_eq!(atlas_tex_dims(true, ATLAS_W, 101), (2052, 104));
+        // 取整后必是 4 的倍数（GPU 块拷贝的硬要求）
+        for h in [1u32, 3, 4, 7, 99, 2048] {
+            let (tw, th) = atlas_tex_dims(true, ATLAS_W, h);
+            assert_eq!((tw % 4, th % 4), (0, 0), "BC7 纹理尺寸必须 4 对齐");
+        }
+    }
+
+    /// 关键不变量：BC7 取整后，内容子区右下角的 UV 仍 < 1.0（精确指进真实内容，
+    /// 不越界到 padding 行列）——这是「分母用纹理真实尺寸」防采样整体偏移的核心。
+    #[test]
+    fn bc7_content_uv_stays_inside_real_content() {
+        let (logical_w, logical_h) = (ATLAS_W, 101u32);
+        let (tex_w, tex_h) = atlas_tex_dims(true, logical_w, logical_h);
+        // 内容最右下一像素的右/下边界 UV（uv 闭包同款公式）
+        let u1 = logical_w as f32 / tex_w as f32;
+        let v1 = logical_h as f32 / tex_h as f32;
+        assert!(u1 < 1.0 && v1 < 1.0, "内容边界 UV 必须 < 1（padding 在外侧不被采样）");
+        // 反算回像素：UV×纹理尺寸 落回逻辑内容尺寸（不偏移）
+        assert_eq!((u1 * tex_w as f32).round() as u32, logical_w);
+        assert_eq!((v1 * tex_h as f32).round() as u32, logical_h);
+    }
 
     /// 不碰 GPU 的假图集：白点 + 测试图（hero 带法线配对，gem 没有）+ 全空字形。
     fn fake_atlas() -> Atlas {

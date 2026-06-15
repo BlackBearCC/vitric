@@ -34,8 +34,12 @@ pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8]) -> Result<(u32, u32, V
     }
     let bx = width.div_ceil(4);
     let by = height.div_ceil(4);
-    let mut out = Vec::with_capacity(bx as usize * by as usize * BLOCK_BYTES);
-    for byi in 0..by {
+    let row_bytes = bx as usize * BLOCK_BYTES;
+    let mut out = vec![0u8; by as usize * row_bytes];
+
+    // 编码一整块行 byi 到 dst（dst 恰是该行的 bx×16 字节）。块只读自己的 4×4 像素、
+    // 写自己固定的 16 字节，无任何共享可变状态 → 串行/并行**逐字节同结果**。
+    let fill_row = |byi: u32, dst: &mut [u8]| {
         for bxi in 0..bx {
             // 取 4×4 像素（越界 clamp 到最近边像素，和打包复制边一致）
             let mut block = [[0u8; 4]; 16];
@@ -47,8 +51,34 @@ pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8]) -> Result<(u32, u32, V
                     block[(py * 4 + px) as usize].copy_from_slice(&rgba[o..o + 4]);
                 }
             }
-            out.extend_from_slice(&encode_block_mode6(&block));
+            let d = bxi as usize * BLOCK_BYTES;
+            dst[d..d + BLOCK_BYTES].copy_from_slice(&encode_block_mode6(&block));
         }
+    };
+
+    // 几百上千帧的角色图集能到几十 MB，串行编码要几秒卡启动。块行间互不依赖、各写
+    // 不相交的输出切片，所以按块行均分给 CPU 核并行——`thread::scope` 借用 rgba/out，
+    // 输出 disjoint，结果与串行逐字节一致（无浮点 RNG、无顺序依赖，确定性不破）。小图
+    // （< PAR_MIN_ROWS 块行）串行省去线程开销。纯 std，不引第三方依赖。
+    const PAR_MIN_ROWS: u32 = 64;
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    if threads <= 1 || by < PAR_MIN_ROWS {
+        for (byi, dst) in out.chunks_mut(row_bytes).enumerate() {
+            fill_row(byi as u32, dst);
+        }
+    } else {
+        let rows_per = (by as usize).div_ceil(threads);
+        let fill_row = &fill_row; // 各线程共享只读闭包（捕获 &rgba，Sync）
+        std::thread::scope(|s| {
+            for (chunk_i, dst_chunk) in out.chunks_mut(rows_per * row_bytes).enumerate() {
+                let base = (chunk_i * rows_per) as u32;
+                s.spawn(move || {
+                    for (i, dst) in dst_chunk.chunks_mut(row_bytes).enumerate() {
+                        fill_row(base + i as u32, dst);
+                    }
+                });
+            }
+        });
     }
     Ok((bx, by, out))
 }
@@ -261,6 +291,37 @@ impl BitReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 并行编码逐字节 == 串行：encode_rgba8 大图走多线程块行切分，结果必须和一块块
+    /// 顺序编码完全相同（确定性是 `--frames`/`vitric check` 的硬契约，并行不许破）。
+    #[test]
+    fn parallel_encode_byte_identical_to_serial() {
+        // 320px 高 = 80 块行 > PAR_MIN_ROWS(64)，确保走并行路径；宽度非 4 倍数测取整
+        let (w, h) = (70u32, 320u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        // 造有梯度的内容（不是纯色，逼并行/串行在"有损块"上也一致）
+        for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+            px.copy_from_slice(&[(i % 251) as u8, (i / 7 % 253) as u8, (i / 13 % 247) as u8, 255]);
+        }
+        let (bx, by, par) = encode_rgba8(w, h, &rgba).unwrap();
+        // 串行参照：一块块顺序编码
+        let mut serial = Vec::with_capacity(bx as usize * by as usize * BLOCK_BYTES);
+        for byi in 0..by {
+            for bxi in 0..bx {
+                let mut block = [[0u8; 4]; 16];
+                for py in 0..4u32 {
+                    for px in 0..4u32 {
+                        let sx = (bxi * 4 + px).min(w - 1);
+                        let sy = (byi * 4 + py).min(h - 1);
+                        let o = (sy as usize * w as usize + sx as usize) * 4;
+                        block[(py * 4 + px) as usize].copy_from_slice(&rgba[o..o + 4]);
+                    }
+                }
+                serial.extend_from_slice(&encode_block_mode6(&block));
+            }
+        }
+        assert_eq!(par, serial, "并行编码必须与串行逐字节一致");
+    }
 
     /// mode6 块恒 16 字节，4×4 像素 = 8bpp。
     #[test]
