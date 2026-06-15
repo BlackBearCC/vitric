@@ -7,6 +7,7 @@ pub mod frames;
 pub mod gate;
 pub mod llm;
 pub mod normals;
+pub mod playtest_llm;
 pub mod runtime;
 pub mod team;
 pub mod turf;
