@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
+use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use serde_json::{json, Map, Value};
 
-use crate::{fnv1a_64, EcsError, EntityId};
+use crate::hash::Fnv1aWriter;
+use crate::{EcsError, EntityId};
 
 /// 世界：实体 + 组件的唯一容器。
 ///
@@ -321,12 +323,18 @@ impl World {
         Ok(())
     }
 
-    /// 状态哈希：对快照的规范 JSON 字节做 FNV-1a。
+    /// 状态哈希：对世界的规范 JSON 字节做 FNV-1a。
     /// 同状态必同哈希；录像回放靠它判定「一帧都没跑偏」。
+    ///
+    /// **流式、零中间分配**：直接把规范序列化喂进 `Fnv1aWriter`，绕过 `snapshot()` 的
+    /// 整世界深拷 + `to_string` 的整世界字符串——两个全世界级分配都省掉。字节与
+    /// `fnv1a_64(to_string(snapshot()))` **逐位相同**（[`CanonicalWorld`] 镜像 snapshot
+    /// 的结构与键序；由 `canonical_hash_byte_identical_to_snapshot` 锁死，改一位都报红），
+    /// 所以已落盘的录像校验点不受影响。
     pub fn state_hash(&self) -> u64 {
-        let canonical =
-            serde_json::to_string(&self.snapshot()).expect("快照必可序列化");
-        fnv1a_64(canonical.as_bytes())
+        let mut hasher = Fnv1aWriter::new();
+        serde_json::to_writer(&mut hasher, &CanonicalWorld(self)).expect("世界必可规范序列化");
+        hasher.finish()
     }
 
     fn check_alive(&self, id: EntityId, op: &str) -> Result<(), EcsError> {
@@ -335,6 +343,75 @@ impl World {
         } else {
             Err(EcsError::DeadEntity { id, op: op.to_string() })
         }
+    }
+}
+
+/// 规范序列化包装：按 [`World::snapshot`] **完全相同**的结构与键序把世界序列化出去，
+/// 但**借用**组件值（不深拷）——给 [`World::state_hash`] 流式哈希用，字节与
+/// `to_string(snapshot())` 逐位一致。
+///
+/// 键序对齐 serde_json 默认（无 `preserve_order`）的 `Map`＝`BTreeMap` 字典序：
+/// 顶层 `entities < free < generations < slots`，实体内 `components < id < name`，
+/// 组件按组件名排序。组件值本身是 `&Value`，由 serde_json 原样序列化（和 snapshot 里
+/// 那份 clone 出来的 Value 序列化字节相同）——这是「不深拷却逐位一致」的关键。
+struct CanonicalWorld<'a>(&'a World);
+
+impl Serialize for CanonicalWorld<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let w = self.0;
+        // 顶层四键，字典序：entities, free, generations, slots
+        let mut m = s.serialize_map(Some(4))?;
+        m.serialize_entry("entities", &EntitiesSer(w))?;
+        m.serialize_entry("free", &w.free)?;
+        m.serialize_entry("generations", &w.generations)?;
+        m.serialize_entry("slots", &w.generations.len())?;
+        m.end()
+    }
+}
+
+struct EntitiesSer<'a>(&'a World);
+
+impl Serialize for EntitiesSer<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let ids = self.0.entities();
+        let mut seq = s.serialize_seq(Some(ids.len()))?;
+        for id in ids {
+            seq.serialize_element(&EntitySer(self.0, id))?;
+        }
+        seq.end()
+    }
+}
+
+struct EntitySer<'a>(&'a World, EntityId);
+
+impl Serialize for EntitySer<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let (w, id) = (self.0, self.1);
+        let name = w.name_of(id);
+        // 实体键字典序：components, id, name（name 可缺，和 snapshot 一致）
+        let mut m = s.serialize_map(Some(if name.is_some() { 3 } else { 2 }))?;
+        m.serialize_entry("components", &ComponentsSer(w, id))?;
+        m.serialize_entry("id", &id.to_string())?;
+        if let Some(n) = name {
+            m.serialize_entry("name", n)?;
+        }
+        m.end()
+    }
+}
+
+struct ComponentsSer<'a>(&'a World, EntityId);
+
+impl Serialize for ComponentsSer<'_> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let (w, id) = (self.0, self.1);
+        // components_of 源自 BTreeMap 已是字典序；这里 entry 顺序即输出顺序，和 snapshot
+        // 把它们塞进 Map(BTreeMap) 后的序列化序一致。
+        let names = w.components_of(id);
+        let mut m = s.serialize_map(Some(names.len()))?;
+        for name in &names {
+            m.serialize_entry(name, &w.components[name][&id.index])?;
+        }
+        m.end()
     }
 }
 
@@ -448,6 +525,7 @@ fn type_name(v: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fnv1a_64; // 等价性测试比对老路径用；非测试构建里 state_hash 已不用它
 
     fn pos(x: f64, y: f64) -> Value {
         json!({"x": x, "y": y})
@@ -602,5 +680,44 @@ mod tests {
         let h0 = w.state_hash();
         w.set_field(e, "Position.x", json!(0.1)).unwrap();
         assert_ne!(w.state_hash(), h0);
+    }
+
+    /// 流式 state_hash 必须与老路径 `fnv1a(to_string(snapshot()))` **逐位一致**——
+    /// 这是已落盘录像校验点不被打破的保证（老路径正是它们的生成者）。改一位都报红。
+    #[test]
+    fn canonical_hash_byte_identical_to_snapshot() {
+        let old = |w: &World| fnv1a_64(serde_json::to_string(&w.snapshot()).unwrap().as_bytes());
+
+        // 形态1：空世界
+        let w = World::new();
+        assert_eq!(w.state_hash(), old(&w), "空世界");
+
+        // 形态2：单实体单组件
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", pos(3.0, 4.0)).unwrap();
+        assert_eq!(w.state_hash(), old(&w), "单实体");
+
+        // 形态3：多实体 + 有名/无名 + 多组件 + 嵌套值 + despawn 留代数痕迹 + unicode 名 + null/bool
+        let mut w = World::new();
+        let p = w.spawn_named("玩家").unwrap();
+        w.set_component(p, "Position", pos(1.5, -2.0)).unwrap();
+        w.set_component(p, "Inventory", json!({"items": [{"id": "sword", "n": 2}], "gold": 99}))
+            .unwrap();
+        let tmp = w.spawn();
+        w.set_component(tmp, "Position", pos(0.0, 0.0)).unwrap();
+        w.despawn(tmp).unwrap();
+        let n = w.spawn();
+        w.set_component(n, "Velocity", json!({"x": 0.0, "y": 9.81})).unwrap();
+        w.set_component(n, "Health", json!({"hp": 100, "alive": true, "tag": null})).unwrap();
+        assert_eq!(w.state_hash(), old(&w), "复杂世界");
+
+        // 形态4：组件名乱序插入也等价（键序由序列化排，不靠插入序）
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Zeta", json!({"z": 1})).unwrap();
+        w.set_component(e, "Alpha", json!({"a": 1})).unwrap();
+        w.set_component(e, "Mid", json!({"m": 1})).unwrap();
+        assert_eq!(w.state_hash(), old(&w), "组件名乱序");
     }
 }
