@@ -1,0 +1,9 @@
+{
+  "components": {
+    "Resources": {
+      "fields": {
+        "gold": { "type": "number", "default": 100.0 }
+      }
+    }
+  }
+}

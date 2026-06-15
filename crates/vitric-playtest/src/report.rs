@@ -21,6 +21,22 @@ use crate::swarm::{LabeledResult, StrategyKind};
 /// 「末尾连续多少 tick 状态哈希完全不变」算冻结候选的阈值（设计稿：K 默认 60）。
 pub const DEFAULT_FREEZE_K: usize = 60;
 
+/// 跑飞判据阈值（设计稿四阶段「runaway: max>初值的 1000 倍或 >1e6」）。注释说明、可后续配：
+/// - 末值/峰值 ≫ 首值（`> first × RUNAWAY_RATIO`）说明这字段无界长——单看绝对值会冤判
+///   本来就大的字段，看相对倍率更稳；
+/// - **或**峰值 `> RUNAWAY_ABS` 绝对上界（首值为 0/负时倍率失效，用绝对阈兜底）；
+/// - 且 `monotonic_up`（只增不减）——真跑飞是单向爆涨，一涨一跌的波动不算。
+///
+/// 两条任一命中即候选（诚实标候选，合法强成长也可能命中，留人复核）。
+const RUNAWAY_RATIO: f64 = 1000.0;
+const RUNAWAY_ABS: f64 = 1e6;
+
+/// 一招鲜判据：某动作在通关局注入里的占比阈值（≥ 这个比例 → 候选）。
+/// 0.8 = 通关全靠这一招按了八成以上，其他动作几乎没用——选择意义存疑。
+const DOMINANT_ACTION_SHARE: f64 = 0.8;
+/// 一招鲜至少要有这么多通关局垫底才下论断（样本太小不算「碾压」）。
+const DOMINANT_ACTION_MIN_WINS: usize = 3;
+
 /// 内建事件名：这些事件不算「某个 input 动作引发了规则响应」——它们是引擎机制，
 /// 跟某个 input 动作有没有被规则接住无关：
 /// - `start`：sim 在 tick 0 无条件发的生命周期事件（每局都有，与动作无关）；
@@ -125,12 +141,75 @@ pub struct StrategyStats {
     pub median_win_ticks: Option<u64>,
 }
 
-/// 主导策略：分策略表现 + 「某策略碾压」标记。
+/// 主导策略：分策略表现 + 「某策略碾压」标记 + 「一招鲜」动作标记。
 #[derive(Debug, Clone, Serialize)]
 pub struct DominantStrategy {
     pub per_strategy: Vec<StrategyStats>,
     /// 若某策略通关率 ≥2× 次优且样本足（每策略 ≥4 局），标出它的名字；否则 None。
     pub dominant: Option<String>,
+    /// **一招鲜**候选（设计稿五节「一招鲜/主导策略」、十一节四阶段「主导策略深化」）：
+    /// 在**通关局**里某单个动作高频出现、其他动作几乎不出现 → 这一招碾压其他玩法、
+    /// 别的选择没意义。诚实标「候选」（高频≠唯一致胜，但值得人复核选择设计）。None=无此现象。
+    pub dominant_action: Option<DominantAction>,
+}
+
+/// 一招鲜动作候选：通关局里某动作占了绝大多数注入。
+#[derive(Debug, Clone, Serialize)]
+pub struct DominantAction {
+    /// 这个霸榜的动作名。
+    pub action: String,
+    /// 它在所有通关局注入总数里的占比（0..1）。
+    pub share: f64,
+    /// 统计基于多少局通关局。
+    pub winning_sessions: usize,
+}
+
+/// 数值崩维度（设计稿五节「数值崩」、十一节四阶段验收）。三类候选都按**字段名聚类**报，
+/// 诚实标「候选」（合法的强成长曲线也可能像跑飞，留人复核；每条挂得到可重放录像）。
+#[derive(Debug, Clone, Serialize)]
+pub struct NumericBreakage {
+    /// 跑飞候选：某字段在多局里 max 极大、末值≫首值且只增不减（经济无界增长）。
+    pub runaway: Vec<RunawayField>,
+    /// 崩盘软锁候选：某字段触达 0 且**那一局落进了卡死簇**（资源归零后世界冻结）。
+    pub collapse: Vec<CollapseField>,
+    /// 溢出候选：某字段出现过 inf/nan（数值溢出/除零的硬信号）。
+    pub non_finite: Vec<NonFiniteField>,
+}
+
+/// 一个跑飞字段（按字段名聚类的若干局）。
+#[derive(Debug, Clone, Serialize)]
+pub struct RunawayField {
+    /// 数值字段路径（如 `treasury/Resources.gold`）。
+    pub field: String,
+    /// 命中跑飞判据的局数。
+    pub hits: usize,
+    /// 这些局里观测到的最大 max（跑成多大）。
+    pub peak_max: f64,
+    /// 代表局（拿一局的策略/seed/录像，能据此重放看跑飞过程）。
+    pub sample_strategy: String,
+    pub sample_seed: u64,
+    pub sample_recording: Recording,
+}
+
+/// 一个崩盘字段（按字段名聚类的若干局）。
+#[derive(Debug, Clone, Serialize)]
+pub struct CollapseField {
+    pub field: String,
+    /// 命中「归零 + 那局卡死」的局数。
+    pub hits: usize,
+    pub sample_strategy: String,
+    pub sample_seed: u64,
+    pub sample_recording: Recording,
+}
+
+/// 一个出现过非有限值的字段。
+#[derive(Debug, Clone, Serialize)]
+pub struct NonFiniteField {
+    pub field: String,
+    pub hits: usize,
+    pub sample_strategy: String,
+    pub sample_seed: u64,
+    pub sample_recording: Recording,
 }
 
 /// 地板报告（机器 JSON + 人话 summary）。第 2 阶段的几个扎实维度。
@@ -148,6 +227,8 @@ pub struct Report {
     /// 疑似惰性动作（轻量启发式候选）。
     pub inert_actions: Vec<String>,
     pub dominant_strategy: DominantStrategy,
+    /// 数值崩：经济跑飞/崩盘软锁/溢出（设计稿四阶段）。诚实标候选。
+    pub numeric_breakage: NumericBreakage,
     /// 人话摘要：一两句把上面最关键的几条说清。
     pub summary: String,
 }
@@ -187,6 +268,9 @@ fn aggregate_inner(
     let pacing = aggregate_pacing(results);
     let inert_actions = aggregate_inert(results);
     let dominant_strategy = aggregate_dominant(results);
+    // 数值崩要知道「哪些局卡死了」来判 collapse——用同一套冻结判据算出卡死局下标集合。
+    let stuck_idx = stuck_session_indices(results, freeze_k);
+    let numeric_breakage = aggregate_numeric_breakage(results, &stuck_idx);
     let summary = build_summary(
         &outcome_distribution,
         &reachability,
@@ -194,6 +278,7 @@ fn aggregate_inner(
         &stuck_clusters,
         &inert_actions,
         &dominant_strategy,
+        &numeric_breakage,
     );
     Report {
         sessions: results.len(),
@@ -204,6 +289,7 @@ fn aggregate_inner(
         pacing,
         inert_actions,
         dominant_strategy,
+        numeric_breakage,
         summary,
     }
 }
@@ -276,31 +362,48 @@ fn aggregate_reachability(results: &[LabeledResult], dist: &OutcomeDistribution)
     Reachability { reached_events: reached.into_iter().collect(), unbeatable_by_swarm }
 }
 
+/// 一局是否「卡死」：Timeout + 末尾连续相同 state_hash ≥ K。卡死即返 Some(冻结 hash)，否则 None。
+/// 软锁聚类和数值崩的 collapse 判定共用它——同一套冻结判据，不各写一份免得阈值漂移。
+fn frozen_tail_hash(lr: &LabeledResult, freeze_k: usize) -> Option<u64> {
+    // Timeout 才可能是软锁；Win/Lose 是正常到了尽头，不算卡死
+    if lr.result.outcome != Outcome::Timeout {
+        return None;
+    }
+    let trace = &lr.result.state_trace;
+    let last = *trace.last()?;
+    // 从末尾往前数：末值连续重复了多少 tick（末尾冻结长度）
+    let mut run = 0usize;
+    for &h in trace.iter().rev() {
+        if h == last {
+            run += 1;
+        } else {
+            break;
+        }
+    }
+    if run >= freeze_k {
+        Some(last)
+    } else {
+        None
+    }
+}
+
+/// 卡死局的下标集合（数值崩 collapse 判定要拿它和「归零字段」求交）。
+fn stuck_session_indices(results: &[LabeledResult], freeze_k: usize) -> BTreeSet<usize> {
+    results
+        .iter()
+        .enumerate()
+        .filter(|(_, lr)| frozen_tail_hash(lr, freeze_k).is_some())
+        .map(|(i, _)| i)
+        .collect()
+}
+
 /// 软锁候选：每局看末尾连续相同的 state_hash 跑了多长。≥K 且没到终止 → 冻结候选。
 /// 按「冻结时的 hash」分桶，每桶命中局数 + 一条代表录像。
 fn aggregate_stuck(results: &[LabeledResult], freeze_k: usize) -> Vec<StuckCluster> {
     // 桶：frozen_hash -> (命中数, 代表局)。BTreeMap 保证输出顺序确定。
     let mut buckets: BTreeMap<u64, (usize, &LabeledResult)> = BTreeMap::new();
     for lr in results {
-        // Timeout 才可能是软锁；Win/Lose 是正常到了尽头，不算卡死
-        if lr.result.outcome != Outcome::Timeout {
-            continue;
-        }
-        let trace = &lr.result.state_trace;
-        if trace.is_empty() {
-            continue;
-        }
-        // 从末尾往前数：末值连续重复了多少 tick（末尾冻结长度）
-        let last = *trace.last().expect("非空");
-        let mut run = 0usize;
-        for &h in trace.iter().rev() {
-            if h == last {
-                run += 1;
-            } else {
-                break;
-            }
-        }
-        if run >= freeze_k {
+        if let Some(last) = frozen_tail_hash(lr, freeze_k) {
             let entry = buckets.entry(last).or_insert((0, lr));
             entry.0 += 1;
             // 代表局保第一个遇到的（BTreeMap 输出序确定，命中数累加）
@@ -316,6 +419,94 @@ fn aggregate_stuck(results: &[LabeledResult], freeze_k: usize) -> Vec<StuckClust
             sample_recording: rep.result.recording.clone(),
         })
         .collect()
+}
+
+/// 数值崩聚合（设计稿四阶段）：把各局的 `numeric_summary` 按**字段名聚类**，逮三类——
+/// - runaway：该字段在某局 monotonic_up 且（末值≫首值 或 峰值过绝对阈）→ 无界增长；
+/// - collapse：该字段在某局 hit_zero 且**那一局卡死**（落在 stuck_idx）→ 归零后软锁；
+/// - non_finite：该字段在某局出现过 inf/nan → 溢出/除零。
+///
+/// 一趟扫所有局（O(局 × 字段数)，不存历史不做平方比对），每类按字段名归桶，桶里累计命中
+/// 局数 + 留一条代表局（拿它的策略/seed/录像）。输出按字段名排序（BTreeMap）= 确定。
+fn aggregate_numeric_breakage(
+    results: &[LabeledResult],
+    stuck_idx: &BTreeSet<usize>,
+) -> NumericBreakage {
+    // 三类各一张桶：field -> (命中局数, 峰值max, 代表局)。BTreeMap 保证输出确定。
+    let mut runaway: BTreeMap<&str, (usize, f64, &LabeledResult)> = BTreeMap::new();
+    let mut collapse: BTreeMap<&str, (usize, &LabeledResult)> = BTreeMap::new();
+    let mut non_finite: BTreeMap<&str, (usize, &LabeledResult)> = BTreeMap::new();
+
+    for (i, lr) in results.iter().enumerate() {
+        let is_stuck = stuck_idx.contains(&i);
+        for (field, stat) in &lr.result.numeric_summary {
+            // 溢出：出现过非有限值
+            if stat.non_finite {
+                let e = non_finite.entry(field.as_str()).or_insert((0, lr));
+                e.0 += 1;
+            }
+            // 跑飞：只增不减 + （末值/峰值远超首值 或 峰值过绝对阈）
+            if is_runaway(stat) {
+                let e = runaway.entry(field.as_str()).or_insert((0, stat.max, lr));
+                e.0 += 1;
+                if stat.max > e.1 {
+                    e.1 = stat.max; // 桶里保最大的峰值（最能说明跑多飞）
+                }
+            }
+            // 崩盘软锁：归零 + 那局卡死（光归零不算——很多游戏资源正常会到 0 又回来）
+            if stat.hit_zero && is_stuck {
+                let e = collapse.entry(field.as_str()).or_insert((0, lr));
+                e.0 += 1;
+            }
+        }
+    }
+
+    NumericBreakage {
+        runaway: runaway
+            .into_iter()
+            .map(|(field, (hits, peak, rep))| RunawayField {
+                field: field.to_string(),
+                hits,
+                peak_max: peak,
+                sample_strategy: rep.spec.strategy_kind.name().to_string(),
+                sample_seed: rep.spec.seed,
+                sample_recording: rep.result.recording.clone(),
+            })
+            .collect(),
+        collapse: collapse
+            .into_iter()
+            .map(|(field, (hits, rep))| CollapseField {
+                field: field.to_string(),
+                hits,
+                sample_strategy: rep.spec.strategy_kind.name().to_string(),
+                sample_seed: rep.spec.seed,
+                sample_recording: rep.result.recording.clone(),
+            })
+            .collect(),
+        non_finite: non_finite
+            .into_iter()
+            .map(|(field, (hits, rep))| NonFiniteField {
+                field: field.to_string(),
+                hits,
+                sample_strategy: rep.spec.strategy_kind.name().to_string(),
+                sample_seed: rep.spec.seed,
+                sample_recording: rep.result.recording.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// 一个字段的整局摘要是否命中跑飞判据。非有限单独归 non_finite，这里只看有限范围的爆涨。
+fn is_runaway(stat: &crate::session::NumericStat) -> bool {
+    if !stat.monotonic_up || stat.non_finite {
+        return false;
+    }
+    // 绝对阈：峰值过 1e6（首值 0/负时倍率失效，用它兜底）
+    if stat.max > RUNAWAY_ABS {
+        return true;
+    }
+    // 相对阈：峰值 ≫ 首值（首值 >0 才算倍率，避免 0 当分母）
+    stat.first > 0.0 && stat.max > stat.first * RUNAWAY_RATIO
 }
 
 fn aggregate_pacing(results: &[LabeledResult]) -> Pacing {
@@ -434,7 +625,39 @@ fn aggregate_dominant(results: &[LabeledResult]) -> DominantStrategy {
     }
     // 主导判定：通关率最高的策略 ≥2× 次优，且双方样本都 ≥4 局（样本足才下论断）
     let dominant = find_dominant(&per_strategy);
-    DominantStrategy { per_strategy, dominant }
+    // 一招鲜：通关局里某动作高频碾压其他动作（设计稿四阶段「主导策略深化」）
+    let dominant_action = find_dominant_action(results);
+    DominantStrategy { per_strategy, dominant, dominant_action }
+}
+
+/// 一招鲜动作：统计**通关局**里各动作的注入次数，若某一个动作占了总注入的 ≥80%、
+/// 且垫底的通关局够多，标它为候选（这一招碾压其他玩法、别的选择没意义）。
+/// 数据源 = 通关局录像的 inputs（注入动作即录像，确定可重放）。
+fn find_dominant_action(results: &[LabeledResult]) -> Option<DominantAction> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut total = 0usize;
+    let mut winning_sessions = 0usize;
+    for lr in results {
+        if lr.result.outcome != Outcome::Win {
+            continue;
+        }
+        winning_sessions += 1;
+        for inp in &lr.result.recording.inputs {
+            *counts.entry(inp.action.as_str()).or_insert(0) += 1;
+            total += 1;
+        }
+    }
+    if winning_sessions < DOMINANT_ACTION_MIN_WINS || total == 0 {
+        return None; // 通关局太少 / 通关都没按动作（瞬时通关），不下论断
+    }
+    // 取注入最多的动作；并列时取字段名靠前的（BTreeMap 序，确定）
+    let (action, &top) = counts.iter().max_by_key(|(name, c)| (**c, std::cmp::Reverse(**name)))?;
+    let share = top as f64 / total as f64;
+    if share >= DOMINANT_ACTION_SHARE {
+        Some(DominantAction { action: action.to_string(), share, winning_sessions })
+    } else {
+        None
+    }
 }
 
 /// 主导：按 win_rate 降序，头名 ≥2× 次名且头名样本 ≥4 局；次名 win_rate=0 时只要头名
@@ -466,6 +689,7 @@ fn build_summary(
     stuck: &[StuckCluster],
     inert: &[String],
     dominant: &DominantStrategy,
+    numeric: &NumericBreakage,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
     parts.push(format!(
@@ -509,6 +733,39 @@ fn build_summary(
     if let Some(d) = &dominant.dominant {
         parts.push(format!("策略 {d} 通关率碾压其他（疑似一招鲜，选择意义存疑）。"));
     }
+    if let Some(da) = &dominant.dominant_action {
+        parts.push(format!(
+            "⚠ 通关几乎全靠动作「{}」（占注入 {:.0}%，{} 局通关），疑似一招鲜，其他选择没意义。",
+            da.action,
+            da.share * 100.0,
+            da.winning_sessions
+        ));
+    }
+    if !numeric.runaway.is_empty() {
+        let fields: Vec<&str> = numeric.runaway.iter().map(|r| r.field.as_str()).collect();
+        parts.push(format!(
+            "⚠ 经济跑飞候选 {} 个字段：{}（无界增长，最高峰值 {:.3e}，可重放复核）。",
+            numeric.runaway.len(),
+            fields.join("/"),
+            numeric.runaway.iter().map(|r| r.peak_max).fold(0.0_f64, f64::max)
+        ));
+    }
+    if !numeric.collapse.is_empty() {
+        let fields: Vec<&str> = numeric.collapse.iter().map(|c| c.field.as_str()).collect();
+        parts.push(format!(
+            "⚠ 经济崩盘软锁候选 {} 个字段：{}（资源归零后世界冻结，可重放复核）。",
+            numeric.collapse.len(),
+            fields.join("/")
+        ));
+    }
+    if !numeric.non_finite.is_empty() {
+        let fields: Vec<&str> = numeric.non_finite.iter().map(|c| c.field.as_str()).collect();
+        parts.push(format!(
+            "⚠ 数值溢出候选 {} 个字段：{}（出现 inf/nan）。",
+            numeric.non_finite.len(),
+            fields.join("/")
+        ));
+    }
     parts.join(" ")
 }
 
@@ -516,7 +773,7 @@ fn build_summary(
 mod tests {
     use super::*;
     use crate::scene_view::Outcome;
-    use crate::session::SessionResult;
+    use crate::session::{NumericStat, SessionResult};
     use crate::swarm::{SessionSpec, StrategyKind};
     use vitric_sim::{InputRecord, Recording};
 
@@ -546,8 +803,24 @@ mod tests {
                 recording,
                 state_trace,
                 fired_events: fired_events.iter().map(|s| s.to_string()).collect(),
+                numeric_summary: std::collections::BTreeMap::new(),
             },
         }
+    }
+
+    /// 造一条带数值摘要的 LabeledResult（喂数值崩聚合器）。
+    fn labeled_numeric(
+        kind: StrategyKind,
+        seed: u64,
+        outcome: Outcome,
+        ticks: u64,
+        state_trace: Vec<u64>,
+        numeric: Vec<(&str, NumericStat)>,
+    ) -> LabeledResult {
+        let mut lr = labeled(kind, seed, outcome, ticks, state_trace, vec![], vec![]);
+        lr.result.numeric_summary =
+            numeric.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        lr
     }
 
     #[test]
@@ -786,5 +1059,187 @@ mod tests {
         let a = aggregate(&build());
         let b = aggregate(&build());
         assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
+    }
+
+    // ---- 数值崩维度（numeric_breakage）单元测试 ----
+
+    /// 造一个 NumericStat（按场景设值，绕过 private start/observe）。
+    fn nstat(
+        first: f64,
+        last: f64,
+        min: f64,
+        max: f64,
+        monotonic_up: bool,
+        hit_zero: bool,
+        non_finite: bool,
+    ) -> NumericStat {
+        NumericStat { first, last, min, max, monotonic_up, hit_zero, non_finite }
+    }
+
+    #[test]
+    fn numeric_breakage_flags_runaway_by_absolute_threshold() {
+        // gold 从 100 单调涨到 5e6（> 1e6 绝对阈）→ 跑飞
+        let r = vec![labeled_numeric(
+            StrategyKind::Economy,
+            0,
+            Outcome::Timeout,
+            300,
+            vec![],
+            vec![("treasury/Resources.gold", nstat(100.0, 5e6, 100.0, 5e6, true, false, false))],
+        )];
+        let rep = aggregate(&r);
+        assert_eq!(rep.numeric_breakage.runaway.len(), 1, "应逮到一个跑飞字段");
+        assert_eq!(rep.numeric_breakage.runaway[0].field, "treasury/Resources.gold");
+        assert!(rep.numeric_breakage.runaway[0].peak_max >= 5e6);
+    }
+
+    #[test]
+    fn numeric_breakage_flags_runaway_by_ratio() {
+        // gold 50 → 80000（1600× > 1000× 倍率阈），峰值 <1e6 但相对暴涨
+        let r = vec![labeled_numeric(
+            StrategyKind::Economy,
+            0,
+            Outcome::Timeout,
+            100,
+            vec![],
+            vec![("bank/R.gold", nstat(50.0, 80000.0, 50.0, 80000.0, true, false, false))],
+        )];
+        let rep = aggregate(&r);
+        assert_eq!(rep.numeric_breakage.runaway.len(), 1, "倍率阈也应逮到");
+    }
+
+    #[test]
+    fn numeric_breakage_runaway_needs_monotonic() {
+        // 峰值过 1e6 但中途降过（非单调）→ 不算跑飞（一涨一跌的波动不是无界增长）
+        let r = vec![labeled_numeric(
+            StrategyKind::Economy,
+            0,
+            Outcome::Timeout,
+            100,
+            vec![],
+            vec![("x/Y.z", nstat(100.0, 200.0, 50.0, 2e6, false, false, false))],
+        )];
+        let rep = aggregate(&r);
+        assert!(rep.numeric_breakage.runaway.is_empty(), "非单调不算跑飞");
+    }
+
+    #[test]
+    fn numeric_breakage_clusters_runaway_by_field_name() {
+        // 同字段名在多局命中 → 聚成一桶、hits 累加、peak 取最大
+        let r = vec![
+            labeled_numeric(StrategyKind::Economy, 0, Outcome::Timeout, 100, vec![],
+                vec![("v/R.gold", nstat(1.0, 2e6, 1.0, 2e6, true, false, false))]),
+            labeled_numeric(StrategyKind::Economy, 1, Outcome::Timeout, 100, vec![],
+                vec![("v/R.gold", nstat(1.0, 9e6, 1.0, 9e6, true, false, false))]),
+        ];
+        let rep = aggregate(&r);
+        assert_eq!(rep.numeric_breakage.runaway.len(), 1, "同字段聚一桶");
+        assert_eq!(rep.numeric_breakage.runaway[0].hits, 2);
+        assert!((rep.numeric_breakage.runaway[0].peak_max - 9e6).abs() < 1.0, "峰值取最大");
+    }
+
+    #[test]
+    fn numeric_breakage_flags_collapse_only_when_stuck() {
+        // 两局都归零；但只有卡死那局（末尾冻结 ≥K）算崩盘软锁
+        let mut frozen = vec![1u64, 2];
+        frozen.extend(std::iter::repeat_n(7u64, 70)); // 末尾冻结 → 卡死
+        let r = vec![
+            // 归零 + 卡死 → collapse
+            labeled_numeric(StrategyKind::Economy, 0, Outcome::Timeout, frozen.len() as u64, frozen,
+                vec![("base/Res.fuel", nstat(100.0, 0.0, 0.0, 100.0, false, true, false))]),
+            // 归零但没卡死（状态还在变）→ 不算（资源正常会到 0 又回来）
+            labeled_numeric(StrategyKind::Economy, 1, Outcome::Timeout, 5, vec![1, 2, 3, 4, 5],
+                vec![("base/Res.fuel", nstat(100.0, 0.0, 0.0, 100.0, false, true, false))]),
+        ];
+        let rep = aggregate(&r);
+        assert_eq!(rep.numeric_breakage.collapse.len(), 1, "只卡死那局算崩盘");
+        assert_eq!(rep.numeric_breakage.collapse[0].field, "base/Res.fuel");
+        assert_eq!(rep.numeric_breakage.collapse[0].hits, 1);
+    }
+
+    #[test]
+    fn numeric_breakage_flags_non_finite() {
+        let r = vec![labeled_numeric(
+            StrategyKind::Economy,
+            0,
+            Outcome::Timeout,
+            10,
+            vec![],
+            vec![("x/Y.ratio", nstat(1.0, f64::NAN, 1.0, 1.0, false, false, true))],
+        )];
+        let rep = aggregate(&r);
+        assert_eq!(rep.numeric_breakage.non_finite.len(), 1);
+        assert_eq!(rep.numeric_breakage.non_finite[0].field, "x/Y.ratio");
+    }
+
+    #[test]
+    fn numeric_breakage_empty_when_healthy() {
+        // 健康字段：小幅波动、不归零、不溢出 → 三类全空
+        let r = vec![labeled_numeric(
+            StrategyKind::Random,
+            0,
+            Outcome::Win,
+            10,
+            vec![],
+            vec![("p/Stats.hp", nstat(100.0, 90.0, 80.0, 110.0, false, false, false))],
+        )];
+        let rep = aggregate(&r);
+        assert!(rep.numeric_breakage.runaway.is_empty());
+        assert!(rep.numeric_breakage.collapse.is_empty());
+        assert!(rep.numeric_breakage.non_finite.is_empty());
+    }
+
+    // ---- 主导动作（dominant_action 一招鲜）单元测试 ----
+
+    #[test]
+    fn dominant_action_flagged_when_one_action_dominates_wins() {
+        // 4 局通关，每局都狂按 "cheese"（9 次）+ 别的动作 1 次 → cheese 占 90% > 80%
+        let mut r = Vec::new();
+        for seed in 0..4u64 {
+            let mut injected = vec!["cheese"; 9];
+            injected.push("other");
+            r.push(labeled(StrategyKind::Random, seed, Outcome::Win, 20, vec![], vec![], injected));
+        }
+        let rep = aggregate(&r);
+        let da = rep.dominant_strategy.dominant_action.expect("应标一招鲜");
+        assert_eq!(da.action, "cheese");
+        assert!(da.share >= 0.8, "占比 {}", da.share);
+        assert_eq!(da.winning_sessions, 4);
+    }
+
+    #[test]
+    fn dominant_action_none_when_balanced() {
+        // 通关局动作均衡（a/b 各半）→ 没有一招鲜
+        let mut r = Vec::new();
+        for seed in 0..4u64 {
+            r.push(labeled(StrategyKind::Random, seed, Outcome::Win, 20, vec![], vec![],
+                vec!["a", "b", "a", "b"]));
+        }
+        let rep = aggregate(&r);
+        assert!(rep.dominant_strategy.dominant_action.is_none(), "均衡不算一招鲜");
+    }
+
+    #[test]
+    fn dominant_action_ignores_non_winning_sessions() {
+        // 超时局狂按 cheese 不算数；只看通关局——通关局太少 → None
+        let r = vec![
+            labeled(StrategyKind::Random, 0, Outcome::Timeout, 20, vec![], vec![], vec!["cheese"; 20]),
+            labeled(StrategyKind::Random, 1, Outcome::Win, 5, vec![], vec![], vec!["a", "b"]),
+        ];
+        let rep = aggregate(&r);
+        assert!(rep.dominant_strategy.dominant_action.is_none(), "通关局不足/不偏，不下论断");
+    }
+
+    #[test]
+    fn numeric_breakage_serializes_in_report() {
+        let r = vec![labeled_numeric(
+            StrategyKind::Economy, 0, Outcome::Timeout, 100, vec![],
+            vec![("t/R.gold", nstat(1.0, 5e6, 1.0, 5e6, true, false, false))],
+        )];
+        let rep = aggregate(&r);
+        let json = serde_json::to_string(&rep).unwrap();
+        assert!(json.contains("numeric_breakage"));
+        assert!(json.contains("runaway"));
+        assert!(rep.summary.contains("跑飞"), "summary 应提跑飞: {}", rep.summary);
     }
 }

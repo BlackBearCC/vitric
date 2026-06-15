@@ -1,0 +1,10 @@
+{
+  "entities": [
+    {
+      "name": "treasury",
+      "components": {
+        "Resources": { "gold": 100.0 }
+      }
+    }
+  ]
+}

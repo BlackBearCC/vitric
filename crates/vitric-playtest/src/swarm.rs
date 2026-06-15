@@ -20,7 +20,7 @@ use crate::scene_view::{Outcome, TerminalSpec};
 use crate::seed::Perturbation;
 use crate::session::{run_session, SessionConfig, SessionResult};
 use crate::strategy::{
-    CoverageStrategy, GreedyStrategy, RandomStrategy, ScriptedStrategy, Strategy,
+    CoverageStrategy, EconomyStrategy, GreedyStrategy, RandomStrategy, ScriptedStrategy, Strategy,
 };
 
 /// 策略种类（spec 里用名字指定，跑的时候据此 new 出策略实例）。
@@ -30,6 +30,8 @@ pub enum StrategyKind {
     Random,
     Greedy,
     Coverage,
+    /// 经济压力策略（模拟经营找数值崩）：锁定一个动作连按 R 次再轮转（设计稿四阶段）。
+    Economy,
     /// 种子探索的脚本回放局——只作**标签**（结果归类用）。脚本本身不在 SessionSpec 里
     /// （脚本是变长的，且每条不同），由 `run_seed_swarm` 直接持有 Perturbation 构造策略。
     Scripted,
@@ -37,9 +39,14 @@ pub enum StrategyKind {
 
 impl StrategyKind {
     /// 廉价策略档全集（CLI 默认轮流跑这几种用）。**不含 Scripted**——脚本回放走种子探索
-    /// 专路（`run_seed_swarm`），不进「广度覆盖」的策略轮换。
-    pub const ALL: [StrategyKind; 3] =
-        [StrategyKind::Random, StrategyKind::Greedy, StrategyKind::Coverage];
+    /// 专路（`run_seed_swarm`），不进「广度覆盖」的策略轮换。含 Economy：模拟经营游戏靠它
+    /// 才逮得到经济跑飞/崩盘，把它放进默认轮换不挑游戏类型（非经营游戏它就是另一种压力测试）。
+    pub const ALL: [StrategyKind; 4] = [
+        StrategyKind::Random,
+        StrategyKind::Greedy,
+        StrategyKind::Coverage,
+        StrategyKind::Economy,
+    ];
 
     /// 短名（报告/CLI 显示用）。
     pub fn name(self) -> &'static str {
@@ -47,6 +54,7 @@ impl StrategyKind {
             StrategyKind::Random => "random",
             StrategyKind::Greedy => "greedy",
             StrategyKind::Coverage => "coverage",
+            StrategyKind::Economy => "economy",
             StrategyKind::Scripted => "scripted",
         }
     }
@@ -58,6 +66,7 @@ impl StrategyKind {
             StrategyKind::Random => Box::new(RandomStrategy::new(seed)),
             StrategyKind::Greedy => Box::new(GreedyStrategy::new(seed)),
             StrategyKind::Coverage => Box::new(CoverageStrategy::new(seed)),
+            StrategyKind::Economy => Box::new(EconomyStrategy::new(seed)),
             StrategyKind::Scripted => {
                 panic!("Scripted 策略要带脚本，必须走 run_seed_swarm，不能用 StrategyKind::build")
             }

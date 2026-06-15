@@ -1,0 +1,11 @@
+{
+  "entities": [
+    {
+      "name": "base",
+      "components": {
+        "Resources": { "fuel": 30 },
+        "State": { "bankrupt": false }
+      }
+    }
+  ]
+}

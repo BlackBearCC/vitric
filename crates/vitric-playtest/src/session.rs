@@ -8,11 +8,150 @@
 //! 不认识项目目录怎么装配。Engine 单独传是因为派生动作词汇要读规则，而它被 GameLogic
 //! 装配体私有持有，拿不到引用。
 
+use std::collections::BTreeMap;
+
 use vitric_sim::{GameLogic, Recording, Sim};
 use vitric_rules::Engine;
+use serde_json::Value;
 
 use crate::scene_view::{Outcome, SceneView, TerminalSpec};
 use crate::strategy::Strategy;
+
+/// 一个数值字段在整局里的轨迹摘要（**增量统计**，不存每 tick 全表）。
+///
+/// key（在 `numeric_summary` 的 BTreeMap 里）= 数值叶子的路径，形如
+/// `hero/Resources.gold`（实体名或 id + 「组件.字段...」）。每 tick 从当前 observation
+/// 取所有数值叶子，对各自的 NumericStat 做 O(1) 更新——不保留逐 tick 历史。
+///
+/// 为什么这么设计：模拟经营找数值崩（设计稿五节「数值崩」）靠的是「这个字段最后跑成多大/
+/// 有没有归零/是不是只增不减」这些**摘要**信号，不需要逐 tick 曲线。增量统计把内存压到
+/// O(数值字段数) 而非 O(字段数 × tick 数)，几千局也扛得住（设计稿九节性能预算）。
+///
+/// **不进哈希、不进录像**：和 state_trace/fired_events 一样，是「这局怎么跑的」旁观记录，
+/// 是录像的纯函数派生（同录像必出同摘要），自然满足确定性铁律。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NumericStat {
+    /// 这个字段第一次被观测到时的值（首帧基线）。
+    pub first: f64,
+    /// 最后一次观测到的值（末帧——「跑成多大/崩到多小」看它）。
+    pub last: f64,
+    /// 整局观测到的最小值。
+    pub min: f64,
+    /// 整局观测到的最大值。
+    pub max: f64,
+    /// 整局**只增不减**（每次新观测都 ≥ 上一次）——经济跑飞的特征之一。
+    pub monotonic_up: bool,
+    /// 整局曾触达过 0（资源归零——崩盘软锁的特征之一）。
+    pub hit_zero: bool,
+    /// 曾观测到非有限值（inf / nan）——数值溢出/除零的硬信号，单独标。
+    pub non_finite: bool,
+}
+
+impl NumericStat {
+    /// 用首次观测值初始化。
+    fn start(v: f64) -> NumericStat {
+        let finite = v.is_finite();
+        NumericStat {
+            first: v,
+            last: v,
+            min: v,
+            max: v,
+            monotonic_up: true,
+            hit_zero: finite && v == 0.0,
+            non_finite: !finite,
+        }
+    }
+
+    /// 增量并入一次新观测（O(1)）：刷新 last/min/max、维护单调/归零/非有限标记。
+    fn observe(&mut self, v: f64) {
+        if !v.is_finite() {
+            // 非有限值单独标，不污染 min/max（NaN 比较全 false 会破坏单调判定）
+            self.non_finite = true;
+            self.last = v;
+            return;
+        }
+        // 单调：只要某次比上一次小，就不再是「只增不减」
+        if v < self.last {
+            self.monotonic_up = false;
+        }
+        self.last = v;
+        if v < self.min {
+            self.min = v;
+        }
+        if v > self.max {
+            self.max = v;
+        }
+        if v == 0.0 {
+            self.hit_zero = true;
+        }
+    }
+}
+
+/// 从一份 observation（SceneView 投影的 JSON）抽出所有数值叶子，并入 summary（增量）。
+///
+/// key 路径：`<实体名或id>/<组件>.<字段>[.<子字段>...]`。遍历 observation.entities，
+/// 每个实体取 name（无名退化成 id），再钻它的 components 树，遇到数值（含 bool 折成 0/1?
+/// 不——只收真数值 number，bool 是 flag 不是数值，不进数值崩分析）就更新对应 NumericStat。
+///
+/// **确定性**：observation 的实体是按槽位序、组件/字段是 serde_json Map（BTreeMap 序），
+/// 遍历序固定；BTreeMap 聚合输出也固定。O(数值叶子数)/tick，不存历史（设计稿九节）。
+fn collect_numeric_leaves(observation: &Value, summary: &mut BTreeMap<String, NumericStat>) {
+    let Some(entities) = observation.get("entities").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for ent in entities {
+        // 实体标识：优先人话名，无名退化成 id（scene_view 保证 id 一定在）
+        let label = ent
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| ent.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()));
+        let Some(label) = label else { continue };
+        let Some(comps) = ent.get("components").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for (cname, cval) in comps {
+            // 路径前缀：实体/组件，字段名在递归里接上
+            let prefix = format!("{label}/{cname}");
+            walk_numeric(&prefix, cval, summary);
+        }
+    }
+}
+
+/// 递归钻一个组件值，把数值叶子并入 summary。path 是「到这一层」的路径前缀。
+fn walk_numeric(path: &str, value: &Value, summary: &mut BTreeMap<String, NumericStat>) {
+    match value {
+        Value::Number(n) => {
+            // 只收真数值；整数也转 f64（数值崩看量级，i64/f64 统一成一个标尺）
+            if let Some(f) = n.as_f64() {
+                upsert(summary, path, f);
+            }
+        }
+        Value::Object(map) => {
+            for (k, v) in map {
+                let child = format!("{path}.{k}");
+                walk_numeric(&child, v, summary);
+            }
+        }
+        Value::Array(arr) => {
+            // 数组按下标编路径（如 inventory.0 / inventory.1），递归同样规则
+            for (i, v) in arr.iter().enumerate() {
+                let child = format!("{path}.{i}");
+                walk_numeric(&child, v, summary);
+            }
+        }
+        // bool/string/null 不是数值，跳过（bool 是 flag，不进数值崩分析）
+        _ => {}
+    }
+}
+
+/// 有则增量并入、无则以首值初始化（增量统计的 upsert）。
+fn upsert(summary: &mut BTreeMap<String, NumericStat>, key: &str, v: f64) {
+    summary
+        .entry(key.to_string())
+        .and_modify(|s| s.observe(v))
+        .or_insert_with(|| NumericStat::start(v));
+}
 
 /// 一局的配置。
 #[derive(Debug, Clone)]
@@ -47,6 +186,9 @@ pub struct SessionResult {
     /// 整局出现过的事件名（去重，首次出现序）：StepReport.events + logic.drain_observed()。
     /// 用来判「哪些终止/里程碑事件被触发过」「哪些 input 动作引发过规则响应」。
     pub fired_events: Vec<String>,
+    /// 数值遥测：每个数值字段路径 → 整局轨迹摘要（增量统计，不存每 tick 全表）。
+    /// 给聚合器逮经济跑飞/崩盘/溢出（设计稿五节「数值崩」）。不进哈希/录像。
+    pub numeric_summary: BTreeMap<String, NumericStat>,
 }
 
 /// 跑一局。`sim`/`logic` 必须是刚 boot 出来、还在 tick 0 的全新一对（要录可重放的录像，
@@ -66,8 +208,10 @@ pub fn run_session(
     }
     sim.start_recording();
 
-    // 遥测累加器：state_trace 每 tick 一条，fired_events 去重（用 set 判重 + vec 保序）
+    // 遥测累加器：state_trace 每 tick 一条，fired_events 去重（用 set 判重 + vec 保序），
+    // numeric_summary 增量统计（每 tick 从 observation 取数值叶子更新，不存历史）
     let mut state_trace: Vec<u64> = Vec::new();
+    let mut numeric_summary: BTreeMap<String, NumericStat> = BTreeMap::new();
     let mut fired_events: Vec<String> = Vec::new();
     let mut seen_events: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut note_events = |names: &mut dyn Iterator<Item = &str>| {
@@ -99,6 +243,11 @@ pub fn run_session(
         // 遥测（step 后采）：state_hash 是状态指纹（已优化、便宜，不自己序列化整世界），
         // 事件名累进去重集。遥测只读、不回写世界，不影响录像/哈希。
         state_trace.push(sim.world.state_hash());
+        // 数值遥测：step 后对当前世界投影一份观测，抽数值叶子增量并入摘要。
+        // 用 SceneView::derive 的同款投影（剔装饰、按槽位序），保证 key 路径与策略所见一致；
+        // 只取 observation（不用 actions），增量更新 O(数值叶子数)，不存逐 tick 历史。
+        let post = SceneView::derive(&sim.world, engine, &cfg.terminal);
+        collect_numeric_leaves(&post.observation, &mut numeric_summary);
         note_events(&mut report.events.iter().map(|e| e.name.as_str()));
 
         // 扫本 tick 发给逻辑层的事件 + 逻辑层 emit 的事件，命中终止就收
@@ -115,7 +264,14 @@ pub fn run_session(
     }
 
     let recording = sim.stop_recording().expect("刚 start_recording 过");
-    Ok(SessionResult { outcome, ticks: sim.tick, recording, state_trace, fired_events })
+    Ok(SessionResult {
+        outcome,
+        ticks: sim.tick,
+        recording,
+        state_trace,
+        fired_events,
+        numeric_summary,
+    })
 }
 
 /// 一组事件里第一个命中终止的结局（按事件序，确定性）。
@@ -328,5 +484,147 @@ mod tests {
             assert!(["left", "right"].contains(&inp.action.as_str()), "意外动作 {inp:?}");
         }
         let _ = Action { action: "x".into(), phase: "pressed".into() }; // 引用 Action 类型
+    }
+
+    // ---- 数值遥测（NumericStat / numeric_summary）单元测试 ----
+
+    #[test]
+    fn numeric_stat_observe_tracks_min_max_last_monotonic_zero() {
+        // 100 → 50 → 200 → 0：min=0 max=200 last=0；中途下降过 → 非单调；触达过 0
+        let mut s = NumericStat::start(100.0);
+        s.observe(50.0);
+        s.observe(200.0);
+        s.observe(0.0);
+        assert_eq!(s.first, 100.0);
+        assert_eq!(s.last, 0.0);
+        assert_eq!(s.min, 0.0);
+        assert_eq!(s.max, 200.0);
+        assert!(!s.monotonic_up, "中途降过就不是只增不减");
+        assert!(s.hit_zero, "触达过 0");
+        assert!(!s.non_finite);
+    }
+
+    #[test]
+    fn numeric_stat_monotonic_up_stays_true_when_only_grows() {
+        let mut s = NumericStat::start(1.0);
+        for v in [2.0, 4.0, 8.0, 16.0] {
+            s.observe(v);
+        }
+        assert!(s.monotonic_up, "只增不减");
+        assert_eq!(s.max, 16.0);
+        assert!(!s.hit_zero);
+    }
+
+    #[test]
+    fn numeric_stat_flags_non_finite() {
+        let mut s = NumericStat::start(1.0);
+        s.observe(f64::INFINITY);
+        assert!(s.non_finite, "inf 必须标 non_finite");
+        // 非有限值不污染 min/max（仍是有限观测的范围）
+        assert_eq!(s.max, 1.0);
+    }
+
+    #[test]
+    fn collect_numeric_leaves_extracts_nested_paths() {
+        // observation 仿 SceneView 投影结构：entities[].{name,components.{Comp.{field}}}
+        let obs = json!({"entities": [
+            {"name": "hero", "id": "0v0", "components": {
+                "Resources": {"gold": 12.0, "wood": 3},
+                "Stats": {"hp": 100}
+            }},
+            {"id": "1v0", "components": {"Tally": {"n": 7}}}  // 无名 → 用 id 当 label
+        ]});
+        let mut sum: BTreeMap<String, NumericStat> = BTreeMap::new();
+        collect_numeric_leaves(&obs, &mut sum);
+        assert!(sum.contains_key("hero/Resources.gold"), "{:?}", sum.keys().collect::<Vec<_>>());
+        assert!(sum.contains_key("hero/Resources.wood"));
+        assert!(sum.contains_key("hero/Stats.hp"));
+        assert!(sum.contains_key("1v0/Tally.n"), "无名实体用 id 当 label");
+        assert_eq!(sum["hero/Resources.gold"].first, 12.0);
+    }
+
+    #[test]
+    fn collect_numeric_leaves_skips_non_numeric() {
+        // bool/string 不进数值摘要（flag 不是数值）
+        let obs = json!({"entities": [
+            {"name": "w", "components": {"State": {"sealed": true, "label": "x", "count": 5}}}
+        ]});
+        let mut sum: BTreeMap<String, NumericStat> = BTreeMap::new();
+        collect_numeric_leaves(&obs, &mut sum);
+        assert!(sum.contains_key("w/State.count"));
+        assert!(!sum.contains_key("w/State.sealed"), "bool 不收");
+        assert!(!sum.contains_key("w/State.label"), "string 不收");
+    }
+
+    /// 一个每 tick 把某实体字段 ×2 的逻辑（直接改 world，模拟经济跑飞）。
+    struct DoublerLogic {
+        ent: String,
+    }
+    impl GameLogic for DoublerLogic {
+        fn on_tick(
+            &mut self,
+            world: &mut vitric_ecs::World,
+            _: Vec<Event>,
+            _: &mut Pcg32,
+            _: u64,
+        ) -> Result<(), String> {
+            // 找到命名实体，把 Bank.gold ×2（float，避免 i64 checked_add 溢出报错）
+            let id = world.entity_names().find(|(n, _)| *n == self.ent).map(|(_, id)| id);
+            if let Some(id) = id {
+                if let Ok(v) = world.get_component(id, "Bank") {
+                    let cur = v.get("gold").and_then(|g| g.as_f64()).unwrap_or(0.0);
+                    let _ = world.set_component(id, "Bank", json!({"gold": cur * 2.0}));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn bank_world_sim() -> Sim {
+        let mut sim = Sim::new(1);
+        let id = sim.world.spawn_named("hero").unwrap();
+        sim.world.set_component(id, "Bank", json!({"gold": 1.0})).unwrap();
+        sim
+    }
+
+    #[test]
+    fn run_session_numeric_summary_catches_runaway_growth() {
+        let mut sim = bank_world_sim();
+        let mut logic = DoublerLogic { ent: "hero".to_string() };
+        let eng = empty_engine();
+        let mut strat = RandomStrategy::new(0);
+        let cfg = SessionConfig { max_ticks: 30, seed: 0, ..Default::default() };
+        let res = run_session(&mut sim, &mut logic, &eng, &mut strat, &cfg).unwrap();
+        let stat = res.numeric_summary.get("hero/Bank.gold").expect("应采到 hero/Bank.gold");
+        assert!(stat.monotonic_up, "只 ×2 → 只增不减");
+        // 30 tick 翻倍：远超初值的千倍（2^30 ≈ 1e9）
+        assert!(stat.max > 1e6, "翻倍 30 次应跑飞到 >1e6，实际 {}", stat.max);
+        assert!(stat.last > stat.first * 1000.0, "末值 ≫ 首值");
+    }
+
+    #[test]
+    fn run_session_numeric_summary_is_incremental_not_full_history() {
+        // 摘要只存每个字段一条 NumericStat，与 tick 数无关（增量，不存历史）
+        let mut sim = bank_world_sim();
+        let mut logic = DoublerLogic { ent: "hero".to_string() };
+        let eng = empty_engine();
+        let mut strat = RandomStrategy::new(0);
+        let cfg = SessionConfig { max_ticks: 20, seed: 0, ..Default::default() };
+        let res = run_session(&mut sim, &mut logic, &eng, &mut strat, &cfg).unwrap();
+        // 只一个数值字段 → 摘要里恰好一条，不随 tick 膨胀
+        assert_eq!(res.numeric_summary.len(), 1);
+    }
+
+    #[test]
+    fn run_session_numeric_summary_is_deterministic() {
+        let run = || {
+            let mut sim = bank_world_sim();
+            let mut logic = DoublerLogic { ent: "hero".to_string() };
+            let eng = empty_engine();
+            let mut strat = RandomStrategy::new(9);
+            let cfg = SessionConfig { max_ticks: 15, seed: 9, ..Default::default() };
+            run_session(&mut sim, &mut logic, &eng, &mut strat, &cfg).unwrap().numeric_summary
+        };
+        assert_eq!(run(), run(), "同输入两次跑数值摘要必须逐项一致");
     }
 }

@@ -148,7 +148,7 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
 /// vitric-playtest，这里把两边接起来。
 ///
 /// 选项：
-///   --strategy <random|greedy>   策略（默认 random；仅单局 N=1 用）
+///   --strategy <random|greedy|economy>  策略（默认 random；仅单局 N=1 用）
 ///   --seed <N>                   策略 PCG 播种（默认 0；swarm 模式从此起递增）
 ///   --max-ticks <N>              超时上限（默认 600）
 ///   --sessions <N>               跑 N 局 swarm 聚合出报告（默认 1=单局旧行为）
@@ -159,15 +159,16 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
 /// - 给了 `--seed-recording`：**种子式探索**（设计稿第 3 阶段）——加载录像当种子，
 ///   `perturb_plan` 生成 N 条变异脚本（drop/swap/substitute/truncate 轮换 + 截断接 random 发散），
 ///   `run_seed_swarm` 并行跑，聚合报告含 `ending_coverage`（哪些声明结局不可达）。`--sessions`=变异条数。
-/// - 没给但 `--sessions>1`：第 2 阶段 swarm——random+greedy+coverage 三策略轮流 × 递增 seed。
+/// - 没给但 `--sessions>1`：swarm——random+greedy+coverage+economy 四策略轮流 × 递增 seed
+///   （economy 专为模拟经营找数值崩，报告含 `numeric_breakage`：经济跑飞/崩盘/溢出）。
 /// - 没给且 `--sessions=1`：单局旧行为，出一条可重放录像。
 ///
 /// 各局都在自己线程内 boot 一份运行时并行跑（QuickJS 非 Send，运行时绝不跨线程）。
 fn cmd_playtest(args: &[String]) -> Result<(), String> {
     use vitric_playtest::{
         aggregate, aggregate_with_endings, perturb_plan, run_seed_swarm, run_session, run_swarm,
-        GreedyStrategy, RandomStrategy, SessionConfig, SessionSpec, Strategy, StrategyKind,
-        TerminalSpec,
+        EconomyStrategy, GreedyStrategy, RandomStrategy, SessionConfig, SessionSpec, Strategy,
+        StrategyKind, TerminalSpec,
     };
 
     let dir = args.first().ok_or("playtest 缺少项目目录参数")?;
@@ -283,11 +284,12 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    // N=1：单局旧行为，原样不动（出可重放录像）
+    // N=1：单局旧行为（出可重放录像）。economy 也能选——单局压一种策略看它怎么跑。
     let mut strategy: Box<dyn Strategy> = match strategy_name.as_str() {
         "random" => Box::new(RandomStrategy::new(seed)),
         "greedy" => Box::new(GreedyStrategy::new(seed)),
-        other => return Err(format!("--strategy 只认 random 或 greedy，拿到 {other:?}")),
+        "economy" => Box::new(EconomyStrategy::new(seed)),
+        other => return Err(format!("--strategy 只认 random / greedy / economy，拿到 {other:?}")),
     };
 
     let out = out_path.unwrap_or_else(|| dir.join("playtest-session.json"));

@@ -99,6 +99,64 @@ impl Strategy for CoverageStrategy {
     }
 }
 
+/// 经济压力策略（设计稿二节 `economy` / 六节模拟经营主力）——专为**找数值崩**：
+/// 资源**无界增长（跑飞）**或**归零卡死（崩盘）**。
+///
+/// 怎么找：random/coverage 把动作打散，单个动作的累积效应被稀释、跑不到极端；而经济崩是
+/// **某一个动作连按很多次**才暴露的（一直点「卖」把金币堆到溢出、一直点「买」把资源掏到 0）。
+/// 所以本策略**锁定一个动作连续重复 R 次再轮到下一个**——把每个动作的 per-action 累积效应
+/// 推到极端，让数值遥测的 max/min/monotonic 把跑飞/崩盘照出来。
+///
+/// R 与轮转用 PCG 播种（从 playtest seed 来，不碰 sim.rng）：同 seed 同序列，完全可复现
+/// （确定性铁律）。R 在一个区间里随机取（避免每个动作都按死同样次数过于规整）；轮转游标
+/// 顺序推进对动作数取模，所以动作集变化（关卡切换词汇变了）也不越界。起点用 PCG 打散，
+/// 不同 seed 从不同动作起压。故意**不**插「不操作」：经济压力要的就是猛按到极端。
+pub struct EconomyStrategy {
+    /// PCG（播种 R 和起点）。
+    rng: Pcg32,
+    /// 当前锁定的动作下标（对动作数取模后用）。
+    cursor: usize,
+    /// 当前动作还要重复几次（剩余次数，归 0 就换下一个动作）。
+    remaining: u64,
+}
+
+/// 单个动作连续重复次数 R 的取值区间（闭区间）。够大才能把累积效应推到极端
+/// （翻倍类跑飞 ~30 次就到 1e9；掏空类崩盘几十次就归零），又不至于一个动作占满整局。
+const ECONOMY_REPEAT_MIN: i64 = 24;
+const ECONOMY_REPEAT_MAX: i64 = 64;
+
+impl EconomyStrategy {
+    pub fn new(seed: u64) -> EconomyStrategy {
+        let mut rng = Pcg32::new(seed);
+        // 起点：从词汇的哪个位置起压（不同 seed 不同），先抽出来存进 cursor 的基偏移。
+        // 这里 cursor 先记成一个大偏移，choose 时再对当前动作数取模——派生时还不知道动作数。
+        let cursor = rng.next_u32() as usize;
+        EconomyStrategy { rng, cursor, remaining: 0 }
+    }
+
+    /// 抽一个新的重复次数 R（区间内 PCG 随机）。
+    fn roll_repeat(&mut self) -> u64 {
+        self.rng.range_i64(ECONOMY_REPEAT_MIN, ECONOMY_REPEAT_MAX) as u64
+    }
+}
+
+impl Strategy for EconomyStrategy {
+    fn choose(&mut self, view: &SceneView) -> Option<Action> {
+        if view.actions.is_empty() {
+            return None;
+        }
+        let n = view.actions.len();
+        // 当前锁定动作的重复次数耗尽：轮到下一个动作，重新抽 R
+        if self.remaining == 0 {
+            self.cursor = self.cursor.wrapping_add(1);
+            self.remaining = self.roll_repeat();
+        }
+        self.remaining -= 1;
+        // 锁定的就是 cursor 对当前动作数取模那个（每次连按同一个，直到 remaining 归 0）
+        Some(view.actions[self.cursor % n].clone())
+    }
+}
+
 /// 脚本策略：按一条固定的输入序列在**录制的 tick** 上注入动作，**不看 SceneView**
 /// （设计稿三节「种子式探索」的回放部分）。种子录像本身就是一段「在第 N tick 按了什么」
 /// 的脚本——把它原样喂回去就复现那一局；扰动过的脚本喂回去就是「在原解附近走一步岔路」。
@@ -290,6 +348,66 @@ mod tests {
             let a = s.choose(&view).unwrap();
             assert!(view.actions.contains(&a), "{a:?}");
         }
+    }
+
+    #[test]
+    fn economy_locks_one_action_for_a_run_then_rotates() {
+        // 经济策略应**连按同一个动作很多次**再换，不是每 tick 换（这是它和 coverage 的区别）
+        let view = view_with_actions(&["buy", "sell", "wait"]);
+        let mut s = EconomyStrategy::new(3);
+        let seq: Vec<String> = (0..200).map(|_| s.choose(&view).unwrap().action).collect();
+        // 至少存在一段「同一动作连续 ≥ 20 次」（锁定重复的特征）
+        let mut max_run = 1usize;
+        let mut run = 1usize;
+        for w in seq.windows(2) {
+            if w[0] == w[1] {
+                run += 1;
+                max_run = max_run.max(run);
+            } else {
+                run = 1;
+            }
+        }
+        assert!(max_run >= 20, "应有一段连按 ≥20 次同一动作，实际最长连段 {max_run}");
+        // 200 tick 内应轮到过不止一个动作（不是死锁在一个上）
+        let distinct: std::collections::HashSet<&String> = seq.iter().collect();
+        assert!(distinct.len() >= 2, "应轮转过多个动作: {distinct:?}");
+    }
+
+    #[test]
+    fn economy_only_picks_legal_actions() {
+        let view = view_with_actions(&["a", "b"]);
+        let mut s = EconomyStrategy::new(1);
+        for _ in 0..300 {
+            let a = s.choose(&view).unwrap();
+            assert!(view.actions.contains(&a), "经济策略只选合法动作: {a:?}");
+        }
+    }
+
+    #[test]
+    fn economy_is_deterministic_same_seed() {
+        let view = view_with_actions(&["buy", "sell", "hold"]);
+        let mut a = EconomyStrategy::new(77);
+        let mut b = EconomyStrategy::new(77);
+        let seq_a: Vec<_> = (0..500).map(|_| a.choose(&view)).collect();
+        let seq_b: Vec<_> = (0..500).map(|_| b.choose(&view)).collect();
+        assert_eq!(seq_a, seq_b, "同 seed economy 必出同一序列");
+    }
+
+    #[test]
+    fn economy_differs_across_seeds() {
+        let view = view_with_actions(&["buy", "sell", "hold", "tax", "spend"]);
+        let mut a = EconomyStrategy::new(1);
+        let mut b = EconomyStrategy::new(424242);
+        let seq_a: Vec<_> = (0..50).map(|_| a.choose(&view)).collect();
+        let seq_b: Vec<_> = (0..50).map(|_| b.choose(&view)).collect();
+        assert_ne!(seq_a, seq_b, "不同 seed 应从不同动作/不同 R 起压");
+    }
+
+    #[test]
+    fn economy_empty_actions_yields_no_op() {
+        let view = view_with_actions(&[]);
+        let mut s = EconomyStrategy::new(2);
+        assert_eq!(s.choose(&view), None);
     }
 
     fn act(name: &str) -> Action {

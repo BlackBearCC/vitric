@@ -20,9 +20,14 @@ pub mod session;
 pub mod strategy;
 pub mod swarm;
 
-pub use report::{aggregate, aggregate_with_endings, EndingCoverage, Report};
+pub use report::{
+    aggregate, aggregate_with_endings, CollapseField, DominantAction, EndingCoverage,
+    NonFiniteField, NumericBreakage, Report, RunawayField,
+};
 pub use scene_view::{Action, Outcome, SceneView, TerminalSpec};
 pub use seed::{perturb_plan, PerturbOp, Perturbation};
-pub use session::{run_session, SessionConfig, SessionResult};
-pub use strategy::{CoverageStrategy, GreedyStrategy, RandomStrategy, ScriptedStrategy, Strategy};
+pub use session::{run_session, NumericStat, SessionConfig, SessionResult};
+pub use strategy::{
+    CoverageStrategy, EconomyStrategy, GreedyStrategy, RandomStrategy, ScriptedStrategy, Strategy,
+};
 pub use swarm::{run_seed_swarm, run_swarm, LabeledResult, SessionSpec, StrategyKind};

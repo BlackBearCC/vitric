@@ -1,0 +1,14 @@
+{
+  "components": {
+    "Resources": {
+      "fields": {
+        "fuel": { "type": "number", "default": 30 }
+      }
+    },
+    "State": {
+      "fields": {
+        "bankrupt": { "type": "bool", "default": false }
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "rules": [
+    {
+      "id": "mint",
+      "on": { "event": "input", "filter": { "action": "mint", "phase": "pressed" } },
+      "do": [
+        { "add": "@treasury.Resources.gold", "by": "@treasury.Resources.gold" }
+      ]
+    }
+  ]
+}
