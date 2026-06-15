@@ -1,0 +1,9 @@
+{
+  "components": {
+    "Lock": {
+      "fields": {
+        "open": { "type": "bool", "default": false }
+      }
+    }
+  }
+}

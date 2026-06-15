@@ -1,0 +1,10 @@
+{
+  "entities": [
+    {
+      "name": "gate",
+      "components": {
+        "Lock": { "open": false }
+      }
+    }
+  ]
+}

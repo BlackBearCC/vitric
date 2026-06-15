@@ -31,12 +31,22 @@ impl Default for SessionConfig {
     }
 }
 
-/// 一局的结果：结局 + 用了多少 tick + 这局的录像（可重放）。
+/// 一局的结果：结局 + 用了多少 tick + 这局的录像（可重放）+ 轻量遥测。
+///
+/// 遥测（state_trace/fired_events）只供聚合器分析，**不进录像、不进哈希**——
+/// 它是「这局怎么跑的」的旁观记录，不是「这局是什么」的权威状态。确定性铁律：
+/// 同 (策略,seed,起点) 跑出的录像逐字节一致，遥测是录像的纯函数派生，自然也一致。
 #[derive(Debug, Clone)]
 pub struct SessionResult {
     pub outcome: Outcome,
     pub ticks: u64,
     pub recording: Recording,
+    /// 每 tick step 后的世界状态哈希（`world.state_hash()`，已优化过、便宜）。
+    /// 长度 = 实际跑的 tick 数；是「状态变没变」的权威信号，软锁聚类靠它判冻结。
+    pub state_trace: Vec<u64>,
+    /// 整局出现过的事件名（去重，首次出现序）：StepReport.events + logic.drain_observed()。
+    /// 用来判「哪些终止/里程碑事件被触发过」「哪些 input 动作引发过规则响应」。
+    pub fired_events: Vec<String>,
 }
 
 /// 跑一局。`sim`/`logic` 必须是刚 boot 出来、还在 tick 0 的全新一对（要录可重放的录像，
@@ -56,6 +66,18 @@ pub fn run_session(
     }
     sim.start_recording();
 
+    // 遥测累加器：state_trace 每 tick 一条，fired_events 去重（用 set 判重 + vec 保序）
+    let mut state_trace: Vec<u64> = Vec::new();
+    let mut fired_events: Vec<String> = Vec::new();
+    let mut seen_events: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut note_events = |names: &mut dyn Iterator<Item = &str>| {
+        for name in names {
+            if seen_events.insert(name.to_string()) {
+                fired_events.push(name.to_string());
+            }
+        }
+    };
+
     let mut outcome = Outcome::Timeout;
     while sim.tick < cfg.max_ticks {
         // Scene View 是纯投影：只读世界/规则，绝不改 world、不进哈希
@@ -74,12 +96,18 @@ pub fn run_session(
 
         let report = sim.step(logic).map_err(|e| e.to_string())?;
 
+        // 遥测（step 后采）：state_hash 是状态指纹（已优化、便宜，不自己序列化整世界），
+        // 事件名累进去重集。遥测只读、不回写世界，不影响录像/哈希。
+        state_trace.push(sim.world.state_hash());
+        note_events(&mut report.events.iter().map(|e| e.name.as_str()));
+
         // 扫本 tick 发给逻辑层的事件 + 逻辑层 emit 的事件，命中终止就收
         if let Some(o) = scan_terminal(report.events.iter(), &cfg.terminal) {
             outcome = o;
             break;
         }
         let emitted = logic.drain_observed();
+        note_events(&mut emitted.iter().map(|e| e.name.as_str()));
         if let Some(o) = scan_terminal(emitted.iter(), &cfg.terminal) {
             outcome = o;
             break;
@@ -87,7 +115,7 @@ pub fn run_session(
     }
 
     let recording = sim.stop_recording().expect("刚 start_recording 过");
-    Ok(SessionResult { outcome, ticks: sim.tick, recording })
+    Ok(SessionResult { outcome, ticks: sim.tick, recording, state_trace, fired_events })
 }
 
 /// 一组事件里第一个命中终止的结局（按事件序，确定性）。
@@ -234,6 +262,55 @@ mod tests {
         )
         .unwrap();
         Engine::new(rules, schema)
+    }
+
+    #[test]
+    fn run_session_collects_state_trace_one_per_tick() {
+        let mut sim = Sim::new(1);
+        let mut logic = NeverEnds;
+        let eng = empty_engine();
+        let mut strat = RandomStrategy::new(0);
+        let cfg = SessionConfig { max_ticks: 40, seed: 0, ..Default::default() };
+        let res = run_session(&mut sim, &mut logic, &eng, &mut strat, &cfg).unwrap();
+        // 每跑一个 tick 采一条 state_hash，长度必须等于实际 tick 数
+        assert_eq!(res.state_trace.len(), res.ticks as usize);
+        assert_eq!(res.state_trace.len(), 40);
+    }
+
+    /// 每 tick 都 emit 同一个非终止事件——用来验证 fired_events 去重。
+    struct EmitEveryTick {
+        event: String,
+        pending: Vec<Event>,
+    }
+    impl GameLogic for EmitEveryTick {
+        fn on_tick(
+            &mut self,
+            _: &mut vitric_ecs::World,
+            _: Vec<Event>,
+            _: &mut Pcg32,
+            _: u64,
+        ) -> Result<(), String> {
+            self.pending.push(Event::new(&self.event, json!({})));
+            Ok(())
+        }
+        fn drain_observed(&mut self) -> Vec<Event> {
+            std::mem::take(&mut self.pending)
+        }
+    }
+
+    #[test]
+    fn run_session_collects_fired_events_deduped() {
+        let mut sim = Sim::new(1);
+        // 每 tick 发同名事件 20 次，fired_events 应只收一次（去重）
+        let mut logic = EmitEveryTick { event: "milestone".to_string(), pending: vec![] };
+        let eng = empty_engine();
+        let mut strat = RandomStrategy::new(0);
+        // milestone 不是终止事件 → 不会停，跑满
+        let cfg = SessionConfig { max_ticks: 20, seed: 0, ..Default::default() };
+        let res = run_session(&mut sim, &mut logic, &eng, &mut strat, &cfg).unwrap();
+        assert!(res.fired_events.contains(&"milestone".to_string()), "{:?}", res.fired_events);
+        // 去重：发了 20 次，fired_events 里只一份
+        assert_eq!(res.fired_events.iter().filter(|n| *n == "milestone").count(), 1);
     }
 
     #[test]

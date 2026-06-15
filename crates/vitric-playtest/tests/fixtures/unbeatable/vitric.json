@@ -1,0 +1,9 @@
+{
+  "name": "unbeatable",
+  "schema": "schema.json",
+  "entry": "scenes/main.json",
+  "scenes": ["scenes/main.json"],
+  "rules": ["rules/game.json"],
+  "scripts": [],
+  "seed": 1
+}

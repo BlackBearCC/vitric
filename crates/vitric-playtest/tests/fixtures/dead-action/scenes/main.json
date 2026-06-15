@@ -1,0 +1,10 @@
+{
+  "entities": [
+    {
+      "name": "scratch",
+      "components": {
+        "Scratch": { "v": 0 }
+      }
+    }
+  ]
+}

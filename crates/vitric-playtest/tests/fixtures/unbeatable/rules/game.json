@@ -1,0 +1,14 @@
+{
+  "rules": [
+    {
+      "id": "win-if-gate-open",
+      "on": { "event": "input", "filter": { "action": "try", "phase": "pressed" } },
+      "if": [
+        ["@gate.Lock.open", "==", true]
+      ],
+      "do": [
+        { "emit": "game-won", "data": {} }
+      ]
+    }
+  ]
+}

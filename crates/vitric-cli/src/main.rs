@@ -4,7 +4,7 @@
 //! - `vitric check <项目目录>`            校验项目（schema/场景/规则/脚本），出报告
 //! - `vitric run <项目目录> [选项]`        无头运行 + AI 控制面
 //! - `vitric replay <项目目录> <录像.json>` 重放录像并校验确定性
-//! - `vitric playtest <项目目录> [选项]`     进程内自动试玩一局：派生场景视图喂策略、循环步进，出可重放录像
+//! - `vitric playtest <项目目录> [选项]`     进程内自动试玩：单局出可重放录像（默认），或 --sessions N 并行跑批聚合地板报告
 //! - `vitric gate <项目目录>`              交付门禁：check + 通关录像重放 + 断言集，全过才出证书
 //! - `vitric bundle <项目目录> [选项]`      发行打包：gate PASS 后把项目附进引擎副本，出自包含单文件（无证书不发行）
 //! - `vitric assets <项目目录> [选项]`      全项目 PNG 统一色板（AI 出图规整成一个调）
@@ -148,12 +148,21 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
 /// vitric-playtest，这里把两边接起来。
 ///
 /// 选项：
-///   --strategy <random|greedy>   策略（默认 random）
-///   --seed <N>                   策略 PCG 播种（默认 0）
+///   --strategy <random|greedy>   策略（默认 random；仅单局 N=1 用）
+///   --seed <N>                   策略 PCG 播种（默认 0；swarm 模式从此起递增）
 ///   --max-ticks <N>              超时上限（默认 600）
-///   --out <录像路径>             录像落盘位置（默认 <项目>/playtest-session.json）
+///   --sessions <N>               跑 N 局 swarm 聚合出报告（默认 1=单局旧行为）
+///   --out <路径>                 N=1 写录像；N>1 写完整报告 JSON
+///
+/// 单局（N=1）保持旧行为：派生场景视图喂策略、循环步进、出可重放录像。
+/// 多局（N>1）走 swarm：random+greedy+coverage 三策略轮流 × 递增 seed 凑够 N 局，
+/// 各局在自己线程内 boot 一份运行时并行跑（QuickJS 非 Send，运行时绝不跨线程），
+/// 聚合成地板报告打到 stdout（设计稿第 2 阶段）。
 fn cmd_playtest(args: &[String]) -> Result<(), String> {
-    use vitric_playtest::{run_session, GreedyStrategy, RandomStrategy, SessionConfig, Strategy};
+    use vitric_playtest::{
+        aggregate, run_session, run_swarm, GreedyStrategy, RandomStrategy, SessionConfig,
+        SessionSpec, Strategy, StrategyKind,
+    };
 
     let dir = args.first().ok_or("playtest 缺少项目目录参数")?;
     let dir = PathBuf::from(dir);
@@ -161,6 +170,7 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     let mut strategy_name = "random".to_string();
     let mut seed: u64 = 0;
     let mut max_ticks: u64 = 600;
+    let mut sessions: u64 = 1;
     let mut out_path: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
@@ -178,16 +188,58 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
                 max_ticks = args.get(i + 1).ok_or(need("--max-ticks"))?.parse().map_err(|e| format!("--max-ticks: {e}"))?;
                 i += 2;
             }
+            "--sessions" => {
+                sessions = args.get(i + 1).ok_or(need("--sessions"))?.parse().map_err(|e| format!("--sessions: {e}"))?;
+                if sessions == 0 {
+                    return Err("--sessions 至少为 1".to_string());
+                }
+                i += 2;
+            }
             "--out" => {
                 out_path = Some(PathBuf::from(args.get(i + 1).ok_or(need("--out"))?));
                 i += 2;
             }
             other => {
-                return Err(format!("未知选项 {other:?}。可用: --strategy --seed --max-ticks --out"))
+                return Err(format!("未知选项 {other:?}。可用: --strategy --seed --max-ticks --sessions --out"))
             }
         }
     }
 
+    // N>1：swarm 跑批 + 聚合报告
+    if sessions > 1 {
+        // 计划：三策略轮流 × 递增 seed，凑够 N 局。每条 spec 自带 (策略,seed,max_ticks)，
+        // 一局结果只由 spec 决定（确定性铁律）——串行/并行结果一致。
+        let mut plan: Vec<SessionSpec> = Vec::with_capacity(sessions as usize);
+        for k in 0..sessions {
+            let kind = StrategyKind::ALL[(k as usize) % StrategyKind::ALL.len()];
+            // seed 从 --seed 起递增：每条 spec 一个不同 seed，覆盖更广
+            plan.push(SessionSpec::new(kind, seed + k, max_ticks));
+        }
+
+        // 工厂闭包：每个工作线程在自己线程内调它 boot 一份全新运行时。
+        // 返回 (Sim, Runtime, Engine)——Engine 是装配期无状态副本（derive Clone），
+        // 跑 run_session 时同时可变借 logic 和不可变借 engine 需要它独立一份。
+        let factory = || -> Result<(_, _, _), String> {
+            let (sim, rt) = Runtime::boot(&dir)?;
+            let engine = rt.rules.clone();
+            Ok((sim, rt, engine))
+        };
+
+        // 线程数默认机器并行度（run_swarm 内部再取 min(plan, cpu)）
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let results = run_swarm(factory, &plan, threads)?;
+        let report = aggregate(&results);
+
+        let json = serde_json::to_string_pretty(&report).expect("报告可序列化");
+        if let Some(out) = &out_path {
+            std::fs::write(out, &json).map_err(|e| format!("写报告 {} 失败: {e}", out.display()))?;
+        }
+        // 报告 JSON 永远打 stdout（人和机器同一份，与 gate/team 同口径）
+        println!("{json}");
+        return Ok(());
+    }
+
+    // N=1：单局旧行为，原样不动（出可重放录像）
     let mut strategy: Box<dyn Strategy> = match strategy_name.as_str() {
         "random" => Box::new(RandomStrategy::new(seed)),
         "greedy" => Box::new(GreedyStrategy::new(seed)),

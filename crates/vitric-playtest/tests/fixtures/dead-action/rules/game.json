@@ -1,0 +1,11 @@
+{
+  "rules": [
+    {
+      "id": "useless-noop",
+      "on": { "event": "input", "filter": { "action": "useless", "phase": "pressed" } },
+      "do": [
+        { "set": "@scratch.Scratch.v", "to": 0 }
+      ]
+    }
+  ]
+}

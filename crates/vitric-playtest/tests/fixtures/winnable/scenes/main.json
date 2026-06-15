@@ -1,0 +1,10 @@
+{
+  "entities": [
+    {
+      "name": "marker",
+      "components": {
+        "Marker": { "v": 0 }
+      }
+    }
+  ]
+}

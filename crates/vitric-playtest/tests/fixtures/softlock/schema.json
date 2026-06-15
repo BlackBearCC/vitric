@@ -1,0 +1,9 @@
+{
+  "components": {
+    "State": {
+      "fields": {
+        "sealed": { "type": "bool", "default": false }
+      }
+    }
+  }
+}

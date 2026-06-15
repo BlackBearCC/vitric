@@ -1,0 +1,14 @@
+{
+  "rules": [
+    {
+      "id": "seal-once",
+      "on": { "event": "input", "filter": { "action": "seal", "phase": "pressed" } },
+      "if": [
+        ["@world.State.sealed", "==", false]
+      ],
+      "do": [
+        { "set": "@world.State.sealed", "to": true }
+      ]
+    }
+  ]
+}

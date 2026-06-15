@@ -1,0 +1,9 @@
+{
+  "components": {
+    "Scratch": {
+      "fields": {
+        "v": { "type": "number", "default": 0 }
+      }
+    }
+  }
+}

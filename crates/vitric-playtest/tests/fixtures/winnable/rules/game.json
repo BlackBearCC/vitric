@@ -1,0 +1,11 @@
+{
+  "rules": [
+    {
+      "id": "win-on-key",
+      "on": { "event": "input", "filter": { "action": "key", "phase": "pressed" } },
+      "do": [
+        { "emit": "game-won", "data": {} }
+      ]
+    }
+  ]
+}

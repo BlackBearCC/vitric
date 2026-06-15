@@ -1,0 +1,10 @@
+{
+  "entities": [
+    {
+      "name": "world",
+      "components": {
+        "State": { "sealed": false }
+      }
+    }
+  ]
+}

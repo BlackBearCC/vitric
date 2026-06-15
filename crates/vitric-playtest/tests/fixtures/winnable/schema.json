@@ -1,0 +1,9 @@
+{
+  "components": {
+    "Marker": {
+      "fields": {
+        "v": { "type": "number", "default": 0 }
+      }
+    }
+  }
+}

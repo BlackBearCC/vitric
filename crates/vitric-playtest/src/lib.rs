@@ -8,10 +8,14 @@
 //! 装配运行时（`Runtime::boot`）住在 vitric-cli，依赖方向是 cli → playtest，所以本 crate
 //! 不 boot 项目，由调用方 boot 好再把 `(Sim, GameLogic, Engine)` 交给 [`session::run_session`]。
 
+pub mod report;
 pub mod scene_view;
 pub mod session;
 pub mod strategy;
+pub mod swarm;
 
+pub use report::{aggregate, Report};
 pub use scene_view::{Action, Outcome, SceneView, TerminalSpec};
 pub use session::{run_session, SessionConfig, SessionResult};
-pub use strategy::{GreedyStrategy, RandomStrategy, Strategy};
+pub use strategy::{CoverageStrategy, GreedyStrategy, RandomStrategy, Strategy};
+pub use swarm::{run_swarm, LabeledResult, SessionSpec, StrategyKind};
