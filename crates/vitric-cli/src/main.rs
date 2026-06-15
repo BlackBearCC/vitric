@@ -4,6 +4,7 @@
 //! - `vitric check <项目目录>`            校验项目（schema/场景/规则/脚本），出报告
 //! - `vitric run <项目目录> [选项]`        无头运行 + AI 控制面
 //! - `vitric replay <项目目录> <录像.json>` 重放录像并校验确定性
+//! - `vitric playtest <项目目录> [选项]`     进程内自动试玩一局：派生场景视图喂策略、循环步进，出可重放录像
 //! - `vitric gate <项目目录>`              交付门禁：check + 通关录像重放 + 断言集，全过才出证书
 //! - `vitric bundle <项目目录> [选项]`      发行打包：gate PASS 后把项目附进引擎副本，出自包含单文件（无证书不发行）
 //! - `vitric assets <项目目录> [选项]`      全项目 PNG 统一色板（AI 出图规整成一个调）
@@ -63,6 +64,7 @@ fn main() {
         Some("check") => cmd_check(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
         Some("replay") => cmd_replay(&args[1..]),
+        Some("playtest") => cmd_playtest(&args[1..]),
         Some("gate") => cmd_gate(&args[1..]),
         Some("bundle") => vitric_cli::bundle::run(&args[1..]),
         Some("run-embedded") => cmd_run_embedded(&args[1..]),
@@ -83,7 +85,7 @@ fn main() {
 }
 
 fn usage_and_exit() -> ! {
-    eprintln!("用法: vitric <check|run|replay|gate|bundle|assets|team|turf> <项目目录> [选项]\n详见 vitric 仓库 docs/");
+    eprintln!("用法: vitric <check|run|replay|playtest|gate|bundle|assets|team|turf> <项目目录> [选项]\n详见 vitric 仓库 docs/");
     std::process::exit(2);
 }
 
@@ -135,6 +137,81 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
             "replayed_ticks": rec.ticks,
             "final_hash": format!("{:#018x}", rec.final_hash),
             "verified": true,
+        })
+    );
+    Ok(())
+}
+
+/// `vitric playtest`：进程内自动试玩一局。boot 项目 → 派生场景视图喂策略 →
+/// 循环步进直到通关/死亡/超时 → 出一份可重放录像。这是 agent 集群试玩的地基
+/// （设计稿第 1 阶段）：装配住在本 crate（Runtime::boot），循环/视图/策略住在
+/// vitric-playtest，这里把两边接起来。
+///
+/// 选项：
+///   --strategy <random|greedy>   策略（默认 random）
+///   --seed <N>                   策略 PCG 播种（默认 0）
+///   --max-ticks <N>              超时上限（默认 600）
+///   --out <录像路径>             录像落盘位置（默认 <项目>/playtest-session.json）
+fn cmd_playtest(args: &[String]) -> Result<(), String> {
+    use vitric_playtest::{run_session, GreedyStrategy, RandomStrategy, SessionConfig, Strategy};
+
+    let dir = args.first().ok_or("playtest 缺少项目目录参数")?;
+    let dir = PathBuf::from(dir);
+
+    let mut strategy_name = "random".to_string();
+    let mut seed: u64 = 0;
+    let mut max_ticks: u64 = 600;
+    let mut out_path: Option<PathBuf> = None;
+    let mut i = 1;
+    while i < args.len() {
+        let need = |key: &str| format!("{key} 缺少参数值");
+        match args[i].as_str() {
+            "--strategy" => {
+                strategy_name = args.get(i + 1).ok_or(need("--strategy"))?.clone();
+                i += 2;
+            }
+            "--seed" => {
+                seed = args.get(i + 1).ok_or(need("--seed"))?.parse().map_err(|e| format!("--seed: {e}"))?;
+                i += 2;
+            }
+            "--max-ticks" => {
+                max_ticks = args.get(i + 1).ok_or(need("--max-ticks"))?.parse().map_err(|e| format!("--max-ticks: {e}"))?;
+                i += 2;
+            }
+            "--out" => {
+                out_path = Some(PathBuf::from(args.get(i + 1).ok_or(need("--out"))?));
+                i += 2;
+            }
+            other => {
+                return Err(format!("未知选项 {other:?}。可用: --strategy --seed --max-ticks --out"))
+            }
+        }
+    }
+
+    let mut strategy: Box<dyn Strategy> = match strategy_name.as_str() {
+        "random" => Box::new(RandomStrategy::new(seed)),
+        "greedy" => Box::new(GreedyStrategy::new(seed)),
+        other => return Err(format!("--strategy 只认 random 或 greedy，拿到 {other:?}")),
+    };
+
+    let out = out_path.unwrap_or_else(|| dir.join("playtest-session.json"));
+    // boot 一对全新的 (sim, runtime)：录可重放录像必须从冷启动起录
+    let (mut sim, mut rt) = Runtime::boot(&dir)?;
+    let cfg = SessionConfig { max_ticks, seed, ..Default::default() };
+    // run_session 要同时可变借 logic(rt) 和不可变借 engine(rt.rules)——同一对象借不动。
+    // Engine 是装配期无状态副本，复制一份只读的传进去最干净（见 Engine 的 derive 注释）。
+    let engine = rt.rules.clone();
+    let result = run_session(&mut sim, &mut rt, &engine, strategy.as_mut(), &cfg)?;
+
+    let json = serde_json::to_string_pretty(&result.recording).expect("录像可序列化");
+    std::fs::write(&out, json).map_err(|e| format!("写录像 {} 失败: {e}", out.display()))?;
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "outcome": format!("{:?}", result.outcome),
+            "ticks": result.ticks,
+            "out": out.display().to_string(),
         })
     );
     Ok(())

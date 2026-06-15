@@ -59,6 +59,10 @@ impl std::error::Error for RuleError {}
 const MAX_CASCADE_DEPTH: usize = 8;
 
 /// 规则引擎。无内部状态：每 tick 拿事件进来、改世界、吐输出。
+/// 可 Clone（rules/schema 都是装配期不可变副本）：playtest 派生场景视图要读规则，
+/// 而它被 Runtime 这个 GameLogic 装配体私有持有——同时可变借 logic + 不可变借 engine
+/// 借用检查器不允许，复制一份只读副本最干净，引擎本身无状态、复制零语义负担。
+#[derive(Clone)]
 pub struct Engine {
     pub rules: RuleSet,
     pub schema: Schema,

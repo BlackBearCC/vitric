@@ -18,6 +18,7 @@ vitric-data = { path = "../vitric-data" }
 vitric-rules = { path = "../vitric-rules" }
 vitric-script = { path = "../vitric-script" }
 vitric-sim = { path = "../vitric-sim" }
+vitric-playtest = { path = "../vitric-playtest" }
 vitric-control = { path = "../vitric-control" }
 winit = "0.30"
 softbuffer = "0.4"

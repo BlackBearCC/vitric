@@ -8,6 +8,7 @@ members = [
     "crates/vitric-script",
     "crates/vitric-control",
     "crates/vitric-render",
+    "crates/vitric-playtest",
     "crates/vitric-cli",
 ]
 

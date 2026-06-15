@@ -2958,6 +2958,7 @@ dependencies = [
  "vitric-control",
  "vitric-data",
  "vitric-ecs",
+ "vitric-playtest",
  "vitric-render",
  "vitric-rules",
  "vitric-script",
@@ -2995,6 +2996,18 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "vitric-playtest"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "vitric-data",
+ "vitric-ecs",
+ "vitric-rules",
+ "vitric-sim",
 ]
 
 [[package]]
