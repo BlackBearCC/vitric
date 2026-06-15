@@ -199,6 +199,16 @@ pub fn parse_completion(body: &str) -> Result<String, String> {
         })
 }
 
+/// 同步问一次 LLM（直接阻塞当前线程，返回回复文本或显式错误）。
+///
+/// 运行时的游戏循环走 [`Llm`] 的异步队列（绝不阻塞主循环）；但 **playtest 的 LLM 档**是另一
+/// 条路——它本就慢、单独限流、不在游戏帧里（设计稿九节），同步阻塞最直白，正好给
+/// playtest 的 `LlmClient` 适配器包一层。复用同一套请求/解析（build_request_body/parse_completion），
+/// 端点行为和运行时 LLM 完全一致。
+pub fn complete_sync(cfg: &LlmConfig, prompt: &str) -> Result<String, String> {
+    call_endpoint(cfg, prompt)
+}
+
 /// 在工作线程里执行一次 HTTP 调用（同步阻塞，主循环看不见这段等待）。
 fn call_endpoint(cfg: &LlmConfig, prompt: &str) -> Result<String, String> {
     let body = build_request_body(&cfg.model, prompt);

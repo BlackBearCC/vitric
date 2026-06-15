@@ -212,6 +212,40 @@ pub struct NonFiniteField {
     pub sample_recording: Recording,
 }
 
+/// LLM 定性 note 汇总（设计稿五节「LLM 定性 note」、十一节第 5 阶段）。
+///
+/// **诚实定位**：这一整块是 **LLM 主观提示，不是真人判定，待人复核**——LLM 看着觉得
+/// 「看不懂/前后矛盾/选项没意义」，可能对、也可能是它自己没看懂。报告把它和「机械逮出的
+/// 结构破绽」（软锁/不可达/数值崩那些确定性结论）分开摆，不混为一谈。
+///
+/// LLM 局的 note 本就不要求跨次复现（LLM 非确定），所以这块**不**进确定性保证；但每条 note
+/// 都挂得到它那局的可重放录像（`sample_recording`），人能回放到那一刻看 LLM 在说哪一幕。
+#[derive(Debug, Clone, Serialize)]
+pub struct QualitativeNotes {
+    /// 收到的 note 总条数（含重复）。
+    pub total: usize,
+    /// 按 kind 分组、组内按文本去重后的 note 簇（排序确定）。
+    pub clusters: Vec<NoteCluster>,
+}
+
+/// 一簇定性 note：同一 kind + 同一文本归一成一条，记命中次数 + 代表局录像。
+#[derive(Debug, Clone, Serialize)]
+pub struct NoteCluster {
+    /// note 类型（clarity/continuity/choice/other）。
+    pub kind: String,
+    /// note 正文（归一后的代表文本）。
+    pub text: String,
+    /// 这条 note 出现过几次（跨局 + 同局多 tick 累加）。
+    pub count: usize,
+    /// 第一次见到它的决策 tick（代表 tick，便于回放定位到那一刻）。
+    pub sample_tick: u64,
+    /// 代表局的策略/seed（对回是哪局 LLM 说的）。
+    pub sample_strategy: String,
+    pub sample_seed: u64,
+    /// 代表局的可重放录像——回放到那一幕看 LLM 在说什么（结论挂证据）。
+    pub sample_recording: Recording,
+}
+
 /// 地板报告（机器 JSON + 人话 summary）。第 2 阶段的几个扎实维度。
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
@@ -229,6 +263,9 @@ pub struct Report {
     pub dominant_strategy: DominantStrategy,
     /// 数值崩：经济跑飞/崩盘软锁/溢出（设计稿四阶段）。诚实标候选。
     pub numeric_breakage: NumericBreakage,
+    /// LLM 定性 note 汇总（设计稿第 5 阶段）：清晰度/连续性/选择有效性，按 kind 分组去重。
+    /// 诚实标「LLM 主观提示，非真人判，待人复核」——和上面的机械结构结论分开摆。
+    pub qualitative_notes: QualitativeNotes,
     /// 人话摘要：一两句把上面最关键的几条说清。
     pub summary: String,
 }
@@ -271,6 +308,7 @@ fn aggregate_inner(
     // 数值崩要知道「哪些局卡死了」来判 collapse——用同一套冻结判据算出卡死局下标集合。
     let stuck_idx = stuck_session_indices(results, freeze_k);
     let numeric_breakage = aggregate_numeric_breakage(results, &stuck_idx);
+    let qualitative_notes = aggregate_notes(results);
     let summary = build_summary(
         &outcome_distribution,
         &reachability,
@@ -279,6 +317,7 @@ fn aggregate_inner(
         &inert_actions,
         &dominant_strategy,
         &numeric_breakage,
+        &qualitative_notes,
     );
     Report {
         sessions: results.len(),
@@ -290,6 +329,7 @@ fn aggregate_inner(
         inert_actions,
         dominant_strategy,
         numeric_breakage,
+        qualitative_notes,
         summary,
     }
 }
@@ -509,6 +549,43 @@ fn is_runaway(stat: &crate::session::NumericStat) -> bool {
     stat.first > 0.0 && stat.max > stat.first * RUNAWAY_RATIO
 }
 
+/// LLM 定性 note 聚合（设计稿第 5 阶段）：把各局的 `notes` 汇总，按 (kind, 文本) 归一去重、
+/// 累计命中次数，挂第一次见到它的 tick / 代表局录像。
+///
+/// 去重键 = (kind, 归一文本)：同一句话不管出现在哪局哪个 tick 都归一成一条 count++，避免
+/// 「LLM 每局都说同一句矛盾」刷屏。归一文本 = trim 后的原文（不做语义聚类，那要再上一层 LLM，
+/// 超出本阶段范围；诚实地只做字面去重）。输出按 (kind, 文本) 排序（BTreeMap）= 确定。
+///
+/// 注意：note 本身是 LLM 局的非确定产物，这个聚合**不**进确定性保证（设计稿八节「LLM 档除外」）；
+/// 但聚合逻辑本身是纯函数——给定同一批 notes 必出同一份汇总。
+fn aggregate_notes(results: &[LabeledResult]) -> QualitativeNotes {
+    // 桶：(kind, 文本) -> (命中次数, 代表 tick, 代表局)。BTreeMap 保证输出顺序确定。
+    let mut buckets: BTreeMap<(String, String), (usize, u64, &LabeledResult)> = BTreeMap::new();
+    let mut total = 0usize;
+    for lr in results {
+        for note in &lr.result.notes {
+            total += 1;
+            let key = (note.kind.clone(), note.text.trim().to_string());
+            let entry = buckets.entry(key).or_insert((0, note.tick, lr));
+            entry.0 += 1;
+            // 代表 tick/局保第一个遇到的（BTreeMap 输出序确定，count 累加）
+        }
+    }
+    let clusters = buckets
+        .into_iter()
+        .map(|((kind, text), (count, tick, rep))| NoteCluster {
+            kind,
+            text,
+            count,
+            sample_tick: tick,
+            sample_strategy: rep.spec.strategy_kind.name().to_string(),
+            sample_seed: rep.spec.seed,
+            sample_recording: rep.result.recording.clone(),
+        })
+        .collect();
+    QualitativeNotes { total, clusters }
+}
+
 fn aggregate_pacing(results: &[LabeledResult]) -> Pacing {
     // 终止局（Win/Lose）的 tick，排序求 min/median/max + 直方
     let mut term_ticks: Vec<u64> = results
@@ -682,6 +759,7 @@ fn find_dominant(stats: &[StrategyStats]) -> Option<String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_summary(
     dist: &OutcomeDistribution,
     reach: &Reachability,
@@ -690,6 +768,7 @@ fn build_summary(
     inert: &[String],
     dominant: &DominantStrategy,
     numeric: &NumericBreakage,
+    notes: &QualitativeNotes,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
     parts.push(format!(
@@ -766,6 +845,21 @@ fn build_summary(
             fields.join("/")
         ));
     }
+    if !notes.clusters.is_empty() {
+        // 按 kind 统计去重后各有几条（continuity/clarity/choice 概况）
+        let mut by_kind: BTreeMap<&str, usize> = BTreeMap::new();
+        for c in &notes.clusters {
+            *by_kind.entry(c.kind.as_str()).or_insert(0) += 1;
+        }
+        let breakdown: Vec<String> =
+            by_kind.iter().map(|(k, n)| format!("{k} {n}")).collect();
+        parts.push(format!(
+            "LLM 定性提示 {} 条（去重 {} 条：{}）——主观感受，非真人判，待人复核。",
+            notes.total,
+            notes.clusters.len(),
+            breakdown.join("/")
+        ));
+    }
     parts.join(" ")
 }
 
@@ -804,8 +898,24 @@ mod tests {
                 state_trace,
                 fired_events: fired_events.iter().map(|s| s.to_string()).collect(),
                 numeric_summary: std::collections::BTreeMap::new(),
+                notes: Vec::new(),
             },
         }
+    }
+
+    /// 造一条带 LLM note 的 LabeledResult（喂 note 聚合器）。
+    fn labeled_with_notes(
+        kind: StrategyKind,
+        seed: u64,
+        notes: Vec<crate::strategy::PlaytestNote>,
+    ) -> LabeledResult {
+        let mut lr = labeled(kind, seed, Outcome::Timeout, 30, vec![], vec![], vec![]);
+        lr.result.notes = notes;
+        lr
+    }
+
+    fn note(tick: u64, kind: &str, text: &str) -> crate::strategy::PlaytestNote {
+        crate::strategy::PlaytestNote { tick, kind: kind.to_string(), text: text.to_string() }
     }
 
     /// 造一条带数值摘要的 LabeledResult（喂数值崩聚合器）。
@@ -1228,6 +1338,84 @@ mod tests {
         ];
         let rep = aggregate(&r);
         assert!(rep.dominant_strategy.dominant_action.is_none(), "通关局不足/不偏，不下论断");
+    }
+
+    // ---- LLM 定性 note（qualitative_notes）单元测试 ----
+
+    #[test]
+    fn qualitative_notes_empty_when_no_llm() {
+        // 纯廉价策略局没有 note → 汇总为空
+        let r = vec![labeled(StrategyKind::Random, 0, Outcome::Win, 10, vec![], vec![], vec![])];
+        let rep = aggregate(&r);
+        assert_eq!(rep.qualitative_notes.total, 0);
+        assert!(rep.qualitative_notes.clusters.is_empty());
+    }
+
+    #[test]
+    fn qualitative_notes_groups_by_kind_and_dedups_text() {
+        // 同一句矛盾在两局都说 → 去重成一条 count=2；另一条不同文本单列
+        let r = vec![
+            labeled_with_notes(StrategyKind::Scripted, 0, vec![
+                note(3, "continuity", "管理员这句和上一幕矛盾"),
+                note(5, "clarity", "看不懂该干嘛"),
+            ]),
+            labeled_with_notes(StrategyKind::Scripted, 1, vec![
+                note(4, "continuity", "管理员这句和上一幕矛盾"),
+            ]),
+        ];
+        let rep = aggregate(&r);
+        assert_eq!(rep.qualitative_notes.total, 3, "原始 note 共 3 条");
+        assert_eq!(rep.qualitative_notes.clusters.len(), 2, "去重后 2 条");
+        let contradiction = rep
+            .qualitative_notes
+            .clusters
+            .iter()
+            .find(|c| c.text.contains("矛盾"))
+            .expect("应有矛盾簇");
+        assert_eq!(contradiction.kind, "continuity");
+        assert_eq!(contradiction.count, 2, "同句矛盾跨局归一 count=2");
+        assert_eq!(contradiction.sample_tick, 3, "代表 tick = 第一次见到");
+    }
+
+    #[test]
+    fn qualitative_notes_same_text_different_kind_not_merged() {
+        // 文本相同但 kind 不同 → 不归一（去重键含 kind）
+        let r = vec![labeled_with_notes(StrategyKind::Scripted, 0, vec![
+            note(1, "clarity", "这步没意义"),
+            note(2, "choice", "这步没意义"),
+        ])];
+        let rep = aggregate(&r);
+        assert_eq!(rep.qualitative_notes.clusters.len(), 2, "kind 不同不归一");
+    }
+
+    #[test]
+    fn qualitative_notes_summary_and_serialization() {
+        let r = vec![labeled_with_notes(StrategyKind::Scripted, 0, vec![
+            note(3, "continuity", "前后矛盾"),
+        ])];
+        let rep = aggregate(&r);
+        assert!(rep.summary.contains("LLM 定性提示"), "summary 应提 LLM note 概况: {}", rep.summary);
+        assert!(rep.summary.contains("待人复核"), "summary 应诚实标待复核");
+        let json = serde_json::to_string(&rep).unwrap();
+        assert!(json.contains("qualitative_notes"));
+        assert!(json.contains("前后矛盾"));
+    }
+
+    #[test]
+    fn qualitative_notes_is_deterministic_aggregation() {
+        // 聚合本身是纯函数：同一批 notes 两次聚出同一份汇总（note 本身非确定不影响这点）
+        let build = || {
+            vec![labeled_with_notes(StrategyKind::Scripted, 0, vec![
+                note(2, "clarity", "b"),
+                note(1, "continuity", "a"),
+            ])]
+        };
+        let a = aggregate(&build());
+        let b = aggregate(&build());
+        assert_eq!(
+            serde_json::to_string(&a.qualitative_notes).unwrap(),
+            serde_json::to_string(&b.qualitative_notes).unwrap()
+        );
     }
 
     #[test]

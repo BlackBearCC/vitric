@@ -1,14 +1,38 @@
 //! 策略库——消费 Scene View、产出动作的纯逻辑。每个策略都用**独立的 Pcg32**
 //! 播种（从 playtest seed 来，不碰 sim.rng），所以同 seed 同序列、完全可复现。
 
+use serde::{Deserialize, Serialize};
 use vitric_sim::{InputRecord, Pcg32};
 
 use crate::scene_view::{Action, SceneView};
+
+/// 一条定性 note（LLM 档拟人玩时吐的主观提示，设计稿二节/五节「LLM 定性 note」）。
+///
+/// 只有 LLM 策略会产 note（清晰度/连续性/选择有效性这类「人话感受」），廉价策略档不产。
+/// note 是**纯遥测**：不进录像、不进哈希、不影响确定性——它是「LLM 这局看着怎么样」的
+/// 旁观记录，和 state_trace/fired_events 同级。报告里诚实标成「LLM 主观提示，待人复核」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaytestNote {
+    /// 这条 note 是在第几个决策 tick 冒出来的（LLM 看哪一刻的视图说的）。
+    pub tick: u64,
+    /// note 类型（归一后的标签）：常见 "clarity"（看不懂该干嘛）/"continuity"（前后矛盾）/
+    /// "choice"（选项没意义）/"other"。由 LLM 自报，解析时归一到这几类。
+    pub kind: String,
+    /// note 正文（LLM 的原话）。
+    pub text: String,
+}
 
 /// 策略接口：看一份视图，选一个动作（或本 tick 不操作）。
 pub trait Strategy {
     /// None = 本 tick 什么都不按。返回的动作必须来自 `view.actions`（合法集合）。
     fn choose(&mut self, view: &SceneView) -> Option<Action>;
+
+    /// 取走本策略到目前为止累积的定性 note（取走即清空，避免重复收）。
+    /// 默认空实现——只有 LLM 策略会覆盖它产 note，廉价策略档（random/greedy/…）一律不产。
+    /// session 每 tick 调一次把 note 收进 SessionResult.notes（不进录像/哈希）。
+    fn drain_notes(&mut self) -> Vec<PlaytestNote> {
+        Vec::new()
+    }
 }
 
 /// 随机策略：合法 actions 里均匀随机挑一个（含一定概率「不操作」）。
@@ -249,6 +273,19 @@ mod tests {
             .map(|n| Action { action: n.to_string(), phase: "pressed".to_string() })
             .collect();
         SceneView { observation: serde_json::json!({}), actions, done: None }
+    }
+
+    #[test]
+    fn non_llm_strategies_drain_no_notes() {
+        // 廉价策略档默认不产 note（drain_notes 默认空实现）——note 通道是 LLM 档专属
+        let view = view_with_actions(&["a", "b"]);
+        let mut r = RandomStrategy::new(1);
+        let mut c = CoverageStrategy::new(1);
+        let mut e = EconomyStrategy::new(1);
+        for s in [&mut r as &mut dyn Strategy, &mut c, &mut e] {
+            let _ = s.choose(&view);
+            assert!(s.drain_notes().is_empty(), "非 LLM 策略不产 note");
+        }
     }
 
     #[test]

@@ -11,11 +11,13 @@
 //! spec 决定，不碰线程调度——所以 `run_swarm` 串行跑和并行跑，结果逐项一致。线程只
 //! 决定「谁先跑完」，不决定「跑出什么」；结果按 spec 在 plan 里的原始下标归位。
 
+use std::sync::Arc;
 use std::thread;
 
 use vitric_rules::Engine;
 use vitric_sim::{GameLogic, Sim};
 
+use crate::llm_agent::{LlmClient, LlmStrategy};
 use crate::scene_view::{Outcome, TerminalSpec};
 use crate::seed::Perturbation;
 use crate::session::{run_session, SessionConfig, SessionResult};
@@ -35,6 +37,10 @@ pub enum StrategyKind {
     /// 种子探索的脚本回放局——只作**标签**（结果归类用）。脚本本身不在 SessionSpec 里
     /// （脚本是变长的，且每条不同），由 `run_seed_swarm` 直接持有 Perturbation 构造策略。
     Scripted,
+    /// LLM 拟人玩局——只作**标签**（设计稿五阶段）。LLM 策略带 client（非 Send 的 trait 对象
+    /// 形态各异），不从 (kind,seed) 构造，由 `cmd_playtest --llm` 直接持有 LlmStrategy 跑，
+    /// 跑完贴这个标签把结果并进 swarm 结果集（note 进 qualitative_notes）。
+    Llm,
 }
 
 impl StrategyKind {
@@ -56,6 +62,7 @@ impl StrategyKind {
             StrategyKind::Coverage => "coverage",
             StrategyKind::Economy => "economy",
             StrategyKind::Scripted => "scripted",
+            StrategyKind::Llm => "llm",
         }
     }
 
@@ -69,6 +76,9 @@ impl StrategyKind {
             StrategyKind::Economy => Box::new(EconomyStrategy::new(seed)),
             StrategyKind::Scripted => {
                 panic!("Scripted 策略要带脚本，必须走 run_seed_swarm，不能用 StrategyKind::build")
+            }
+            StrategyKind::Llm => {
+                panic!("Llm 策略要带 client，必须由 cmd_playtest --llm 直接构造 LlmStrategy，不能用 StrategyKind::build")
             }
         }
     }
@@ -184,6 +194,58 @@ where
         };
         Ok(LabeledResult { spec, result })
     })
+}
+
+/// LLM 档批跑（设计稿五阶段）：少量 LLM 代理读同一份 Scene View 拟人玩 + 吐定性 note。
+///
+/// **为什么串行、不并行**：LLM 局天然慢、单独限流、不拖累策略档（设计稿九节）；而且 LLM
+/// 推理不确定，这几局的 outcome/note **不要求跨次复现**——并行与否对结果没有「确定性」意义。
+/// 串行最简单：共享一个 `client`（`Arc<dyn LlmClient>`，Send+Sync），逐局自己 boot 一份运行时
+/// （和策略档同款冷启动约束，录像才可重放），跑一局 LlmStrategy，贴 `StrategyKind::Llm` 标签。
+///
+/// 每局 seed=`base_seed + 下标`（给 LlmStrategy 的预留 PCG 播种，当前不影响选择，留作对账）。
+/// `goal` 拼进提示词的目标描述。返回的 `LabeledResult` 可直接和策略档结果**拼进同一个结果集**
+/// 喂聚合器——LLM 局的 note 进 `qualitative_notes`，它选的输入进录像（可 `Sim::replay` 复现）。
+pub fn run_llm_sessions<R, F>(
+    factory: F,
+    client: Arc<dyn LlmClient>,
+    count: usize,
+    goal: &str,
+    base_seed: u64,
+    max_ticks: u64,
+    terminal: TerminalSpec,
+) -> Result<Vec<LabeledResult>, String>
+where
+    R: GameLogic,
+    F: Fn() -> Result<(Sim, R, Engine), String>,
+{
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let (mut sim, mut logic, engine) = factory()?;
+        let seed = base_seed.wrapping_add(i as u64);
+        // 每局一个新 LlmStrategy，共享同一个 client（Arc 包成 Box<dyn LlmClient> 喂构造）
+        let mut strategy = LlmStrategy::new(Box::new(SharedClient(client.clone())), goal, seed);
+        let cfg = SessionConfig { max_ticks, seed, terminal: terminal.clone() };
+        let result = run_session(&mut sim, &mut logic, &engine, &mut strategy, &cfg)?;
+        let spec = SessionSpec {
+            strategy_kind: StrategyKind::Llm,
+            seed,
+            max_ticks,
+            terminal: terminal.clone(),
+        };
+        out.push(LabeledResult { spec, result });
+    }
+    Ok(out)
+}
+
+/// 把 `Arc<dyn LlmClient>` 包成一个 `LlmClient`，让多局共享同一个底层 client
+/// （Box 要独占所有权，Arc 让 N 局都拿到同一个真 client，省 N 次重连/重配）。
+struct SharedClient(Arc<dyn LlmClient>);
+
+impl LlmClient for SharedClient {
+    fn complete(&self, prompt: &str) -> Result<String, String> {
+        self.0.complete(prompt)
+    }
 }
 
 /// 下标并行核：跑 `len` 个任务，第 i 个任务由 `task(i)` 定义，结果按下标归位。

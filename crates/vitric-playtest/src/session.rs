@@ -15,7 +15,7 @@ use vitric_rules::Engine;
 use serde_json::Value;
 
 use crate::scene_view::{Outcome, SceneView, TerminalSpec};
-use crate::strategy::Strategy;
+use crate::strategy::{PlaytestNote, Strategy};
 
 /// 一个数值字段在整局里的轨迹摘要（**增量统计**，不存每 tick 全表）。
 ///
@@ -189,6 +189,10 @@ pub struct SessionResult {
     /// 数值遥测：每个数值字段路径 → 整局轨迹摘要（增量统计，不存每 tick 全表）。
     /// 给聚合器逮经济跑飞/崩盘/溢出（设计稿五节「数值崩」）。不进哈希/录像。
     pub numeric_summary: BTreeMap<String, NumericStat>,
+    /// LLM 档定性 note（清晰度/连续性/选择有效性，设计稿五节「LLM 定性 note」）。
+    /// 只有 LLM 策略会产（廉价策略档 drain_notes 默认空）。**不进哈希/录像**——
+    /// 它是「LLM 这局看着怎么样」的旁观主观提示，和别的遥测同级，不影响确定性。
+    pub notes: Vec<PlaytestNote>,
 }
 
 /// 跑一局。`sim`/`logic` 必须是刚 boot 出来、还在 tick 0 的全新一对（要录可重放的录像，
@@ -222,6 +226,10 @@ pub fn run_session(
         }
     };
 
+    // LLM 档定性 note 累加器（每 tick 决策后从策略收，非 LLM 策略 drain 永远空）。
+    // 不进哈希/录像——它是旁观主观提示，确定性铁律不约束它（LLM 局本就不要求跨次复现）。
+    let mut notes: Vec<PlaytestNote> = Vec::new();
+
     let mut outcome = Outcome::Timeout;
     while sim.tick < cfg.max_ticks {
         // Scene View 是纯投影：只读世界/规则，绝不改 world、不进哈希
@@ -237,6 +245,9 @@ pub fn run_session(
         if let Some(action) = strategy.choose(&view) {
             sim.inject_input(&action.action, &action.phase);
         }
+        // 决策后收 note：LLM 策略在 choose 里可能产了 note，每 tick 取走累积
+        // （取走即清空，避免重复）。非 LLM 策略默认返空，零开销。
+        notes.append(&mut strategy.drain_notes());
 
         let report = sim.step(logic).map_err(|e| e.to_string())?;
 
@@ -263,6 +274,10 @@ pub fn run_session(
         }
     }
 
+    // 退出循环（done/Timeout）后再收一次 note：LLM 可能在最后一个决策 tick 吐了
+    // 还没被 drain 的 note（如「这关到这儿就卡住了，看不懂下一步」）。
+    notes.append(&mut strategy.drain_notes());
+
     let recording = sim.stop_recording().expect("刚 start_recording 过");
     Ok(SessionResult {
         outcome,
@@ -271,6 +286,7 @@ pub fn run_session(
         state_trace,
         fired_events,
         numeric_summary,
+        notes,
     })
 }
 
@@ -418,6 +434,54 @@ mod tests {
         )
         .unwrap();
         Engine::new(rules, schema)
+    }
+
+    /// 一个每 tick 吐一条 note 的假策略（不碰 LLM，只验 session 的 note 收集通道）。
+    struct NotingStrategy {
+        tick: u64,
+        pending: Vec<crate::strategy::PlaytestNote>,
+    }
+    impl crate::strategy::Strategy for NotingStrategy {
+        fn choose(&mut self, _view: &SceneView) -> Option<Action> {
+            // 每个决策 tick 攒一条 note，模拟 LLM 策略在 choose 里产 note
+            self.pending.push(crate::strategy::PlaytestNote {
+                tick: self.tick,
+                kind: "clarity".to_string(),
+                text: format!("第 {} tick 看不懂", self.tick),
+            });
+            self.tick += 1;
+            None
+        }
+        fn drain_notes(&mut self) -> Vec<crate::strategy::PlaytestNote> {
+            std::mem::take(&mut self.pending)
+        }
+    }
+
+    #[test]
+    fn run_session_collects_notes_from_strategy() {
+        let mut sim = Sim::new(1);
+        let mut logic = NeverEnds;
+        let eng = empty_engine();
+        let mut strat = NotingStrategy { tick: 0, pending: vec![] };
+        let cfg = SessionConfig { max_ticks: 5, seed: 0, ..Default::default() };
+        let res = run_session(&mut sim, &mut logic, &eng, &mut strat, &cfg).unwrap();
+        // 5 个决策 tick 各产一条 note，全被 session 收进 notes
+        assert_eq!(res.notes.len(), 5, "每 tick 一条 note 应全部收齐: {:?}", res.notes);
+        assert_eq!(res.notes[0].tick, 0);
+        assert_eq!(res.notes[4].tick, 4);
+        assert!(res.notes[0].text.contains("看不懂"));
+    }
+
+    #[test]
+    fn run_session_notes_empty_for_non_noting_strategy() {
+        // 普通策略（random）不产 note → notes 为空（note 通道是 LLM 档专属）
+        let mut sim = Sim::new(1);
+        let mut logic = NeverEnds;
+        let eng = empty_engine();
+        let mut strat = RandomStrategy::new(0);
+        let cfg = SessionConfig { max_ticks: 10, seed: 0, ..Default::default() };
+        let res = run_session(&mut sim, &mut logic, &eng, &mut strat, &cfg).unwrap();
+        assert!(res.notes.is_empty(), "非 LLM 策略不产 note");
     }
 
     #[test]

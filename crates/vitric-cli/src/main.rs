@@ -152,10 +152,16 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
 ///   --seed <N>                   策略 PCG 播种（默认 0；swarm 模式从此起递增）
 ///   --max-ticks <N>              超时上限（默认 600）
 ///   --sessions <N>               跑 N 局 swarm 聚合出报告（默认 1=单局旧行为）
+///   --llm <N>                    额外跑 N 局 LLM 拟人玩（吐定性 note 进报告 qualitative_notes）；
+///                                需 VITRIC_LLM_URL/KEY/MODEL 配齐，没配齐报明确错误（不静默跳过）
 ///   --seed-recording <录像.json> 种子式探索：拿这条录像当种子，扰动它的输入序列跑 N 局
-///   --out <路径>                 N=1 写录像；N>1 / 种子探索写完整报告 JSON
+///   --out <路径>                 N=1 写录像；N>1 / 种子探索 / --llm 写完整报告 JSON
 ///
-/// 三档行为：
+/// 行为分档（优先级从上到下）：
+/// - `--llm N>0`：swarm（sessions 局策略档）+ N 局 LLM 档拟人玩，合并聚合出报告。LLM 局的
+///   note 进 `qualitative_notes`（主观提示，待人复核），它选的输入进录像可重放；策略档部分仍确定。
+///
+/// 其余三档：
 /// - 给了 `--seed-recording`：**种子式探索**（设计稿第 3 阶段）——加载录像当种子，
 ///   `perturb_plan` 生成 N 条变异脚本（drop/swap/substitute/truncate 轮换 + 截断接 random 发散），
 ///   `run_seed_swarm` 并行跑，聚合报告含 `ending_coverage`（哪些声明结局不可达）。`--sessions`=变异条数。
@@ -165,10 +171,12 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
 ///
 /// 各局都在自己线程内 boot 一份运行时并行跑（QuickJS 非 Send，运行时绝不跨线程）。
 fn cmd_playtest(args: &[String]) -> Result<(), String> {
+    use std::sync::Arc;
+
     use vitric_playtest::{
-        aggregate, aggregate_with_endings, perturb_plan, run_seed_swarm, run_session, run_swarm,
-        EconomyStrategy, GreedyStrategy, RandomStrategy, SessionConfig, SessionSpec, Strategy,
-        StrategyKind, TerminalSpec,
+        aggregate, aggregate_with_endings, perturb_plan, run_llm_sessions, run_seed_swarm,
+        run_session, run_swarm, EconomyStrategy, GreedyStrategy, LlmClient, RandomStrategy,
+        SessionConfig, SessionSpec, Strategy, StrategyKind, TerminalSpec,
     };
 
     let dir = args.first().ok_or("playtest 缺少项目目录参数")?;
@@ -178,6 +186,7 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     let mut seed: u64 = 0;
     let mut max_ticks: u64 = 600;
     let mut sessions: u64 = 1;
+    let mut llm_sessions: u64 = 0;
     let mut out_path: Option<PathBuf> = None;
     let mut seed_recording: Option<PathBuf> = None;
     let mut i = 1;
@@ -203,6 +212,10 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
                 }
                 i += 2;
             }
+            "--llm" => {
+                llm_sessions = args.get(i + 1).ok_or(need("--llm"))?.parse().map_err(|e| format!("--llm: {e}"))?;
+                i += 2;
+            }
             "--seed-recording" => {
                 seed_recording = Some(PathBuf::from(args.get(i + 1).ok_or(need("--seed-recording"))?));
                 i += 2;
@@ -212,9 +225,56 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
                 i += 2;
             }
             other => {
-                return Err(format!("未知选项 {other:?}。可用: --strategy --seed --max-ticks --sessions --seed-recording --out"))
+                return Err(format!("未知选项 {other:?}。可用: --strategy --seed --max-ticks --sessions --llm --seed-recording --out"))
             }
         }
+    }
+
+    // --llm N>0：在 swarm 里额外跑 N 局 LLM 拟人玩（设计稿五阶段）。LLM 局的 note 进报告
+    // 的 qualitative_notes，它选的输入进录像（可重放）。装真 client（VITRIC_LLM_* 没配齐
+    // 直接报明确错误，不静默跳过）。LLM 档本就慢，单独串行跑，跑完并进策略档结果集聚合。
+    if llm_sessions > 0 {
+        let client: Arc<dyn LlmClient> = Arc::new(
+            vitric_cli::playtest_llm::PlaytestLlmClient::from_env()?,
+        );
+        let terminal = TerminalSpec::default();
+        let factory = || -> Result<(_, _, _), String> {
+            let (sim, rt) = Runtime::boot(&dir)?;
+            let engine = rt.rules.clone();
+            Ok((sim, rt, engine))
+        };
+        // 同一个工厂闭包要喂两个函数（run_swarm 移走会再无法用），借一份共享引用：
+        // &F where F: Fn 仍是 Fn + Sync，两边都用引用，不重复 boot 逻辑。
+        let factory_ref = &factory;
+        // 策略档：sessions 局廉价策略（轮换 + 递增 seed），和无 --llm 时同口径
+        let mut plan: Vec<SessionSpec> = Vec::with_capacity(sessions as usize);
+        for k in 0..sessions {
+            let kind = StrategyKind::ALL[(k as usize) % StrategyKind::ALL.len()];
+            plan.push(SessionSpec::new(kind, seed + k, max_ticks));
+        }
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        let mut results = run_swarm(factory_ref, &plan, threads)?;
+        // LLM 档：N 局拟人玩，结果并进同一个集合喂聚合器
+        let llm_results = run_llm_sessions(
+            factory_ref,
+            client,
+            llm_sessions as usize,
+            "", // 目标用通用默认（playtest.json 覆盖留到第 6 阶段）
+            seed,
+            max_ticks,
+            terminal.clone(),
+        )?;
+        results.extend(llm_results);
+
+        // 有声明结局就一并算结局覆盖（叙事项目尤其需要）
+        let (_, rt) = Runtime::boot(&dir)?;
+        let report = aggregate_with_endings(&results, &rt.rules, &terminal);
+        let json = serde_json::to_string_pretty(&report).expect("报告可序列化");
+        if let Some(out) = &out_path {
+            std::fs::write(out, &json).map_err(|e| format!("写报告 {} 失败: {e}", out.display()))?;
+        }
+        println!("{json}");
+        return Ok(());
     }
 
     // 给了 --seed-recording：种子式探索（第 3 阶段）。加载种子录像 → perturb_plan 生成
