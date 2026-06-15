@@ -69,6 +69,7 @@ fn main() {
         Some("assets") => vitric_cli::assets_cmd::run(&args[1..]),
         Some("team") => cmd_team(&args[1..]),
         Some("turf") => cmd_turf(&args[1..]),
+        Some("gpu-probe") => gpu::gpu_probe(&args[1..]),
         None => cmd_default(),
         Some(_) => {
             usage_and_exit();

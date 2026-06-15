@@ -1394,6 +1394,145 @@ fn atlas_tex_dims(bc7: bool, w: u32, h: u32) -> (u32, u32) {
     }
 }
 
+/// `vitric gpu-probe [rgba8|bc7]`：**无头**真机诊断（不开窗，SSH/Session 0 可跑）——在本机
+/// 真实 GPU 上验证「整张图集压 BC7 真省显存」这条容器测不了的事。
+///
+/// **单格式、干净基线**：一次只分配一种格式的大纹理，从本进程基线量到分配后的 nvidia-smi
+/// 增量。两种格式分两次进程跑——各自全新基线，避开「先占大块、后者落进已预留堆」导致
+/// 增量被驱动堆预留吃掉的假象。默认 bc7。
+pub fn gpu_probe(args: &[String]) -> Result<(), String> {
+    // 量到清晰信号的图集尺寸：2048×8192，RGBA8=64MB / BC7=16MB
+    const W: u32 = 2048;
+    const H: u32 = 8192;
+    let want_bc7 = !matches!(args.first().map(|s| s.as_str()), Some("rgba8"));
+    let count: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(6);
+
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    // 无头：不要 surface（compatible_surface=None），所以不需要桌面窗口
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .map_err(|e| format!("找不到 GPU 适配器: {e}"))?;
+    let info = adapter.get_info();
+    let bc_supported = adapter.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
+    println!("适配器: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
+    println!("TEXTURE_COMPRESSION_BC 支持: {}", if bc_supported { "是" } else { "否" });
+    if want_bc7 && !bc_supported {
+        println!("→ 本适配器不支持 BC，引擎会走 best-effort RGBA8（显存未压缩）。换独显再测。");
+        return Ok(());
+    }
+
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("vitric-probe"),
+        required_features: if bc_supported {
+            wgpu::Features::TEXTURE_COMPRESSION_BC
+        } else {
+            wgpu::Features::empty()
+        },
+        ..Default::default()
+    }))
+    .map_err(|e| format!("创建 GPU 设备失败: {e}"))?;
+
+    // wgpu 建 device 自带一大块预留显存池，小分配落进池里 nvidia-smi 看不出增量。
+    // 一次分配 count 张同格式，总量远超预留池，真实占用差（4×）才在 nvidia-smi 现出来。
+    let rgba = vec![128u8; (W as usize) * (H as usize) * 4];
+    let base = vram_used_mb();
+    let mut keep: Vec<wgpu::Texture> = Vec::with_capacity(count);
+    let (label, one_mb) = if want_bc7 {
+        let (bx, by, blocks) = vitric_cli::bc7::encode_rgba8(W, H, &rgba)?;
+        let one = (bx as u64 * by as u64 * vitric_cli::bc7::BLOCK_BYTES as u64) / 1_048_576;
+        for _ in 0..count {
+            keep.push(upload_probe_texture(
+                &device, &queue, wgpu::TextureFormat::Bc7RgbaUnorm, bx * 4, by * 4, &blocks, Some(bx),
+            ));
+        }
+        ("BC7", one)
+    } else {
+        let one = (W as u64 * H as u64 * 4) / 1_048_576;
+        for _ in 0..count {
+            keep.push(upload_probe_texture(&device, &queue, wgpu::TextureFormat::Rgba8Unorm, W, H, &rgba, None));
+        }
+        ("RGBA8", one)
+    };
+    let after = vram_used_mb();
+    let total_mb = one_mb * count as u64;
+
+    println!("--- 图集 {W}x{H}，格式 {label} ×{count} ---");
+    println!("单张字节 {one_mb}MB × {count} = {total_mb}MB（字节理论值）");
+    match (base, after) {
+        (Some(b), Some(a)) => println!(
+            "nvidia-smi 全卡已用: 基线 {b}MB → 分配 {count} 张 {label} 后 {a}MB（**实测增 {}MB**）",
+            a.saturating_sub(b)
+        ),
+        _ => println!("（nvidia-smi 不可用，跳过显存实测；字节理论值见上方）"),
+    }
+    drop(keep);
+    Ok(())
+}
+
+/// 探针纹理上传：建纹理 + 写数据 + 提交 + 等 GPU 完成（确保显存真分配下去再量）。
+/// `bc7_blocks_per_row`=Some(每行块数) 走 BC7 块布局，None 走 RGBA8 行布局。
+fn upload_probe_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    format: wgpu::TextureFormat,
+    w: u32,
+    h: u32,
+    data: &[u8],
+    bc7_blocks_per_row: Option<u32>,
+) -> wgpu::Texture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("vitric-probe-tex"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let bytes_per_row = match bc7_blocks_per_row {
+        Some(bx) => bx * vitric_cli::bc7::BLOCK_BYTES as u32, // BC7: 每行块数 × 16
+        None => w * 4,                                        // RGBA8: 宽 × 4
+    };
+    let rows = match bc7_blocks_per_row {
+        Some(_) => h / 4, // BC7 行数 = 像素高 / 4（块网格）
+        None => h,
+    };
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bytes_per_row),
+            rows_per_image: Some(rows),
+        },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    queue.submit([]);
+    let _ = device.poll(wgpu::PollType::wait_indefinitely()); // 等写入落地，显存才真占上
+    std::thread::sleep(std::time::Duration::from_millis(800)); // 给驱动/nvidia-smi 结算时间
+    texture
+}
+
+/// 读 nvidia-smi 报的**全卡**已用显存（MB）。探针是唯一大分配者，增量即纹理占用。
+/// nvidia-smi 不在 PATH（非 N 卡/没装）则 None，探针退化为只报字节倍率。
+fn vram_used_mb() -> Option<u64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse::<u64>().ok()
+}
+
 fn build_atlas(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
