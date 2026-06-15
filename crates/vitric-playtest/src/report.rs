@@ -75,6 +75,25 @@ pub const DEFAULT_FREEZE_K: usize = 60;
 const RUNAWAY_RATIO: f64 = 1000.0;
 const RUNAWAY_ABS: f64 = 1e6;
 
+/// 跑飞相对阈还要求峰值达到这个绝对下限——否则「0.008→8.116」这种倍率虚高但实际很小的
+/// 增长（物理微移/微小累积）会被冤判。真跑飞总会涨到一个有意义的大数。
+const RUNAWAY_RATIO_MIN_ABS: f64 = 1000.0;
+
+/// 空间/物理组件：坐标和速度不是经济资源，单调移动 ≠ 经济无界增长。numeric_breakage 把
+/// 这些字段整个排除（dogfood 实测：重力下落让 Position.y 从近 0 涨到几十就被误报 runaway）。
+const SPATIAL_COMPONENTS: &[&str] = &["Position", "Velocity", "Camera", "Shake"];
+
+/// 字段 key 形如 `<实体>/<组件>.<字段>`，取出组件名；非该格式时退化用整串首段。
+fn field_component(field: &str) -> Option<&str> {
+    let comp_field = field.rsplit_once('/').map_or(field, |(_, cf)| cf);
+    comp_field.split('.').next()
+}
+
+/// 该字段是否属于空间/物理组件（经济崩判定要整个跳过它）。
+fn is_spatial_field(field: &str) -> bool {
+    field_component(field).is_some_and(|c| SPATIAL_COMPONENTS.contains(&c))
+}
+
 /// 一招鲜判据：某动作在通关局注入里的占比阈值（≥ 这个比例 → 候选）。
 /// 0.8 = 通关全靠这一招按了八成以上，其他动作几乎没用——选择意义存疑。
 const DOMINANT_ACTION_SHARE: f64 = 0.8;
@@ -579,6 +598,10 @@ fn aggregate_numeric_breakage(
     for (i, lr) in results.iter().enumerate() {
         let is_stuck = stuck_idx.contains(&i);
         for (field, stat) in &lr.result.numeric_summary {
+            // 空间/物理字段（坐标/速度）不是经济资源，整个跳过经济崩判定（避免下落/移动冤报）
+            if is_spatial_field(field) {
+                continue;
+            }
             // 溢出：出现过非有限值
             if stat.non_finite {
                 let e = non_finite.entry(field.as_str()).or_insert((0, lr));
@@ -653,8 +676,9 @@ fn is_runaway(stat: &crate::session::NumericStat) -> bool {
     if stat.max > RUNAWAY_ABS {
         return true;
     }
-    // 相对阈：峰值 ≫ 首值（首值 >0 才算倍率，避免 0 当分母）
-    stat.first > 0.0 && stat.max > stat.first * RUNAWAY_RATIO
+    // 相对阈：峰值 ≫ 首值（首值 >0 才算倍率，避免 0 当分母）；且峰值要达到绝对下限，
+    // 否则「0.008→8.116」这种倍率虚高但实际很小的增长被冤判（dogfood 教训）。
+    stat.first > 0.0 && stat.max > stat.first * RUNAWAY_RATIO && stat.max >= RUNAWAY_RATIO_MIN_ABS
 }
 
 /// LLM 定性 note 聚合（设计稿第 5 阶段）：把各局的 `notes` 汇总，按 (kind, 文本) 归一去重、
@@ -1328,6 +1352,46 @@ mod tests {
         )];
         let rep = aggregate(&r);
         assert_eq!(rep.numeric_breakage.runaway.len(), 1, "倍率阈也应逮到");
+    }
+
+    #[test]
+    fn numeric_breakage_excludes_spatial_fields() {
+        // dogfood 教训：重力下落让 Position.y 从近 0 单调涨到几十，倍率虚高但不是经济跑飞。
+        // 同样的统计放在 Position（空间）上必须被排除，放在经济字段上也因峰值太小不冤判。
+        let stats = nstat(0.008, 8.116, 0.008, 8.116, true, false, false);
+        let r = vec![labeled_numeric(
+            StrategyKind::Random,
+            0,
+            Outcome::Timeout,
+            300,
+            vec![],
+            vec![
+                ("hero/Position.y", stats.clone()),
+                ("hero/Velocity.x", stats.clone()),
+                ("hero/Resources.coins", stats), // 经济字段但峰值 8.116 < 绝对下限 → 也不算
+            ],
+        )];
+        let rep = aggregate(&r);
+        assert!(
+            rep.numeric_breakage.runaway.is_empty(),
+            "Position/Velocity 空间字段 + 微小经济增长都不该报跑飞: {:?}",
+            rep.numeric_breakage.runaway
+        );
+    }
+
+    #[test]
+    fn numeric_breakage_ratio_needs_min_abs() {
+        // 经济字段倍率超 1000× 但峰值只到 8.116（< 绝对下限）→ 不算跑飞（避免微小值起步冤判）
+        let r = vec![labeled_numeric(
+            StrategyKind::Economy,
+            0,
+            Outcome::Timeout,
+            100,
+            vec![],
+            vec![("shop/R.coins", nstat(0.008, 8.116, 0.008, 8.116, true, false, false))],
+        )];
+        let rep = aggregate(&r);
+        assert!(rep.numeric_breakage.runaway.is_empty(), "倍率虚高但峰值太小不算跑飞");
     }
 
     #[test]
