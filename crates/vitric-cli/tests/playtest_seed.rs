@@ -75,6 +75,7 @@ fn seed_exploration_flags_unreachable_good_ending_and_softlock() {
     let results = run_seed_swarm(
         factory(dir.clone()),
         &plan,
+        &[],
         200,
         TerminalSpec::default(),
         777,
@@ -125,9 +126,9 @@ fn seed_exploration_is_deterministic_serial_vs_parallel() {
     let dir = branching_dir();
     let plan = perturb_plan(&seed_to_bad(), 20, 999);
     let serial =
-        run_seed_swarm(factory(dir.clone()), &plan, 150, TerminalSpec::default(), 5, 1).unwrap();
+        run_seed_swarm(factory(dir.clone()), &plan, &[], 150, TerminalSpec::default(), 5, 1).unwrap();
     let parallel =
-        run_seed_swarm(factory(dir.clone()), &plan, 150, TerminalSpec::default(), 5, 8).unwrap();
+        run_seed_swarm(factory(dir.clone()), &plan, &[], 150, TerminalSpec::default(), 5, 8).unwrap();
     assert_eq!(serial.len(), parallel.len());
     for (a, b) in serial.iter().zip(parallel.iter()) {
         assert_eq!(a.result.outcome, b.result.outcome, "结局一致");
