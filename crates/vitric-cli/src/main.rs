@@ -332,8 +332,16 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
             Ok((sim, rt, engine))
         };
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        let results =
-            run_seed_swarm(factory, &plan, max_ticks, terminal.clone(), seed.wrapping_add(1), threads)?;
+        // 种子回复跟着种子走：扰动只动输入，回复原样按原 tick 注回去（run_seed_swarm 内部按截断过滤）。
+        let results = run_seed_swarm(
+            factory,
+            &plan,
+            &seed_rec.replies,
+            max_ticks,
+            terminal.clone(),
+            seed.wrapping_add(1),
+            threads,
+        )?;
 
         // 结局覆盖要扫规则声明的结局集合，单独 boot 一份只读 Engine 喂聚合器
         let (_, rt) = Runtime::boot(&dir)?;
@@ -387,7 +395,7 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     // boot 一对全新的 (sim, runtime)：录可重放录像必须从冷启动起录
     let (mut sim, mut rt) = Runtime::boot(&dir)?;
     // 单局也走 config：终止覆盖 + 派生量视图（greedy 找目标）。
-    let cfg = SessionConfig { max_ticks, seed, terminal: terminal.clone(), playtest: config.clone() };
+    let cfg = SessionConfig { max_ticks, seed, terminal: terminal.clone(), playtest: config.clone(), ..Default::default() };
     // run_session 要同时可变借 logic(rt) 和不可变借 engine(rt.rules)——同一对象借不动。
     // Engine 是装配期无状态副本，复制一份只读的传进去最干净（见 Engine 的 derive 注释）。
     let engine = rt.rules.clone();

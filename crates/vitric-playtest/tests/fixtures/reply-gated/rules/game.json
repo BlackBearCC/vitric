@@ -1,0 +1,19 @@
+{
+  "rules": [
+    {
+      "id": "ask",
+      "on": { "event": "input", "filter": { "action": "ask", "phase": "pressed" } },
+      "do": [
+        { "set": "@world.Story.asked", "to": true }
+      ]
+    },
+    {
+      "id": "oracle-open",
+      "on": { "event": "oracle-says", "filter": { "answer": "open" } },
+      "do": [
+        { "set": "@world.Story.won", "to": true },
+        { "emit": "game-won", "data": {} }
+      ]
+    }
+  ]
+}

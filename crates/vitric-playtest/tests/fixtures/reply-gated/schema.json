@@ -1,0 +1,10 @@
+{
+  "components": {
+    "Story": {
+      "fields": {
+        "asked": { "type": "bool", "default": false },
+        "won": { "type": "bool", "default": false }
+      }
+    }
+  }
+}

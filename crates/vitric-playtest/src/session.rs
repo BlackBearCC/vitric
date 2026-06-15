@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use vitric_sim::{GameLogic, Recording, Sim};
+use vitric_sim::{GameLogic, Recording, ReplyRecord, Sim};
 use vitric_rules::Engine;
 use serde_json::Value;
 
@@ -166,6 +166,11 @@ pub struct SessionConfig {
     /// session 用它走 `SceneView::derive_with_config`——策略/LLM 看到 include/exclude/relabel/
     /// 派生量调整后的视图（尤其 greedy 靠派生量找目标）。**仍是纯投影**，不进哈希/录像。
     pub playtest: crate::config::PlaytestConfig,
+    /// 种子录像里要按 tick 重放的外部回复（LLM 内容等）。默认空=这局没有外部回复（行为不变）。
+    /// 种子式探索专用：策略只复现/扰动**输入**，但靠回复才走到的结局得把回复也按原 tick 注回去
+    /// ——和 `Sim::replay` 同口径（输入在前、回复在后、再 step），否则基线复现不出靠回复通关的结局。
+    /// 截断发散时，调用方只把截断点之前的回复传进来（截断后是 random 发散，没有种子回复）。
+    pub seed_replies: Vec<ReplyRecord>,
 }
 
 impl Default for SessionConfig {
@@ -175,6 +180,7 @@ impl Default for SessionConfig {
             seed: 0,
             terminal: TerminalSpec::default(),
             playtest: crate::config::PlaytestConfig::default(),
+            seed_replies: Vec::new(),
         }
     }
 }
@@ -254,6 +260,13 @@ pub fn run_session(
         // 策略选动作 → 注入（None=本 tick 不操作）
         if let Some(action) = strategy.choose(&view) {
             sim.inject_input(&action.action, &action.phase);
+        }
+        // 种子回复：和 Sim::replay 同口径——输入注完再注本 tick 的种子回复（顺序固定才逐位一致）。
+        // 非种子路径 seed_replies 为空，这层是零开销 no-op，行为不变。
+        for reply in &cfg.seed_replies {
+            if reply.tick == sim.tick {
+                sim.inject_reply(&reply.name, reply.data.clone());
+            }
         }
         // 决策后收 note：LLM 策略在 choose 里可能产了 note，每 tick 取走累积
         // （取走即清空，避免重复）。非 LLM 策略默认返空，零开销。

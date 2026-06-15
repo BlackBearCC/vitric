@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::thread;
 
 use vitric_rules::Engine;
-use vitric_sim::{GameLogic, Sim};
+use vitric_sim::{GameLogic, ReplyRecord, Sim};
 
 use crate::llm_agent::{LlmClient, LlmStrategy};
 use crate::scene_view::{Outcome, TerminalSpec};
@@ -140,6 +140,8 @@ where
         seed: spec.seed,
         terminal: spec.terminal.clone(),
         playtest: config.clone(),
+        // 普通 swarm/单局不重放种子回复（那是种子探索专路 run_seed_swarm 才有的事）
+        seed_replies: Vec::new(),
     };
     let result = run_session(&mut sim, &mut logic, &engine, strategy.as_mut(), &cfg)?;
     Ok(LabeledResult { spec: spec.clone(), result })
@@ -185,12 +187,17 @@ where
 /// 复用 `run_swarm` 同款下标并行核（`run_indexed`），所以**串行/并行结果逐项一致**，
 /// 结果可直接喂 `aggregate_with_endings`（含不可达结局）。
 ///
+/// `seed_replies`：种子录像里的外部回复（LLM 内容等）。扰动只动**输入**，回复跟着种子走、
+/// 原样按原 tick 注回去（和 `Sim::replay` 同口径）——否则靠回复才通关的结局（如 echo）基线
+/// 复现不出来。截断脚本只注**截断点之前**的回复（截断后是 random 发散，没有种子回复了）。
+///
 /// 每条结果的 spec 标 `StrategyKind::Scripted`、seed=该脚本在 plan 里的下标
 /// （让结果可对账到具体哪条扰动；脚本本身不进 spec，太长且变长）。
 /// 截断脚本（`truncate_at=Some`）的发散随机用 `explore_seed + 下标` 播种——确定可复现。
 pub fn run_seed_swarm<R, F>(
     factory: F,
     plan: &[Perturbation],
+    seed_replies: &[ReplyRecord],
     max_ticks: u64,
     terminal: TerminalSpec,
     explore_seed: u64,
@@ -211,7 +218,19 @@ where
             None
         };
         let mut strategy = ScriptedStrategy::new(pert.script.clone(), then_explore);
-        let cfg = SessionConfig { max_ticks, seed: i as u64, terminal: terminal.clone(), ..Default::default() };
+        // 这局要注的种子回复：截断脚本只留截断点之前的（截断后没有种子回复）；
+        // 非截断脚本注全部。drop/swap/substitute 不改 tick 轴，回复照原 tick 注。
+        let replies: Vec<ReplyRecord> = match pert.truncate_at {
+            Some(cut) => seed_replies.iter().filter(|r| r.tick < cut).cloned().collect(),
+            None => seed_replies.to_vec(),
+        };
+        let cfg = SessionConfig {
+            max_ticks,
+            seed: i as u64,
+            terminal: terminal.clone(),
+            seed_replies: replies,
+            ..Default::default()
+        };
         let result = run_session(&mut sim, &mut logic, &engine, &mut strategy, &cfg)?;
         // spec 标 Scripted + seed=下标，便于把结果对回具体哪条扰动
         let spec = SessionSpec {
@@ -477,6 +496,7 @@ mod tests {
         let out = run_seed_swarm(
             factory_winning(Some(3)),
             &plan,
+            &[],
             50,
             TerminalSpec::default(),
             7,
@@ -494,10 +514,10 @@ mod tests {
     fn seed_swarm_serial_and_parallel_identical() {
         let plan = seed_plan();
         let serial =
-            run_seed_swarm(factory_winning(Some(3)), &plan, 80, TerminalSpec::default(), 11, 1)
+            run_seed_swarm(factory_winning(Some(3)), &plan, &[], 80, TerminalSpec::default(), 11, 1)
                 .unwrap();
         let parallel =
-            run_seed_swarm(factory_winning(Some(3)), &plan, 80, TerminalSpec::default(), 11, 8)
+            run_seed_swarm(factory_winning(Some(3)), &plan, &[], 80, TerminalSpec::default(), 11, 8)
                 .unwrap();
         assert_eq!(serial.len(), parallel.len());
         for (a, b) in serial.iter().zip(parallel.iter()) {
@@ -513,7 +533,95 @@ mod tests {
     #[test]
     fn seed_swarm_empty_plan_yields_empty() {
         let out =
-            run_seed_swarm(factory_winning(Some(3)), &[], 50, TerminalSpec::default(), 0, 4).unwrap();
+            run_seed_swarm(factory_winning(Some(3)), &[], &[], 50, TerminalSpec::default(), 0, 4)
+                .unwrap();
         assert!(out.is_empty());
+    }
+
+    /// 一个只有收到 "oracle-says" 回复才发 game-won 的逻辑——靠回复才通关，光按输入通不了。
+    /// 用来验证种子探索真把种子回复按 tick 注回去了（基线该复现到 Win）。
+    struct WinOnReply {
+        pending: Vec<Event>,
+    }
+    impl GameLogic for WinOnReply {
+        fn on_tick(
+            &mut self,
+            _: &mut vitric_ecs::World,
+            events: Vec<Event>,
+            _: &mut Pcg32,
+            _: u64,
+        ) -> Result<(), String> {
+            for e in events {
+                if e.name == "oracle-says" && e.data.get("answer") == Some(&json!("open")) {
+                    self.pending.push(Event::new("game-won", json!({})));
+                }
+            }
+            Ok(())
+        }
+        fn drain_observed(&mut self) -> Vec<Event> {
+            std::mem::take(&mut self.pending)
+        }
+    }
+
+    fn factory_reply_gated() -> impl Fn() -> Result<(Sim, WinOnReply, Engine), String> {
+        || Ok((Sim::new(1), WinOnReply { pending: vec![] }, empty_engine()))
+    }
+
+    #[test]
+    fn seed_swarm_injects_seed_replies_baseline_reaches_win() {
+        // 种子：tick 2 一条 oracle-says{answer:"open"}（靠它才通关）。脚本只有输入（这里空脚本）。
+        let plan = vec![pert(PerturbOp::Baseline, vec![], None)];
+        let replies = vec![ReplyRecord {
+            tick: 2,
+            name: "oracle-says".to_string(),
+            data: json!({"answer": "open"}),
+        }];
+        // 注了种子回复 → 基线复现到 Win
+        let out = run_seed_swarm(
+            factory_reply_gated(),
+            &plan,
+            &replies,
+            50,
+            TerminalSpec::default(),
+            0,
+            1,
+        )
+        .unwrap();
+        assert_eq!(out[0].outcome(), Outcome::Win, "种子回复注回去了，基线该通关");
+
+        // 反证：不传种子回复 → 没有 oracle-says → 永远通不了 → Timeout
+        let out_no = run_seed_swarm(
+            factory_reply_gated(),
+            &plan,
+            &[],
+            50,
+            TerminalSpec::default(),
+            0,
+            1,
+        )
+        .unwrap();
+        assert_eq!(out_no[0].outcome(), Outcome::Timeout, "没回复就通不了");
+    }
+
+    #[test]
+    fn seed_swarm_truncate_drops_replies_after_cut() {
+        // 种子回复在 tick 5；截断点在 tick 3 → 截断后没有种子回复 → 注不到那条 → 通不了。
+        let plan = vec![pert(PerturbOp::Truncate, vec![], Some(3))];
+        let replies = vec![ReplyRecord {
+            tick: 5,
+            name: "oracle-says".to_string(),
+            data: json!({"answer": "open"}),
+        }];
+        let out = run_seed_swarm(
+            factory_reply_gated(),
+            &plan,
+            &replies,
+            50,
+            TerminalSpec::default(),
+            0,
+            1,
+        )
+        .unwrap();
+        assert_eq!(out[0].outcome(), Outcome::Timeout, "截断点之后的种子回复不该被注入");
     }
 }

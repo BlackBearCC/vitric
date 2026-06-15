@@ -1,0 +1,10 @@
+{
+  "entities": [
+    {
+      "name": "world",
+      "components": {
+        "Story": { "asked": false, "won": false }
+      }
+    }
+  ]
+}
