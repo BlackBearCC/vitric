@@ -13,6 +13,12 @@
     "Cell": { "fields": { "kind": { "type": "text", "default": "regolith" } } },
     "Structure": { "fields": { "kind": { "type": "text", "default": "floor" } } },
     "Build": { "fields": { "kind": { "type": "text", "default": "floor" } } },
+    "Census": {
+      "fields": {
+        "count": { "type": "int", "default": 0 },
+        "is_hub": { "type": "int", "default": 0 }
+      }
+    },
     "Colony": {
       "fields": {
         "oxygen": { "type": "number", "default": 60 },

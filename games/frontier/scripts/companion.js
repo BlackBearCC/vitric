@@ -57,9 +57,10 @@ vitric.system(
       }
       if (n.comfort <= 0) {
         n.leave_timer += ctx.dt;
-        if (n.leave_timer >= LEAVE_GRACE) {
+        // 宽限到了:发离开事件(由 do-leave 规则按名字 despawn,只发一次)。
+        if (n.leave_timer >= LEAVE_GRACE && n.voiced < 2) {
+          n.voiced = 2; // 复用 voiced 当"已宣告离开"标记,防每帧刷
           ctx.emit("companion-left", { who: e.id });
-          ctx.despawn(e.id);
         }
       } else {
         n.leave_timer = 0;

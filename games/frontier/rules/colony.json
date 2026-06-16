@@ -8,16 +8,6 @@
         { "set": "@colony.Colony.food_rate", "to": "event.food" },
         { "set": "@colony.Colony.o2_rate", "to": "event.o2" }
       ]
-    },
-    {
-      "id": "apply-pop",
-      "on": { "event": "pop" },
-      "do": [ { "set": "@colony.Colony.pop", "to": "event.n" } ]
-    },
-    {
-      "id": "pop-on-left",
-      "on": { "event": "companion-left" },
-      "do": [ { "set": "@colony.Colony.pop", "to": 0 } ]
     }
   ]
 }

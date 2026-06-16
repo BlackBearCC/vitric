@@ -60,6 +60,7 @@ entities.append({
     "components": {
         "Colony": {"oxygen": 60, "power": 60, "food": 60, "o2_rate": 0, "pow_rate": 0, "food_rate": 0, "pop": 0,
                    "o2_i": 60, "pow_i": 60, "food_i": 60},
+        "Census": {"count": 1, "is_hub": 1},
     },
 })
 # @hud_res / @hud_comp:屏幕顶部常驻 HUD(screen=true 锚定屏幕,不随相机)
@@ -88,6 +89,7 @@ entities.append({
         "Mood": {"value": "好奇"},
         "ThinkReq": {"pending": 0},
         "Need": {"comfort": 50, "quarters": 0, "leave_timer": 0, "voiced": 0, "comfort_i": 50},
+        "Census": {"count": 0, "is_hub": 0},
         "Wander": {"home_x": 6, "home_y": 7, "tx": 6, "ty": 7, "timer": 2},
         "Position": {"x": 6, "y": 7},
         "Velocity": {"x": 0, "y": 0},

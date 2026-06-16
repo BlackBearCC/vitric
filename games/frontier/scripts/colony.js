@@ -12,9 +12,16 @@ function clamp(v) {
   return v < 0 ? 0 : (v > 100 ? 100 : v);
 }
 
-// 统计在场伙伴数,发出去(规则落到 @colony.pop)。伙伴会帮着撑殖民地。
-vitric.system("pop-tally", { query: ["Companion"], writes: [] }, (entities, ctx) => {
-  ctx.emit("pop", { n: entities.length });
+// 普查:数在场伙伴,写回标了 is_hub 的 @colony。这个系统总在跑(@colony 永远在),
+// 所以伙伴走光也能归零——按 [Companion] 查的系统在 0 实体时根本不跑,计数会滞留。
+vitric.system("census", { query: ["Census"], writes: ["Census"] }, (entities, ctx) => {
+  let companions = 0;
+  let hub = null;
+  for (const e of entities) {
+    if (e.Census.is_hub > 0) hub = e;
+    else companions += 1;
+  }
+  if (hub) hub.Census.count = companions;
 });
 
 // 统计产出结构,把"每秒产量"发出去(规则把它落进 @colony 的速率字段)。
@@ -32,10 +39,10 @@ vitric.system("tally", { query: ["Structure"], writes: [] }, (entities, ctx) => 
 });
 
 // 每帧:库存 += (产出速率 - 基础消耗) * dt,夹在 [0,100]。
-vitric.system("colony", { query: ["Colony"], writes: ["Colony"] }, (entities, ctx) => {
+vitric.system("colony", { query: ["Colony", "Census"], writes: ["Colony"] }, (entities, ctx) => {
   for (const e of entities) {
     const c = e.Colony;
-    const help = c.pop * POP_BONUS; // 伙伴帮的活,摊到每种资源
+    const help = e.Census.count * POP_BONUS; // 伙伴帮的活(普查的实时人数),摊到每种资源
     c.power = clamp(c.power + (c.pow_rate + help - BASE_USE) * ctx.dt);
     c.oxygen = clamp(c.oxygen + (c.o2_rate + help - BASE_USE) * ctx.dt);
     c.food = clamp(c.food + (c.food_rate + help - BASE_USE) * ctx.dt);
