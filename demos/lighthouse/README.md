@@ -3,6 +3,10 @@
 一个 agent 从一句话点子、只靠引擎的机器验证链造出来的小游戏。这份 README 诚实记录整条链：
 机器每一步给了什么反馈、据此改了什么——证明它是"机器逼着改"出来的，不是一次拍脑袋成的。
 
+![lighthouse](../../docs/media/lighthouse.gif)
+
+*↑ 通关录像 `recordings/clear.json`（33 个「上」键）逐帧渲出：守夜人从塔底往上爬、相机跟随，摸到顶灯 → 灯变亮、提示字变「THE LIGHT IS LIT」、发 `game-won`。每帧都是引擎 CPU 光栅器无头渲的，逐字节确定。*
+
 ## 一句话点子
 
 > 灯塔守夜人：一个单屏游戏——守夜人要爬到顶端的灯，摸到灯就赢。
@@ -20,7 +24,7 @@
 
 ### 1. `vitric check demos/lighthouse`
 
-一遍过，没报 VD 错误：`entities 6, rules [climb, reach-lamp], initial_hash 0xa83d3f8cf1169bec`，退出 0。
+一遍过，没报 VD 错误：`entities 6, rules [climb, reach-lamp], initial_hash 0xdad1a14e6b85354c`，退出 0。
 （写之前先读了 `examples/jump` 学格式、读了 `crates/vitric-playtest/src/config.rs` 确认 `playtest.json` 的
 确切字段名，所以 schema/scene/rules/playtest.json 一次写对。）
 
@@ -62,7 +66,7 @@ found_value=0.225  found_clear_rate=0.531  in_target=true  note="二分命中目
 
 ```
 vitric replay demos/lighthouse recordings/clear.json
-→ {"final_hash":"0xb9ff6a2804c58645","replayed_ticks":33,"verified":true}   退出 0
+→ {"final_hash":"0x1920f01cd6f015e1","replayed_ticks":33,"verified":true}   退出 0
 ```
 
 冷启动逐位重放一致（verified）✓。
@@ -125,6 +129,19 @@ gate 先行（不 PASS 不出包）→ 出自包含单文件二进制：
 让通关率平滑单调，balance 有信号可调；③零软锁、零数值崩。灯塔"爬到顶端的光"这个核儿没变，
 只是把机器验证链通不过的精准跳跃，换成了机器能验证的爬升。**这就是"机器驱动"的全部意义：
 不是我觉得跳跃版好就硬上，是机器逐步把它否了、逼出一个它能闭环认证的设计。**
+
+## 渲染自检又抓出一个：爬塔的人是隐形的
+
+把通关录像逐帧渲出来一看，发现一个低级但致命的视觉问题：**守夜人整段爬塔全程看不见**。
+根因是绘制顺序——渲染器按实体 id 升序画（`vitric-render` 的 `world.query(["Position","Sprite"])`），
+没有图层/前后层（z）字段；守夜人原本是场景里第一个实体（id 最小），最先画，于是被随后画的塔身整个盖住。
+一个"爬塔"的游戏，主角却被塔挡住，等于没法看。
+
+改法：把 `keeper` 挪到场景实体列表最后（id 最大 → 最后画 → 盖在塔上 → 全程可见）。
+这改了实体 id，连带 `initial_hash` 和通关录像里的校验哈希都变，所以重跑一局
+`--strategy lookahead --sessions 1 --out` 重生成 `recordings/clear.json`、更新了上面那两个哈希，
+再 `vitric gate` 复验——四道门依旧全绿。教训：机器能验"通不通关、卡不卡死、数值崩不崩"，
+但"画面看不看得清"得真把帧渲出来用人眼过一遍，只看后台状态会漏。
 
 ## 文件
 
