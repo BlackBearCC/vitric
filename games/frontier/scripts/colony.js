@@ -4,9 +4,11 @@
 //   colony 系统每帧按 (产出 - 基础消耗) 调库存。
 // 产出映射:conduit→电,plot(种植/水培)→食 + 氧。
 
-const BASE_USE = 2.0; // 每秒基础消耗(电/氧/食各自)——殖民地活着就在烧
-const PER = 3.0;      // 每个产出结构每秒产量
-const POP_BONUS = 1.5; // 每个伙伴每秒帮的活(净正:留住人对生存有实利,心脏 C 的一半)
+const BASE_USE = 2.0;     // 每秒固定底噪(电/氧/食/水各自)——殖民地活着就在烧
+const PER = 3.0;          // 每个产出结构每秒产量
+const DRAW_PER_POP = 0.8; // 每个居民每秒额外消耗(呼吸/吃喝/用水电):人越多,胃口越大
+const POP_HELP = 0.4;     // 每个居民每秒帮的产出(干活)。比人均消耗小 → 多一个人是净负担,
+                          // 逼你扩产能去撑住——这才是心脏 C:伙伴是你建设的目标,养住他们就是挑战。
 
 function clamp(v) {
   return v < 0 ? 0 : (v > 100 ? 100 : v);
@@ -58,11 +60,13 @@ vitric.system("stage", { query: ["Colony", "Census"], writes: ["Colony"] }, (ent
 vitric.system("colony", { query: ["Colony", "Census"], writes: ["Colony"] }, (entities, ctx) => {
   for (const e of entities) {
     const c = e.Colony;
-    const help = e.Census.count * POP_BONUS; // 伙伴帮的活(普查的实时人数),摊到每种资源
-    c.power = clamp(c.power + (c.pow_rate + help - BASE_USE) * ctx.dt);
-    c.oxygen = clamp(c.oxygen + (c.o2_rate + help - BASE_USE) * ctx.dt);
-    c.food = clamp(c.food + (c.food_rate + help - BASE_USE) * ctx.dt);
-    c.water = clamp(c.water + (c.water_rate + help - BASE_USE) * ctx.dt);
+    const pop = e.Census.count;            // 普查的实时人数
+    const draw = BASE_USE + pop * DRAW_PER_POP; // 总消耗随人口涨(底噪 + 每人一份胃口)
+    const work = pop * POP_HELP;                // 居民帮的产出(< 人均消耗,所以人是净负担)
+    c.power = clamp(c.power + (c.pow_rate + work - draw) * ctx.dt);
+    c.oxygen = clamp(c.oxygen + (c.o2_rate + work - draw) * ctx.dt);
+    c.food = clamp(c.food + (c.food_rate + work - draw) * ctx.dt);
+    c.water = clamp(c.water + (c.water_rate + work - draw) * ctx.dt);
     // 取整给 HUD 显示用(format 模板直接读这几个,免得屏上是 53.9999)
     c.o2_i = Math.round(c.oxygen);
     c.pow_i = Math.round(c.power);
