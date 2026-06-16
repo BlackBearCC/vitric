@@ -3,7 +3,7 @@
   "schema": "schema.json",
   "entry": "scenes/main.json",
   "scenes": [ "scenes/main.json" ],
-  "rules": [ "rules/move.json" ],
-  "scripts": [],
+  "rules": [ "rules/move.json", "rules/build.json" ],
+  "scripts": [ "scripts/build.js" ],
   "seed": 1
 }

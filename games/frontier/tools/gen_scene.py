@@ -49,6 +49,11 @@ entities.append({
         "Camera": {"x": PLAYER[0], "y": PLAYER[1], "scale": 18, "follow": "player", "lerp": 0.12},
     },
 })
+# @ui:建造选择状态(数字键改 Build.kind,点击建造时读它)
+entities.append({
+    "name": "ui",
+    "components": {"Build": {"kind": "floor"}},
+})
 
 out = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "scenes", "main.json"))
 with open(out, "w") as f:

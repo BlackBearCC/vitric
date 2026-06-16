@@ -11,6 +11,8 @@
       }
     },
     "Cell": { "fields": { "kind": { "type": "text", "default": "regolith" } } },
+    "Structure": { "fields": { "kind": { "type": "text", "default": "floor" } } },
+    "Build": { "fields": { "kind": { "type": "text", "default": "floor" } } },
     "Player": { "fields": {} },
     "Camera": {
       "fields": {

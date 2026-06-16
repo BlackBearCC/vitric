@@ -3294,6 +3294,14 @@
      "lerp": 0.12
     }
    }
+  },
+  {
+   "name": "ui",
+   "components": {
+    "Build": {
+     "kind": "floor"
+    }
+   }
   }
  ]
 }
