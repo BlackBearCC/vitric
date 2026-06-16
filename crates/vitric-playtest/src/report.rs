@@ -414,7 +414,21 @@ pub fn aggregate_with_endings(
     engine: &Engine,
     terminal: &TerminalSpec,
 ) -> Report {
-    let declared = declared_endings(engine, terminal);
+    let declared = declared_endings(engine, terminal, &[] as &[String]);
+    aggregate_inner(results, DEFAULT_FREEZE_K, Some(declared), Some(engine))
+}
+
+/// 同 [`aggregate_with_endings`]，但额外把清单声明的结局名（`gates.playthroughs[].must_emit`）
+/// 并进声明结局集。规则静态扫描只看 `do` 里的 `emit`，逮不到脚本/LLM 发的事件
+/// （echo 的 `run-complete` 由 JS 系统发，规则里根本没这条 emit），ending_coverage 因此漏判。
+/// 把清单的权威通关事件并进来，脚本/LLM 游戏的结局才认得出（与规则扫描结果取并集、去重）。
+pub fn aggregate_with_endings_and_declared(
+    results: &[LabeledResult],
+    engine: &Engine,
+    terminal: &TerminalSpec,
+    manifest_declared: &[String],
+) -> Report {
+    let declared = declared_endings(engine, terminal, manifest_declared);
     aggregate_inner(results, DEFAULT_FREEZE_K, Some(declared), Some(engine))
 }
 
@@ -465,7 +479,11 @@ fn aggregate_inner(
 /// 扫规则里所有 `emit` 动作的事件名，凡命中 TerminalSpec（win/lose 命名或 ending 前缀）的
 /// 就是「声明的结局」。排序去重——确定且便于对账。**静态扫规则**，不看运行时是否真发过，
 /// 所以从没被 emit 的结局也能被认定为「声明了」（这正是判不可达的前提，见 EndingCoverage 注释）。
-fn declared_endings(engine: &Engine, terminal: &TerminalSpec) -> Vec<String> {
+fn declared_endings(
+    engine: &Engine,
+    terminal: &TerminalSpec,
+    manifest_declared: &[String],
+) -> Vec<String> {
     let mut declared: BTreeSet<String> = BTreeSet::new();
     for rule in &engine.rules.rules {
         for action in &rule.actions {
@@ -476,6 +494,11 @@ fn declared_endings(engine: &Engine, terminal: &TerminalSpec) -> Vec<String> {
                 }
             }
         }
+    }
+    // 并进清单声明的结局名（gates.playthroughs[].must_emit）——脚本/LLM 发的事件
+    // 规则里没有 emit，只能靠清单声明补上（与规则扫描取并集，BTreeSet 自动去重排序）。
+    for name in manifest_declared {
+        declared.insert(name.clone());
     }
     declared.into_iter().collect()
 }

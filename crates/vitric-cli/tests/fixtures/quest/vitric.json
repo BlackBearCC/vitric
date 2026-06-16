@@ -1,0 +1,22 @@
+{
+  "name": "quest",
+  "schema": "schema.json",
+  "entry": "scenes/main.json",
+  "scenes": [
+    "scenes/main.json"
+  ],
+  "rules": [
+    "rules/game.json"
+  ],
+  "scripts": [],
+  "seed": 1,
+  "gates": {
+    "playthroughs": [
+      {
+        "recording": "recordings/clear.json",
+        "must_emit": "quest-done"
+      }
+    ],
+    "check": true
+  }
+}

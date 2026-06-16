@@ -78,6 +78,31 @@ impl TerminalSpec {
         }
     }
 
+    /// 把项目清单 `gates.playthroughs[].must_emit` 声明的通关事件名**追加**进
+    /// `win_events`（在默认/已有集合基础上叠加，不替换；去重，原序保留、新名按入参序补到末尾）。
+    /// 立场：每个项目其实已经声明了自己的权威通关事件（gate 门禁就用它判通关录像），
+    /// 脚本/LLM 游戏（如 echo 的 `run-complete`）的胜利事件不在通用默认集里，
+    /// 不并进来就会被误判"谁也通不了"。playtest.json 的 terminal 覆盖仍在本步之前先生效，
+    /// 这一步只往 win 集合里**补**清单声明的事件，不动 lose/ending。
+    pub fn with_manifest_must_emit<I, S>(&self, events: I) -> TerminalSpec
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut win = self.win_events.clone();
+        for ev in events {
+            let ev = ev.as_ref();
+            if !win.iter().any(|n| n == ev) {
+                win.push(ev.to_string());
+            }
+        }
+        TerminalSpec {
+            win_events: win,
+            lose_events: self.lose_events.clone(),
+            ending_prefixes: self.ending_prefixes.clone(),
+        }
+    }
+
     /// 一个事件名命中终止？命中返回对应结局，没命中返回 None。
     /// win/ending 都归 Win（达成结局=通到一个尽头），lose 归 Lose。
     pub fn classify(&self, event_name: &str) -> Option<Outcome> {
@@ -661,6 +686,42 @@ mod tests {
         assert_eq!(spec.classify("ending-x"), Some(Outcome::Win));
         // 老的默认 win 名被覆盖掉了（不再认 game-won）
         assert_eq!(spec.classify("game-won"), None);
+    }
+
+    #[test]
+    fn with_manifest_must_emit_appends_and_dedups() {
+        // 清单声明的 must_emit 并进 win 集合：新名认得出，老默认名仍在（追加不替换）
+        let spec = TerminalSpec::default().with_manifest_must_emit(["run-complete"]);
+        assert_eq!(spec.classify("run-complete"), Some(Outcome::Win));
+        assert_eq!(spec.classify("game-won"), Some(Outcome::Win), "默认 win 名仍保留");
+        // 已存在的名（game-won）不会重复进集合
+        let spec2 = TerminalSpec::default().with_manifest_must_emit(["game-won", "run-complete"]);
+        assert_eq!(spec2.win_events.iter().filter(|n| *n == "game-won").count(), 1, "去重");
+        assert!(spec2.win_events.iter().any(|n| n == "run-complete"));
+    }
+
+    #[test]
+    fn with_manifest_must_emit_empty_is_unchanged() {
+        // 空清单（没声明 gates）退化为默认集合——向后兼容铁律
+        let base = TerminalSpec::default();
+        let merged = base.with_manifest_must_emit(Vec::<String>::new());
+        assert_eq!(merged, base, "无 must_emit 时必须和默认逐字段一致");
+    }
+
+    #[test]
+    fn with_manifest_must_emit_stacks_on_override() {
+        // playtest.json 覆盖先生效，再叠清单 must_emit：两路都认
+        let ovr = TerminalOverride {
+            win_events: Some(vec!["reached-exit".to_string()]),
+            lose_events: None,
+            ending_prefixes: None,
+        };
+        let spec = TerminalSpec::default()
+            .apply_override(&ovr)
+            .with_manifest_must_emit(["quest-done"]);
+        assert_eq!(spec.classify("reached-exit"), Some(Outcome::Win), "覆盖的 win 名认得");
+        assert_eq!(spec.classify("quest-done"), Some(Outcome::Win), "清单 must_emit 也认得");
+        assert_eq!(spec.classify("game-won"), None, "覆盖替换掉了默认 win 名");
     }
 
     #[test]

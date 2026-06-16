@@ -1,0 +1,26 @@
+{
+  "rules": [
+    {
+      "id": "advance",
+      "on": "tick",
+      "if": [
+        ["@tracker.Quest.done", "==", false]
+      ],
+      "do": [
+        { "add": "@tracker.Quest.progress", "by": 1 }
+      ]
+    },
+    {
+      "id": "complete",
+      "on": "tick",
+      "if": [
+        ["@tracker.Quest.progress", ">=", 5],
+        ["@tracker.Quest.done", "==", false]
+      ],
+      "do": [
+        { "set": "@tracker.Quest.done", "to": true },
+        { "emit": "quest-done", "data": {} }
+      ]
+    }
+  ]
+}

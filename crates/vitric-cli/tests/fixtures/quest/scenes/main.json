@@ -1,0 +1,13 @@
+{
+  "entities": [
+    {
+      "name": "tracker",
+      "components": {
+        "Quest": {
+          "progress": 0,
+          "done": false
+        }
+      }
+    }
+  ]
+}

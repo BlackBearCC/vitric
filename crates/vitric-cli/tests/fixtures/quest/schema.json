@@ -1,0 +1,10 @@
+{
+  "components": {
+    "Quest": {
+      "fields": {
+        "progress": { "type": "number", "default": 0 },
+        "done": { "type": "bool", "default": false }
+      }
+    }
+  }
+}

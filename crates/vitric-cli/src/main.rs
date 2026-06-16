@@ -180,7 +180,8 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     use std::sync::Arc;
 
     use vitric_playtest::{
-        aggregate_with_endings, perturb_plan, run_llm_sessions, run_seed_swarm, run_session,
+        aggregate_with_endings_and_declared, perturb_plan, run_llm_sessions, run_seed_swarm,
+        run_session,
         run_swarm_with_config, EconomyStrategy, GreedyStrategy, LlmClient, PlaytestConfig,
         RandomStrategy, SessionConfig, SessionSpec, Strategy, StrategyKind, TerminalSpec,
     };
@@ -244,11 +245,28 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     // 自动加载项目根 playtest.json（存在即用，否则默认 config=自动推视图、行为不变）。
     // 解析失败带路径明确报错（vitric check 风格），不静默跳过。
     let config = PlaytestConfig::load(&dir)?.unwrap_or_default();
-    // 终止规格：playtest.json 的 terminal 覆盖（没写就是默认集合）。
+    // 项目清单声明的权威通关事件：gates.playthroughs[].must_emit。脚本/LLM 游戏
+    // （如 echo 的 run-complete）的胜利事件不在通用默认 TerminalSpec 里，靠这条并进来，
+    // 否则会被误判"谁也通不了"、ending_coverage 空。boot 内部已加载，这里再 load 一次取
+    // manifest 是廉价的（只读 JSON），换来不必把 must_emit 一路穿过 boot 的好处。
+    let manifest_must_emit: Vec<String> = match vitric_data::Project::load(&dir) {
+        Ok(project) => project
+            .manifest
+            .gates
+            .as_ref()
+            .map(|g| g.playthroughs.iter().map(|p| p.must_emit.clone()).collect())
+            .unwrap_or_default(),
+        // 清单读不出来不在这里硬错（boot 自己会报）——退化为空集，等价没声明 gates。
+        Err(_) => Vec::new(),
+    };
+
+    // 终止规格：playtest.json 的 terminal 覆盖（没写就是默认集合）先生效，
+    // 再把清单 must_emit 追加进 win 集合（叠加去重，不替换覆盖结果）。
     let terminal = match &config.terminal {
         Some(ovr) => TerminalSpec::default().apply_override(ovr),
         None => TerminalSpec::default(),
-    };
+    }
+    .with_manifest_must_emit(&manifest_must_emit);
     // 代表录像落盘目录：默认 <项目>/playtest-report/。报告主体只挂相对路径，录像各自一份文件。
     let report_dir = report_dir.unwrap_or_else(|| dir.join("playtest-report"));
 
@@ -311,7 +329,7 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
 
         // 有声明结局就一并算结局覆盖（叙事项目尤其需要）
         let (_, rt) = Runtime::boot(&dir)?;
-        let report = aggregate_with_endings(&results, &rt.rules, &terminal);
+        let report = aggregate_with_endings_and_declared(&results, &rt.rules, &terminal, &manifest_must_emit);
         return emit_report(report, &out_path);
     }
 
@@ -345,7 +363,7 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
 
         // 结局覆盖要扫规则声明的结局集合，单独 boot 一份只读 Engine 喂聚合器
         let (_, rt) = Runtime::boot(&dir)?;
-        let report = aggregate_with_endings(&results, &rt.rules, &terminal);
+        let report = aggregate_with_endings_and_declared(&results, &rt.rules, &terminal, &manifest_must_emit);
         return emit_report(report, &out_path);
     }
 
@@ -375,7 +393,7 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         // 有声明结局就算结局覆盖（用 config 覆盖后的 terminal 扫声明集合）。
         let results = run_swarm_with_config(factory, &plan, &config, threads)?;
         let (_, rt) = Runtime::boot(&dir)?;
-        let report = aggregate_with_endings(&results, &rt.rules, &terminal);
+        let report = aggregate_with_endings_and_declared(&results, &rt.rules, &terminal, &manifest_must_emit);
         return emit_report(report, &out_path);
     }
 

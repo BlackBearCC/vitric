@@ -35,7 +35,8 @@ pub use config::{
 };
 pub use llm_agent::{LlmClient, LlmStrategy};
 pub use report::{
-    aggregate, aggregate_with_endings, CollapseField, DominantAction, EndingCoverage,
+    aggregate, aggregate_with_endings, aggregate_with_endings_and_declared, CollapseField,
+    DominantAction, EndingCoverage,
     NonFiniteField, NoteCluster, NumericBreakage, QualitativeNotes, RecordingRef, Report,
     RunawayField,
 };
