@@ -801,6 +801,29 @@ mod tests {
     }
 
     #[test]
+    fn system_despawn_of_named_entity_fully_removes_it() {
+        // 复现 frontier 记的"疑似引擎 bug":系统里 ctx.despawn(命名实体) 到底是
+        // 彻底删除(名字+实体都没),还是只注销名字、实体留在查询里。
+        let mut eng = engine_with(
+            r#"
+            vitric.system("reaper", {query: ["Coin"], writes: []}, (entities, ctx) => {
+                for (const e of entities) {
+                    ctx.despawn(e.id);
+                }
+            });
+            "#,
+        );
+        let mut w = World::new();
+        let victim = w.spawn_named("victim").unwrap();
+        w.set_component(victim, "Coin", json!({"value": 1})).unwrap();
+        let mut rng = Pcg32::new(1);
+        eng.run_systems(&mut w, &mut rng, 0).unwrap();
+        assert!(!w.is_alive(victim), "命名实体 despawn 后应不存活");
+        assert!(w.entity("victim").is_err(), "名字应注销");
+        assert!(w.query(&["Coin"]).is_empty(), "实体应从查询消失(不只名字)");
+    }
+
+    #[test]
     fn spawned_components_are_schema_checked() {
         let mut eng = engine_with(
             r#"
