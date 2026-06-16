@@ -58,7 +58,7 @@ entities.append({
 entities.append({
     "name": "colony",
     "components": {
-        "Colony": {"oxygen": 60, "power": 60, "food": 60, "o2_rate": 0, "pow_rate": 0, "food_rate": 0},
+        "Colony": {"oxygen": 60, "power": 60, "food": 60, "o2_rate": 0, "pow_rate": 0, "food_rate": 0, "pop": 0},
     },
 })
 # @companion:第一个活伙伴(LLM 驱动,走近按 t 说话)。人设现给死一个,后续改成现生成。

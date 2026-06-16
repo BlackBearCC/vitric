@@ -6,10 +6,16 @@
 
 const BASE_USE = 2.0; // 每秒基础消耗(电/氧/食各自)——殖民地活着就在烧
 const PER = 3.0;      // 每个产出结构每秒产量
+const POP_BONUS = 1.5; // 每个伙伴每秒帮的活(净正:留住人对生存有实利,心脏 C 的一半)
 
 function clamp(v) {
   return v < 0 ? 0 : (v > 100 ? 100 : v);
 }
+
+// 统计在场伙伴数,发出去(规则落到 @colony.pop)。伙伴会帮着撑殖民地。
+vitric.system("pop-tally", { query: ["Companion"], writes: [] }, (entities, ctx) => {
+  ctx.emit("pop", { n: entities.length });
+});
 
 // 统计产出结构,把"每秒产量"发出去(规则把它落进 @colony 的速率字段)。
 vitric.system("tally", { query: ["Structure"], writes: [] }, (entities, ctx) => {
@@ -26,8 +32,9 @@ vitric.system("tally", { query: ["Structure"], writes: [] }, (entities, ctx) => 
 vitric.system("colony", { query: ["Colony"], writes: ["Colony"] }, (entities, ctx) => {
   for (const e of entities) {
     const c = e.Colony;
-    c.power = clamp(c.power + (c.pow_rate - BASE_USE) * ctx.dt);
-    c.oxygen = clamp(c.oxygen + (c.o2_rate - BASE_USE) * ctx.dt);
-    c.food = clamp(c.food + (c.food_rate - BASE_USE) * ctx.dt);
+    const help = c.pop * POP_BONUS; // 伙伴帮的活,摊到每种资源
+    c.power = clamp(c.power + (c.pow_rate + help - BASE_USE) * ctx.dt);
+    c.oxygen = clamp(c.oxygen + (c.o2_rate + help - BASE_USE) * ctx.dt);
+    c.food = clamp(c.food + (c.food_rate + help - BASE_USE) * ctx.dt);
   }
 });

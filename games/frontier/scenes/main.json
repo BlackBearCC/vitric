@@ -3312,7 +3312,8 @@
      "food": 60,
      "o2_rate": 0,
      "pow_rate": 0,
-     "food_rate": 0
+     "food_rate": 0,
+     "pop": 0
     }
    }
   },

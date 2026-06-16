@@ -20,7 +20,8 @@
         "food": { "type": "number", "default": 60 },
         "o2_rate": { "type": "number", "default": 0 },
         "pow_rate": { "type": "number", "default": 0 },
-        "food_rate": { "type": "number", "default": 0 }
+        "food_rate": { "type": "number", "default": 0 },
+        "pop": { "type": "number", "default": 0 }
       }
     },
     "Companion": { "fields": {} },
