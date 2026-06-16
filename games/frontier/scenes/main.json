@@ -3315,6 +3315,51 @@
      "food_rate": 0
     }
    }
+  },
+  {
+   "name": "companion",
+   "components": {
+    "Companion": {},
+    "Persona": {
+     "name": "Pip",
+     "archetype": "\u8bdd\u75e8\u6280\u5de5",
+     "traits": "\u70ed\u5fc3,\u85cf\u4e0d\u4f4f\u8bdd,\u7231\u5012\u817e\u673a\u5668",
+     "speech": "\u8bed\u901f\u5feb\u3001\u7231\u7528'\u8bf6''\u5450'\u3001\u559c\u6b22\u987a\u5634\u5410\u69fd"
+    },
+    "Mood": {
+     "value": "\u597d\u5947"
+    },
+    "ThinkReq": {
+     "pending": 0
+    },
+    "Position": {
+     "x": 6,
+     "y": 7
+    },
+    "Velocity": {
+     "x": 0,
+     "y": 0
+    },
+    "Sprite": {
+     "w": 0.9,
+     "h": 0.9,
+     "image": "companion.png"
+    }
+   }
+  },
+  {
+   "name": "bubble",
+   "components": {
+    "Position": {
+     "x": 6,
+     "y": 8
+    },
+    "Text": {
+     "content": "",
+     "size": 0.8,
+     "color": "#ffe9b0"
+    }
+   }
   }
  ]
 }

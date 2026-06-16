@@ -61,6 +61,28 @@ entities.append({
         "Colony": {"oxygen": 60, "power": 60, "food": 60, "o2_rate": 0, "pow_rate": 0, "food_rate": 0},
     },
 })
+# @companion:第一个活伙伴(LLM 驱动,走近按 t 说话)。人设现给死一个,后续改成现生成。
+entities.append({
+    "name": "companion",
+    "components": {
+        "Companion": {},
+        "Persona": {"name": "Pip", "archetype": "话痨技工", "traits": "热心,藏不住话,爱倒腾机器",
+                    "speech": "语速快、爱用'诶''呐'、喜欢顺嘴吐槽"},
+        "Mood": {"value": "好奇"},
+        "ThinkReq": {"pending": 0},
+        "Position": {"x": 6, "y": 7},
+        "Velocity": {"x": 0, "y": 0},
+        "Sprite": {"w": 0.9, "h": 0.9, "image": "companion.png"},
+    },
+})
+# @bubble:伙伴头顶话泡(伙伴说话时填 Text.content)
+entities.append({
+    "name": "bubble",
+    "components": {
+        "Position": {"x": 6, "y": 8},
+        "Text": {"content": "", "size": 0.8, "color": "#ffe9b0"},
+    },
+})
 
 out = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "scenes", "main.json"))
 with open(out, "w") as f:

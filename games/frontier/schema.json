@@ -23,6 +23,24 @@
         "food_rate": { "type": "number", "default": 0 }
       }
     },
+    "Companion": { "fields": {} },
+    "Persona": {
+      "fields": {
+        "name": { "type": "text", "default": "旅人" },
+        "archetype": { "type": "text", "default": "" },
+        "traits": { "type": "text", "default": "" },
+        "speech": { "type": "text", "default": "" }
+      }
+    },
+    "Mood": { "fields": { "value": { "type": "text", "default": "平静" } } },
+    "ThinkReq": { "fields": { "pending": { "type": "number", "default": 0 } } },
+    "Text": {
+      "fields": {
+        "content": { "type": "text", "default": "" },
+        "size": { "type": "number", "default": 1 },
+        "color": { "type": "text", "default": "#ffffff" }
+      }
+    },
     "Player": { "fields": {} },
     "Camera": {
       "fields": {
