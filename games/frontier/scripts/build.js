@@ -7,6 +7,7 @@ const KIND_IMG = {
   plot: "plot.png",
   conduit: "conduit.png",
   quarters: "quarters.png",
+  extractor: "tank.png",
 };
 
 // 左键:在点中的格子(四舍五入到整格)生成选中类型的结构。

@@ -58,8 +58,9 @@ entities.append({
 entities.append({
     "name": "colony",
     "components": {
-        "Colony": {"oxygen": 60, "power": 60, "food": 60, "o2_rate": 0, "pow_rate": 0, "food_rate": 0, "pop": 0,
-                   "o2_i": 60, "pow_i": 60, "food_i": 60},
+        "Colony": {"oxygen": 60, "power": 60, "food": 60, "water": 60,
+                   "o2_rate": 0, "pow_rate": 0, "food_rate": 0, "water_rate": 0, "pop": 0,
+                   "o2_i": 60, "pow_i": 60, "food_i": 60, "water_i": 60},
         "Census": {"count": 1, "is_hub": 1},
         "Spawn": {"timer": 8, "cap": 4},
         "Event": {"timer": 25, "flash": 0},

@@ -6,7 +6,7 @@
       "do": [
         {
           "set": "@hud_res.Text.content",
-          "to": { "format": "氧 {}   电 {}   食 {}   人手 {}", "args": ["@colony.Colony.o2_i", "@colony.Colony.pow_i", "@colony.Colony.food_i", "@colony.Census.count"] }
+          "to": { "format": "氧 {}  电 {}  食 {}  水 {}  人手 {}", "args": ["@colony.Colony.o2_i", "@colony.Colony.pow_i", "@colony.Colony.food_i", "@colony.Colony.water_i", "@colony.Census.count"] }
         }
       ]
     },

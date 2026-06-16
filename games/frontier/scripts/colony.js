@@ -29,13 +29,15 @@ vitric.system("tally", { query: ["Structure"], writes: [] }, (entities, ctx) => 
   let conduit = 0;
   let plot = 0;
   let quarters = 0;
+  let extractor = 0;
   for (const e of entities) {
     if (e.Structure.kind === "conduit") conduit += 1;
     else if (e.Structure.kind === "plot") plot += 1;
     else if (e.Structure.kind === "quarters") quarters += 1;
+    else if (e.Structure.kind === "extractor") extractor += 1;
   }
   // quarters 数也带上,给伙伴需求系统用(住所满足舒适)
-  ctx.emit("tally", { pow: conduit * PER, food: plot * PER, o2: plot * PER, quarters: quarters });
+  ctx.emit("tally", { pow: conduit * PER, food: plot * PER, o2: plot * PER, water: extractor * PER, quarters: quarters });
 });
 
 // 每帧:库存 += (产出速率 - 基础消耗) * dt,夹在 [0,100]。
@@ -46,10 +48,12 @@ vitric.system("colony", { query: ["Colony", "Census"], writes: ["Colony"] }, (en
     c.power = clamp(c.power + (c.pow_rate + help - BASE_USE) * ctx.dt);
     c.oxygen = clamp(c.oxygen + (c.o2_rate + help - BASE_USE) * ctx.dt);
     c.food = clamp(c.food + (c.food_rate + help - BASE_USE) * ctx.dt);
+    c.water = clamp(c.water + (c.water_rate + help - BASE_USE) * ctx.dt);
     // 取整给 HUD 显示用(format 模板直接读这几个,免得屏上是 53.9999)
     c.o2_i = Math.round(c.oxygen);
     c.pow_i = Math.round(c.power);
     c.food_i = Math.round(c.food);
+    c.water_i = Math.round(c.water);
   }
 });
 

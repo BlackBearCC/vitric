@@ -6,7 +6,8 @@
       "do": [
         { "set": "@colony.Colony.pow_rate", "to": "event.pow" },
         { "set": "@colony.Colony.food_rate", "to": "event.food" },
-        { "set": "@colony.Colony.o2_rate", "to": "event.o2" }
+        { "set": "@colony.Colony.o2_rate", "to": "event.o2" },
+        { "set": "@colony.Colony.water_rate", "to": "event.water" }
       ]
     }
   ]
