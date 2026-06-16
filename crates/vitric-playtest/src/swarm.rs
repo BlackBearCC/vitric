@@ -20,7 +20,7 @@ use vitric_sim::{GameLogic, ReplyRecord, Sim};
 use crate::llm_agent::{LlmClient, LlmStrategy};
 use crate::scene_view::{Outcome, TerminalSpec};
 use crate::seed::Perturbation;
-use crate::session::{run_session, SessionConfig, SessionResult};
+use crate::session::{run_session, run_session_lookahead, LookaheadConfig, SessionConfig, SessionResult};
 use crate::strategy::{
     CoverageStrategy, EconomyStrategy, GreedyStrategy, RandomStrategy, ScriptedStrategy, Strategy,
 };
@@ -41,6 +41,11 @@ pub enum StrategyKind {
     /// 形态各异），不从 (kind,seed) 构造，由 `cmd_playtest --llm` 直接持有 LlmStrategy 跑，
     /// 跑完贴这个标签把结果并进 swarm 结果集（note 进 qualitative_notes）。
     Llm,
+    /// 前瞻搜索局（技巧/导航类专用）。它不是 `Strategy`——要 sim/logic 自己 snapshot/restore
+    /// 投机选最优动作（走 `run_session_lookahead` 而非 `run_session`），所以 horizon 直接挂在
+    /// 变体上。声明了 goal 的项目，默认 swarm 会掺几局这种进来（导航类才不被误报 unbeatable）。
+    /// `run_one` 在每会话执行处按这个变体分流到 `run_session_lookahead`。
+    Lookahead { horizon: u64 },
 }
 
 impl StrategyKind {
@@ -63,6 +68,7 @@ impl StrategyKind {
             StrategyKind::Economy => "economy",
             StrategyKind::Scripted => "scripted",
             StrategyKind::Llm => "llm",
+            StrategyKind::Lookahead { .. } => "lookahead",
         }
     }
 
@@ -83,6 +89,9 @@ impl StrategyKind {
             }
             StrategyKind::Llm => {
                 panic!("Llm 策略要带 client，必须由 cmd_playtest --llm 直接构造 LlmStrategy，不能用 StrategyKind::build")
+            }
+            StrategyKind::Lookahead { .. } => {
+                panic!("Lookahead 不是 Strategy，要 sim/logic 自己投机，必须走 run_session_lookahead，不能用 StrategyKind::build")
             }
         }
     }
@@ -119,6 +128,49 @@ impl LabeledResult {
     }
 }
 
+/// 默认 swarm 掺入的前瞻局用的搜索地平线。比单局 `--strategy lookahead` 的默认 12 大：
+/// 技巧/导航类要看够远才算得出「先绕一步再回正」的收益（如 nav 跳墙：跳起到越过墙顶减小
+/// 距离要 ~20+ 帧，horizon 12 看不到落点收益就退化成原地踏步）。24 是 nav fixture 实测能稳定
+/// 通关的最小值；动作集小（导航类一般个位数候选），24 帧投机成本仍可控。单局 `--strategy
+/// lookahead` 不受此影响（仍用 `--horizon`/默认 12，用户可显式调大）。
+pub const DEFAULT_SWARM_LOOKAHEAD_HORIZON: u64 = 24;
+
+/// 默认 swarm 的会话计划：N 局，廉价策略（random/greedy/coverage/economy）轮换 × 递增 seed。
+///
+/// **声明了 goal 时掺前瞻**：lookahead 需要项目声明 goal（`playtest.json` 的 PlaytestConfig.goal）
+/// 才有方向，否则没意义。所以仅当 `has_goal` 为真时，把计划里固定少数几局换成 `Lookahead`——
+/// 导航/技巧类（先跳上墙再走）random 0% 通关，不掺前瞻就会被误报 unbeatable。比例克制（前瞻慢：
+/// 每真 tick = |候选+不操作|×horizon 个投机 step）：取 `min(N, max(2, N/4))` 局（约 25%，至少 2、
+/// 不超过 N）。**没声明 goal 时一局都不换**，默认组完全不变（向后兼容）。
+///
+/// 掺入的前瞻局用 [`DEFAULT_SWARM_LOOKAHEAD_HORIZON`]（比单局默认大，技巧类才看得到收益）。
+/// 哪几局换成前瞻：取计划**末尾**那几局换（前面的轮换槽位不动，diff 最小、好对账）。被换的局
+/// 沿用它原本的 seed/max_ticks/terminal，只把 strategy_kind 改成 `Lookahead{horizon}`。
+pub fn default_plan(
+    sessions: u64,
+    seed: u64,
+    max_ticks: u64,
+    terminal: TerminalSpec,
+    has_goal: bool,
+) -> Vec<SessionSpec> {
+    let mut plan: Vec<SessionSpec> = Vec::with_capacity(sessions as usize);
+    for k in 0..sessions {
+        let kind = StrategyKind::ALL[(k as usize) % StrategyKind::ALL.len()];
+        plan.push(SessionSpec { strategy_kind: kind, seed: seed + k, max_ticks, terminal: terminal.clone() });
+    }
+    if has_goal && sessions > 0 {
+        // 掺入局数：约 1/4，至少 2，但不超过总局数。
+        let look_n = ((sessions / 4).max(2)).min(sessions) as usize;
+        // 换末尾 look_n 局（前面轮换槽位不动）。
+        let start = plan.len() - look_n;
+        for spec in &mut plan[start..] {
+            spec.strategy_kind =
+                StrategyKind::Lookahead { horizon: DEFAULT_SWARM_LOOKAHEAD_HORIZON };
+        }
+    }
+    plan
+}
+
 /// 跑一条 spec（在调用线程内 boot 一份运行时，跑一局，出标签结果）。
 /// swarm 的串行/并行两条路都收敛到这一个函数——保证「怎么跑都跑出同一份结果」。
 /// `config`：每游戏视图覆盖（include/exclude/relabel/派生量/goal/terminal）。greedy 用它的 goal
@@ -134,7 +186,6 @@ where
 {
     // 每局自己 boot：运行时不跨局复用（录可重放录像必须冷启动），更不跨线程
     let (mut sim, mut logic, engine) = factory()?;
-    let mut strategy = spec.strategy_kind.build(spec.seed, &config.goal);
     let cfg = SessionConfig {
         max_ticks: spec.max_ticks,
         seed: spec.seed,
@@ -143,7 +194,18 @@ where
         // 普通 swarm/单局不重放种子回复（那是种子探索专路 run_seed_swarm 才有的事）
         seed_replies: Vec::new(),
     };
-    let result = run_session(&mut sim, &mut logic, &engine, strategy.as_mut(), &cfg)?;
+    // 分流：Lookahead 不是 Strategy，要 sim/logic 自己 snapshot/restore 投机选动作，走
+    // run_session_lookahead；其余照旧 build 出 Strategy 走 run_session。两条路同口径产
+    // SessionResult（state_trace/numeric_summary/fired_events/notes/recording 都齐），聚合不缺数据。
+    let result = match spec.strategy_kind {
+        StrategyKind::Lookahead { horizon } => {
+            run_session_lookahead(&mut sim, &mut logic, &engine, &cfg, &LookaheadConfig { horizon })?
+        }
+        _ => {
+            let mut strategy = spec.strategy_kind.build(spec.seed, &config.goal);
+            run_session(&mut sim, &mut logic, &engine, strategy.as_mut(), &cfg)?
+        }
+    };
     Ok(LabeledResult { spec: spec.clone(), result })
 }
 
@@ -422,6 +484,104 @@ mod tests {
     fn swarm_empty_plan_yields_empty() {
         let out = run_swarm(factory_winning(Some(3)), &[], 4).unwrap();
         assert!(out.is_empty());
+    }
+
+    // ---- default_plan：声明 goal 时掺前瞻 / 无 goal 完全不变 ----
+
+    /// 一个会话计划里前瞻局的数量。
+    fn count_lookahead(plan: &[SessionSpec]) -> usize {
+        plan.iter()
+            .filter(|s| matches!(s.strategy_kind, StrategyKind::Lookahead { .. }))
+            .count()
+    }
+
+    #[test]
+    fn default_plan_no_goal_is_pure_rotation_unchanged() {
+        // 无 goal：计划必须和「四策略轮换 × 递增 seed」逐条一致，一局前瞻都不掺（向后兼容）。
+        let plan = default_plan(8, 0, 50, TerminalSpec::default(), false);
+        assert_eq!(plan.len(), 8);
+        assert_eq!(count_lookahead(&plan), 0, "无 goal 不该掺前瞻");
+        for (k, spec) in plan.iter().enumerate() {
+            assert_eq!(spec.strategy_kind, StrategyKind::ALL[k % StrategyKind::ALL.len()]);
+            assert_eq!(spec.seed, k as u64);
+        }
+    }
+
+    #[test]
+    fn default_plan_with_goal_mixes_in_lookahead() {
+        // 有 goal：约 1/4 局换成前瞻（8 局 → 2 局），换的是末尾几局，其余轮换槽位不动。
+        let plan = default_plan(8, 0, 50, TerminalSpec::default(), true);
+        assert_eq!(plan.len(), 8);
+        assert_eq!(count_lookahead(&plan), 2, "8 局应掺 2 局前瞻（约 25%）: {plan:?}");
+        // 末尾 2 局是前瞻、前 6 局仍是原轮换
+        assert!(matches!(plan[6].strategy_kind, StrategyKind::Lookahead { .. }));
+        assert!(matches!(plan[7].strategy_kind, StrategyKind::Lookahead { .. }));
+        for (k, spec) in plan.iter().enumerate().take(6) {
+            assert_eq!(spec.strategy_kind, StrategyKind::ALL[k % StrategyKind::ALL.len()]);
+        }
+        // 前瞻局沿用原 seed/max_ticks/terminal，只换 kind
+        assert_eq!(plan[7].seed, 7);
+        assert_eq!(plan[7].max_ticks, 50);
+        // 掺入的前瞻用默认 swarm 地平线（比单局默认大）
+        assert_eq!(
+            plan[7].strategy_kind,
+            StrategyKind::Lookahead { horizon: DEFAULT_SWARM_LOOKAHEAD_HORIZON }
+        );
+    }
+
+    #[test]
+    fn default_plan_with_goal_keeps_at_least_two_lookahead_for_small_n() {
+        // 小 N：至少 2 局前瞻、但不超过总局数。N=1 → 1 局（min 起作用）。
+        assert_eq!(count_lookahead(&default_plan(1, 0, 50, TerminalSpec::default(), true)), 1);
+        assert_eq!(count_lookahead(&default_plan(3, 0, 50, TerminalSpec::default(), true)), 2);
+        // N=20 → 1/4=5 局
+        assert_eq!(count_lookahead(&default_plan(20, 0, 50, TerminalSpec::default(), true)), 5);
+    }
+
+    /// 一个会发 game-won 的最小逻辑，但只有「没注入任何输入」才发——用来证明前瞻局确实走了
+    /// `run_session_lookahead`（它会逐候选投机；空动作词汇下「不操作」是唯一候选，照样能跑通通关）。
+    /// 这里主要验证 run_one 对 Lookahead 变体的分流：不 panic（build 会 panic）、产出齐遥测。
+    #[test]
+    fn run_swarm_dispatches_lookahead_spec_to_lookahead_runner() {
+        // 计划：一局普通 random + 一局 Lookahead。两局都应跑通、都带齐遥测（state_trace 非空、有录像）。
+        let plan = vec![
+            SessionSpec::new(StrategyKind::Random, 0, 20),
+            SessionSpec::new(StrategyKind::Lookahead { horizon: 4 }, 1, 20),
+        ];
+        // factory_winning(Some(3))：tick 3 发 game-won，两条路都该在 tick 4 通关
+        let out = run_swarm(factory_winning(Some(3)), &plan, 2).unwrap();
+        assert_eq!(out.len(), 2);
+        // 前瞻局没 panic（若误走 build 会 panic）、结局/遥测齐全
+        let look = &out[1];
+        assert!(matches!(look.spec.strategy_kind, StrategyKind::Lookahead { .. }));
+        assert_eq!(look.outcome(), Outcome::Win, "前瞻局也该收到 tick3 的 game-won");
+        assert_eq!(look.result.ticks, 4);
+        // 遥测同口径：每 tick 一条 state_hash + 一份可序列化录像
+        assert_eq!(look.result.state_trace.len(), look.result.ticks as usize);
+        assert!(!look.result.recording.checkpoints.is_empty());
+    }
+
+    /// 含前瞻局的混合计划，串行 vs 并行逐项一致（确定性铁律对前瞻同样成立）。
+    #[test]
+    fn swarm_mixed_lookahead_serial_and_parallel_identical() {
+        let plan = vec![
+            SessionSpec::new(StrategyKind::Random, 0, 40),
+            SessionSpec::new(StrategyKind::Lookahead { horizon: 5 }, 1, 40),
+            SessionSpec::new(StrategyKind::Greedy, 2, 40),
+            SessionSpec::new(StrategyKind::Lookahead { horizon: 8 }, 3, 40),
+        ];
+        let serial = run_swarm(factory_winning(Some(10)), &plan, 1).unwrap();
+        let parallel = run_swarm(factory_winning(Some(10)), &plan, 8).unwrap();
+        assert_eq!(serial.len(), parallel.len());
+        for (a, b) in serial.iter().zip(parallel.iter()) {
+            assert_eq!(a.spec, b.spec, "spec 顺序一致");
+            assert_eq!(a.result.outcome, b.result.outcome, "结局一致");
+            assert_eq!(a.result.ticks, b.result.ticks, "tick 数一致");
+            assert_eq!(a.result.state_trace, b.result.state_trace, "状态轨迹逐项一致");
+            let ja = serde_json::to_string(&a.result.recording).unwrap();
+            let jb = serde_json::to_string(&b.result.recording).unwrap();
+            assert_eq!(ja, jb, "含前瞻局的混合计划串/并行录像逐字节一致");
+        }
     }
 
     #[test]

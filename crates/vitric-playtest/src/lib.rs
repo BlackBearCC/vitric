@@ -50,6 +50,6 @@ pub use strategy::{
     ScriptedStrategy, Strategy,
 };
 pub use swarm::{
-    run_llm_sessions, run_seed_swarm, run_swarm, run_swarm_with_config, LabeledResult, SessionSpec,
-    StrategyKind,
+    default_plan, run_llm_sessions, run_seed_swarm, run_swarm, run_swarm_with_config,
+    LabeledResult, SessionSpec, StrategyKind, DEFAULT_SWARM_LOOKAHEAD_HORIZON,
 };

@@ -175,6 +175,9 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
 ///   `run_seed_swarm` 并行跑，聚合报告含 `ending_coverage`（哪些声明结局不可达）。`--sessions`=变异条数。
 /// - 没给但 `--sessions>1`：swarm——random+greedy+coverage+economy 四策略轮流 × 递增 seed
 ///   （economy 专为模拟经营找数值崩，报告含 `numeric_breakage`：经济跑飞/崩盘/溢出）。
+///   **声明了 goal 的项目**（playtest.json 有 goal）默认自动把末尾少数几局（约 25%）换成前瞻搜索
+///   （lookahead），让导航/技巧类游戏被真玩起来、不被随机策略误报 unbeatable；没声明 goal 则
+///   默认组完全不变（向后兼容）。无需新选项，默认行为自动变聪明。
 /// - 没给且 `--sessions=1`：单局旧行为，出一条可重放录像。
 ///
 /// 各局都在自己线程内 boot 一份运行时并行跑（QuickJS 非 Send，运行时绝不跨线程）。
@@ -182,10 +185,10 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     use std::sync::Arc;
 
     use vitric_playtest::{
-        aggregate_with_endings_and_declared, perturb_plan, run_llm_sessions, run_seed_swarm,
-        run_session, run_session_lookahead,
+        aggregate_with_endings_and_declared, default_plan, perturb_plan, run_llm_sessions,
+        run_seed_swarm, run_session, run_session_lookahead,
         run_swarm_with_config, EconomyStrategy, GreedyStrategy, LlmClient, LookaheadConfig,
-        PlaytestConfig, RandomStrategy, SessionConfig, SessionSpec, Strategy, StrategyKind,
+        PlaytestConfig, RandomStrategy, SessionConfig, Strategy,
         TerminalSpec,
     };
 
@@ -308,13 +311,9 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         // 同一个工厂闭包要喂两个函数（run_swarm 移走会再无法用），借一份共享引用：
         // &F where F: Fn 仍是 Fn + Sync，两边都用引用，不重复 boot 逻辑。
         let factory_ref = &factory;
-        // 策略档：sessions 局廉价策略（轮换 + 递增 seed），和无 --llm 时同口径
-        let mut plan: Vec<SessionSpec> = Vec::with_capacity(sessions as usize);
-        for k in 0..sessions {
-            let kind = StrategyKind::ALL[(k as usize) % StrategyKind::ALL.len()];
-            // spec.terminal 用 config 覆盖后的终止规格
-            plan.push(SessionSpec { strategy_kind: kind, seed: seed + k, max_ticks, terminal: terminal.clone() });
-        }
+        // 策略档：sessions 局廉价策略（轮换 + 递增 seed），和无 --llm 时同口径。
+        // 声明了 goal 的项目自动掺几局前瞻（default_plan 内部判 has_goal）。
+        let plan = default_plan(sessions, seed, max_ticks, terminal.clone(), config.goal.is_some());
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         // 带 config：greedy 朝 config.goal 走，视图按 include/exclude/relabel/派生量调整
         let mut results = run_swarm_with_config(factory_ref, &plan, &config, threads)?;
@@ -379,12 +378,9 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     if sessions > 1 {
         // 计划：四策略轮流 × 递增 seed，凑够 N 局。每条 spec 自带 (策略,seed,max_ticks,terminal)，
         // 一局结果只由 spec + config 决定（确定性铁律）——串行/并行结果一致。
-        let mut plan: Vec<SessionSpec> = Vec::with_capacity(sessions as usize);
-        for k in 0..sessions {
-            let kind = StrategyKind::ALL[(k as usize) % StrategyKind::ALL.len()];
-            // seed 从 --seed 起递增：每条 spec 一个不同 seed，覆盖更广；terminal 用 config 覆盖后的
-            plan.push(SessionSpec { strategy_kind: kind, seed: seed + k, max_ticks, terminal: terminal.clone() });
-        }
+        // 声明了 goal（playtest.json）的项目，default_plan 自动把末尾少数几局换成前瞻搜索，
+        // 让导航/技巧类不被随机策略误报 unbeatable；没声明 goal 则默认组完全不变（向后兼容）。
+        let plan = default_plan(sessions, seed, max_ticks, terminal.clone(), config.goal.is_some());
 
         // 工厂闭包：每个工作线程在自己线程内调它 boot 一份全新运行时。
         // 返回 (Sim, Runtime, Engine)——Engine 是装配期无状态副本（derive Clone），
