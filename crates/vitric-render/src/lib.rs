@@ -149,7 +149,7 @@ pub use ui_interact::{
 
 use serde_json::Value;
 
-use vitric_ecs::World;
+use vitric_ecs::{relate, Placement, World};
 
 /// 点光源数量上限。逐像素（CPU）/逐片元（GPU uniform 数组）都要遍历全部灯，
 /// 不设上限会把两条路径同时拖死；超了显式报错，不静默截断。
@@ -2457,8 +2457,22 @@ pub fn describe_world_with_assets(
     let half_w_units = width as f64 / scale / 2.0;
     let half_h_units = height as f64 / scale / 2.0;
 
-    let mut visible = Vec::new();
-    let mut offscreen = Vec::new();
+    // 焦点（以自我为中心关系的「我」）：Camera.follow 指名的实体。没有就不输出
+    // relative_to_focal、也不按距离排序（退化回槽位序，向后兼容）。
+    let focal = focal_of(world);
+    let focal_id = focal.map(|(id, _)| id);
+
+    // 收集时带排序键：(有名次序, 到焦点距离, id)。没焦点时距离恒为 0、靠原序兜底。
+    // 主次排序的意图：有名字的实体（玩法主体）排前，再按离焦点近的排前——让模型先读到
+    // 「我」身边最相关的东西。
+    struct DescribeRow {
+        named: bool,
+        dist: f64,
+        id: vitric_ecs::EntityId,
+        value: serde_json::Value,
+    }
+    let mut visible: Vec<DescribeRow> = Vec::new();
+    let mut offscreen: Vec<DescribeRow> = Vec::new();
     let mut rects: Vec<(String, f64, f64, f64, f64)> = Vec::new(); // (id, x, y, w, h) 世界坐标
 
     for id in world.query(&["Position", "Sprite"]) {
@@ -2499,6 +2513,18 @@ pub fn describe_world_with_assets(
         }
         entry.insert("sprite".into(), sprite);
 
+        // 以自我为中心关系：相对焦点的方位/距离/同行同列/相邻。焦点自己不输出这块
+        // （自己跟自己没关系）；没焦点时整块不出现（向后兼容）。复用 ecs 的共享算子，
+        // 和 SceneView 同源同值。dist_to_focal 兼作主次排序键（没焦点时为 0）。
+        let mut dist_to_focal = 0.0;
+        if let Some((fid, fplace)) = focal {
+            if fid != id {
+                let rel = relate(fplace, Placement::new(px, py, sw, sh));
+                dist_to_focal = rel.distance;
+                entry.insert("relative_to_focal".into(), rel.to_json());
+            }
+        }
+
         if on_screen {
             let sx = width as f64 / 2.0 + dx * scale;
             let sy = height as f64 / 2.0 - dy * scale;
@@ -2508,7 +2534,12 @@ pub fn describe_world_with_assets(
                 json!(region_word(sx / width as f64, sy / height as f64)),
             );
             rects.push((id.to_string(), px, py, sw, sh));
-            visible.push(serde_json::Value::Object(entry));
+            visible.push(DescribeRow {
+                named: name.is_some(),
+                dist: dist_to_focal,
+                id,
+                value: serde_json::Value::Object(entry),
+            });
         } else {
             let direction = direction_word(dx, dy);
             entry.insert("direction".into(), json!(direction));
@@ -2516,9 +2547,31 @@ pub fn describe_world_with_assets(
                 "distance_units".into(),
                 json!((dx.powi(2) + dy.powi(2)).sqrt().round()),
             );
-            offscreen.push(serde_json::Value::Object(entry));
+            offscreen.push(DescribeRow {
+                named: name.is_some(),
+                dist: dist_to_focal,
+                id,
+                value: serde_json::Value::Object(entry),
+            });
         }
     }
+
+    // 主次排序（只在有焦点时启用——没焦点排序键无意义，保持槽位序向后兼容）：
+    // 有名字的排前，再按到焦点距离升序，距离平手用 id 兜底——键确定 → 结果逐帧确定。
+    if focal_id.is_some() {
+        let sort_rows = |rows: &mut Vec<DescribeRow>| {
+            rows.sort_by(|a, b| {
+                b.named
+                    .cmp(&a.named) // named=true 排前（true > false，反向）
+                    .then(a.dist.total_cmp(&b.dist))
+                    .then(a.id.cmp(&b.id))
+            });
+        };
+        sort_rows(&mut visible);
+        sort_rows(&mut offscreen);
+    }
+    let visible: Vec<serde_json::Value> = visible.into_iter().map(|r| r.value).collect();
+    let offscreen: Vec<serde_json::Value> = offscreen.into_iter().map(|r| r.value).collect();
 
     // 屏上文字：内容本身就是语义，agent 不用 OCR 截图
     let mut texts = Vec::new();
@@ -2891,6 +2944,29 @@ fn camera_base(world: &World, viewport_h: u32) -> Result<(f64, f64, f64), String
             Ok((x, y, scale))
         }
     }
+}
+
+/// 焦点实体（以自我为中心关系的「我」）：取第一个 `Camera` 实体的 `follow` 字段
+/// 指名的实体。约定和 vitric-sim 的相机跟随一致——`follow` 是实体名（文本），
+/// 缺省/空串 = 不跟随 = 没有焦点（向后兼容：没焦点时 describe 不输出 relative_to_focal）。
+///
+/// 返回焦点的 (id, 世界占位)。占位的 w/h 取 `Sprite.w`/`Sprite.h`（缺了当 0，
+/// 相邻判定退化为严格中心重合——比凭空假设尺寸安全）。
+/// follow 指向不存在的实体时返回 `None`（语义观察不该因为配置笔误整帧报错——
+/// 渲染/sim 那边会把这个错暴露出来，describe 只是少输出一块）。
+fn focal_of(world: &World) -> Option<(vitric_ecs::EntityId, Placement)> {
+    let cam = *world.query(&["Camera"]).first()?;
+    let name = world.get_field(cam, "Camera.follow").ok()?.as_str()?.to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let id = world.entity(&name).ok()?;
+    let x = num(world, id, "Position.x").ok()?;
+    let y = num(world, id, "Position.y").ok()?;
+    // 尺寸可选：没有 Sprite 的焦点（如纯逻辑锚点）w/h 当 0
+    let w = world.get_field(id, "Sprite.w").ok().and_then(Value::as_f64).unwrap_or(0.0);
+    let h = world.get_field(id, "Sprite.h").ok().and_then(Value::as_f64).unwrap_or(0.0);
+    Some((id, Placement::new(x, y, w, h)))
 }
 
 /// 渲染取景相机：本体 + 相机实体上 `Shake` 组件的抖动偏移。
@@ -4732,5 +4808,96 @@ mod tests {
         assert_ne!(a, b);
         // 同一 id 永远同种子（确定性）
         assert_eq!(a, emitter_seed(vitric_ecs::EntityId { index: 1, generation: 1 }));
+    }
+
+    // ---- 以自我为中心关系 + 主次排序（relative_to_focal） ----
+
+    /// 一个带 follow 相机的世界：hero(0,0) 焦点 + 右边邻居 coin(3,0) + 视野外 far(-100,0)。
+    /// 相机宽到能把 coin 收进屏内（scale 小）。
+    fn focal_world() -> World {
+        let mut w = World::new();
+        let hero = w.spawn_named("hero").unwrap();
+        w.set_component(hero, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(hero, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000"})).unwrap();
+        let coin = w.spawn_named("coin").unwrap();
+        w.set_component(coin, "Position", json!({"x": 3.0, "y": 0.0})).unwrap();
+        w.set_component(coin, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#ffd84d"})).unwrap();
+        let cam = w.spawn();
+        // 焦点 = follow 指向 hero；scale 1 像素/单位 → 64px 视口能看到 ±32 单位
+        w.set_component(cam, "Camera", json!({"x": 0.0, "y": 0.0, "scale": 1.0, "follow": "hero"}))
+            .unwrap();
+        w
+    }
+
+    #[test]
+    fn describe_attaches_relative_to_focal_for_neighbor() {
+        let w = focal_world();
+        let d = describe_world(&w, 64, 64).unwrap();
+        let vis = d["visible"].as_array().unwrap();
+        // coin 在 hero 右边 3 单位
+        let coin = vis.iter().find(|e| e["name"] == json!("coin")).unwrap();
+        let rel = &coin["relative_to_focal"];
+        assert_eq!(rel["direction"], json!("right"), "coin 在 hero 右边");
+        assert_eq!(rel["distance"], json!(3.0));
+        assert_eq!(rel["same_row"], json!(true), "y 相同 → 同行");
+        assert_eq!(rel["same_col"], json!(false));
+    }
+
+    #[test]
+    fn describe_focal_entity_has_no_relative_block() {
+        let w = focal_world();
+        let d = describe_world(&w, 64, 64).unwrap();
+        let vis = d["visible"].as_array().unwrap();
+        let hero = vis.iter().find(|e| e["name"] == json!("hero")).unwrap();
+        assert!(hero.get("relative_to_focal").is_none(), "焦点自己不输出 relative_to_focal");
+    }
+
+    #[test]
+    fn describe_without_follow_has_no_relative_block() {
+        // 向后兼容：没有 Camera.follow 时整块不出现，输出和加这功能之前一样
+        let mut w = world_one_red_sprite();
+        let cam = w.spawn();
+        // 有相机但没 follow（不跟随）
+        w.set_component(cam, "Camera", json!({"x": 0.0, "y": 0.0, "scale": 8.0})).unwrap();
+        let d = describe_world(&w, 64, 64).unwrap();
+        for e in d["visible"].as_array().unwrap() {
+            assert!(e.get("relative_to_focal").is_none(), "无 follow 不该有 relative_to_focal");
+        }
+    }
+
+    #[test]
+    fn describe_offscreen_neighbor_relative_direction() {
+        // 视野外的实体也带 relative_to_focal（关系不分屏内屏外）
+        let mut w = focal_world();
+        let up = w.spawn_named("moon").unwrap();
+        w.set_component(up, "Position", json!({"x": 0.0, "y": 100.0})).unwrap();
+        w.set_component(up, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#ffffff"})).unwrap();
+        let d = describe_world(&w, 64, 64).unwrap();
+        let moon = d["offscreen"].as_array().unwrap().iter()
+            .find(|e| e["name"] == json!("moon")).unwrap();
+        assert_eq!(moon["relative_to_focal"]["direction"], json!("up"), "y 向上 → 正上方");
+        assert_eq!(moon["relative_to_focal"]["distance"], json!(100.0));
+    }
+
+    #[test]
+    fn describe_primary_sort_named_then_distance() {
+        // 主次排序：有名字的排前，再按到焦点距离升序
+        let mut w = focal_world(); // hero(0,0,焦点) + coin(3,0)
+        // 一个无名近邻 near(1,0)：距离 1，但无名
+        let near = w.spawn();
+        w.set_component(near, "Position", json!({"x": 1.0, "y": 0.0})).unwrap();
+        w.set_component(near, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#0000ff"})).unwrap();
+        // 一个有名远邻 star(5,0)：距离 5，有名
+        let star = w.spawn_named("star").unwrap();
+        w.set_component(star, "Position", json!({"x": 5.0, "y": 0.0})).unwrap();
+        w.set_component(star, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#00ff00"})).unwrap();
+
+        let d = describe_world(&w, 64, 64).unwrap();
+        let vis = d["visible"].as_array().unwrap();
+        let names: Vec<String> = vis.iter()
+            .map(|e| e.get("name").and_then(|n| n.as_str()).unwrap_or("<anon>").to_string())
+            .collect();
+        // 有名字的在前（hero 距 0、coin 距 3、star 距 5），无名 near 殿后
+        assert_eq!(names, vec!["hero", "coin", "star", "<anon>"], "有名字优先、再按距离升序");
     }
 }

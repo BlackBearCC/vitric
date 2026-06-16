@@ -8,9 +8,11 @@
 mod entity;
 mod error;
 mod hash;
+mod spatial;
 mod world;
 
 pub use entity::EntityId;
 pub use error::EcsError;
 pub use hash::fnv1a_64;
+pub use spatial::{relate, Direction, Placement, RelativeSpatial};
 pub use world::World;

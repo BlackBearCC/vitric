@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use vitric_ecs::World;
+use vitric_ecs::{relate, EntityId, Placement, World};
 use vitric_rules::{Engine, Trigger};
 
 use crate::config::{
@@ -128,6 +128,79 @@ fn is_decorative(component: &str) -> bool {
     DECORATIVE_COMPONENTS.contains(&component)
 }
 
+/// 焦点实体（以自我为中心关系的「我」）：取第一个 `Camera` 的 `follow` 字段指名的实体。
+/// 约定和 vitric-sim 的相机跟随、vitric-render 的 describe 一致——follow 是实体名（文本），
+/// 缺省/空串/指向不存在的实体 = 没有焦点（不输出 relative_to_focal、不按距离排序）。
+///
+/// 返回焦点的 (id, 世界占位)。占位 w/h 取 `Sprite.w`/`Sprite.h`（缺了当 0，相邻退化为
+/// 严格中心重合）。**后续可配**：playtest.json 暂不开放覆盖焦点实体名（要动 config 解析器，
+/// 范围外）；现阶段统一用 Camera.follow，需要时再加一个 observation.focal 覆盖。
+fn focal_of(world: &World) -> Option<(EntityId, Placement)> {
+    let cam = *world.query(&["Camera"]).first()?;
+    let name = world.get_field(cam, "Camera.follow").ok()?.as_str()?.to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let id = world.entity(&name).ok()?;
+    Some((id, placement_of(world, id)?))
+}
+
+/// 读一个实体的世界占位（Position 必须有；Sprite 尺寸可选，缺了当 0）。
+fn placement_of(world: &World, id: EntityId) -> Option<Placement> {
+    let pos = world.get_component(id, "Position").ok()?;
+    let x = pos.get("x").and_then(|v| v.as_f64())?;
+    let y = pos.get("y").and_then(|v| v.as_f64())?;
+    let (w, h) = match world.get_component(id, "Sprite") {
+        Ok(s) => (
+            s.get("w").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            s.get("h").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        ),
+        Err(_) => (0.0, 0.0),
+    };
+    Some(Placement::new(x, y, w, h))
+}
+
+/// 给一个实体对象（已建好的 `{"id","name","components"}` Map）追加 `relative_to_focal`，
+/// 并返回主次排序键 `(有名字, 到焦点距离)`。焦点自己不追加（自己跟自己没关系）、
+/// 没焦点或自身无 Position 时不追加。**和 describe 同源**：调同一个 `ecs::relate`。
+///
+/// 排序键里距离没焦点时为 0（排序整体不启用，键被忽略）。
+fn attach_relative(
+    world: &World,
+    id: EntityId,
+    has_name: bool,
+    focal: Option<(EntityId, Placement)>,
+    obj: &mut Map<String, Value>,
+) -> (bool, f64) {
+    let mut dist = 0.0;
+    if let Some((fid, fplace)) = focal {
+        if fid != id {
+            if let Some(p) = placement_of(world, id) {
+                let rel = relate(fplace, p);
+                dist = rel.distance;
+                obj.insert("relative_to_focal".to_string(), rel.to_json());
+            }
+        }
+    }
+    (has_name, dist)
+}
+
+/// 按主次排序实体列表（只在有焦点时启用）：有名字的排前、再按到焦点距离升序，
+/// 平手用 id 兜底——键确定 → 输出确定。`keys[i]` 对应 `entities[i]` 的 (有名字, 距离, id)。
+fn sort_entities_by_focus(entities: &mut [Value], keys: &mut [(bool, f64, EntityId)]) {
+    // 一起排：先把 (key, entity) 配对排序，再写回。entities/keys 等长由调用方保证。
+    let mut idx: Vec<usize> = (0..entities.len()).collect();
+    idx.sort_by(|&a, &b| {
+        let (na, da, ia) = keys[a];
+        let (nb, db, ib) = keys[b];
+        nb.cmp(&na) // named=true 排前
+            .then(da.total_cmp(&db))
+            .then(ia.cmp(&ib))
+    });
+    let reordered: Vec<Value> = idx.iter().map(|&i| entities[i].clone()).collect();
+    entities.clone_from_slice(&reordered);
+}
+
 /// 一份「代理所见」。observation 是机器可读 JSON，策略和（后续）LLM 共用同一份。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SceneView {
@@ -183,7 +256,9 @@ impl SceneView {
 /// config.observation 全空时与 [`project_observation`] 逐字节一致（向后兼容）。
 fn project_observation_with_config(world: &World, cfg: &ObservationConfig) -> Value {
     let use_include = !cfg.include.is_empty();
+    let focal = focal_of(world);
     let mut entities = Vec::new();
+    let mut keys: Vec<(bool, f64, EntityId)> = Vec::new();
     for id in world.entities() {
         let ent_label = world.name_of(id).map(|s| s.to_string());
         let mut comps = Map::new();
@@ -212,7 +287,13 @@ fn project_observation_with_config(world: &World, cfg: &ObservationConfig) -> Va
             e.insert("name".to_string(), json!(name));
         }
         e.insert("components".to_string(), Value::Object(comps));
+        // 以自我为中心关系（和 describe 同源）：焦点自己/无 Position/无焦点不追加
+        let (named, dist) = attach_relative(world, id, ent_label.is_some(), focal, &mut e);
+        keys.push((named, dist, id));
         entities.push(Value::Object(e));
+    }
+    if focal.is_some() {
+        sort_entities_by_focus(&mut entities, &mut keys);
     }
     json!({ "entities": entities })
 }
@@ -313,7 +394,9 @@ fn derived_count(world: &World, component: &str) -> Value {
 /// 全是装饰的实体（如纯相机/纯背景 Sprite）components 为空，仍保留——
 /// 它的存在本身是状态（实体在不在）。
 fn project_observation(world: &World) -> Value {
+    let focal = focal_of(world);
     let mut entities = Vec::new();
+    let mut keys: Vec<(bool, f64, EntityId)> = Vec::new();
     for id in world.entities() {
         let mut comps = Map::new();
         for cname in world.components_of(id) {
@@ -324,13 +407,20 @@ fn project_observation(world: &World) -> Value {
                 comps.insert(cname, v.clone());
             }
         }
+        let has_name = world.name_of(id).is_some();
         let mut e = Map::new();
         e.insert("id".to_string(), json!(id.to_string()));
         if let Some(name) = world.name_of(id) {
             e.insert("name".to_string(), json!(name));
         }
         e.insert("components".to_string(), Value::Object(comps));
+        // 以自我为中心关系（和 describe 同源）：焦点自己/无 Position/无焦点不追加
+        let (named, dist) = attach_relative(world, id, has_name, focal, &mut e);
+        keys.push((named, dist, id));
         entities.push(Value::Object(e));
+    }
+    if focal.is_some() {
+        sort_entities_by_focus(&mut entities, &mut keys);
     }
     json!({ "entities": entities })
 }
@@ -722,6 +812,94 @@ mod tests {
         assert_eq!(spec.classify("reached-exit"), Some(Outcome::Win), "覆盖的 win 名认得");
         assert_eq!(spec.classify("quest-done"), Some(Outcome::Win), "清单 must_emit 也认得");
         assert_eq!(spec.classify("game-won"), None, "覆盖替换掉了默认 win 名");
+    }
+
+    // ---- 以自我为中心关系 + 主次排序（relative_to_focal） ----
+
+    /// 带 follow 相机的世界：hero(0,0) 焦点 + coin(3,0) 右邻 + anon 无名近邻(1,0)。
+    fn focal_world() -> World {
+        let mut w = World::new();
+        let hero = w.spawn_named("hero").unwrap();
+        w.set_component(hero, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        w.set_component(hero, "Sprite", json!({"w": 2.0, "h": 2.0})).unwrap();
+        let coin = w.spawn_named("coin").unwrap();
+        w.set_component(coin, "Position", json!({"x": 3.0, "y": 0.0})).unwrap();
+        let cam = w.spawn();
+        w.set_component(cam, "Camera", json!({"x": 0.0, "y": 0.0, "follow": "hero"})).unwrap();
+        w
+    }
+
+    fn find_ent<'a>(obs: &'a Value, name: &str) -> &'a Value {
+        obs.get("entities").unwrap().as_array().unwrap().iter()
+            .find(|e| e.get("name") == Some(&json!(name))).unwrap()
+    }
+
+    #[test]
+    fn observation_attaches_relative_to_focal() {
+        let eng = jump_like_engine();
+        let w = focal_world();
+        let view = SceneView::derive(&w, &eng, &TerminalSpec::default());
+        let coin = find_ent(&view.observation, "coin");
+        let rel = coin.get("relative_to_focal").unwrap();
+        assert_eq!(rel["direction"], json!("right"));
+        assert_eq!(rel["distance"], json!(3.0));
+        assert_eq!(rel["same_row"], json!(true));
+    }
+
+    #[test]
+    fn observation_focal_has_no_relative_block() {
+        let eng = jump_like_engine();
+        let w = focal_world();
+        let view = SceneView::derive(&w, &eng, &TerminalSpec::default());
+        let hero = find_ent(&view.observation, "hero");
+        assert!(hero.get("relative_to_focal").is_none(), "焦点自己不输出");
+    }
+
+    #[test]
+    fn observation_relative_value_matches_describe_shared_function() {
+        // 和 describe 同源：两处都调 ecs::relate，值必须一致。
+        use vitric_ecs::{relate, Placement};
+        let eng = jump_like_engine();
+        let w = focal_world();
+        let view = SceneView::derive(&w, &eng, &TerminalSpec::default());
+        let coin = find_ent(&view.observation, "coin");
+        // 焦点 hero(0,0,2x2)、目标 coin(3,0,无 Sprite→0x0)
+        let expected = relate(Placement::new(0.0, 0.0, 2.0, 2.0), Placement::new(3.0, 0.0, 0.0, 0.0))
+            .to_json();
+        assert_eq!(coin.get("relative_to_focal").unwrap(), &expected);
+    }
+
+    #[test]
+    fn observation_no_camera_no_relative_no_reorder() {
+        // 向后兼容：没相机/没 follow 时不追加 relative_to_focal、保持槽位序
+        let eng = jump_like_engine();
+        let w = pos_world(); // 无 Camera
+        let view = SceneView::derive(&w, &eng, &TerminalSpec::default());
+        for e in view.observation.get("entities").unwrap().as_array().unwrap() {
+            assert!(e.get("relative_to_focal").is_none());
+        }
+    }
+
+    #[test]
+    fn observation_primary_sort_named_then_distance() {
+        let eng = jump_like_engine();
+        let mut w = focal_world(); // hero(0,0 焦点) + coin(3,0)
+        // 无名近邻(1,0)
+        let near = w.spawn();
+        w.set_component(near, "Position", json!({"x": 1.0, "y": 0.0})).unwrap();
+        // 有名远邻 star(5,0)
+        let star = w.spawn_named("star").unwrap();
+        w.set_component(star, "Position", json!({"x": 5.0, "y": 0.0})).unwrap();
+
+        let view = SceneView::derive(&w, &eng, &TerminalSpec::default());
+        let ents = view.observation.get("entities").unwrap().as_array().unwrap();
+        let names: Vec<String> = ents.iter()
+            .map(|e| e.get("name").and_then(|n| n.as_str()).unwrap_or("<anon>").to_string())
+            .collect();
+        // 注意：相机实体（无名、无 Position）也在列表里，排到无名段。
+        // 有名段按距离：hero(0) < coin(3) < star(5)
+        assert_eq!(&names[0..3], &["hero", "coin", "star"], "有名字优先、按距离升序: {names:?}");
+        assert!(names[3..].iter().all(|n| n == "<anon>"), "无名实体殿后: {names:?}");
     }
 
     #[test]
