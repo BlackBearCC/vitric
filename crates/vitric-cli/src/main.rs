@@ -5,7 +5,7 @@
 //! - `vitric run <项目目录> [选项]`        无头运行 + AI 控制面
 //! - `vitric replay <项目目录> <录像.json>` 重放录像并校验确定性
 //! - `vitric playtest <项目目录> [选项]`     进程内自动试玩：单局出可重放录像（默认），--sessions N 并行跑批聚合地板报告，--seed-recording 种子式探索（扰动证书录像逮不可达结局/顺序软锁）
-//! - `vitric gate <项目目录>`              交付门禁：check + 通关录像重放 + 断言集，全过才出证书
+//! - `vitric gate <项目目录>`              交付门禁：check + 通关录像重放 + 断言集 + 可选 playtest 门（清单声明 gates.playtest 才跑：真跑 swarm 断言达标），全过才出证书
 //! - `vitric bundle <项目目录> [选项]`      发行打包：gate PASS 后把项目附进引擎副本，出自包含单文件（无证书不发行）
 //! - `vitric assets <项目目录> [选项]`      全项目 PNG 统一色板（AI 出图规整成一个调）
 //! - `vitric team <项目目录>`              多 agent 班子协同黑板：各角色交付物健康度 + 门禁/合同状态（只读，永远退出 0）
@@ -451,6 +451,11 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
 
 /// `vitric gate`：交付门禁。报告（人和机器同一份 JSON）永远打到 stdout；
 /// 全部门禁 pass 才退出 0——"交付完成"由这里裁决，不由 agent 自述。
+///
+/// 门集：check + 通关录像重放 + 断言集（见 gate::run），外加**可选的 playtest 门**——清单
+/// 声明 `gates.playtest` 才跑：真跑一遍 playtest swarm（确定可复现）、聚合出报告、逐条核对
+/// 声明的契约（能不能通关 / 软锁数 / 不可达结局 / 惰性动作 / 数值崩），把"自动清地板"变成
+/// 交付契约。没声明 = 不跑这道门（向后兼容，现有 gate 行为不变）。
 fn cmd_gate(args: &[String]) -> Result<(), String> {
     let dir = args.first().ok_or("gate 缺少项目目录参数")?;
     let (report, pass) = vitric_cli::gate::run(&PathBuf::from(dir))?;

@@ -5,10 +5,13 @@
 //! 真的触发了终局事件（默认 game-won）的录像，就是一张**不可伪造的通关证书**——
 //! 想伪造任何一帧，状态哈希必然在下一个校验点跑偏。
 //!
-//! 三道门（清单 `gates` 字段声明，见 vitric-data 的 [`vitric_data::Gates`]）：
+//! 四道门（清单 `gates` 字段声明，见 vitric-data 的 [`vitric_data::Gates`]）：
 //! 1. check 门：完整项目校验（vitric check 同款），任何错误 = FAIL；
 //! 2. 通关录像门：每条录像独立重放，校验点一致 + must_emit 事件出现 + 长度 ≤ max_ticks；
-//! 3. 断言门（可选）：重放过程中每个 tick 全量求值断言集，任何一刻违反 = FAIL。
+//! 3. 断言门（可选）：重放过程中每个 tick 全量求值断言集，任何一刻违反 = FAIL；
+//! 4. playtest 门（可选，声明 `gates.playtest` 才跑）：真跑一遍 playtest swarm（确定可复现），
+//!    聚合出报告，再逐条核对清单声明的契约（能不能通关、软锁数、不可达结局、惰性动作、
+//!    数值崩）——把"自动清地板"变成交付契约，任一条不达标 = FAIL。
 //!
 //! 没有声明 gates 的项目直接拒绝——无门禁项目不出证书，空门禁放行就是后门。
 
@@ -16,7 +19,12 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use vitric_data::{Gates, Project};
+use vitric_data::{Gates, PlaytestGate, Project};
+use vitric_playtest::{
+    aggregate_with_endings_and_declared, perturb_plan, run_seed_swarm, run_session_lookahead,
+    run_swarm_with_config, LabeledResult, LookaheadConfig, PlaytestConfig, Report, SessionConfig,
+    SessionSpec, StrategyKind, TerminalSpec,
+};
 use vitric_rules::{Engine, RuleSet};
 use vitric_sim::Recording;
 
@@ -100,6 +108,13 @@ pub fn run(dir: &Path) -> Result<(Value, bool), String> {
                            "violations": violations},
             }));
         }
+    }
+
+    // ---- 门 4：playtest（可选，声明 gates.playtest 才跑）----
+    // 真跑一遍 playtest swarm（确定可复现）→ 聚合出报告 → 逐条核对清单声明的契约。
+    // 没声明就跳过——现有 gate 行为完全不变（向后兼容）。
+    if let Some(pt) = &gates.playtest {
+        results.push(run_playtest_gate(dir, pt));
     }
 
     let pass = results.iter().all(|g| g["status"] == json!("pass"));
@@ -193,6 +208,216 @@ fn run_playthrough(
         "must_emit": entry.must_emit,
         "verified": true,
     }))
+}
+
+/// playtest 门：按清单 `gates.playtest` 配置真跑一遍 playtest（swarm / lookahead / 种子探索），
+/// 聚合出报告，再逐条核对声明的断言。返回一条 `{"name":"playtest","status":..,"detail":..}`。
+///
+/// 复用 cmd_playtest 同款 boot/工厂/聚合写法（不重写 swarm）：每条 spec 在调用线程内 boot 一份
+/// 全新运行时，结果可复现（确定性铁律）。pass 时 detail 给关键指标；fail 时 detail 列出违反的
+/// 断言名 + 实际值（带可对账的代表 strategy/seed），不内联整坨录像。
+///
+/// 任何一步出错（boot / 跑批 / 读种子录像）都按门失败处理（detail 给错误原因），不 panic。
+fn run_playtest_gate(dir: &Path, pt: &PlaytestGate) -> Value {
+    match playtest_report(dir, pt) {
+        Ok(report) => judge_playtest(pt, &report),
+        Err(e) => json!({"name": "playtest", "status": "fail", "detail": {"error": e}}),
+    }
+}
+
+/// 按 pt 配置跑 playtest 出报告（boot/工厂/聚合照搬 cmd_playtest）。
+fn playtest_report(dir: &Path, pt: &PlaytestGate) -> Result<Report, String> {
+    // 项目根 playtest.json（存在即用，否则默认配置=自动推视图）——和 cmd_playtest 同口径。
+    let config = PlaytestConfig::load(dir)?.unwrap_or_default();
+    // 清单声明的权威通关事件（gates.playthroughs[].must_emit）：脚本/LLM 游戏的胜利事件
+    // 不在通用默认 TerminalSpec 里，靠它并进 win 集合，否则会被误判"谁也通不了"。
+    let manifest_must_emit: Vec<String> = match Project::load(dir) {
+        Ok(project) => project
+            .manifest
+            .gates
+            .as_ref()
+            .map(|g| g.playthroughs.iter().map(|p| p.must_emit.clone()).collect())
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    let terminal = match &config.terminal {
+        Some(ovr) => TerminalSpec::default().apply_override(ovr),
+        None => TerminalSpec::default(),
+    }
+    .with_manifest_must_emit(&manifest_must_emit);
+
+    // 工厂闭包：每个工作线程在自己线程内 boot 一份全新运行时（QuickJS 非 Send，运行时不跨线程）。
+    let factory = || -> Result<(_, _, _), String> {
+        let (sim, rt) = Runtime::boot(dir)?;
+        let engine = rt.rules.clone();
+        Ok((sim, rt, engine))
+    };
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+
+    // 跑法分流：种子录像 > lookahead > 默认策略组 swarm。
+    let results = if let Some(seed_rel) = &pt.seed_recording {
+        // 种子式探索：以这条录像为基线，扰动出 sessions 条变异并行跑。
+        let seed_path = dir.join(seed_rel);
+        let rec_text = std::fs::read_to_string(&seed_path)
+            .map_err(|e| format!("读取种子录像 {seed_rel} 失败: {e}"))?;
+        let seed_rec: Recording =
+            serde_json::from_str(&rec_text).map_err(|e| format!("种子录像 {seed_rel} 解析失败: {e}"))?;
+        let plan = perturb_plan(&seed_rec, pt.sessions, 0);
+        run_seed_swarm(
+            factory,
+            &plan,
+            &seed_rec.replies,
+            pt.max_ticks,
+            terminal.clone(),
+            1, // explore_seed：截断脚本的 random 发散播种（与扰动 PCG 错开）
+            threads,
+        )?
+    } else if pt.strategy.as_deref() == Some("lookahead") {
+        // lookahead：跑 sessions 局前瞻搜索（每局 seed 递增）。lookahead 贵，不进 swarm 轮换，
+        // 这里按声明显式跑——每局自己 boot，串行（前瞻本身已是重计算）。
+        let mut out = Vec::with_capacity(pt.sessions);
+        for k in 0..pt.sessions {
+            let (mut sim, mut rt) = Runtime::boot(dir)?;
+            let engine = rt.rules.clone();
+            let cfg = SessionConfig {
+                max_ticks: pt.max_ticks,
+                seed: k as u64,
+                terminal: terminal.clone(),
+                playtest: config.clone(),
+                ..Default::default()
+            };
+            let result = run_session_lookahead(
+                &mut sim,
+                &mut rt,
+                &engine,
+                &cfg,
+                &LookaheadConfig { horizon: pt.horizon },
+            )?;
+            // lookahead 局贴 Coverage 标签只是占位（spec 仅用于聚合分组/对账，不影响结果）。
+            let spec =
+                SessionSpec::new(StrategyKind::Coverage, k as u64, pt.max_ticks);
+            out.push(LabeledResult { spec, result });
+        }
+        out
+    } else {
+        // 默认策略组 swarm：四策略轮换 × 递增 seed 凑够 sessions 局。
+        let mut plan: Vec<SessionSpec> = Vec::with_capacity(pt.sessions);
+        for k in 0..pt.sessions {
+            let kind = StrategyKind::ALL[k % StrategyKind::ALL.len()];
+            plan.push(SessionSpec {
+                strategy_kind: kind,
+                seed: k as u64,
+                max_ticks: pt.max_ticks,
+                terminal: terminal.clone(),
+            });
+        }
+        run_swarm_with_config(factory, &plan, &config, threads)?
+    };
+
+    // 结局覆盖要扫规则声明的结局集合，单独 boot 一份只读 Engine 喂聚合器（同 cmd_playtest）。
+    let (_, rt) = Runtime::boot(dir)?;
+    Ok(aggregate_with_endings_and_declared(&results, &rt.rules, &terminal, &manifest_must_emit))
+}
+
+/// 逐条核对声明的断言：每条只有在 pt 里填了才查（没填的维度不参与裁决）。
+/// 全过 push pass（detail 给关键指标）；任一不达标 push fail（detail 列违反项 + 实际值）。
+fn judge_playtest(pt: &PlaytestGate, report: &Report) -> Value {
+    let dist = &report.outcome_distribution;
+    let unreachable = report
+        .ending_coverage
+        .as_ref()
+        .map(|ec| ec.unreachable_endings.len())
+        .unwrap_or(0);
+    let nb = &report.numeric_breakage;
+
+    let mut violations: Vec<Value> = Vec::new();
+
+    // 能通关：通关率必须 > 0
+    if pt.require_clearable == Some(true) && dist.win == 0 {
+        violations.push(json!({
+            "assertion": "require_clearable",
+            "expected": "win_rate > 0（swarm 至少通关一次）",
+            "actual": {"win": dist.win, "win_rate": dist.win_rate},
+        }));
+    }
+    // 通关率下限
+    if let Some(min) = pt.min_clear_rate {
+        if dist.win_rate < min {
+            violations.push(json!({
+                "assertion": "min_clear_rate",
+                "expected": min, "actual": dist.win_rate,
+            }));
+        }
+    }
+    // 软锁簇数上限
+    if let Some(max) = pt.max_soft_locks {
+        let n = report.stuck_clusters.len();
+        if n > max {
+            violations.push(json!({
+                "assertion": "max_soft_locks",
+                "expected": max, "actual": n,
+            }));
+        }
+    }
+    // 不可达结局数上限
+    if let Some(max) = pt.max_unreachable_endings {
+        if unreachable > max {
+            violations.push(json!({
+                "assertion": "max_unreachable_endings",
+                "expected": max, "actual": unreachable,
+                "endings": report.ending_coverage.as_ref().map(|ec| ec.unreachable_endings.clone()),
+            }));
+        }
+    }
+    // 惰性动作数上限
+    if let Some(max) = pt.max_inert_actions {
+        let n = report.inert_actions.len();
+        if n > max {
+            violations.push(json!({
+                "assertion": "max_inert_actions",
+                "expected": max, "actual": n, "actions": report.inert_actions,
+            }));
+        }
+    }
+    // 数值崩必须全空
+    if pt.forbid_numeric_breakage == Some(true) {
+        let total = nb.runaway.len() + nb.collapse.len() + nb.non_finite.len();
+        if total > 0 {
+            violations.push(json!({
+                "assertion": "forbid_numeric_breakage",
+                "expected": "runaway/collapse/non_finite 全空",
+                "actual": {
+                    "runaway": nb.runaway.len(),
+                    "collapse": nb.collapse.len(),
+                    "non_finite": nb.non_finite.len(),
+                },
+            }));
+        }
+    }
+
+    // 关键指标摘要（pass/fail 都带，便于对账与复现）。
+    let metrics = json!({
+        "sessions": report.sessions,
+        "win_rate": dist.win_rate,
+        "wins": dist.win,
+        "soft_locks": report.stuck_clusters.len(),
+        "unreachable_endings": unreachable,
+        "inert_actions": report.inert_actions.len(),
+        "numeric_breakage": {
+            "runaway": nb.runaway.len(),
+            "collapse": nb.collapse.len(),
+            "non_finite": nb.non_finite.len(),
+        },
+    });
+
+    if violations.is_empty() {
+        json!({"name": "playtest", "status": "pass", "detail": metrics})
+    } else {
+        json!({
+            "name": "playtest", "status": "fail",
+            "detail": {"message": "playtest 门有声明的契约未达标", "violations": violations, "metrics": metrics},
+        })
+    }
 }
 
 /// 读断言集文件：`[{"id": "...", "if": [[左, op, 右], ...]}, ...]`。

@@ -89,6 +89,80 @@ pub struct Gates {
     /// 录像 tick 数上限（不设 = 不限）。防"挂机一百万 tick 总会赢"式注水证书。
     #[serde(default)]
     pub max_ticks: Option<u64>,
+    /// playtest 门（可选）。声明了它，`vitric gate` 多跑一道 playtest 门：按这里的配置
+    /// 跑一遍 swarm/lookahead/种子探索、聚合出报告，再逐条核对声明的断言（通关率/软锁数/
+    /// 不可达结局/惰性动作/数值崩）。不声明 = 不跑这道门（现有 gate 行为不变）。
+    #[serde(default)]
+    pub playtest: Option<PlaytestGate>,
+}
+
+/// playtest 门声明（清单 `gates.playtest` 字段）。
+///
+/// 把"自动清地板"变成交付契约：项目声明它必须达到的 playtest 门槛（多少局、能不能通关、
+/// 软锁上限等），`vitric gate` 真跑一遍 playtest swarm 断言达标才放行。playtest swarm 是
+/// 确定的（同种子同输入 = 同结果），所以这道门可复现。
+///
+/// ```json
+/// "playtest": {
+///   "sessions": 16,
+///   "max_ticks": 600,
+///   "require_clearable": true,
+///   "max_soft_locks": 0
+/// }
+/// ```
+///
+/// 跑法字段（sessions/max_ticks/strategy/horizon/seed_recording）决定怎么跑；断言字段
+/// （require_clearable/min_clear_rate/max_soft_locks/...）都可选，**填了才查**——没填的
+/// 维度不参与裁决，只把关心的契约写进清单。
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlaytestGate {
+    /// 跑多少局（默认 16）。strategy=lookahead 时是跑多少局 lookahead。
+    #[serde(default = "default_sessions")]
+    pub sessions: usize,
+    /// 每局 tick 上限（默认 600）。
+    #[serde(default = "default_pt_max_ticks")]
+    pub max_ticks: u64,
+    /// 跑法策略（不填=默认策略组 swarm 轮换四策略；可填 "lookahead" 走前瞻搜索跑 sessions 局）。
+    #[serde(default)]
+    pub strategy: Option<String>,
+    /// lookahead 的前瞻帧数（仅 strategy=lookahead 用，默认 12）。
+    #[serde(default = "default_horizon")]
+    pub horizon: u64,
+    /// 种子录像（相对项目根）。填了走种子式探索：以这条录像为基线扰动出 sessions 条变异跑。
+    #[serde(default)]
+    pub seed_recording: Option<String>,
+
+    // ---- 断言（都可选，填了才查；没填的维度不参与裁决）----
+    /// true = 通关率必须 > 0（swarm 至少通关一次）。
+    #[serde(default)]
+    pub require_clearable: Option<bool>,
+    /// 通关率下限（0..1）。实际通关率 < 这个值就 fail。
+    #[serde(default)]
+    pub min_clear_rate: Option<f64>,
+    /// 软锁簇（stuck_clusters）数上限。超了 fail。
+    #[serde(default)]
+    pub max_soft_locks: Option<usize>,
+    /// 不可达结局（ending_coverage.unreachable_endings）数上限。超了 fail。
+    #[serde(default)]
+    pub max_unreachable_endings: Option<usize>,
+    /// 惰性动作（inert_actions）数上限。超了 fail。
+    #[serde(default)]
+    pub max_inert_actions: Option<usize>,
+    /// true = 数值崩（runaway/collapse/non_finite）必须全空，任一非空就 fail。
+    #[serde(default)]
+    pub forbid_numeric_breakage: Option<bool>,
+}
+
+fn default_sessions() -> usize {
+    16
+}
+
+fn default_pt_max_ticks() -> u64 {
+    600
+}
+
+fn default_horizon() -> u64 {
+    12
 }
 
 /// 一条通关录像门。

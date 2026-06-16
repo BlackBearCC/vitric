@@ -1,0 +1,19 @@
+{
+  "name": "gate-softlock",
+  "schema": "schema.json",
+  "entry": "scenes/main.json",
+  "scenes": ["scenes/main.json"],
+  "rules": ["rules/game.json"],
+  "scripts": [],
+  "seed": 1,
+  "gates": {
+    "playthroughs": [{ "recording": "qa/clear.json", "must_emit": "game-won" }],
+    "check": true,
+    "playtest": {
+      "sessions": 16,
+      "max_ticks": 200,
+      "require_clearable": true,
+      "max_soft_locks": 0
+    }
+  }
+}

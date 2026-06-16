@@ -1,0 +1,24 @@
+{
+  "rules": [
+    {
+      "id": "win-on-key",
+      "on": { "event": "input", "filter": { "action": "key", "phase": "pressed" } },
+      "if": [
+        ["@world.State.sealed", "==", false]
+      ],
+      "do": [
+        { "emit": "game-won", "data": {} }
+      ]
+    },
+    {
+      "id": "seal-once",
+      "on": { "event": "input", "filter": { "action": "seal", "phase": "pressed" } },
+      "if": [
+        ["@world.State.sealed", "==", false]
+      ],
+      "do": [
+        { "set": "@world.State.sealed", "to": true }
+      ]
+    }
+  ]
+}

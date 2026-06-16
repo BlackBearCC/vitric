@@ -12,7 +12,7 @@ mod theme;
 mod ui_check;
 
 pub use error::{ValidationError, ValidationReport};
-pub use project::{Budgets, Clip, Gates, PlaythroughGate, Project, ProjectManifest};
+pub use project::{Budgets, Clip, Gates, PlaytestGate, PlaythroughGate, Project, ProjectManifest};
 pub use scene::{instantiate_scene, Scene};
 pub use schema::{ComponentSchema, FieldDef, FieldType, Schema};
 pub use sequence::{SeqStep, Sequence, SEQ_ACTION_KINDS};

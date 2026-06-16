@@ -267,3 +267,80 @@ fn healthy_assertions_pass_and_recording_over_max_ticks_fails() {
 
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// playtest 门：声明 require_clearable + max_soft_locks:0 的可通关、无软锁项目（coin-run）
+/// → swarm 100% 通关、零软锁 → 该门 pass、gate 整体 pass。
+#[test]
+fn playtest_gate_passes_when_swarm_clears_with_no_softlock() {
+    let dir = copy_example("pt-pass");
+    write_recording(&dir, "qa/clear.json", &record_win(&dir));
+    set_gates(
+        &dir,
+        json!({
+            "playthroughs": [{"recording": "qa/clear.json", "must_emit": "game-won"}],
+            "check": true,
+            "max_ticks": 100000,
+            "playtest": {
+                "sessions": 16,
+                "max_ticks": 200,
+                "require_clearable": true,
+                "max_soft_locks": 0,
+                "forbid_numeric_breakage": true
+            }
+        }),
+    );
+
+    // 直接调库（任务要求的入口），不经子进程
+    let (report, pass) = vitric_cli::gate::run(&dir).unwrap();
+    assert!(pass, "可通关无软锁项目应整体 pass: {report}");
+    let pt = gate_entry(&report, "playtest");
+    assert_eq!(pt["status"], json!("pass"), "playtest 门应 pass: {report}");
+    // pass 的 detail 带关键指标
+    assert!(pt["detail"]["win_rate"].as_f64().unwrap() > 0.0);
+    assert_eq!(pt["detail"]["soft_locks"], json!(0));
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// playtest 门：声明同款门槛但 swarm 会撞出软锁的项目（gate-softlock fixture：按 key 通关、
+/// 按 seal 永久封死再也赢不了 → 部分局冻结成软锁）→ playthrough 仍 pass（可通关），但
+/// playtest 门 fail（软锁数超 max_soft_locks:0）→ gate 整体 fail，detail 含违反的断言名。
+#[test]
+fn playtest_gate_fails_on_softlock_with_violated_assertion() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../vitric-playtest/tests/fixtures/gate-softlock");
+
+    let (report, pass) = vitric_cli::gate::run(&dir).unwrap();
+    assert!(!pass, "撞出软锁应整体 fail: {report}");
+    // 录像门仍 pass：游戏确实可通关，差的只是 playtest 契约
+    assert_eq!(gate_entry(&report, "playthrough:")["status"], json!("pass"), "{report}");
+    let pt = gate_entry(&report, "playtest");
+    assert_eq!(pt["status"], json!("fail"), "playtest 门应 fail: {report}");
+    let violations = pt["detail"]["violations"].as_array().unwrap();
+    let names: Vec<&str> =
+        violations.iter().map(|v| v["assertion"].as_str().unwrap()).collect();
+    assert!(names.contains(&"max_soft_locks"), "应点名违反的断言 max_soft_locks: {names:?}");
+    // 实际值带出来便于对账
+    assert!(pt["detail"]["metrics"]["soft_locks"].as_u64().unwrap() >= 1);
+}
+
+/// 向后兼容：没声明 gates.playtest 的项目，报告里不出现 playtest 门，行为不变。
+#[test]
+fn no_playtest_gate_means_no_playtest_door() {
+    let dir = copy_example("no-pt");
+    write_recording(&dir, "qa/clear.json", &record_win(&dir));
+    set_gates(
+        &dir,
+        json!({"playthroughs": [{"recording": "qa/clear.json"}], "check": true}),
+    );
+    let (report, pass) = vitric_cli::gate::run(&dir).unwrap();
+    assert!(pass, "{report}");
+    let has_playtest = report["gates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|g| g["name"] == json!("playtest"));
+    assert!(!has_playtest, "没声明 gates.playtest 就不该有 playtest 门: {report}");
+
+    fs::remove_dir_all(&dir).unwrap();
+}
