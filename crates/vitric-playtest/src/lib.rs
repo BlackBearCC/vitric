@@ -42,7 +42,9 @@ pub use report::{
 };
 pub use scene_view::{Action, Outcome, SceneView, TerminalSpec};
 pub use seed::{perturb_plan, PerturbOp, Perturbation};
-pub use session::{run_session, NumericStat, SessionConfig, SessionResult};
+pub use session::{
+    run_session, run_session_lookahead, LookaheadConfig, NumericStat, SessionConfig, SessionResult,
+};
 pub use strategy::{
     CoverageStrategy, EconomyStrategy, GreedyStrategy, PlaytestNote, RandomStrategy,
     ScriptedStrategy, Strategy,

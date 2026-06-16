@@ -1,0 +1,37 @@
+{
+  "rules": [
+    {
+      "id": "go-right",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "pressed" } },
+      "do": [{ "set": "@hero.Velocity.x", "to": 12 }]
+    },
+    {
+      "id": "stop-right",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "released" } },
+      "do": [{ "set": "@hero.Velocity.x", "to": 0 }]
+    },
+    {
+      "id": "go-left",
+      "on": { "event": "input", "filter": { "action": "left", "phase": "pressed" } },
+      "do": [{ "set": "@hero.Velocity.x", "to": -12 }]
+    },
+    {
+      "id": "stop-left",
+      "on": { "event": "input", "filter": { "action": "left", "phase": "released" } },
+      "do": [{ "set": "@hero.Velocity.x", "to": 0 }]
+    },
+    {
+      "id": "jump",
+      "on": { "event": "input", "filter": { "action": "space", "phase": "pressed" } },
+      "if": [["@hero.Body.grounded", "==", true]],
+      "do": [{ "set": "@hero.Velocity.y", "to": 16 }]
+    },
+    {
+      "id": "reach-exit",
+      "on": "tick",
+      "each": ["Player"],
+      "if": [["self.Position.x", ">=", 9.5]],
+      "do": [{ "emit": "reached-exit", "data": {} }]
+    }
+  ]
+}

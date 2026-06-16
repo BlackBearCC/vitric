@@ -125,6 +125,11 @@ impl Sim {
         }
     }
 
+    /// 这局的种子（构造时定，restore 会随快照覆盖）。手工攒录像时要拿它当 `Recording.seed`。
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
     /// 注入一条输入（下一次 step 生效）。phase: "pressed" | "released"。
     pub fn inject_input(&mut self, action: &str, phase: &str) {
         self.pending_inputs.push((action.to_string(), phase.to_string()));

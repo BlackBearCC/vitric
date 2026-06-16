@@ -1,0 +1,20 @@
+{
+  "observation": {
+    "derived": [
+      {
+        "kind": "distance",
+        "name": "to_exit",
+        "from": "hero",
+        "to": "exit",
+        "metric": "manhattan"
+      }
+    ]
+  },
+  "goal": {
+    "quantity": "to_exit",
+    "direction": "min"
+  },
+  "terminal": {
+    "win_events": ["reached-exit"]
+  }
+}

@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use vitric_sim::{GameLogic, Recording, ReplyRecord, Sim};
+use vitric_sim::{GameLogic, InputRecord, Recording, ReplyRecord, Sim, TICKS_PER_SECOND};
 use vitric_rules::Engine;
 use serde_json::Value;
 
@@ -311,6 +311,309 @@ pub fn run_session(
         numeric_summary,
         notes,
     })
+}
+
+/// 前瞻搜索配置（设计稿：技巧类游戏专用的「聪明但慢」档）。
+///
+/// 前瞻搜索是 greedy 的加强版：greedy 只用「上一步有没有改善」这种 1 步轻量启发，
+/// 前瞻则在每个真 tick 把当前状态**存档**，挨个候选动作真模拟 `horizon` 帧、按目标量
+/// 打分、再**读档**，选分最高那个真注入。这是 Vitric 独有的——靠的是 `Sim::snapshot`/
+/// `Sim::restore` 能精确存读全状态（world+rng+tick+逻辑态），别的引擎非确定、没法精确
+/// 回滚重试，做不了这种投机搜索。
+#[derive(Debug, Clone)]
+pub struct LookaheadConfig {
+    /// 每个候选动作向前试模拟多少帧（搜索地平线）。越大越「有远见」也越慢
+    /// （每真 tick 的代价 = |候选动作+不操作| × horizon 个投机 step）。默认 12。
+    pub horizon: u64,
+}
+
+impl Default for LookaheadConfig {
+    fn default() -> LookaheadConfig {
+        LookaheadConfig { horizon: 12 }
+    }
+}
+
+/// 一个候选动作的 rollout 评分（越大越优）。打分先比「rollout 内有没有 + 多早触达终止」，
+/// 再比目标派生量（有 goal）或探索新态（无 goal）。用一个可全序比较的结构体承载，
+/// 选择时按字段优先级逐项比，确定性平手规则交给调用处（取动作列表里靠前的）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RolloutScore {
+    /// 终止信号：+1=rollout 内触达过 Win，0=没终止，-1=触达过 Lose（Win 优先级最高）。
+    terminal: i8,
+    /// 触达 Win 的早晚：越早越好。用「horizon - 命中帧」表示（没命中=0），越大越优。
+    win_earliness: i64,
+    /// 目标分（有 goal 时）：direction=min 取 -末态距离，max 取末态值（越大越优）；
+    /// 无 goal 时此项恒 0，靠 explore 兜底。
+    goal_score: f64,
+    /// 探索分（无 goal 时的弱进展信号）：rollout 内 state_hash 变了多少次（走到多少新态）。
+    /// 有 goal 时此项不参与决策（goal_score 已是主信号），但仍算出来当次级平手判据。
+    explore: u64,
+}
+
+impl RolloutScore {
+    /// 全序比较：terminal > win_earliness > goal_score > explore（逐项，前者相等才看后者）。
+    /// 无 goal 时 goal_score 恒 0，自然退到 explore 主导；NaN 目标分按最差处理（不该出现，
+    /// 派生量取不到时上游已折成保底值，这里再兜一层防止比较 panic）。
+    fn cmp(&self, other: &RolloutScore) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        self.terminal
+            .cmp(&other.terminal)
+            .then(self.win_earliness.cmp(&other.win_earliness))
+            .then(
+                self.goal_score
+                    .partial_cmp(&other.goal_score)
+                    .unwrap_or(Ordering::Equal),
+            )
+            .then(self.explore.cmp(&other.explore))
+    }
+}
+
+/// 跑一局**前瞻搜索**（设计稿：让技巧类游戏——平台/导航/解谜——被 swarm 玩起来，
+/// 不被随机策略误报 unbeatable）。和 [`run_session`] 同样出可重放录像、同样收遥测，
+/// 区别只在「每真 tick 怎么选动作」：
+///
+/// 每个真 tick：
+/// 1. `cp = sim.snapshot(logic)` 存当前全状态；
+/// 2. 对当前 SceneView 的每个候选动作（**含「不操作」也作为一个候选**）：先 `restore(&cp)`
+///    回到真状态，非「不操作」就 `inject_input`，再走 `horizon` 帧投机 step（期间扫到终止
+///    Win 给高分、Lose 给低分），用末态的目标派生量打分；
+/// 3. `restore(&cp)` 回到真状态，选分最高的动作（确定性平手：分相同取候选列表里靠前的）；
+/// 4. 真注入选中的动作，正常 `sim.step` 推进一个真 tick（**只有这一步进真录像**）。
+///
+/// **确定性铁律**：投机步全程在 snapshot/restore 之间，精确回滚、**绝不进真录像**。
+/// 但 `restore` 会清掉 sim 进行中的 recorder——而每个真 tick 都要 restore 投机，所以
+/// **不能用 `sim.start_recording`/`stop_recording`**：第 2 个真 tick 一 restore 就把第 1 tick
+/// 起的录像清空了。这里改成**手工攒一个 `Recording`**，绕开 sim 的 recorder：自己按
+/// 「注入那一刻的 sim.tick」记 input/reply、每 60 真 tick（与 sim 内部 CHECKPOINT_INTERVAL
+/// 同口径）记一条 checkpoint、起点也记一条 `(0, 初始 hash)`、收尾填 final_hash/ticks。
+/// 口径和 `Sim::step` 内部录制完全一致，所以这份手工录像照样可被 `Sim::replay` 逐位复现。
+/// 真注入的动作才录。打分/选择是当前状态的纯函数，同 (项目,seed,horizon) 两次跑结果逐项一致。
+///
+/// **目标量来源**：`cfg.playtest.goal`（Phase 6 声明的派生量 + min/max）。
+/// **无 goal 退化**：rollout 评分先看「是否更早触达 Win 终止」，没有 Win 时只能靠
+/// 「state_hash 变化数/探索新态」这种**弱进展信号**——没有目标量时前瞻无法判「哪个方向更近
+/// 终点」，只能靠「够不够得到终点」和「有没有把世界推动起来」，本就比有 goal 时弱得多。
+pub fn run_session_lookahead(
+    sim: &mut Sim,
+    logic: &mut dyn GameLogic,
+    engine: &Engine,
+    cfg: &SessionConfig,
+    look: &LookaheadConfig,
+) -> Result<SessionResult, String> {
+    if sim.is_recording() {
+        return Err("run_session_lookahead 要自己开录：传进来的 sim 不该已在录像中".to_string());
+    }
+    if look.horizon == 0 {
+        return Err("lookahead horizon 必须 ≥ 1".to_string());
+    }
+
+    // 遥测累加器（与 run_session 同口径）
+    let mut state_trace: Vec<u64> = Vec::new();
+    let mut numeric_summary: BTreeMap<String, NumericStat> = BTreeMap::new();
+    let mut fired_events: Vec<String> = Vec::new();
+    let mut seen_events: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // ---- 手工攒录像（不用 sim 的 recorder，因为每真 tick 都要 restore 投机会清掉它）----
+    // 口径必须和 Sim::step / Sim::start_recording 一致，replay 才校验得过：
+    //  - 起点先记一条 (sim.tick, 初始 hash)（= start_recording 一开始就记的那条，新 sim 即 (0, h0)）；
+    //  - input/reply 的 tick 取「注入那一刻、step 前的 sim.tick」；
+    //  - 每过 CHECKPOINT_INTERVAL(=TICKS_PER_SECOND=60) 个真 tick，step 后记 (sim.tick, hash)；
+    //  - 收尾填 final_hash = 末态 hash、ticks = sim.tick。
+    let mut recording = Recording {
+        seed: sim.seed(),
+        checkpoints: vec![(sim.tick, sim.world.state_hash())],
+        ..Default::default()
+    };
+
+    let mut outcome = Outcome::Timeout;
+
+    while sim.tick < cfg.max_ticks {
+        let view = SceneView::derive_with_config(&sim.world, engine, &cfg.terminal, &cfg.playtest);
+        if let Some(done) = view.done {
+            outcome = done;
+            break;
+        }
+
+        // ---- 投机搜索（全程在 snapshot/restore 之间，不进手工录像）----
+        // 候选 = view.actions 各一个 + 末尾一个「不操作」（None）。不操作也是合法选择
+        //（解谜/平台里「这一刻按兵不动等下落」常常才是对的）。
+        // snapshot 当前真状态——投机全程在它和 restore 之间，绝不污染真轨迹。
+        let cp = sim.snapshot(logic);
+        let n = view.actions.len();
+        let mut best_idx = n; // 默认「不操作」(下标 n)；下面有更优才改
+        let mut best_score: Option<RolloutScore> = None;
+        // 候选下标 0..n = view.actions[i]，下标 n = 不操作。按下标升序评估，
+        // 平手时先到先得（best 只在「严格更优」时替换）→ 取候选列表靠前的，确定。
+        for cand in 0..=n {
+            sim.restore(&cp, logic)?;
+            if cand < n {
+                let a = &view.actions[cand];
+                sim.inject_input(&a.action, &a.phase);
+            }
+            let score = rollout_score(sim, logic, engine, cfg, look.horizon)?;
+            let better = match &best_score {
+                None => true,
+                Some(b) => score.cmp(b) == std::cmp::Ordering::Greater,
+            };
+            if better {
+                best_score = Some(score);
+                best_idx = cand;
+            }
+        }
+        // 回到真状态：投机结束，下面才是真 tick
+        sim.restore(&cp, logic)?;
+
+        // 真注入选中的动作（不操作=不注入），手工记进录像（tick = 注入那一刻的 sim.tick）。
+        let inject_tick = sim.tick;
+        if best_idx < n {
+            let a = &view.actions[best_idx];
+            sim.inject_input(&a.action, &a.phase);
+            recording.inputs.push(InputRecord {
+                tick: inject_tick,
+                action: a.action.clone(),
+                phase: a.phase.clone(),
+            });
+        }
+        // 种子回复（和 run_session 同口径；前瞻一般不带，留通道一致）。同样手工记进录像。
+        for reply in &cfg.seed_replies {
+            if reply.tick == inject_tick {
+                sim.inject_reply(&reply.name, reply.data.clone());
+                recording.replies.push(ReplyRecord {
+                    tick: inject_tick,
+                    name: reply.name.clone(),
+                    data: reply.data.clone(),
+                });
+            }
+        }
+        let report = sim.step(logic).map_err(|e| e.to_string())?;
+
+        // 周期性 checkpoint：和 Sim::step 同口径（step 后 tick 是 60 的倍数就记一条）。
+        if sim.tick.is_multiple_of(TICKS_PER_SECOND) {
+            recording.checkpoints.push((sim.tick, sim.world.state_hash()));
+        }
+
+        // 遥测（真 step 后采）
+        state_trace.push(sim.world.state_hash());
+        let post = SceneView::derive_with_config(&sim.world, engine, &cfg.terminal, &cfg.playtest);
+        collect_numeric_leaves(&post.observation, &mut numeric_summary);
+        for name in report.events.iter().map(|e| e.name.as_str()) {
+            if seen_events.insert(name.to_string()) {
+                fired_events.push(name.to_string());
+            }
+        }
+        if let Some(o) = scan_terminal(report.events.iter(), &cfg.terminal) {
+            outcome = o;
+            break;
+        }
+        let emitted = logic.drain_observed();
+        for name in emitted.iter().map(|e| e.name.as_str()) {
+            if seen_events.insert(name.to_string()) {
+                fired_events.push(name.to_string());
+            }
+        }
+        if let Some(o) = scan_terminal(emitted.iter(), &cfg.terminal) {
+            outcome = o;
+            break;
+        }
+    }
+
+    // 收尾：和 Sim::stop_recording 同口径填末态。
+    recording.ticks = sim.tick;
+    recording.final_hash = sim.world.state_hash();
+    Ok(SessionResult {
+        outcome,
+        ticks: sim.tick,
+        recording,
+        state_trace,
+        fired_events,
+        numeric_summary,
+        // 前瞻是廉价（非 LLM）策略档：不产定性 note
+        notes: Vec::new(),
+    })
+}
+
+/// 从「已注入候选动作、待 step」的状态出发，向前投机走 `horizon` 帧，算这个候选的评分。
+/// 调用前 sim 必须已 restore 到真状态 + inject 了候选动作（或不操作）；本函数只读式地推进
+/// 投机副本（调用方负责事后再 restore 回真状态）。
+///
+/// 评分（见 [`RolloutScore`]）：
+/// - 扫每帧 step 的事件：命中 Win 记最早命中帧（越早越优）、命中 Lose 标负；
+/// - 末态用 `goal.quantity` 派生量打目标分（min→ -距离，max→ 值；取不到=最差保底）；
+/// - 无 goal 时算 rollout 内 state_hash 变化数当探索弱信号。
+fn rollout_score(
+    sim: &mut Sim,
+    logic: &mut dyn GameLogic,
+    engine: &Engine,
+    cfg: &SessionConfig,
+    horizon: u64,
+) -> Result<RolloutScore, String> {
+    let mut terminal: i8 = 0;
+    let mut win_frame: Option<u64> = None;
+    let mut explore: u64 = 0;
+    let mut last_hash = sim.world.state_hash();
+
+    for frame in 0..horizon {
+        let report = sim.step(logic).map_err(|e| e.to_string())?;
+        // 终止扫描：step 事件 + 逻辑 emit 的事件
+        let mut hit: Option<Outcome> = scan_terminal(report.events.iter(), &cfg.terminal);
+        let emitted = logic.drain_observed();
+        if hit.is_none() {
+            hit = scan_terminal(emitted.iter(), &cfg.terminal);
+        }
+        if let Some(o) = hit {
+            match o {
+                Outcome::Win => {
+                    if win_frame.is_none() {
+                        win_frame = Some(frame);
+                        terminal = 1;
+                    }
+                    // 触达 Win 即停：再往后是「已经赢了」之后的无意义帧
+                    break;
+                }
+                Outcome::Lose => {
+                    // 没先触达 Win 才标负（Win 优先）；触达 Lose 也停
+                    if terminal == 0 {
+                        terminal = -1;
+                    }
+                    break;
+                }
+                Outcome::Timeout => {}
+            }
+        }
+        // 探索弱信号：状态哈希变了就 +1（走到一个新态）
+        let h = sim.world.state_hash();
+        if h != last_hash {
+            explore += 1;
+            last_hash = h;
+        }
+    }
+
+    // 末态目标分
+    let goal_score = match &cfg.playtest.goal {
+        Some(g) => {
+            let view = SceneView::derive_with_config(&sim.world, engine, &cfg.terminal, &cfg.playtest);
+            let val = view
+                .observation
+                .get("derived")
+                .and_then(|d| d.get(&g.quantity))
+                .and_then(|v| v.as_f64());
+            match val {
+                Some(v) => match g.direction {
+                    // min：距离越小越优 → 取负距离（越大越优，和 RolloutScore 口径一致）
+                    crate::config::GoalDirection::Min => -v,
+                    crate::config::GoalDirection::Max => v,
+                },
+                // 取不到目标量（派生量为 null 等）：给最差保底，不让这个候选被选中
+                None => f64::NEG_INFINITY,
+            }
+        }
+        None => 0.0,
+    };
+
+    // win_earliness：越早触达 Win 越优。没命中=0；命中第 frame 帧 → horizon-frame（越早越大）
+    let win_earliness = win_frame.map(|f| (horizon - f) as i64).unwrap_or(0);
+
+    Ok(RolloutScore { terminal, win_earliness, goal_score, explore })
 }
 
 /// 一组事件里第一个命中终止的结局（按事件序，确定性）。
@@ -713,5 +1016,78 @@ mod tests {
             run_session(&mut sim, &mut logic, &eng, &mut strat, &cfg).unwrap().numeric_summary
         };
         assert_eq!(run(), run(), "同输入两次跑数值摘要必须逐项一致");
+    }
+
+    // ---- 前瞻搜索（run_session_lookahead）单元测试 ----
+
+    #[test]
+    fn lookahead_rejects_zero_horizon() {
+        let mut sim = Sim::new(1);
+        let mut logic = NeverEnds;
+        let eng = empty_engine();
+        let cfg = SessionConfig { max_ticks: 10, seed: 0, ..Default::default() };
+        let err = run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { horizon: 0 }).unwrap_err();
+        assert!(err.contains("horizon"), "{err}");
+    }
+
+    /// 手工攒的录像必须能被 Sim::replay 逐位复现——锁死「投机的 restore 不污染录像、
+    /// tick/checkpoint 口径和 sim 内部一致」这两件事。用 action_engine（有 left/right 词汇，
+    /// 候选非空 → 投机每真 tick 都 restore 多次）+ EmitAt（tick 70 发 game-won，跨 60 边界
+    /// 才有周期 checkpoint）逼出 checkpoint 对齐。
+    #[test]
+    fn lookahead_recording_replays_bit_for_bit() {
+        let mut sim = Sim::new(1);
+        let mut logic = EmitAt { at: 70, event: "game-won".to_string(), pending: vec![] };
+        let eng = action_engine();
+        let cfg = SessionConfig { max_ticks: 300, seed: 0, ..Default::default() };
+        let res = run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { horizon: 5 }).unwrap();
+        assert_eq!(res.outcome, Outcome::Win);
+        assert_eq!(res.ticks, 71, "tick 70 发的 game-won，step 后 tick=71 收到");
+        // 跨过 tick 60 → 必有起点 (0,_) + 周期 (60,_) 两条 checkpoint
+        assert!(res.recording.checkpoints.len() >= 2, "应有起点+周期 checkpoint: {:?}", res.recording.checkpoints);
+        assert_eq!(res.recording.checkpoints[0].0, 0, "起点 checkpoint tick=0");
+        assert_eq!(res.recording.ticks, 71);
+        assert_eq!(res.recording.seed, 1, "录像 seed = sim.seed");
+
+        // 关键：从冷启动重放这份手工录像，逐校验点 + final_hash 必须全对上
+        let mut sim2 = Sim::new(1);
+        let mut logic2 = EmitAt { at: 70, event: "game-won".to_string(), pending: vec![] };
+        sim2.replay(&res.recording, &mut logic2).expect("手工攒的前瞻录像必须可重放且逐位一致");
+        assert_eq!(sim2.world.state_hash(), res.recording.final_hash);
+    }
+
+    #[test]
+    fn lookahead_is_deterministic_byte_for_byte() {
+        let run = || {
+            let mut sim = Sim::new(2);
+            let mut logic = EmitAt { at: 50, event: "game-won".to_string(), pending: vec![] };
+            let eng = action_engine();
+            let cfg = SessionConfig { max_ticks: 200, seed: 2, ..Default::default() };
+            run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { horizon: 6 }).unwrap()
+        };
+        let a = run();
+        let b = run();
+        assert_eq!(a.outcome, b.outcome);
+        assert_eq!(a.ticks, b.ticks);
+        let ja = serde_json::to_string(&a.recording).unwrap();
+        let jb = serde_json::to_string(&b.recording).unwrap();
+        assert_eq!(ja, jb, "同 (项目,seed,horizon) 两次前瞻录像必须逐字节一致");
+    }
+
+    /// 起手就 done / max_ticks=0：一个真 tick 都不跑，仍出一份合法空录像（起点 checkpoint + ticks=0）。
+    #[test]
+    fn lookahead_zero_ticks_yields_valid_empty_recording() {
+        let mut sim = Sim::new(3);
+        let mut logic = NeverEnds;
+        let eng = empty_engine();
+        let cfg = SessionConfig { max_ticks: 0, seed: 0, ..Default::default() };
+        let res = run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { horizon: 4 }).unwrap();
+        assert_eq!(res.ticks, 0);
+        assert_eq!(res.recording.ticks, 0);
+        assert!(res.recording.inputs.is_empty());
+        assert_eq!(res.recording.checkpoints, vec![(0, res.recording.final_hash)]);
+        // 空录像也可重放（起点即终点）
+        let mut sim2 = Sim::new(3);
+        sim2.replay(&res.recording, &mut NeverEnds).expect("空前瞻录像也可重放");
     }
 }

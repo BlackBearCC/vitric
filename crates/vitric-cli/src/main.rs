@@ -148,7 +148,9 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
 /// vitric-playtest，这里把两边接起来。
 ///
 /// 选项：
-///   --strategy <random|greedy|economy>  策略（默认 random；仅单局 N=1 用）
+///   --strategy <random|greedy|economy|lookahead>  策略（默认 random；仅单局 N=1 用）。
+///                                lookahead=前瞻搜索（技巧类游戏专用，慢但聪明，不进 swarm 默认轮换）
+///   --horizon <K>                lookahead 每真 tick 向前投机多少帧（默认 12，仅 --strategy lookahead 用）
 ///   --seed <N>                   策略 PCG 播种（默认 0；swarm 模式从此起递增）
 ///   --max-ticks <N>              超时上限（默认 600）
 ///   --sessions <N>               跑 N 局 swarm 聚合出报告（默认 1=单局旧行为）
@@ -181,15 +183,17 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
 
     use vitric_playtest::{
         aggregate_with_endings_and_declared, perturb_plan, run_llm_sessions, run_seed_swarm,
-        run_session,
-        run_swarm_with_config, EconomyStrategy, GreedyStrategy, LlmClient, PlaytestConfig,
-        RandomStrategy, SessionConfig, SessionSpec, Strategy, StrategyKind, TerminalSpec,
+        run_session, run_session_lookahead,
+        run_swarm_with_config, EconomyStrategy, GreedyStrategy, LlmClient, LookaheadConfig,
+        PlaytestConfig, RandomStrategy, SessionConfig, SessionSpec, Strategy, StrategyKind,
+        TerminalSpec,
     };
 
     let dir = args.first().ok_or("playtest 缺少项目目录参数")?;
     let dir = PathBuf::from(dir);
 
     let mut strategy_name = "random".to_string();
+    let mut horizon: u64 = 12;
     let mut seed: u64 = 0;
     let mut max_ticks: u64 = 600;
     let mut sessions: u64 = 1;
@@ -207,6 +211,10 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
             }
             "--strategy" => {
                 strategy_name = args.get(i + 1).ok_or(need("--strategy"))?.clone();
+                i += 2;
+            }
+            "--horizon" => {
+                horizon = args.get(i + 1).ok_or(need("--horizon"))?.parse().map_err(|e| format!("--horizon: {e}"))?;
                 i += 2;
             }
             "--seed" => {
@@ -237,7 +245,7 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
                 i += 2;
             }
             other => {
-                return Err(format!("未知选项 {other:?}。可用: --strategy --seed --max-ticks --sessions --llm --seed-recording --out --report-dir"))
+                return Err(format!("未知选项 {other:?}。可用: --strategy --horizon --seed --max-ticks --sessions --llm --seed-recording --out --report-dir"))
             }
         }
     }
@@ -397,27 +405,35 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         return emit_report(report, &out_path);
     }
 
-    // N=1：单局旧行为（出可重放录像）。economy 也能选——单局压一种策略看它怎么跑。
-    // greedy 有 config.goal 时朝目标走（playtest.json 声明派生量 + goal），否则退化随机。
-    let mut strategy: Box<dyn Strategy> = match strategy_name.as_str() {
-        "random" => Box::new(RandomStrategy::new(seed)),
-        "greedy" => match &config.goal {
-            Some(g) => Box::new(GreedyStrategy::with_goal(seed, g.clone())),
-            None => Box::new(GreedyStrategy::new(seed)),
-        },
-        "economy" => Box::new(EconomyStrategy::new(seed)),
-        other => return Err(format!("--strategy 只认 random / greedy / economy，拿到 {other:?}")),
-    };
-
+    // N=1：单局旧行为（出可重放录像）。
     let out = out_path.unwrap_or_else(|| dir.join("playtest-session.json"));
     // boot 一对全新的 (sim, runtime)：录可重放录像必须从冷启动起录
     let (mut sim, mut rt) = Runtime::boot(&dir)?;
-    // 单局也走 config：终止覆盖 + 派生量视图（greedy 找目标）。
+    // 单局也走 config：终止覆盖 + 派生量视图（greedy/lookahead 找目标）。
     let cfg = SessionConfig { max_ticks, seed, terminal: terminal.clone(), playtest: config.clone(), ..Default::default() };
     // run_session 要同时可变借 logic(rt) 和不可变借 engine(rt.rules)——同一对象借不动。
     // Engine 是装配期无状态副本，复制一份只读的传进去最干净（见 Engine 的 derive 注释）。
     let engine = rt.rules.clone();
-    let result = run_session(&mut sim, &mut rt, &engine, strategy.as_mut(), &cfg)?;
+
+    // lookahead 走前瞻搜索（每真 tick 投机 horizon 帧选最优），其余走普通策略 run_session。
+    // 成本注释：前瞻每真 tick 代价 = |候选动作+不操作| × horizon 个投机 step，远贵于廉价策略，
+    // 所以只在显式 --strategy lookahead 时启用，**不进 swarm 默认轮换**（swarm 要跑成百上千局）。
+    let result = if strategy_name == "lookahead" {
+        run_session_lookahead(&mut sim, &mut rt, &engine, &cfg, &LookaheadConfig { horizon })?
+    } else {
+        // economy 也能选——单局压一种策略看它怎么跑。
+        // greedy 有 config.goal 时朝目标走（playtest.json 声明派生量 + goal），否则退化随机。
+        let mut strategy: Box<dyn Strategy> = match strategy_name.as_str() {
+            "random" => Box::new(RandomStrategy::new(seed)),
+            "greedy" => match &config.goal {
+                Some(g) => Box::new(GreedyStrategy::with_goal(seed, g.clone())),
+                None => Box::new(GreedyStrategy::new(seed)),
+            },
+            "economy" => Box::new(EconomyStrategy::new(seed)),
+            other => return Err(format!("--strategy 只认 random / greedy / economy / lookahead，拿到 {other:?}")),
+        };
+        run_session(&mut sim, &mut rt, &engine, strategy.as_mut(), &cfg)?
+    };
 
     let json = serde_json::to_string_pretty(&result.recording).expect("录像可序列化");
     std::fs::write(&out, json).map_err(|e| format!("写录像 {} 失败: {e}", out.display()))?;

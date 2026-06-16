@@ -1,0 +1,31 @@
+{
+  "components": {
+    "Player": { "fields": {} },
+    "Goal": { "fields": {} },
+    "Position": {
+      "fields": {
+        "x": { "type": "number", "default": 0 },
+        "y": { "type": "number", "default": 0 }
+      }
+    },
+    "Velocity": {
+      "fields": {
+        "x": { "type": "number", "default": 0 },
+        "y": { "type": "number", "default": 0 }
+      }
+    },
+    "Collider": {
+      "fields": {
+        "w": { "type": "number", "default": 1 },
+        "h": { "type": "number", "default": 1 }
+      }
+    },
+    "Body": {
+      "fields": {
+        "gravity": { "type": "number", "default": -30 },
+        "grounded": { "type": "bool", "default": false }
+      }
+    },
+    "Solid": { "fields": {} }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "entities": [
+    {
+      "name": "hero",
+      "components": {
+        "Player": {},
+        "Position": { "x": 0, "y": 2 },
+        "Velocity": { "x": 0, "y": 0 },
+        "Collider": { "w": 1, "h": 2 },
+        "Body": { "gravity": -30, "grounded": false }
+      }
+    },
+    {
+      "name": "ground",
+      "components": {
+        "Position": { "x": 6, "y": -1 },
+        "Collider": { "w": 40, "h": 2 },
+        "Solid": {}
+      }
+    },
+    {
+      "name": "wall",
+      "components": {
+        "Position": { "x": 5, "y": 0 },
+        "Collider": { "w": 1, "h": 1 },
+        "Solid": {}
+      }
+    },
+    {
+      "name": "exit",
+      "components": {
+        "Goal": {},
+        "Position": { "x": 10, "y": 1 },
+        "Collider": { "w": 1, "h": 2 }
+      }
+    }
+  ]
+}
