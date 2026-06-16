@@ -56,6 +56,8 @@ rpc '{"method":"render/screenshot","params":{"path":"shot.png"}}'  # headless sc
 rpc '{"method":"events/recent"}'                                   # the causal chain: collision → coin-collected → game-won
 ```
 
+`render/describe` is built for a model to read: alongside the entity list it gives ego-centric spatial relations to the camera's focal entity (direction / distance / line-of-sight), an ASCII map of the level, the declared input actions, and a frame-to-frame diff of what changed since the last call.
+
 Full method reference: [docs/agent-guide.en.md](docs/agent-guide.en.md) ([中文](docs/agent-guide.md)).
 
 ## Automated playtesting

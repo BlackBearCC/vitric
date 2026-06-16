@@ -30,7 +30,7 @@ Response: `{"ok": true, "result": ...}` or `{"ok": false, "error": "message with
 | `world/entities` | `components?: []` | list entities, optionally filtered by components |
 | `world/get` | `entity` | all components of one entity. Entity refs: `"@name"` or handle `"e3v1"` |
 | `events/recent` | `since?: tick` | recent events (input/collision plus everything rules & scripts emit) |
-| `render/describe` | `width? height?` | **semantic view (primary channel)**: visible entities with screen region words / world & pixel coords / color / image, visual overlap pairs, off-screen entities with direction & distance, plus a text summary. More precise than reading pixels. On-screen text gets a legibility check: if its WCAG-style contrast ratio against the backdrop falls below 2.5, the response adds a `warnings[]` entry (kind=`low-contrast-text`, with entity/content/ratio/hint) plus a ⚠ summary line — the engine reads pixels so you don't have to (see "On-screen text") |
+| `render/describe` | `width? height?` | **semantic view (primary channel)**: visible entities with screen region words / world & pixel coords / color / image, visual overlap pairs, off-screen entities with direction & distance, plus a text summary. When a focal entity exists (a `Camera.follow` target) it also gives each entity a `relative_to_focal` block (direction/distance/line-of-sight to the focal point), a top-level `ascii_map` (a focus-centered grid of the level), and sorts entities named-first then nearest-first; a top-level `actions` list always declares the input vocabulary; from the second call on, a top-level `changes` block diffs against the previous describe — see "Model-legible scene view". More precise than reading pixels. On-screen text gets a legibility check: if its WCAG-style contrast ratio against the backdrop falls below 2.5, the response adds a `warnings[]` entry (kind=`low-contrast-text`, with entity/content/ratio/hint) plus a ⚠ summary line — the engine reads pixels so you don't have to (see "On-screen text") |
 | `render/screenshot` | `width? height? path? inline?` | headless PNG (fallback verification / pixel-level asserts), no GPU needed |
 | `inspect/selection` | — | what the human clicked in the window (highlighted entity), full components |
 | `inspect/select` | `entity` (null clears) | point the other way: highlight an entity for the human |
@@ -82,6 +82,75 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'
 
 Reproducing a bug: `vitric run my-game --ticks 600 --record bug.json`, then
 `vitric replay my-game bug.json` replays it frame-exact, and divergence is pinpointed to a checkpoint window.
+
+## Model-legible scene view
+
+Beyond the per-entity list, `render/describe` adds four things that let a model read the picture without doing geometry from raw coordinates. The first two appear only when the scene has a **focal entity** — the target of `Camera.follow` (empty / missing / pointing at nothing = no focal point, and these two are simply omitted, so a game without camera follow gets the byte-identical pre-existing response). `actions` and `changes` are independent of the focal point.
+
+**1. `relative_to_focal`** — on each visible/off-screen entity (except the focal entity itself), the spatial relationship measured from the focal point, so the model doesn't recompute "is it on my left, can I reach it, is it blocked" from absolute coordinates:
+
+```json
+"relative_to_focal": {
+  "direction": "left",        // one of 8 compass words: right/up-right/up/up-left/left/down-left/down/down-right
+  "distance": 12.62,          // center-to-center, world units, 2 decimals
+  "same_row": false,          // within half a sprite's height vertically
+  "same_col": false,          // within half a sprite's width horizontally
+  "adjacent": false,          // the two AABBs touch or overlap
+  "blocked": true             // a third-party Solid sits on the line of sight from focal to this entity
+}
+```
+
+When a focal point exists, entities are also **sorted named-first, then nearest-first** (the focal entity leads).
+
+**2. `ascii_map`** (top-level) — a bounded, focus-centered ASCII grid of the level; reading structure off this beats reading a coordinate list or a screenshot. `@` = the focal entity, `#` = Solid geometry, letters = other entities (decoded in `legend`):
+
+```json
+"ascii_map": {
+  "grid": [
+    "d  g#   #      ",
+    "##      #      ",
+    "   b    #      ",
+    "  ##    #      ",
+    "   e  ###      ",
+    "    ##  #      ",
+    " a      #      ",
+    "## f   @#      ",
+    "########       "
+  ],
+  "legend": { "a": "brazier-1", "b": "brazier-2", "d": "spike-1",
+              "e": "txt-brazier", "f": "txt-controls", "g": "txt-spikes" },
+  "cell_size": 2.0,           // world units per grid cell
+  "focal_at": [7, 7]          // [row, col] of @ in the grid
+}
+```
+
+**3. `actions`** (top-level) — the input vocabulary the project's rules actually declare (its affordances): describe tells the model not just "what's where" but "what you can do". Each entry is `{action, phase}`, with `pressed` and `released` flattened:
+
+```json
+"actions": [
+  {"action": "left",  "phase": "pressed"}, {"action": "left",  "phase": "released"},
+  {"action": "right", "phase": "pressed"}, {"action": "right", "phase": "released"}
+]
+```
+
+**4. `changes`** (top-level, from the second describe onward) — the frame-to-frame delta against the previous describe, so the model can track "what changed since last time" instead of re-reading the whole screen. There is no `changes` key on the first call. Shape: `appeared` (new entity objects), `disappeared` (ids only), `changed` (`id → {field: [old, new]}`):
+
+```json
+"changes": {
+  "appeared": [],
+  "disappeared": [],
+  "changed": {
+    "e0v0": {
+      "world":     [{"x": 0.0, "y": 1.05}, {"x": 1.05, "y": 1.05}],
+      "sprite":    [{"color": "#6cc6ff", "h": 2.2, "image": "hero-idle.png",  "w": 1.7},
+                    {"color": "#6cc6ff", "h": 2.2, "image": "hero-walk1.png", "w": 1.7}],
+      "screen_px": [{"x": 160.0, "y": 120.0}, {"x": 168.0, "y": 120.0}]
+    }
+  }
+}
+```
+
+(An entity that moves from on-screen to off-screen counts as `changed`, not `disappeared` — it still exists. With camera follow on, moving the focal entity shifts every other entity's `screen_px`, so `changed` then lists them all.)
 
 ## Delivery gates (vitric gate)
 
