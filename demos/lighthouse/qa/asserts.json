@@ -1,0 +1,3 @@
+[
+  { "id": "keeper-only-climbs-never-sinks", "if": [ [ "@keeper.Position.y", ">=", 1 ] ] }
+]

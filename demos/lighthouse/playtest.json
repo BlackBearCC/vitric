@@ -1,0 +1,20 @@
+{
+  "observation": {
+    "relabel": {
+      "keeper/Position.y": "守夜人高度"
+    },
+    "derived": [
+      {
+        "kind": "distance",
+        "name": "to_lamp",
+        "from": "keeper",
+        "to": "lamp",
+        "metric": "manhattan"
+      }
+    ]
+  },
+  "goal": {
+    "quantity": "to_lamp",
+    "direction": "min"
+  }
+}

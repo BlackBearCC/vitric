@@ -1,0 +1,19 @@
+{
+  "rules": [
+    {
+      "id": "climb",
+      "on": { "event": "input", "filter": { "action": "up", "phase": "pressed" } },
+      "do": [ { "add": "@keeper.Position.y", "by": 0.225 } ]
+    },
+    {
+      "id": "reach-lamp",
+      "on": { "event": "collision", "between": [ "Keeper", "Lamp" ] },
+      "do": [
+        { "set": "@msg.Text.content", "to": "THE LIGHT IS LIT" },
+        { "set": "@msg.Text.color", "to": "#7dff8a" },
+        { "set": "@lamp.Sprite.color", "to": "#fff6cc" },
+        { "emit": "game-won", "data": {} }
+      ]
+    }
+  ]
+}
