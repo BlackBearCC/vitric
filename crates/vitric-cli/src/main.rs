@@ -159,6 +159,9 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
 ///   --seed-recording <录像.json> 种子式探索：拿这条录像当种子，扰动它的输入序列跑 N 局
 ///   --out <路径>                 N=1 写录像；N>1 / 种子探索 / --llm 写完整报告 JSON
 ///   --report-dir <目录>          代表录像落盘目录（默认 <项目>/playtest-report/）；报告主体只挂相对路径
+///   --html <路径>                把报告渲成一页给人看的自包含 HTML 写到该路径（内联 CSS/SVG，无外部依赖）；
+///                                代表录像仍按 --report-dir 落盘，HTML 里挂相对链接。单局（N=1）不出 HTML
+///                                （它只出一条录像，没有可聚合的报告）
 ///
 /// **每游戏视图覆盖**（设计稿一节、十一节第 6 条）：自动加载项目根 `playtest.json`（存在即用，
 /// 否则默认 config=自动推视图、行为不变）——可挑组件/重命名/声明派生量（距离/别名/计数）/给
@@ -204,10 +207,15 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     let mut out_path: Option<PathBuf> = None;
     let mut seed_recording: Option<PathBuf> = None;
     let mut report_dir: Option<PathBuf> = None;
+    let mut html_path: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
         let need = |key: &str| format!("{key} 缺少参数值");
         match args[i].as_str() {
+            "--html" => {
+                html_path = Some(PathBuf::from(args.get(i + 1).ok_or(need("--html"))?));
+                i += 2;
+            }
             "--report-dir" => {
                 report_dir = Some(PathBuf::from(args.get(i + 1).ok_or(need("--report-dir"))?));
                 i += 2;
@@ -248,7 +256,7 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
                 i += 2;
             }
             other => {
-                return Err(format!("未知选项 {other:?}。可用: --strategy --horizon --seed --max-ticks --sessions --llm --seed-recording --out --report-dir"))
+                return Err(format!("未知选项 {other:?}。可用: --strategy --horizon --seed --max-ticks --sessions --llm --seed-recording --out --report-dir --html"))
             }
         }
     }
@@ -281,8 +289,16 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     // 代表录像落盘目录：默认 <项目>/playtest-report/。报告主体只挂相对路径，录像各自一份文件。
     let report_dir = report_dir.unwrap_or_else(|| dir.join("playtest-report"));
 
+    // 项目名（HTML 标题展示用）：取项目目录最后一段，取不到退化用 "project"。
+    let project_name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project")
+        .to_string();
+
     // 报告产出口径统一：外置代表录像到 report-dir（回填相对路径）→ 打干净 JSON 到 stdout →
-    // --out 时另存一份完整报告 JSON。录像不内联进报告主体（设计稿十一节第 6 条）。
+    // --out 时另存一份完整报告 JSON →（给了 --html）把人话 HTML 报告写到该路径。录像不内联进
+    // 报告主体（设计稿十一节第 6 条）；HTML 里只挂代表录像的相对链接（path 已回填）。
     let emit_report = |mut report: vitric_playtest::Report,
                        out_path: &Option<PathBuf>|
      -> Result<(), String> {
@@ -291,6 +307,11 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         if let Some(out) = out_path {
             std::fs::write(out, &json)
                 .map_err(|e| format!("写报告 {} 失败: {e}", out.display()))?;
+        }
+        if let Some(html_out) = &html_path {
+            let html = vitric_playtest::report_to_html(&report, &project_name);
+            std::fs::write(html_out, &html)
+                .map_err(|e| format!("写 HTML 报告 {} 失败: {e}", html_out.display()))?;
         }
         println!("{json}");
         Ok(())

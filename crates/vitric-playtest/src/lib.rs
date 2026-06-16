@@ -21,6 +21,7 @@
 //! 不 boot 项目，由调用方 boot 好再把 `(Sim, GameLogic, Engine)` 交给 [`session::run_session`]。
 
 pub mod config;
+pub mod html;
 pub mod llm_agent;
 pub mod report;
 pub mod scene_view;
@@ -33,6 +34,7 @@ pub use config::{
     DerivedSpec, DistanceMetric, GoalDirection, GoalSpec, ObservationConfig, PlaytestConfig,
     Relabel, TerminalOverride,
 };
+pub use html::report_to_html;
 pub use llm_agent::{LlmClient, LlmStrategy};
 pub use report::{
     aggregate, aggregate_with_endings, aggregate_with_endings_and_declared, CollapseField,
