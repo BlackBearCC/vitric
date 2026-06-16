@@ -1,14 +1,14 @@
 {
   "rules": [
-    { "id": "talk", "on": { "event": "input", "filter": { "action": "t", "phase": "pressed" } }, "do": [ { "set": "@companion.ThinkReq.pending", "to": 1 } ] },
+    { "id": "talk", "on": { "event": "input", "filter": { "action": "t", "phase": "pressed" } }, "if": [ ["@companion", "exists"] ], "do": [ { "set": "@companion.ThinkReq.pending", "to": 1 } ] },
 
-    { "id": "feed-quarters", "on": { "event": "tally" }, "do": [ { "set": "@companion.Need.quarters", "to": "event.quarters" } ] },
+    { "id": "feed-quarters", "on": { "event": "tally" }, "if": [ ["@companion", "exists"] ], "do": [ { "set": "@companion.Need.quarters", "to": "event.quarters" } ] },
 
     { "id": "do-leave", "on": { "event": "companion-left" }, "if": [ ["@companion", "exists"] ], "do": [ { "despawn": "@companion" } ] },
 
     { "id": "llm-reply-route", "on": { "event": "llm-reply" }, "do": [ { "call": "__onReply", "with": { "id": "event.id", "text": "event.text" } } ] },
 
-    { "id": "say", "on": { "event": "companion-said" }, "do": [
+    { "id": "say", "on": { "event": "companion-said" }, "if": [ ["@companion", "exists"] ], "do": [
       { "set": "@companion.Mood.value", "to": "event.mood" },
       { "set": "@companion.Text.content", "to": "event.say" }
     ] }
