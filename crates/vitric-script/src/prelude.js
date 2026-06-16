@@ -40,6 +40,23 @@ globalThis.vitric = {
   },
 };
 
+// 内置分发器：ctx.ask 把回调名编进 id 前段，<service>-reply 事件经此转发到对应 vitric.fn。
+// 接通方式 = 游戏在规则里加一条，把回复事件 call 到这里、并把事件 data 当 args 传入，例如：
+//   { "on": {"event": "llm-reply"}, "do": [{ "call": "__onReply" }] }
+// args = 回复事件的 data：成功 { id, text }，失败 { id, message }。回调拿到的就是这个对象。
+vitric.fn("__onReply", (args, ctx) => {
+  const id = (args && args.id) || "";
+  const cb = id.split("#")[0];
+  if (!cb) {
+    throw new Error("__onReply: 回复缺 id 或 id 不含回调名（应形如 \"回调名#tick#n\"）。这条回复不是 ctx.ask 发出的？");
+  }
+  const f = __fns[cb];
+  if (!f) {
+    throw new Error("__onReply: ctx.ask 指定的回调 \"" + cb + "\" 没注册。用 vitric.fn(\"" + cb + "\", (reply, ctx) => {...}) 注册它");
+  }
+  f(args, ctx);
+});
+
 // ---- 确定性铁律：禁掉一切非确定性入口 ----
 Math.random = function () {
   throw new Error("Math.random 在 Vitric 里禁用（会破坏确定性回放）。改用系统/函数回调里的 ctx.random()");
@@ -98,6 +115,19 @@ function __makeCtx(payload, ops, rng) {
     despawn: (id) => {
       if (typeof id !== "string") throw new Error("ctx.despawn: 参数必须是实体句柄字符串（实体对象上的 e.id）");
       ops.push({ op: "despawn", id });
+    },
+    // 对外问话的薄封装：发一条 <service>-ask 事件，回复回来时由内置分发器 __onReply
+    // 转给名为 onReply 的 vitric.fn。底层仍是裸的 ask/reply 事件 + 自动录回放，确定性不变。
+    // “收”那半要游戏在规则里加一条把 <service>-reply 转进 __onReply（见 prelude 顶部 __onReply 注释）。
+    ask: (service, prompt, onReply) => {
+      if (typeof service !== "string" || !service) throw new Error("ctx.ask: service 必须是非空字符串，如 'llm'");
+      if (typeof prompt !== "string") throw new Error("ctx.ask: prompt 必须是字符串");
+      if (typeof onReply !== "string" || !onReply) throw new Error("ctx.ask: 第三个参数必须是回复回调的函数名（用 vitric.fn 注册它）");
+      if (onReply.indexOf("#") !== -1) throw new Error("ctx.ask: 回调名不能含 '#'（用作 id 分隔符）");
+      // 确定性 id：回调名#tick#本次系统内的发射序号。不用 Math.random（已禁）、不依赖跨快照的全局计数。
+      const id = onReply + "#" + payload.tick + "#" + ops.length;
+      ops.push({ op: "emit", name: service + "-ask", data: { id: id, prompt: prompt } });
+      return id;
     },
   };
 }

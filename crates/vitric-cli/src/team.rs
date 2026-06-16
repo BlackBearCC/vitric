@@ -146,7 +146,12 @@ pub fn run(dir: &Path) -> Result<Value, String> {
         .map_err(|r| r.to_string())
         .and_then(|p| Runtime::build(&p))
     {
-        Ok(rt) => (json!(rt.scripts.systems.len()), json!(rt.scripts.fns.len()), None),
+        // fns 只数作者写的玩法函数，排除 `__` 开头的引擎内置（如 ctx.ask 的回复分发器 __onReply）
+        Ok(rt) => (
+            json!(rt.scripts.systems.len()),
+            json!(rt.scripts.fns.iter().filter(|f| !f.starts_with("__")).count()),
+            None,
+        ),
         Err(e) => (Value::Null, Value::Null, Some(e)),
     };
     if rule_count == 0 && load_error.is_none() && systems == json!(0) {

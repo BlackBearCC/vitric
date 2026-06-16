@@ -538,6 +538,67 @@ mod tests {
     }
 
     #[test]
+    fn ctx_ask_emits_service_ask_with_callback_in_id() {
+        let mut eng = engine_with(
+            r#"
+            vitric.system("brain", {query: ["Position"], writes: []}, (entities, ctx) => {
+                for (const e of entities) { ctx.ask("llm", "hello", "onBrainReply"); }
+            });
+            "#,
+        );
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let mut rng = Pcg32::new(1);
+        let out = eng.run_systems(&mut w, &mut rng, 7).unwrap();
+        let ask = out.events.iter().find(|ev| ev.name == "llm-ask").expect("ctx.ask 应发出 llm-ask");
+        assert_eq!(ask.data["prompt"], json!("hello"));
+        let id = ask.data["id"].as_str().unwrap();
+        assert!(id.starts_with("onBrainReply#7#"), "id 应把回调名和 tick 编进去，实际 {id}");
+    }
+
+    #[test]
+    fn on_reply_dispatches_to_callback_named_in_id() {
+        let mut eng = engine_with(
+            r#"
+            vitric.fn("onBrainReply", (reply, ctx) => { ctx.emit("handled", {text: reply.text}); });
+            "#,
+        );
+        let mut w = World::new();
+        let mut rng = Pcg32::new(1);
+        let out = eng
+            .call_fn(
+                "__onReply",
+                &json!({"id": "onBrainReply#7#0", "text": "hi there"}),
+                None,
+                &mut w,
+                &mut rng,
+                8,
+            )
+            .unwrap();
+        let handled = out.events.iter().find(|ev| ev.name == "handled").expect("__onReply 应分发到 onBrainReply");
+        assert_eq!(handled.data["text"], json!("hi there"));
+    }
+
+    #[test]
+    fn on_reply_unregistered_callback_errors_loud() {
+        let mut eng = engine_with(r#"vitric.fn("present", (a, c) => {});"#);
+        let mut w = World::new();
+        let mut rng = Pcg32::new(1);
+        let err = eng
+            .call_fn(
+                "__onReply",
+                &json!({"id": "ghost#1#0", "text": "x"}),
+                None,
+                &mut w,
+                &mut rng,
+                0,
+            )
+            .unwrap_err();
+        assert!(format!("{err}").contains("ghost"), "应显式报未注册回调，实际 {err}");
+    }
+
+    #[test]
     fn undeclared_write_is_rejected() {
         let mut eng = engine_with(
             r#"
@@ -768,7 +829,8 @@ mod tests {
             });
             "#,
         );
-        assert_eq!(eng.fns, vec!["explode"]);
+        // __onReply 是 prelude 内置的 ctx.ask 回复分发器，永远在册（排在用户函数前）
+        assert_eq!(eng.fns, vec!["__onReply", "explode"]);
         let mut w = World::new();
         let mut rng = Pcg32::new(1);
         let out = eng
