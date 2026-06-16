@@ -62,6 +62,15 @@ entities.append({
                    "o2_i": 60, "pow_i": 60, "food_i": 60},
         "Census": {"count": 1, "is_hub": 1},
         "Spawn": {"timer": 8, "cap": 4},
+        "Event": {"timer": 25, "flash": 0},
+    },
+})
+# @hud_evt:宇宙事件警告(耀斑时短暂亮起,屏幕偏上居中)
+entities.append({
+    "name": "hud_evt",
+    "components": {
+        "Position": {"x": 0, "y": 8.8},
+        "Text": {"content": "", "size": 0.8, "color": "#ff9a6b", "screen": True},
     },
 })
 # @hud_res / @hud_comp:屏幕顶部常驻 HUD(screen=true 锚定屏幕,不随相机)

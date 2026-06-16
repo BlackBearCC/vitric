@@ -25,6 +25,12 @@
         "cap": { "type": "int", "default": 4 }
       }
     },
+    "Event": {
+      "fields": {
+        "timer": { "type": "number", "default": 25 },
+        "flash": { "type": "number", "default": 0 }
+      }
+    },
     "Colony": {
       "fields": {
         "oxygen": { "type": "number", "default": 60 },

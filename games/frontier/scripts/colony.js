@@ -52,3 +52,23 @@ vitric.system("colony", { query: ["Colony", "Census"], writes: ["Colony"] }, (en
     c.food_i = Math.round(c.food);
   }
 });
+
+// 宇宙事件:每隔一阵来一次太阳耀斑,电和氧骤降——给生存加动态张力(你得留缓冲、靠建设扛过去)。
+const FLARE_INTERVAL = 25.0;
+const FLARE_POWER = 35;
+const FLARE_O2 = 20;
+const FLASH_SECONDS = 3.0; // 警告亮多久
+vitric.system("cosmic", { query: ["Colony", "Event"], writes: ["Colony", "Event"] }, (entities, ctx) => {
+  for (const e of entities) {
+    const ev = e.Event;
+    if (ev.flash > 0) ev.flash = Math.max(0, ev.flash - ctx.dt);
+    ev.timer -= ctx.dt;
+    if (ev.timer <= 0) {
+      ev.timer = FLARE_INTERVAL;
+      ev.flash = FLASH_SECONDS;
+      e.Colony.power = Math.max(0, e.Colony.power - FLARE_POWER);
+      e.Colony.oxygen = Math.max(0, e.Colony.oxygen - FLARE_O2);
+      ctx.emit("flare", {});
+    }
+  }
+});

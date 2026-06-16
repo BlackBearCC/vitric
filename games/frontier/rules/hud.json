@@ -26,6 +26,18 @@
       "on": "tick",
       "if": [ ["@companion", "!exists"] ],
       "do": [ { "set": "@hud_comp.Text.content", "to": "Pip 走了……" } ]
+    },
+    {
+      "id": "hud-flare-on",
+      "on": "tick",
+      "if": [ ["@colony.Event.flash", ">", 0] ],
+      "do": [ { "set": "@hud_evt.Text.content", "to": "！太阳耀斑 — 电、氧骤降!" } ]
+    },
+    {
+      "id": "hud-flare-off",
+      "on": "tick",
+      "if": [ ["@colony.Event.flash", "<=", 0] ],
+      "do": [ { "set": "@hud_evt.Text.content", "to": "" } ]
     }
   ]
 }

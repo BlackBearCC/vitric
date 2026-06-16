@@ -3325,6 +3325,25 @@
     "Spawn": {
      "timer": 8,
      "cap": 4
+    },
+    "Event": {
+     "timer": 25,
+     "flash": 0
+    }
+   }
+  },
+  {
+   "name": "hud_evt",
+   "components": {
+    "Position": {
+     "x": 0,
+     "y": 8.8
+    },
+    "Text": {
+     "content": "",
+     "size": 0.8,
+     "color": "#ff9a6b",
+     "screen": true
     }
    }
   },
