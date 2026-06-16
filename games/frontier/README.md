@@ -5,6 +5,10 @@
 
 设计稿:[`docs/superpowers/specs/2026-06-17-frontier-sim-design.md`](../../docs/superpowers/specs/2026-06-17-frontier-sim-design.md)
 
+![whitebox](whitebox.gif)
+
+*↑ 白模一览:俯视角荒星地表,点格子建造(floor/conduit/plot/wall),活伙伴 Pip 在家附近自己溜达。像素是占位素材,后期走"截图→图生图"美化。*
+
 ## 现在能跑什么(白模)
 
 俯视角像素白模,目前落地了四块地基(均已无头自测):
