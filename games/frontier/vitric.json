@@ -1,6 +1,7 @@
 {
   "name": "frontier",
   "schema": "schema.json",
+  "font": "fonts/cjk.otf",
   "entry": "scenes/main.json",
   "scenes": [ "scenes/main.json" ],
   "rules": [ "rules/move.json", "rules/build.json", "rules/colony.json", "rules/companion.json" ],

@@ -1,0 +1,4 @@
+# 生成的中文字体(11MB,不入库)。跑 tools/gen_font.py 从系统 Noto CJK 重新生成。
+fonts/*.otf
+fonts/*.ttf
+fonts/*.ttc
