@@ -41,9 +41,9 @@ globalThis.vitric = {
 };
 
 // 内置分发器：ctx.ask 把回调名编进 id 前段，<service>-reply 事件经此转发到对应 vitric.fn。
-// 接通方式 = 游戏在规则里加一条，把回复事件 call 到这里、并把事件 data 当 args 传入，例如：
-//   { "on": {"event": "llm-reply"}, "do": [{ "call": "__onReply" }] }
-// args = 回复事件的 data：成功 { id, text }，失败 { id, message }。回调拿到的就是这个对象。
+// 接通方式 = 游戏在规则里加一条，把回复事件的 data 当 args 传进来（务必带 with，否则没 id）：
+//   { "on": {"event": "llm-reply"}, "do": [{ "call": "__onReply", "with": { "id": "event.id", "text": "event.text" } }] }
+// 回调拿到的 reply 就是 { id, text }（出错时 llm-error 事件的 data 是 { id, message }，另接一条规则）。
 vitric.fn("__onReply", (args, ctx) => {
   const id = (args && args.id) || "";
   const cb = id.split("#")[0];
