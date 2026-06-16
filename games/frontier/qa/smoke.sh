@@ -58,6 +58,22 @@ echo "== HUD:屏上资源条非空 =="
 hud=$(field @hud_res "['Text']['content']")
 [ -n "$hud" ] && [ "$hud" != "GONE" ] && ok "HUD 有内容 (\"$hud\")" || no "HUD 空"
 
+echo "== 活伙伴离开:拆住所、舒适见底 → 自己 despawn(命名实体走干净,人手实时回落不滞留) =="
+# 冻结到来(cap=0),这样人数变化只可能来自"离开",计数断言才确定。world/set 仅非录制可用。
+rpc '{"method":"world/set","params":{"entity":"@colony","path":"Spawn.cap","value":0}}' >/dev/null
+cB=$(field @colony "['Census']['count']")
+rpc '{"method":"input/click","params":{"x":6,"y":6,"button":"right"}}' >/dev/null; sleep 0.5  # 拆掉 quarters,断舒适来源
+left="no"
+for i in $(seq 1 15); do
+  rpc '{"method":"world/set","params":{"entity":"@companion","path":"Need.comfort","value":0}}' >/dev/null
+  rpc '{"method":"world/set","params":{"entity":"@companion","path":"Need.leave_timer","value":9}}' >/dev/null
+  sleep 0.2
+  [ "$(field @companion "['Companion']")" = "GONE" ] && { left="yes"; break; }
+done
+cA=$(field @colony "['Census']['count']")
+cnt_ok=$(python3 -c "print(1 if int('$cA' or -1)==int('$cB' or -2)-1 else 0)" 2>/dev/null)
+if [ "$left" = "yes" ] && [ "$cnt_ok" = "1" ]; then ok "伙伴离开:@companion despawn 干净,人手 $cB -> $cA(census 实时回落)"; else no "离开异常 (gone=$left, 人手 $cB -> $cA)"; fi
+
 echo
 echo "结果: PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

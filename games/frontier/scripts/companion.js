@@ -57,10 +57,11 @@ vitric.system(
       }
       if (n.comfort <= 0) {
         n.leave_timer += ctx.dt;
-        // 宽限到了:发离开事件(由 do-leave 规则按名字 despawn,只发一次)。
-        if (n.leave_timer >= LEAVE_GRACE && n.voiced < 2) {
-          n.voiced = 2; // 复用 voiced 当"已宣告离开"标记,防每帧刷
-          ctx.emit("companion-left", { who: e.id });
+        // 宽限到了:直接 despawn 走的就是它自己。命名/匿名实体都清得干净
+        // (见 vitric-script 的 system_despawn_of_named_entity_fully_removes_it),
+        // 不必再绕"发事件→规则按 @名字 删"——那条路只对独苗 Pip 成立,多伙伴会删错人。
+        if (n.leave_timer >= LEAVE_GRACE) {
+          ctx.despawn(e.id);
         }
       } else {
         n.leave_timer = 0;
