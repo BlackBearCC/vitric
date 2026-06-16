@@ -1,0 +1,25 @@
+{
+  "components": {
+    "Position": { "fields": { "x": { "type": "number" }, "y": { "type": "number" } } },
+    "Velocity": { "fields": { "x": { "type": "number", "default": 0 }, "y": { "type": "number", "default": 0 } } },
+    "Sprite": {
+      "fields": {
+        "w": { "type": "number" },
+        "h": { "type": "number" },
+        "image": { "type": "text", "default": "" },
+        "color": { "type": "text", "default": "#ffffff" }
+      }
+    },
+    "Cell": { "fields": { "kind": { "type": "text", "default": "regolith" } } },
+    "Player": { "fields": {} },
+    "Camera": {
+      "fields": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "scale": { "type": "number", "default": 8 },
+        "follow": { "type": "text", "default": "" },
+        "lerp": { "type": "number", "default": 1 }
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "frontier",
+  "schema": "schema.json",
+  "entry": "scenes/main.json",
+  "scenes": [ "scenes/main.json" ],
+  "rules": [ "rules/move.json" ],
+  "scripts": [],
+  "seed": 1
+}
