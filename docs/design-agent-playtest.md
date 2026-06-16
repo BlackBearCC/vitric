@@ -1,6 +1,6 @@
 # 设计稿：agent 集群试玩（vitric playtest）
 
-状态：**全 6 阶段已落地**（2026-06-16，crate `vitric-playtest` + `vitric playtest` 子命令，637 测试绿）。dogfood 真实例子(spire/echo)硬化过三处假阳性(Position 误报 runaway、Light/初值0 误报 collapse、种子探索不重放 replies)。已知精化(留后续)：声明结局集合靠静态扫规则 emit，**脚本/LLM 发结局的游戏(如 echo)要在 `playtest.json` 声明 terminal/视图**才判得出 ending_coverage——这是 Phase 6 视图覆盖的用法，不是 bug。定位：**把"确定性 + gate 证书 + AI 控制面"这三张别人没有的牌，复利成一件别的引擎给不了的能力——给单机游戏配一个自动 QA + 配平师。** 放一群确定性 agent 把游戏自动玩穿，聚合出"哪通不了、哪不平衡、哪卡死、哪是废内容、节奏在哪崩"的报告，每局都是可重放可认证的录像。
+状态：**全 6 阶段已落地 + dogfood 硬化完毕**（2026-06-16，crate `vitric-playtest` + `vitric playtest` 子命令，649 测试绿，16 项目压力跑 0 panic）。dogfood 真实例子(spire/echo)修过的假阳性：Position 误报 runaway、Light/初值0 误报 collapse、种子探索不重放 replies、移动键误标惰性。**通关事件自动从项目 `vitric.json` 的 `gates.playthroughs[].must_emit` 认**（gate 证书的权威通关声明）——有 gate 证书的游戏(如 echo→run-complete)开箱就判得出胜利/ending_coverage，不用手写 playtest.json。echo 种子探索实证：62.5% 通关、ending_coverage 填满。定位：**把"确定性 + gate 证书 + AI 控制面"这三张别人没有的牌，复利成一件别的引擎给不了的能力——给单机游戏配一个自动 QA + 配平师。** 放一群确定性 agent 把游戏自动玩穿，聚合出"哪通不了、哪不平衡、哪卡死、哪是废内容、节奏在哪崩"的报告，每局都是可重放可认证的录像。
 
 支持**所有经典类型**（平台跳跃/解谜/卡牌构筑/roguelike/RPG/模拟经营/叙事冒险/动作射击/生存合成），靠的是一套**类型无关的接口** + 一个**可插拔的策略库** + **种子式探索**，不是为每个类型写一套。
 
