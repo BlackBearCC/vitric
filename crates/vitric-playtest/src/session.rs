@@ -313,48 +313,63 @@ pub fn run_session(
     })
 }
 
-/// 前瞻搜索配置（设计稿：技巧类游戏专用的「聪明但慢」档）。
+/// 前瞻规划器配置（设计稿：技巧类游戏专用的「聪明但慢」档）。
 ///
-/// 前瞻搜索是 greedy 的加强版：greedy 只用「上一步有没有改善」这种 1 步轻量启发，
-/// 前瞻则在每个真 tick 把当前状态**存档**，挨个候选动作真模拟 `horizon` 帧、按目标量
-/// 打分、再**读档**，选分最高那个真注入。这是 Vitric 独有的——靠的是 `Sim::snapshot`/
-/// `Sim::restore` 能精确存读全状态（world+rng+tick+逻辑态），别的引擎非确定、没法精确
-/// 回滚重试，做不了这种投机搜索。
+/// 这是一个**深度 D、束宽 W 的定向束搜索**滚动规划器（MPC）。和旧的单步前瞻（1-ply：
+/// 每个真 tick 只挑「这一刻一个动作」、再滚行 horizon 帧打分）相比，束搜索在 snapshot/restore
+/// 之间建一棵搜索树：每个节点是一份 `Sim::snapshot`，展开一个节点 = 对每个候选动作 restore
+/// 回该节点、注入、`step` **一帧**、再 snapshot 成子节点。这样「先按上再按右」「撞墙后重新
+/// 按右爬上去」这类**多 tick 组合 / 连续机动**会自然从最优路径里涌现——因为搜索的每一层都
+/// 重新挑动作，最优序列就是「右右右」或「上右」，而不是单步前瞻只能滚行同一动作。
+///
+/// 这是 Vitric 独有的：靠 `Sim::snapshot`/`Sim::restore` 能精确存读全状态（world+rng+tick+
+/// 逻辑态 + 未消化输入/回复），别的引擎非确定、没法精确回滚重试，做不了这种逐层投机搜索。
+///
+/// **退化关系**：`depth=1` 时这棵树只有根的一层展开（对每个候选走一帧打分选最优），
+/// 等价于旧的 1-ply 单步前瞻——保留作退化档。`horizon` 字段并入了 `depth` 的语义
+/// （「往前看几帧」= 搜索深度），CLI 的 `--horizon` 直接映射到 `depth`（见 cmd_playtest）。
 #[derive(Debug, Clone)]
 pub struct LookaheadConfig {
-    /// 每个候选动作向前试模拟多少帧（搜索地平线）。越大越「有远见」也越慢
-    /// （每真 tick 的代价 = |候选动作+不操作| × horizon 个投机 step）。默认 12。
-    pub horizon: u64,
+    /// 搜索深度 D：从根往下展开几层 = 往前规划几帧。越大越「有远见」也越慢。
+    /// `depth=1` 退化为单步前瞻（1-ply）。默认 8。
+    pub depth: u64,
+    /// 束宽 W：每一层只保留评分最高的 W 个节点继续往下展开（束剪枝，避免 B^D 爆炸）。
+    /// 越大越不容易因为贪心剪枝错过需要「先变差再变好」的机动，但越慢。默认 4。
+    pub beam_width: usize,
 }
 
 impl Default for LookaheadConfig {
     fn default() -> LookaheadConfig {
-        LookaheadConfig { horizon: 12 }
+        // depth=8 / beam=4：导航/技巧类一般个位数候选 B，单真 tick 的投机步上界 ≈ W×B×D
+        // （见 run_session_lookahead 的性能注释），默认值取「够解多 tick 组合又不至于太慢」。
+        LookaheadConfig { depth: 8, beam_width: 4 }
     }
 }
 
-/// 一个候选动作的 rollout 评分（越大越优）。打分先比「rollout 内有没有 + 多早触达终止」，
-/// 再比目标派生量（有 goal）或探索新态（无 goal）。用一个可全序比较的结构体承载，
-/// 选择时按字段优先级逐项比，确定性平手规则交给调用处（取动作列表里靠前的）。
+/// 一个搜索节点的评分（越大越优）。束搜索用它给每个展开出的子节点打分：先比终止
+/// 信号（Win > 中性 > Lose），再比触达 Win 的早晚，再比目标派生量（有 goal）或探索新态
+/// （无 goal）。用一个可全序比较的结构体承载——束剪枝按它排序取前 W、最终选最优叶子都靠它。
+/// 确定性平手规则交给调用处（节点带「根第一动作下标 + 展开序」，平手取靠前的）。
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct RolloutScore {
-    /// 终止信号：+1=rollout 内触达过 Win，0=没终止，-1=触达过 Lose（Win 优先级最高）。
+struct NodeScore {
+    /// 终止信号：+1=这条路径已触达 Win，0=没终止，-1=已触达 Lose（Win 优先级最高）。
     terminal: i8,
-    /// 触达 Win 的早晚：越早越好。用「horizon - 命中帧」表示（没命中=0），越大越优。
+    /// 触达 Win 的早晚：越早越好。用「上界深度 - 命中那一层的深度」表示（没命中=0），越大越优。
+    /// 让「3 步就赢」的路径压过「8 步才赢」的，规划器优先走最短通关。
     win_earliness: i64,
-    /// 目标分（有 goal 时）：direction=min 取 -末态距离，max 取末态值（越大越优）；
-    /// 无 goal 时此项恒 0，靠 explore 兜底。
+    /// 目标分（有 goal 时）：direction=min 取 -距离，max 取值（越大越优）；无 goal 时恒 0。
+    /// 这是节点**当前状态**的目标派生量（不是 rollout 末态）——束搜索每层都重算，朝目标爬。
     goal_score: f64,
-    /// 探索分（无 goal 时的弱进展信号）：rollout 内 state_hash 变了多少次（走到多少新态）。
-    /// 有 goal 时此项不参与决策（goal_score 已是主信号），但仍算出来当次级平手判据。
+    /// 探索分（无 goal 时的弱进展信号）：从根到该节点累计走过多少个新 state_hash（变化次数）。
+    /// 有 goal 时此项只当次级平手判据。
     explore: u64,
 }
 
-impl RolloutScore {
+impl NodeScore {
     /// 全序比较：terminal > win_earliness > goal_score > explore（逐项，前者相等才看后者）。
     /// 无 goal 时 goal_score 恒 0，自然退到 explore 主导；NaN 目标分按最差处理（不该出现，
     /// 派生量取不到时上游已折成保底值，这里再兜一层防止比较 panic）。
-    fn cmp(&self, other: &RolloutScore) -> std::cmp::Ordering {
+    fn cmp(&self, other: &NodeScore) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         self.terminal
             .cmp(&other.terminal)
@@ -368,31 +383,75 @@ impl RolloutScore {
     }
 }
 
-/// 跑一局**前瞻搜索**（设计稿：让技巧类游戏——平台/导航/解谜——被 swarm 玩起来，
-/// 不被随机策略误报 unbeatable）。和 [`run_session`] 同样出可重放录像、同样收遥测，
-/// 区别只在「每真 tick 怎么选动作」：
+/// 束搜索树里的一个**活节点**：一份 snapshot + 它的评分 + 它在根那一层走的第一个动作下标。
 ///
-/// 每个真 tick：
-/// 1. `cp = sim.snapshot(logic)` 存当前全状态；
-/// 2. 对当前 SceneView 的每个候选动作（**含「不操作」也作为一个候选**）：先 `restore(&cp)`
-///    回到真状态，非「不操作」就 `inject_input`，再走 `horizon` 帧投机 step（期间扫到终止
-///    Win 给高分、Lose 给低分），用末态的目标派生量打分；
-/// 3. `restore(&cp)` 回到真状态，选分最高的动作（确定性平手：分相同取候选列表里靠前的）；
-/// 4. 真注入选中的动作，正常 `sim.step` 推进一个真 tick（**只有这一步进真录像**）。
+/// `root_action` 是这个节点祖先链回溯到根时、根那一层选的候选下标（`view.actions[i]`，
+/// 或 = 候选数 n 表示「不操作」）——MPC 只执行这第一步，所以每个节点必须一路带着它。
+/// `terminated` 标记这条路径已经在某层触达终止（Win/Lose），不再往下展开（剪枝）。
+/// `explore` 是从根到此累计的新态计数（无 goal 时的进展信号），随展开向下传递累加。
 ///
-/// **确定性铁律**：投机步全程在 snapshot/restore 之间，精确回滚、**绝不进真录像**。
-/// 但 `restore` 会清掉 sim 进行中的 recorder——而每个真 tick 都要 restore 投机，所以
-/// **不能用 `sim.start_recording`/`stop_recording`**：第 2 个真 tick 一 restore 就把第 1 tick
-/// 起的录像清空了。这里改成**手工攒一个 `Recording`**，绕开 sim 的 recorder：自己按
-/// 「注入那一刻的 sim.tick」记 input/reply、每 60 真 tick（与 sim 内部 CHECKPOINT_INTERVAL
-/// 同口径）记一条 checkpoint、起点也记一条 `(0, 初始 hash)`、收尾填 final_hash/ticks。
-/// 口径和 `Sim::step` 内部录制完全一致，所以这份手工录像照样可被 `Sim::replay` 逐位复现。
-/// 真注入的动作才录。打分/选择是当前状态的纯函数，同 (项目,seed,horizon) 两次跑结果逐项一致。
+/// **`best_goal` 是关键设计**：节点的目标分用「从根到此**路径上见过的最优**目标值」，
+/// 不是「当前状态的目标值」。为什么——技巧类的最优路径常**非单调**（先 up 才能 right：跳起时
+/// 离出口的曼哈顿距离反而变大，落到墙那侧才骤降）。若按当前状态打分，束剪枝会把「正在翻墙、
+/// 暂时变差」的分支剪掉，束搜索就退化成贪心、卡在墙前。用「路径最优值」给分=乐观估计：一条路
+/// 只要在**任一帧**摸到过更近出口的位置就被记功，beam 才会保留这条「先变差再变好」的翻墙路，
+/// 等它落到墙那侧 best_goal 骤升，规划器据此把根层第一步定成「该跳」。这正是 1-ply 做不到、
+/// 需要规划深度才有的能力。无 goal 时 best_goal 恒 0，退到 explore 主导。
+#[derive(Debug, Clone)]
+struct BeamNode {
+    /// 该节点的 sim 全状态快照（world+rng+tick+逻辑态+未消化输入/回复）。
+    snapshot: Value,
+    /// 评分（束剪枝排序 / 最终选最优都用它）。其 goal_score = 路径最优目标值（见结构体文档）。
+    score: NodeScore,
+    /// 这个节点在根层走的第一个动作下标（0..n=view.actions[i]，n=不操作）。
+    root_action: usize,
+    /// 这条路径是否已触达终止（已终止则不再展开，直接留作候选最优）。
+    terminated: bool,
+    /// 从根到此累计走过多少个新 state_hash（无 goal 探索信号，往下展开继续累加）。
+    explore: u64,
+    /// 从根到此**路径上见过的最优目标值**（越大越优；min 目标取 -距离，max 取值）。
+    /// 往下展开时与子节点当前状态的目标值取 max 传递——单调不减，记录「这条路最接近过出口几何」。
+    best_goal: f64,
+}
+
+/// 跑一局**定向束搜索滚动规划器**（设计稿：让技巧类游戏——平台/导航/解谜——被 swarm
+/// 玩起来，不被随机策略误报 unbeatable）。和 [`run_session`] 同样出可重放录像、同样收遥测，
+/// 区别只在「每真 tick 怎么选动作」：把旧的单步前瞻换成**深度 D、束宽 W 的束搜索**。
 ///
-/// **目标量来源**：`cfg.playtest.goal`（Phase 6 声明的派生量 + min/max）。
-/// **无 goal 退化**：rollout 评分先看「是否更早触达 Win 终止」，没有 Win 时只能靠
-/// 「state_hash 变化数/探索新态」这种**弱进展信号**——没有目标量时前瞻无法判「哪个方向更近
-/// 终点」，只能靠「够不够得到终点」和「有没有把世界推动起来」，本就比有 goal 时弱得多。
+/// 每个真 tick（滚动地平线 / MPC：每真 tick 重新规划，只执行第一步）：
+///
+/// - **根**：`root = sim.snapshot(logic)` 存当前全状态，作为搜索树的根。
+/// - **建树**：从根逐层展开。展开一个节点 = 对每个候选动作（`view.actions` 各一个 + 末尾一个
+///   「不操作」）`restore` 回该节点、注入、`sim.step` **一帧**、再 `snapshot` 成子节点；子节点记下
+///   「它在根层走的第一个动作」+ 用目标派生量算的评分（命中 Win 终止给最高分并剪枝、Lose 给最低分并剪枝）。
+/// - **束剪枝**：每一层把展开出的子节点按评分排序、只保留最优的若干个继续往下展开（束搜索，避免
+///   B^D 爆炸；保根动作多样性见 [`prune_beam_diverse`]）；已终止的节点不再展开，留作候选最优。
+/// - **选首步**：展开到深度 **D**（或全束节点都终止）后，在所有探索到的节点里选评分最优的，取它的
+///   `root_action`——那就是这个真 tick 要执行的动作。
+/// - **执行**：真注入选中的动作，正常 `sim.step` 推进一个真 tick（**只有这一步进真录像**）。
+///
+/// 「先按上再按右」「撞墙后重新按右爬上去」这类**多 tick 组合 / 连续机动**自然从最优路径里
+/// 涌现：搜索每一层都重新挑动作，最优序列就是「上右」或「右右右」，根层的第一个动作正是
+/// 这串机动的第一步。`depth=1` 退化为单步前瞻（只展开根一层、选最优一帧），保留作退化档。
+///
+/// **确定性铁律**：节点展开顺序（候选按下标升序）、剪枝排序（按 `NodeScore::cmp`，平手取
+/// 「根动作下标更小、其次展开更早」的）、最终选最优的平手规则全确定 → 同 (项目,seed,depth,
+/// beam,起点) 出同一决策序列。投机步全程在 snapshot/restore 之间精确回滚、**绝不进真录像**。
+/// `restore` 会清掉 sim 进行中的 recorder——而每真 tick 都要 restore 投机，所以**不能用
+/// `sim.start_recording`/`stop_recording`**（第 2 个真 tick 一 restore 就把第 1 tick 起的录像
+/// 清空）。这里改成**手工攒一个 `Recording`**：自己按「注入那一刻的 sim.tick」记 input/reply、
+/// 每 60 真 tick（与 sim 内部 CHECKPOINT_INTERVAL 同口径）记一条 checkpoint、起点也记一条
+/// `(0, 初始 hash)`、收尾填 final_hash/ticks。口径和 `Sim::step` 内部录制完全一致，所以这份
+/// 手工录像照样可被 `Sim::replay` 逐位复现。只有真注入的动作才录。
+///
+/// **性能上界**：每个真 tick 的投机 `sim.step` 次数 ≤ **W × (B+1) × D**（B=候选动作数，+1 是
+/// 「不操作」，W=束宽，D=深度；第一层只有 1 个根、之后每层至多 W 个节点各展开 B+1 个子）——
+/// **线性于深度**（束搜索把 (B+1)^D 的指数爆炸压成线性）。导航/技巧类 B 一般个位数，是 opt-in
+/// 的「聪明但慢」档。默认 swarm 掺的前瞻用小 depth（见 swarm.rs `DEFAULT_SWARM_LOOKAHEAD_DEPTH`）。
+///
+/// **目标量来源**：`cfg.playtest.goal`（派生量 + min/max）。**无 goal 退化**：节点评分先看
+/// 「是否更早触达 Win」，没有 Win 时只能靠「到该节点走过多少新态」这种弱进展信号——没有目标量
+/// 时无法判「哪个方向更近终点」，本就比有 goal 时弱得多。
 pub fn run_session_lookahead(
     sim: &mut Sim,
     logic: &mut dyn GameLogic,
@@ -403,8 +462,11 @@ pub fn run_session_lookahead(
     if sim.is_recording() {
         return Err("run_session_lookahead 要自己开录：传进来的 sim 不该已在录像中".to_string());
     }
-    if look.horizon == 0 {
-        return Err("lookahead horizon 必须 ≥ 1".to_string());
+    if look.depth == 0 {
+        return Err("lookahead depth 必须 ≥ 1".to_string());
+    }
+    if look.beam_width == 0 {
+        return Err("lookahead beam_width 必须 ≥ 1".to_string());
     }
 
     // 遥测累加器（与 run_session 同口径）
@@ -414,11 +476,7 @@ pub fn run_session_lookahead(
     let mut seen_events: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // ---- 手工攒录像（不用 sim 的 recorder，因为每真 tick 都要 restore 投机会清掉它）----
-    // 口径必须和 Sim::step / Sim::start_recording 一致，replay 才校验得过：
-    //  - 起点先记一条 (sim.tick, 初始 hash)（= start_recording 一开始就记的那条，新 sim 即 (0, h0)）；
-    //  - input/reply 的 tick 取「注入那一刻、step 前的 sim.tick」；
-    //  - 每过 CHECKPOINT_INTERVAL(=TICKS_PER_SECOND=60) 个真 tick，step 后记 (sim.tick, hash)；
-    //  - 收尾填 final_hash = 末态 hash、ticks = sim.tick。
+    // 口径必须和 Sim::step / Sim::start_recording 一致，replay 才校验得过（见函数文档）。
     let mut recording = Recording {
         seed: sim.seed(),
         checkpoints: vec![(sim.tick, sim.world.state_hash())],
@@ -434,39 +492,19 @@ pub fn run_session_lookahead(
             break;
         }
 
-        // ---- 投机搜索（全程在 snapshot/restore 之间，不进手工录像）----
-        // 候选 = view.actions 各一个 + 末尾一个「不操作」（None）。不操作也是合法选择
-        //（解谜/平台里「这一刻按兵不动等下落」常常才是对的）。
-        // snapshot 当前真状态——投机全程在它和 restore 之间，绝不污染真轨迹。
-        let cp = sim.snapshot(logic);
-        let n = view.actions.len();
-        let mut best_idx = n; // 默认「不操作」(下标 n)；下面有更优才改
-        let mut best_score: Option<RolloutScore> = None;
-        // 候选下标 0..n = view.actions[i]，下标 n = 不操作。按下标升序评估，
-        // 平手时先到先得（best 只在「严格更优」时替换）→ 取候选列表靠前的，确定。
-        for cand in 0..=n {
-            sim.restore(&cp, logic)?;
-            if cand < n {
-                let a = &view.actions[cand];
-                sim.inject_input(&a.action, &a.phase);
-            }
-            let score = rollout_score(sim, logic, engine, cfg, look.horizon)?;
-            let better = match &best_score {
-                None => true,
-                Some(b) => score.cmp(b) == std::cmp::Ordering::Greater,
-            };
-            if better {
-                best_score = Some(score);
-                best_idx = cand;
-            }
-        }
-        // 回到真状态：投机结束，下面才是真 tick
-        sim.restore(&cp, logic)?;
+        // ---- 束搜索规划（全程在 snapshot/restore 之间，不进手工录像）----
+        // 根 = 当前真状态的快照。投机全程在它和后续 restore 之间，绝不污染真轨迹。
+        let root = sim.snapshot(logic);
+        let best_root_action =
+            plan_beam(sim, logic, engine, cfg, look, &view, &root)?;
+        // 回到真状态：投机结束，下面才是真 tick。
+        sim.restore(&root, logic)?;
 
+        let n = view.actions.len();
         // 真注入选中的动作（不操作=不注入），手工记进录像（tick = 注入那一刻的 sim.tick）。
         let inject_tick = sim.tick;
-        if best_idx < n {
-            let a = &view.actions[best_idx];
+        if best_root_action < n {
+            let a = &view.actions[best_root_action];
             sim.inject_input(&a.action, &a.phase);
             recording.inputs.push(InputRecord {
                 tick: inject_tick,
@@ -532,64 +570,218 @@ pub fn run_session_lookahead(
     })
 }
 
-/// 从「已注入候选动作、待 step」的状态出发，向前投机走 `horizon` 帧，算这个候选的评分。
-/// 调用前 sim 必须已 restore 到真状态 + inject 了候选动作（或不操作）；本函数只读式地推进
-/// 投机副本（调用方负责事后再 restore 回真状态）。
+/// 在给定的根状态（`root` 快照）上跑一轮**深度 D、束宽 W 的束搜索**，返回根那一层该走的
+/// 第一个动作下标（0..n=`view.actions[i]`，n=不操作）。MPC 只用这一步。
 ///
-/// 评分（见 [`RolloutScore`]）：
-/// - 扫每帧 step 的事件：命中 Win 记最早命中帧（越早越优）、命中 Lose 标负；
-/// - 末态用 `goal.quantity` 派生量打目标分（min→ -距离，max→ 值；取不到=最差保底）；
-/// - 无 goal 时算 rollout 内 state_hash 变化数当探索弱信号。
-fn rollout_score(
+/// 调用约定：进来时 sim 在某个真状态、`root` 是它的快照；本函数全程在 snapshot/restore 之间
+/// 投机（结束时 sim 停在某个投机末态，调用方负责事后 `restore(root)` 回真状态）。
+///
+/// 树展开（确定性顺序）：
+/// - 第 0 层：以根为唯一活节点；展开它 = 对每个候选动作（下标升序，末尾「不操作」）restore 回根、
+///   注入、step 一帧、snapshot 成子节点；根层每个候选定下它自己的 `root_action`（= 该候选下标）。
+/// - 第 k 层（k≥1）：对上一层束里的每个活节点同样展开（子节点继承父的 `root_action`）。
+/// - 每层展开完，把所有新子节点按 `NodeScore::cmp` 降序排（平手取根动作下标更小、其次展开更早），
+///   取前 W 个作为下一层的束。已终止（命中 Win/Lose）的节点不展开，直接进「候选最优池」。
+/// - 跑满 D 层或束空（全终止）为止。最后在「候选最优池 + 末层束」里选评分最优的，回它的 `root_action`。
+fn plan_beam(
     sim: &mut Sim,
     logic: &mut dyn GameLogic,
     engine: &Engine,
     cfg: &SessionConfig,
-    horizon: u64,
-) -> Result<RolloutScore, String> {
-    let mut terminal: i8 = 0;
-    let mut win_frame: Option<u64> = None;
-    let mut explore: u64 = 0;
-    let mut last_hash = sim.world.state_hash();
+    look: &LookaheadConfig,
+    view: &SceneView,
+    root: &Value,
+) -> Result<usize, String> {
+    let n = view.actions.len(); // 候选 = n 个动作 + 1 个「不操作」(下标 n)
+    // 候选最优池：收集「沿途最优」节点——每层展开后的全部子节点都参与「选最终最优」，
+    // 这样即使 D 层都没人通关，也能选「目标分最高的那个中间节点」的根动作（朝目标爬）。
+    // 用单个 best 累加（严格更优才换 + 平手保守取靠前），不必存全部节点。
+    let mut best: Option<BeamNode> = None;
+    // 当前层的束（活节点，下一层从它们展开）。初始为「根」这一虚拟节点（还没走动作）。
+    // 用 root 快照 + 占位 score/root_action 表示根；根的 root_action 不会被选中
+    //（根层展开时每个候选才定真正的 root_action），这里给 n 占位。
+    // 根节点的 best_goal 用根当前状态的目标值起头（之后子节点路径取 max 单调累进）。
+    // sim 此刻就在根状态（plan_beam 进来时还没 restore 别处），直接算。
+    let root_goal = node_goal_score(sim, engine, cfg);
+    let mut beam: Vec<BeamNode> = vec![BeamNode {
+        snapshot: root.clone(),
+        score: NodeScore { terminal: 0, win_earliness: 0, goal_score: root_goal, explore: 0 },
+        root_action: n,
+        terminated: false,
+        explore: 0,
+        best_goal: root_goal,
+    }];
 
-    for frame in 0..horizon {
-        let report = sim.step(logic).map_err(|e| e.to_string())?;
-        // 终止扫描：step 事件 + 逻辑 emit 的事件
-        let mut hit: Option<Outcome> = scan_terminal(report.events.iter(), &cfg.terminal);
-        let emitted = logic.drain_observed();
-        if hit.is_none() {
-            hit = scan_terminal(emitted.iter(), &cfg.terminal);
-        }
-        if let Some(o) = hit {
-            match o {
-                Outcome::Win => {
-                    if win_frame.is_none() {
-                        win_frame = Some(frame);
-                        terminal = 1;
-                    }
-                    // 触达 Win 即停：再往后是「已经赢了」之后的无意义帧
-                    break;
+    let depth = look.depth;
+    for layer in 0..depth {
+        // 这一层展开出的全部子节点（待剪枝）。
+        let mut children: Vec<BeamNode> = Vec::new();
+        for node in &beam {
+            // 已终止的不展开——但它本身是合法候选最优（如「这条路 3 步就赢了」）。
+            if node.terminated {
+                consider_best(&mut best, node);
+                continue;
+            }
+            for cand in 0..=n {
+                // restore 到这个父节点，注入候选动作（cand==n 即不操作），走一帧 snapshot 成子。
+                sim.restore(&node.snapshot, logic)?;
+                if cand < n {
+                    let a = &view.actions[cand];
+                    sim.inject_input(&a.action, &a.phase);
                 }
-                Outcome::Lose => {
-                    // 没先触达 Win 才标负（Win 优先）；触达 Lose 也停
-                    if terminal == 0 {
-                        terminal = -1;
-                    }
-                    break;
-                }
-                Outcome::Timeout => {}
+                // 根层（layer==0）每个候选定它自己的 root_action；更深层继承父的。
+                let root_action = if layer == 0 { cand } else { node.root_action };
+                let ctx = ExpandCtx {
+                    root_action,
+                    parent_explore: node.explore,
+                    parent_best_goal: node.best_goal,
+                    layer,
+                };
+                let child = expand_one(sim, logic, engine, cfg, &ctx)?;
+                consider_best(&mut best, &child);
+                children.push(child);
             }
         }
-        // 探索弱信号：状态哈希变了就 +1（走到一个新态）
-        let h = sim.world.state_hash();
-        if h != last_hash {
-            explore += 1;
-            last_hash = h;
+        // 束剪枝（保根动作多样性）：见 prune_beam_diverse 的算法/为什么。
+        beam = prune_beam_diverse(children, look.beam_width);
+        if beam.is_empty() {
+            break; // 全束都终止了（已进 best），不必再往下展开
         }
     }
+    // 末层束里的节点也参与「选最终最优」（它们是「看了 D 层最有希望」的状态）。
+    for node in &beam {
+        consider_best(&mut best, node);
+    }
 
-    // 末态目标分
-    let goal_score = match &cfg.playtest.goal {
+    // best 一定有值：根层至少展开出 1 个子节点（n≥0，候选至少含「不操作」）。
+    let best = best.ok_or("束搜索未展开出任何节点（不应发生：至少有「不操作」候选）")?;
+    Ok(best.root_action)
+}
+
+/// 束剪枝（**保根动作多样性的束搜索**）：从这一层展开出的全部子节点里挑出下一层的束。
+///
+/// 不是朴素的「全局评分前 W」，而是**先保证每个根动作各留一条最优线，再用全局次优填满到 W**：
+/// - 第 1 趟：按评分降序遍历，每个 `root_action` 第一次出现时收下它（= 该根动作的最优后继线）。
+///   这保证「翻墙要先跳」这种**早分叉、当前暂时变差**的根动作（jump）不会被 4 条「走右撞墙」的
+///   同根动作线挤掉——否则贪心启发（曼哈顿距离）会把 jump 线在第 1 层就剪光，束搜索退化成贪心、
+///   永远卡在墙前（实测：朴素 top-W 即便 depth=40 也一次都不跳）。
+/// - 第 2 趟：若名额还没满 W，再按评分降序把剩下没收的子节点补进来（给最有希望的根动作多几条线
+///   深入探索）。
+///
+/// 这是「diverse beam search」的标准做法：用根动作分桶强制多样性，避免最优线被同质分支淹没。
+/// 代价上界随之变成 `≤ max(W, 根动作数) × (B+1) × D`（根动作数=B+1，所以 ≈ (B+1)²×D，仍线性于
+/// 深度）。导航/技巧类 B 个位数，可控。
+///
+/// **确定性**：入参 `children` 是按 (父在上层束的序, 候选下标升序) 生成的；本函数先稳定排序
+/// （评分降序，平手根动作下标小者在前，再平手保持生成序），再分桶——同输入出同一束，全程确定。
+fn prune_beam_diverse(mut children: Vec<BeamNode>, beam_width: usize) -> Vec<BeamNode> {
+    if children.is_empty() {
+        return children;
+    }
+    // 稳定排序：评分降序；平手时根动作下标小的在前；再平手保持生成序（展开更早的靠前）。
+    children.sort_by(|a, b| b.score.cmp(&a.score).then(a.root_action.cmp(&b.root_action)));
+
+    let mut chosen: Vec<BeamNode> = Vec::with_capacity(beam_width.max(1));
+    let mut seen_roots: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    let mut taken = vec![false; children.len()];
+
+    // 第 1 趟：每个根动作留它的最优后继线（按已排序的评分序，第一次见到就收）。
+    for (i, c) in children.iter().enumerate() {
+        if seen_roots.insert(c.root_action) {
+            chosen.push(c.clone());
+            taken[i] = true;
+        }
+    }
+    // 第 2 趟：名额没满 W 就按评分序补全局次优（已收过的跳过）。
+    if beam_width > chosen.len() {
+        for (i, c) in children.iter().enumerate() {
+            if chosen.len() >= beam_width {
+                break;
+            }
+            if !taken[i] {
+                chosen.push(c.clone());
+                taken[i] = true;
+            }
+        }
+    }
+    chosen
+}
+
+/// 展开一个子节点时从父继承/由位置决定的上下文（打包成结构体，免得 expand_one 参数爆表）。
+struct ExpandCtx {
+    /// 这个子节点在根层走的第一个动作下标（根层=候选自己，更深层=继承父的）。
+    root_action: usize,
+    /// 从根到父累计的新态数（本帧若产生新 state_hash 再 +1 传给子）。
+    parent_explore: u64,
+    /// 从根到父路径上见过的最优目标值（与本帧当前目标值取 max 传给子）。
+    parent_best_goal: f64,
+    /// 当前展开的是第几层（0-based）：命中 Win 时据此换算 `win_earliness`（越早越大）。
+    layer: u64,
+}
+
+/// 从「已 restore 到父节点 + 注入了候选动作」的状态出发，走**一帧** `sim.step`，把结果
+/// 打包成一个子 [`BeamNode`]：扫这一帧的终止事件、算节点评分、snapshot 成子状态。
+/// 调用前 sim 必须已 restore + inject；本函数推进一帧（调用方负责后续 restore 回别的节点）。
+fn expand_one(
+    sim: &mut Sim,
+    logic: &mut dyn GameLogic,
+    engine: &Engine,
+    cfg: &SessionConfig,
+    ctx: &ExpandCtx,
+) -> Result<BeamNode, String> {
+    let before = sim.world.state_hash();
+    let report = sim.step(logic).map_err(|e| e.to_string())?;
+    // 终止扫描：step 事件 + 逻辑 emit 的事件（同 run_session 口径，Win 优先于 Lose）。
+    let mut hit: Option<Outcome> = scan_terminal(report.events.iter(), &cfg.terminal);
+    let emitted = logic.drain_observed();
+    if hit.is_none() {
+        hit = scan_terminal(emitted.iter(), &cfg.terminal);
+    }
+
+    // 探索弱信号：这一帧若走到新 state_hash 就在父的累计上 +1。
+    let after = sim.world.state_hash();
+    let explore = ctx.parent_explore + if after != before { 1 } else { 0 };
+
+    let mut terminal: i8 = 0;
+    let mut win_earliness: i64 = 0;
+    let mut terminated = false;
+    match hit {
+        Some(Outcome::Win) => {
+            terminal = 1;
+            terminated = true;
+            // 命中越早（layer 越小）→ win_earliness 越大。上界用大常数让它恒为正且单调。
+            // 这里 layer 是「触达 Win 的那一层」的下标；+1 让第 0 层命中也 < 满分。
+            win_earliness = (cfg_depth_bound(cfg) as i64).max(ctx.layer as i64 + 1) - ctx.layer as i64;
+        }
+        Some(Outcome::Lose) => {
+            terminal = -1;
+            terminated = true;
+        }
+        Some(Outcome::Timeout) | None => {}
+    }
+
+    // 路径最优目标值：父的最优值与本帧当前状态目标值取 max（单调不减）。用它当节点 goal_score
+    // ——技巧类最优路径非单调（翻墙时当前距离暂时变大），按「路径见过的最优」打分才不会把翻墙
+    // 中途的分支误剪（见 BeamNode 文档）。无 goal 时 node_goal_score 恒 0，best_goal 也恒 0。
+    let cur_goal = node_goal_score(sim, engine, cfg);
+    let best_goal = ctx.parent_best_goal.max(cur_goal);
+
+    let score = NodeScore { terminal, win_earliness, goal_score: best_goal, explore };
+    let snapshot = sim.snapshot(logic);
+    Ok(BeamNode { snapshot, score, root_action: ctx.root_action, terminated, explore, best_goal })
+}
+
+/// `win_earliness` 的上界基准：取「至少和最深一层一样大」的常数，保证越早命中的 Win 分越高。
+/// 简单用一个够大的固定上界（搜索深度通常 ≤ 几十）；只要它 ≥ 任何可能的 layer 即可。
+fn cfg_depth_bound(_cfg: &SessionConfig) -> u64 {
+    // 1<<20 远大于任何现实搜索深度——保证 (bound - layer) 单调递减且恒正，越早赢分越高。
+    1 << 20
+}
+
+/// 算一个节点当前状态的目标分（越大越优）：有 goal 时按 direction 取 -距离 / 值；
+/// 取不到派生量给最差保底；无 goal 恒 0（退到 explore 主导）。
+fn node_goal_score(sim: &Sim, engine: &Engine, cfg: &SessionConfig) -> f64 {
+    match &cfg.playtest.goal {
         Some(g) => {
             let view = SceneView::derive_with_config(&sim.world, engine, &cfg.terminal, &cfg.playtest);
             let val = view
@@ -599,21 +791,36 @@ fn rollout_score(
                 .and_then(|v| v.as_f64());
             match val {
                 Some(v) => match g.direction {
-                    // min：距离越小越优 → 取负距离（越大越优，和 RolloutScore 口径一致）
+                    // min：距离越小越优 → 取负距离（越大越优，和 NodeScore 口径一致）
                     crate::config::GoalDirection::Min => -v,
                     crate::config::GoalDirection::Max => v,
                 },
-                // 取不到目标量（派生量为 null 等）：给最差保底，不让这个候选被选中
+                // 取不到目标量（派生量为 null 等）：给最差保底，不让这个节点被选中
                 None => f64::NEG_INFINITY,
             }
         }
         None => 0.0,
+    }
+}
+
+/// 用一个候选节点更新「全局最优」：严格更优才替换；**平手保守取靠前**
+///（根动作下标更小者优先，再相等保留先到的=展开更早的）。确定性平手规则的单一出口。
+fn consider_best(best: &mut Option<BeamNode>, node: &BeamNode) {
+    let replace = match best {
+        None => true,
+        Some(b) => {
+            use std::cmp::Ordering;
+            match node.score.cmp(&b.score) {
+                Ordering::Greater => true,
+                Ordering::Less => false,
+                // 评分平手：根动作下标更小的优先（确定）；再相等保留已有（先到先得）
+                Ordering::Equal => node.root_action < b.root_action,
+            }
+        }
     };
-
-    // win_earliness：越早触达 Win 越优。没命中=0；命中第 frame 帧 → horizon-frame（越早越大）
-    let win_earliness = win_frame.map(|f| (horizon - f) as i64).unwrap_or(0);
-
-    Ok(RolloutScore { terminal, win_earliness, goal_score, explore })
+    if replace {
+        *best = Some(node.clone());
+    }
 }
 
 /// 一组事件里第一个命中终止的结局（按事件序，确定性）。
@@ -1021,13 +1228,23 @@ mod tests {
     // ---- 前瞻搜索（run_session_lookahead）单元测试 ----
 
     #[test]
-    fn lookahead_rejects_zero_horizon() {
+    fn lookahead_rejects_zero_depth() {
         let mut sim = Sim::new(1);
         let mut logic = NeverEnds;
         let eng = empty_engine();
         let cfg = SessionConfig { max_ticks: 10, seed: 0, ..Default::default() };
-        let err = run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { horizon: 0 }).unwrap_err();
-        assert!(err.contains("horizon"), "{err}");
+        let err = run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { depth: 0, beam_width: 4 }).unwrap_err();
+        assert!(err.contains("depth"), "{err}");
+    }
+
+    #[test]
+    fn lookahead_rejects_zero_beam_width() {
+        let mut sim = Sim::new(1);
+        let mut logic = NeverEnds;
+        let eng = empty_engine();
+        let cfg = SessionConfig { max_ticks: 10, seed: 0, ..Default::default() };
+        let err = run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { depth: 4, beam_width: 0 }).unwrap_err();
+        assert!(err.contains("beam_width"), "{err}");
     }
 
     /// 手工攒的录像必须能被 Sim::replay 逐位复现——锁死「投机的 restore 不污染录像、
@@ -1040,7 +1257,7 @@ mod tests {
         let mut logic = EmitAt { at: 70, event: "game-won".to_string(), pending: vec![] };
         let eng = action_engine();
         let cfg = SessionConfig { max_ticks: 300, seed: 0, ..Default::default() };
-        let res = run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { horizon: 5 }).unwrap();
+        let res = run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { depth: 5, beam_width: 4 }).unwrap();
         assert_eq!(res.outcome, Outcome::Win);
         assert_eq!(res.ticks, 71, "tick 70 发的 game-won，step 后 tick=71 收到");
         // 跨过 tick 60 → 必有起点 (0,_) + 周期 (60,_) 两条 checkpoint
@@ -1063,7 +1280,7 @@ mod tests {
             let mut logic = EmitAt { at: 50, event: "game-won".to_string(), pending: vec![] };
             let eng = action_engine();
             let cfg = SessionConfig { max_ticks: 200, seed: 2, ..Default::default() };
-            run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { horizon: 6 }).unwrap()
+            run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { depth: 6, beam_width: 4 }).unwrap()
         };
         let a = run();
         let b = run();
@@ -1071,7 +1288,7 @@ mod tests {
         assert_eq!(a.ticks, b.ticks);
         let ja = serde_json::to_string(&a.recording).unwrap();
         let jb = serde_json::to_string(&b.recording).unwrap();
-        assert_eq!(ja, jb, "同 (项目,seed,horizon) 两次前瞻录像必须逐字节一致");
+        assert_eq!(ja, jb, "同 (项目,seed,depth,beam) 两次前瞻录像必须逐字节一致");
     }
 
     /// 起手就 done / max_ticks=0：一个真 tick 都不跑，仍出一份合法空录像（起点 checkpoint + ticks=0）。
@@ -1081,7 +1298,7 @@ mod tests {
         let mut logic = NeverEnds;
         let eng = empty_engine();
         let cfg = SessionConfig { max_ticks: 0, seed: 0, ..Default::default() };
-        let res = run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { horizon: 4 }).unwrap();
+        let res = run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { depth: 4, beam_width: 4 }).unwrap();
         assert_eq!(res.ticks, 0);
         assert_eq!(res.recording.ticks, 0);
         assert!(res.recording.inputs.is_empty());
@@ -1089,5 +1306,87 @@ mod tests {
         // 空录像也可重放（起点即终点）
         let mut sim2 = Sim::new(3);
         sim2.replay(&res.recording, &mut NeverEnds).expect("空前瞻录像也可重放");
+    }
+
+    /// depth=1 退化为单步前瞻：每候选只前瞻 1 帧选最优。这里用「tick 2 发 game-won」的逻辑，
+    /// depth=1 在 tick 1 那帧（step 后 tick=2 收到 win）也能收到终止——验证退化档照常跑、出录像。
+    #[test]
+    fn lookahead_depth_one_is_degenerate_one_ply() {
+        let mut sim = Sim::new(1);
+        let mut logic = EmitAt { at: 2, event: "game-won".to_string(), pending: vec![] };
+        let eng = action_engine();
+        let cfg = SessionConfig { max_ticks: 50, seed: 0, ..Default::default() };
+        let res = run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig { depth: 1, beam_width: 4 }).unwrap();
+        assert_eq!(res.outcome, Outcome::Win, "depth=1 退化档也该收到终止事件");
+        assert_eq!(res.ticks, 3, "tick 2 发的 game-won，step 后 tick=3 收到");
+        // depth=1 照样手工攒可重放录像
+        let mut sim2 = Sim::new(1);
+        let mut logic2 = EmitAt { at: 2, event: "game-won".to_string(), pending: vec![] };
+        sim2.replay(&res.recording, &mut logic2).expect("depth=1 录像可重放");
+    }
+
+    // ---- prune_beam_diverse：保根动作多样性 + 确定性 ----
+
+    /// 造一个最小 BeamNode（snapshot 用 Null 占位——prune 只读 score/root_action）。
+    fn node(root_action: usize, goal: f64, explore: u64) -> BeamNode {
+        BeamNode {
+            snapshot: Value::Null,
+            score: NodeScore { terminal: 0, win_earliness: 0, goal_score: goal, explore },
+            root_action,
+            terminated: false,
+            explore,
+            best_goal: goal,
+        }
+    }
+
+    #[test]
+    fn prune_keeps_one_line_per_root_action_even_when_width_smaller() {
+        // 6 个子：root 0 有 3 条（含全局最高分），root 1、root 2 各一条（分较低）。
+        // beam_width=2 < 不同根数 3 → 第 1 趟仍保证每个根各留它的最优一条（3 条），不被 root 0 的
+        // 三条挤掉。证明多样性：root 1、root 2 的线不会因为 root 0 分高而被剪光。
+        let children = vec![
+            node(0, 10.0, 5), // root0 最优
+            node(0, 9.0, 4),
+            node(0, 8.0, 3),
+            node(1, 2.0, 9), // root1 唯一
+            node(2, 1.0, 1), // root2 唯一
+        ];
+        let kept = prune_beam_diverse(children, 2);
+        let roots: std::collections::BTreeSet<usize> = kept.iter().map(|n| n.root_action).collect();
+        assert!(roots.contains(&0) && roots.contains(&1) && roots.contains(&2),
+            "每个根动作都该留一条线，实际根 {roots:?}");
+        // 每个根只留它的最优一条（root0 留 10.0 那条）
+        let root0: Vec<_> = kept.iter().filter(|n| n.root_action == 0).collect();
+        assert_eq!(root0.len(), 1, "每根第 1 趟只留一条");
+        assert_eq!(root0[0].score.goal_score, 10.0, "root0 留的是它的最优");
+    }
+
+    #[test]
+    fn prune_fills_remaining_slots_with_global_best_when_width_allows() {
+        // 3 个根，beam_width=5 > 根数：第 1 趟留 3 条（每根最优），第 2 趟再补 2 条全局次优。
+        let children = vec![
+            node(0, 10.0, 0),
+            node(0, 9.0, 0), // root0 次优——第 2 趟该补进来
+            node(1, 8.0, 0),
+            node(1, 7.0, 0), // root1 次优——第 2 趟该补进来
+            node(2, 1.0, 0),
+        ];
+        let kept = prune_beam_diverse(children, 5);
+        assert_eq!(kept.len(), 5, "名额够就补满");
+        // 补的是全局次优（9.0、8.0 而非 1.0 之外的更低）——按分序补
+        let goals: Vec<f64> = kept.iter().map(|n| n.score.goal_score).collect();
+        assert!(goals.contains(&9.0) && goals.contains(&7.0), "第 2 趟按分序补次优: {goals:?}");
+    }
+
+    #[test]
+    fn prune_is_deterministic_and_tiebreaks_by_root_action() {
+        // 全同分平手：稳定排序 + 根动作小者优先 → 输出顺序确定（root 升序）。
+        let mk = || vec![node(2, 5.0, 0), node(0, 5.0, 0), node(1, 5.0, 0)];
+        let a = prune_beam_diverse(mk(), 3);
+        let b = prune_beam_diverse(mk(), 3);
+        let ra: Vec<usize> = a.iter().map(|n| n.root_action).collect();
+        let rb: Vec<usize> = b.iter().map(|n| n.root_action).collect();
+        assert_eq!(ra, rb, "同输入两次剪枝顺序必须一致");
+        assert_eq!(ra, vec![0, 1, 2], "平手按根动作下标升序");
     }
 }

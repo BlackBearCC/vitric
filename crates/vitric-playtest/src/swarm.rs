@@ -41,11 +41,12 @@ pub enum StrategyKind {
     /// 形态各异），不从 (kind,seed) 构造，由 `cmd_playtest --llm` 直接持有 LlmStrategy 跑，
     /// 跑完贴这个标签把结果并进 swarm 结果集（note 进 qualitative_notes）。
     Llm,
-    /// 前瞻搜索局（技巧/导航类专用）。它不是 `Strategy`——要 sim/logic 自己 snapshot/restore
-    /// 投机选最优动作（走 `run_session_lookahead` 而非 `run_session`），所以 horizon 直接挂在
-    /// 变体上。声明了 goal 的项目，默认 swarm 会掺几局这种进来（导航类才不被误报 unbeatable）。
+    /// 前瞻规划器局（技巧/导航类专用）。它不是 `Strategy`——要 sim/logic 自己 snapshot/restore
+    /// 跑束搜索投机选最优动作（走 `run_session_lookahead` 而非 `run_session`），所以搜索深度
+    /// `depth` 直接挂在变体上（束宽用默认 [`DEFAULT_SWARM_LOOKAHEAD_BEAM`]，swarm 不另调）。
+    /// 声明了 goal 的项目，默认 swarm 会掺几局这种进来（导航类才不被误报 unbeatable）。
     /// `run_one` 在每会话执行处按这个变体分流到 `run_session_lookahead`。
-    Lookahead { horizon: u64 },
+    Lookahead { depth: u64 },
 }
 
 impl StrategyKind {
@@ -128,24 +129,30 @@ impl LabeledResult {
     }
 }
 
-/// 默认 swarm 掺入的前瞻局用的搜索地平线。比单局 `--strategy lookahead` 的默认 12 大：
-/// 技巧/导航类要看够远才算得出「先绕一步再回正」的收益（如 nav 跳墙：跳起到越过墙顶减小
-/// 距离要 ~20+ 帧，horizon 12 看不到落点收益就退化成原地踏步）。24 是 nav fixture 实测能稳定
-/// 通关的最小值；动作集小（导航类一般个位数候选），24 帧投机成本仍可控。单局 `--strategy
-/// lookahead` 不受此影响（仍用 `--horizon`/默认 12，用户可显式调大）。
-pub const DEFAULT_SWARM_LOOKAHEAD_HORIZON: u64 = 24;
+/// 默认 swarm 掺入的前瞻局用的**束搜索深度**。比单局 `--strategy lookahead` 的默认 depth=8
+/// 略大留余量：技巧/导航类要规划够深才算得出「先跳过墙再右行」这种多 tick 机动的收益——nav
+/// 跳墙的收益（越过墙顶后 hero_x 重新增长）要起跳后约 5 帧才显现，depth 太浅（实测 ≤6）看不到
+/// 就退化成原地踏步。12 配束宽 4 是 nav fixture 实测稳定通关深度（最小约 8，留 1.5× 余量）。
+/// 束搜索线性于深度（每真 tick 投机步 ≤ max(W,根动作数)×(B+1)×D，见 session.rs 性能注释），
+/// 导航类 B 个位数，depth 12 成本可控。单局 `--strategy lookahead` 不受此影响（用 `--horizon`→
+/// depth，默认 8，用户可显式调大解更难的多 tick 机动）。
+pub const DEFAULT_SWARM_LOOKAHEAD_DEPTH: u64 = 12;
+
+/// 默认 swarm 掺入的前瞻局用的**束宽**。导航/技巧类需要保留几条「先变差再变好」的分支（贴墙、
+/// 起跳、横移并存），束宽 1 = 纯贪心容易剪掉跳墙路径；4 给足探索余量又不至于太慢。
+pub const DEFAULT_SWARM_LOOKAHEAD_BEAM: usize = 4;
 
 /// 默认 swarm 的会话计划：N 局，廉价策略（random/greedy/coverage/economy）轮换 × 递增 seed。
 ///
 /// **声明了 goal 时掺前瞻**：lookahead 需要项目声明 goal（`playtest.json` 的 PlaytestConfig.goal）
 /// 才有方向，否则没意义。所以仅当 `has_goal` 为真时，把计划里固定少数几局换成 `Lookahead`——
-/// 导航/技巧类（先跳上墙再走）random 0% 通关，不掺前瞻就会被误报 unbeatable。比例克制（前瞻慢：
-/// 每真 tick = |候选+不操作|×horizon 个投机 step）：取 `min(N, max(2, N/4))` 局（约 25%，至少 2、
+/// 导航/技巧类（先跳上墙再走）random 0% 通关，不掺前瞻就会被误报 unbeatable。比例克制（束搜索慢：
+/// 每真 tick ≤ W×(B+1)×D 个投机 step）：取 `min(N, max(2, N/4))` 局（约 25%，至少 2、
 /// 不超过 N）。**没声明 goal 时一局都不换**，默认组完全不变（向后兼容）。
 ///
-/// 掺入的前瞻局用 [`DEFAULT_SWARM_LOOKAHEAD_HORIZON`]（比单局默认大，技巧类才看得到收益）。
+/// 掺入的前瞻局用 [`DEFAULT_SWARM_LOOKAHEAD_DEPTH`]（比单局默认深，多 tick 机动才看得到收益）。
 /// 哪几局换成前瞻：取计划**末尾**那几局换（前面的轮换槽位不动，diff 最小、好对账）。被换的局
-/// 沿用它原本的 seed/max_ticks/terminal，只把 strategy_kind 改成 `Lookahead{horizon}`。
+/// 沿用它原本的 seed/max_ticks/terminal，只把 strategy_kind 改成 `Lookahead{depth}`。
 pub fn default_plan(
     sessions: u64,
     seed: u64,
@@ -165,7 +172,7 @@ pub fn default_plan(
         let start = plan.len() - look_n;
         for spec in &mut plan[start..] {
             spec.strategy_kind =
-                StrategyKind::Lookahead { horizon: DEFAULT_SWARM_LOOKAHEAD_HORIZON };
+                StrategyKind::Lookahead { depth: DEFAULT_SWARM_LOOKAHEAD_DEPTH };
         }
     }
     plan
@@ -198,8 +205,15 @@ where
     // run_session_lookahead；其余照旧 build 出 Strategy 走 run_session。两条路同口径产
     // SessionResult（state_trace/numeric_summary/fired_events/notes/recording 都齐），聚合不缺数据。
     let result = match spec.strategy_kind {
-        StrategyKind::Lookahead { horizon } => {
-            run_session_lookahead(&mut sim, &mut logic, &engine, &cfg, &LookaheadConfig { horizon })?
+        StrategyKind::Lookahead { depth } => {
+            // swarm 掺入的前瞻局用默认束宽（DEFAULT_SWARM_LOOKAHEAD_BEAM），深度由变体携带。
+            run_session_lookahead(
+                &mut sim,
+                &mut logic,
+                &engine,
+                &cfg,
+                &LookaheadConfig { depth, beam_width: DEFAULT_SWARM_LOOKAHEAD_BEAM },
+            )?
         }
         _ => {
             let mut strategy = spec.strategy_kind.build(spec.seed, &config.goal);
@@ -522,10 +536,10 @@ mod tests {
         // 前瞻局沿用原 seed/max_ticks/terminal，只换 kind
         assert_eq!(plan[7].seed, 7);
         assert_eq!(plan[7].max_ticks, 50);
-        // 掺入的前瞻用默认 swarm 地平线（比单局默认大）
+        // 掺入的前瞻用默认 swarm 搜索深度（比单局默认深）
         assert_eq!(
             plan[7].strategy_kind,
-            StrategyKind::Lookahead { horizon: DEFAULT_SWARM_LOOKAHEAD_HORIZON }
+            StrategyKind::Lookahead { depth: DEFAULT_SWARM_LOOKAHEAD_DEPTH }
         );
     }
 
@@ -546,7 +560,7 @@ mod tests {
         // 计划：一局普通 random + 一局 Lookahead。两局都应跑通、都带齐遥测（state_trace 非空、有录像）。
         let plan = vec![
             SessionSpec::new(StrategyKind::Random, 0, 20),
-            SessionSpec::new(StrategyKind::Lookahead { horizon: 4 }, 1, 20),
+            SessionSpec::new(StrategyKind::Lookahead { depth: 4 }, 1, 20),
         ];
         // factory_winning(Some(3))：tick 3 发 game-won，两条路都该在 tick 4 通关
         let out = run_swarm(factory_winning(Some(3)), &plan, 2).unwrap();
@@ -566,9 +580,9 @@ mod tests {
     fn swarm_mixed_lookahead_serial_and_parallel_identical() {
         let plan = vec![
             SessionSpec::new(StrategyKind::Random, 0, 40),
-            SessionSpec::new(StrategyKind::Lookahead { horizon: 5 }, 1, 40),
+            SessionSpec::new(StrategyKind::Lookahead { depth: 5 }, 1, 40),
             SessionSpec::new(StrategyKind::Greedy, 2, 40),
-            SessionSpec::new(StrategyKind::Lookahead { horizon: 8 }, 3, 40),
+            SessionSpec::new(StrategyKind::Lookahead { depth: 8 }, 3, 40),
         ];
         let serial = run_swarm(factory_winning(Some(10)), &plan, 1).unwrap();
         let parallel = run_swarm(factory_winning(Some(10)), &plan, 8).unwrap();

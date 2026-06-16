@@ -7,12 +7,17 @@
         "from": "hero",
         "to": "exit",
         "metric": "manhattan"
+      },
+      {
+        "kind": "alias",
+        "name": "hero_x",
+        "path": "hero/Position.x"
       }
     ]
   },
   "goal": {
-    "quantity": "to_exit",
-    "direction": "min"
+    "quantity": "hero_x",
+    "direction": "max"
   },
   "terminal": {
     "win_events": ["reached-exit"]

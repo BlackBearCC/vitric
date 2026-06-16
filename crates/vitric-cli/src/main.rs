@@ -149,8 +149,12 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
 ///
 /// 选项：
 ///   --strategy <random|greedy|economy|lookahead>  策略（默认 random；仅单局 N=1 用）。
-///                                lookahead=前瞻搜索（技巧类游戏专用，慢但聪明，不进 swarm 默认轮换）
-///   --horizon <K>                lookahead 每真 tick 向前投机多少帧（默认 12，仅 --strategy lookahead 用）
+///                                lookahead=束搜索滚动规划器（技巧类游戏专用，慢但聪明，能解多 tick
+///                                组合/连续机动；不进 swarm 默认轮换）
+///   --horizon <K>                lookahead 束搜索的**深度**（往前规划几帧；默认 8，K=1 退化为单步前瞻）。
+///                                仅 --strategy lookahead 用
+///   --beam <W>                   lookahead 束搜索的**束宽**（每层保留 W 个最优节点；默认 4）。
+///                                仅 --strategy lookahead 用
 ///   --seed <N>                   策略 PCG 播种（默认 0；swarm 模式从此起递增）
 ///   --max-ticks <N>              超时上限（默认 600）
 ///   --sessions <N>               跑 N 局 swarm 聚合出报告（默认 1=单局旧行为）
@@ -199,7 +203,11 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     let dir = PathBuf::from(dir);
 
     let mut strategy_name = "random".to_string();
-    let mut horizon: u64 = 12;
+    // --horizon 现在指束搜索的**深度**（往前规划几帧）；保留旧 flag 名向后兼容，默认 8。
+    // depth=1 退化为单步前瞻（1-ply）。
+    let mut horizon: u64 = 8;
+    // --beam 束宽（每层保留多少最优节点继续展开），仅 --strategy lookahead 用，默认 4。
+    let mut beam: usize = 4;
     let mut seed: u64 = 0;
     let mut max_ticks: u64 = 600;
     let mut sessions: u64 = 1;
@@ -226,6 +234,10 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
             }
             "--horizon" => {
                 horizon = args.get(i + 1).ok_or(need("--horizon"))?.parse().map_err(|e| format!("--horizon: {e}"))?;
+                i += 2;
+            }
+            "--beam" => {
+                beam = args.get(i + 1).ok_or(need("--beam"))?.parse().map_err(|e| format!("--beam: {e}"))?;
                 i += 2;
             }
             "--seed" => {
@@ -256,7 +268,7 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
                 i += 2;
             }
             other => {
-                return Err(format!("未知选项 {other:?}。可用: --strategy --horizon --seed --max-ticks --sessions --llm --seed-recording --out --report-dir --html"))
+                return Err(format!("未知选项 {other:?}。可用: --strategy --horizon --beam --seed --max-ticks --sessions --llm --seed-recording --out --report-dir --html"))
             }
         }
     }
@@ -432,11 +444,11 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     // Engine 是装配期无状态副本，复制一份只读的传进去最干净（见 Engine 的 derive 注释）。
     let engine = rt.rules.clone();
 
-    // lookahead 走前瞻搜索（每真 tick 投机 horizon 帧选最优），其余走普通策略 run_session。
-    // 成本注释：前瞻每真 tick 代价 = |候选动作+不操作| × horizon 个投机 step，远贵于廉价策略，
-    // 所以只在显式 --strategy lookahead 时启用，**不进 swarm 默认轮换**（swarm 要跑成百上千局）。
+    // lookahead 走束搜索滚动规划器（每真 tick 建深度 D=horizon、束宽 W=beam 的搜索树选最优首步），
+    // 其余走普通策略 run_session。成本注释：束搜索每真 tick 代价 ≤ W×(|候选动作|+1)×D 个投机 step，
+    // 远贵于廉价策略，所以只在显式 --strategy lookahead 时启用，**不进 swarm 默认轮换**（swarm 跑成百上千局）。
     let result = if strategy_name == "lookahead" {
-        run_session_lookahead(&mut sim, &mut rt, &engine, &cfg, &LookaheadConfig { horizon })?
+        run_session_lookahead(&mut sim, &mut rt, &engine, &cfg, &LookaheadConfig { depth: horizon, beam_width: beam })?
     } else {
         // economy 也能选——单局压一种策略看它怎么跑。
         // greedy 有 config.goal 时朝目标走（playtest.json 声明派生量 + goal），否则退化随机。

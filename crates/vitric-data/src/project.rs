@@ -125,9 +125,13 @@ pub struct PlaytestGate {
     /// 跑法策略（不填=默认策略组 swarm 轮换四策略；可填 "lookahead" 走前瞻搜索跑 sessions 局）。
     #[serde(default)]
     pub strategy: Option<String>,
-    /// lookahead 的前瞻帧数（仅 strategy=lookahead 用，默认 12）。
+    /// lookahead 束搜索的**深度**（往前规划几帧；仅 strategy=lookahead 用，默认 8，1=单步前瞻）。
+    /// 字段名沿用 `horizon` 向后兼容旧清单（语义已并入「搜索深度」）。
     #[serde(default = "default_horizon")]
     pub horizon: u64,
+    /// lookahead 束搜索的**束宽**（每层保留多少最优节点继续展开；仅 strategy=lookahead 用，默认 4）。
+    #[serde(default = "default_beam")]
+    pub beam: usize,
     /// 种子录像（相对项目根）。填了走种子式探索：以这条录像为基线扰动出 sessions 条变异跑。
     #[serde(default)]
     pub seed_recording: Option<String>,
@@ -162,7 +166,11 @@ fn default_pt_max_ticks() -> u64 {
 }
 
 fn default_horizon() -> u64 {
-    12
+    8
+}
+
+fn default_beam() -> usize {
+    4
 }
 
 /// 一条通关录像门。

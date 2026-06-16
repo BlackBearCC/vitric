@@ -273,8 +273,8 @@ fn playtest_report(dir: &Path, pt: &PlaytestGate) -> Result<Report, String> {
             threads,
         )?
     } else if pt.strategy.as_deref() == Some("lookahead") {
-        // lookahead：跑 sessions 局前瞻搜索（每局 seed 递增）。lookahead 贵，不进 swarm 轮换，
-        // 这里按声明显式跑——每局自己 boot，串行（前瞻本身已是重计算）。
+        // lookahead：跑 sessions 局束搜索规划器（每局 seed 递增）。前瞻贵，不进 swarm 轮换，
+        // 这里按声明显式跑——每局自己 boot，串行（束搜索本身已是重计算）。
         let mut out = Vec::with_capacity(pt.sessions);
         for k in 0..pt.sessions {
             let (mut sim, mut rt) = Runtime::boot(dir)?;
@@ -291,7 +291,8 @@ fn playtest_report(dir: &Path, pt: &PlaytestGate) -> Result<Report, String> {
                 &mut rt,
                 &engine,
                 &cfg,
-                &LookaheadConfig { horizon: pt.horizon },
+                // 清单 horizon 字段语义已是「搜索深度」，beam 是束宽（都向后兼容默认值）。
+                &LookaheadConfig { depth: pt.horizon, beam_width: pt.beam },
             )?;
             // lookahead 局贴 Coverage 标签只是占位（spec 仅用于聚合分组/对账，不影响结果）。
             let spec =

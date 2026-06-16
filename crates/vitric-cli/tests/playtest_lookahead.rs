@@ -1,13 +1,18 @@
-//! 前瞻搜索（run_session_lookahead）端到端：在真实 nav 导航项目上证明「技巧类游戏能玩了」。
+//! 束搜索滚动规划器（run_session_lookahead）端到端：在真实 nav 导航项目上证明「技巧类游戏
+//! 需要的多 tick 机动能被规划出来」。
 //!
-//! nav 关卡：hero 从 x=0 出发，x=5 处有堵 3 高的墙挡路，必须先跳上墙顶再继续往右，
-//! 走到 x≥9.5 触发 reached-exit 通关。随机策略乱按几乎不可能凑齐「贴墙→起跳→越过→右行」
-//! 这串操作 → 超时；前瞻搜索每真 tick 投机 horizon 帧、按 to_exit 距离打分，能算出该跳该走 → 通关。
+//! nav 关卡：hero 从 x=0 出发，x=5 处有堵挡路的墙（Collider h=2，墙顶 y=1 高过 hero 站地时的
+//! 脚底 y=0），必须**先起跳越过墙、再持续右行**，走到 x≥9.5 触发 reached-exit 通关。playtest.json
+//! 把目标声明成「最大化 hero 的 x 坐标」（向右推进）——跳跃那一帧不增加 x（甚至像在原地「浪费」
+//! 一帧），所以**单步前瞻（depth=1）只会贪心地一直按右、撞墙卡死**；只有规划够深的束搜索才算得出
+//! 「跳一下、越过墙、x 重新增长」这串收益，从而通关。
 //!
-//! 硬证据三条：
-//!  1. 同条件下 lookahead 通关（Win）而 random 超时（Timeout）；
-//!  2. lookahead 那局手工攒的录像被 Sim::replay 逐位复现（证明录像对、投机没污染）；
-//!  3. 同 (项目,seed,horizon) 两次 lookahead 的 outcome/ticks/录像逐字节一致。
+//! 硬证据：
+//!  1. **同一关卡、同一规划器，depth=1（退化单步前瞻）超时，depth≥8 的束搜索通关**——证明规划
+//!     深度真带来了能力（这是本次「单步→束搜索」升级的核心证据）；
+//!  2. 同条件下 lookahead 通关（Win）而 random 超时（Timeout）；
+//!  3. lookahead 那局手工攒的录像被 Sim::replay 逐位复现（证明录像对、投机没污染）；
+//!  4. 同 (项目,seed,depth,beam) 两次 lookahead 的 outcome/ticks/录像逐字节一致。
 
 use std::path::PathBuf;
 
@@ -18,6 +23,11 @@ use vitric_playtest::{
     StrategyKind, Strategy, TerminalSpec,
 };
 
+/// 本测试用的束搜索深度：nav 越墙机动实测 depth≥8 稳定通关（最小约 8），取 12 留余量。
+const NAV_DEPTH: u64 = 12;
+/// 本测试用的束宽。
+const NAV_BEAM: usize = 4;
+
 fn nav_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../vitric-playtest/tests/fixtures/nav")
 }
@@ -27,7 +37,7 @@ fn example(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(name)
 }
 
-/// 加载 nav 的 playtest.json（含派生量 to_exit + goal:min + terminal win_events:["reached-exit"]）。
+/// 加载 nav 的 playtest.json（含派生量 hero_x + goal:max + terminal win_events:["reached-exit"]）。
 fn nav_cfg(seed: u64, max_ticks: u64) -> (PlaytestConfig, SessionConfig) {
     let config = PlaytestConfig::load(&nav_dir()).unwrap().expect("nav 有 playtest.json");
     let terminal = match &config.terminal {
@@ -44,11 +54,17 @@ fn nav_cfg(seed: u64, max_ticks: u64) -> (PlaytestConfig, SessionConfig) {
     (config, cfg)
 }
 
-fn run_lookahead(seed: u64, max_ticks: u64, horizon: u64) -> vitric_playtest::SessionResult {
+/// 跑一局束搜索 lookahead（显式指定 depth/beam，便于硬证据对照 depth=1 vs 深搜）。
+fn run_lookahead_db(seed: u64, max_ticks: u64, depth: u64, beam: usize) -> vitric_playtest::SessionResult {
     let (_, cfg) = nav_cfg(seed, max_ticks);
     let (mut sim, mut rt) = Runtime::boot(&nav_dir()).unwrap();
     let engine = rt.rules.clone();
-    run_session_lookahead(&mut sim, &mut rt, &engine, &cfg, &LookaheadConfig { horizon }).unwrap()
+    run_session_lookahead(&mut sim, &mut rt, &engine, &cfg, &LookaheadConfig { depth, beam_width: beam }).unwrap()
+}
+
+/// 默认深度/束宽的 lookahead（多数硬证据用这个）。
+fn run_lookahead(seed: u64, max_ticks: u64) -> vitric_playtest::SessionResult {
+    run_lookahead_db(seed, max_ticks, NAV_DEPTH, NAV_BEAM)
 }
 
 fn run_random(seed: u64, max_ticks: u64) -> vitric_playtest::SessionResult {
@@ -59,42 +75,73 @@ fn run_random(seed: u64, max_ticks: u64) -> vitric_playtest::SessionResult {
     run_session(&mut sim, &mut rt, &engine, strat.as_mut(), &cfg).unwrap()
 }
 
-/// 硬证据 1：lookahead 通关，random 同条件超时。
+/// 硬证据 1（**本次升级的核心**）：同一关卡、同一规划器，**depth=1 退化单步前瞻超时，
+/// depth≥8 的束搜索通关**——规划深度真带来了「解多 tick 机动」的能力。
+///
+/// 为什么 depth=1 解不了：nav 目标是「最大化 hero_x」。在墙前，单步前瞻对每个候选只看 1 帧——
+/// 跳跃那一帧 x 不增加（甚至像浪费一帧），按右又被墙挡住 x 不变，没有任何单帧动作能改善 hero_x
+/// → 贪心退化成一直按右、撞墙卡死 → 超时。深度够的束搜索能往下看到「跳起→越过墙顶→再右行，
+/// hero_x 重新增长」这串收益，于是在墙前选择起跳 → 通关。这正是单步前瞻（旧实现）做不到、束搜索
+/// 才有的能力。
+#[test]
+fn lookahead_depth1_times_out_but_beam_search_wins() {
+    // depth=1：退化为单步前瞻（每候选只前瞻 1 帧）。撞墙卡死 → 超时。
+    let shallow = run_lookahead_db(0, 300, 1, NAV_BEAM);
+    assert_eq!(
+        shallow.outcome,
+        Outcome::Timeout,
+        "depth=1 单步前瞻应在墙前卡死超时，实际 {:?} @ {} tick",
+        shallow.outcome,
+        shallow.ticks
+    );
+    // depth≥8 的束搜索：规划出「先跳过墙、再右行」→ 通关。
+    let deep = run_lookahead_db(0, 300, NAV_DEPTH, NAV_BEAM);
+    assert_eq!(deep.outcome, Outcome::Win, "深度束搜索应通关 nav（跳过墙到出口）");
+    assert!(deep.ticks < shallow.ticks, "深搜通关 tick({}) 应远少于单步超时 tick({})", deep.ticks, shallow.ticks);
+    // 通关路径里**确实有起跳**——多 tick 机动（跳+持续右行）真涌现了，不是蹭出来的。
+    assert!(
+        deep.recording.inputs.iter().any(|i| i.action == "space"),
+        "深搜通关录像里应记录到起跳（space），证明跳过墙的机动被规划出来：{:?}",
+        deep.recording.inputs
+    );
+}
+
+/// 硬证据 2：lookahead 通关，random 同条件超时。
 #[test]
 fn lookahead_wins_nav_where_random_times_out() {
-    let look = run_lookahead(0, 600, 24);
-    assert_eq!(look.outcome, Outcome::Win, "前瞻搜索应通关 nav（越墙到出口）");
+    let look = run_lookahead(0, 600);
+    assert_eq!(look.outcome, Outcome::Win, "束搜索应通关 nav（越墙到出口）");
     assert!(look.ticks < 600, "通关应早于超时上限，实际 {} tick", look.ticks);
 
     let rand = run_random(0, 600);
     assert_eq!(rand.outcome, Outcome::Timeout, "随机策略凑不齐越墙序列 → 超时");
 }
 
-/// 硬证据 2：lookahead 手工攒的录像被 Sim::replay 逐位复现。
+/// 硬证据 3：lookahead 手工攒的录像被 Sim::replay 逐位复现。
 #[test]
 fn lookahead_nav_recording_replays_bit_for_bit() {
-    let look = run_lookahead(0, 600, 24);
+    let look = run_lookahead(0, 600);
     assert_eq!(look.outcome, Outcome::Win);
-    // 越墙必有输入（贴墙/起跳/右行），录像非空
+    // 越墙必有输入（起跳/右行），录像非空
     assert!(!look.recording.inputs.is_empty(), "通关录像应记录到注入的输入");
     assert!(look.recording.checkpoints.first().map(|c| c.0) == Some(0), "起点 checkpoint tick=0");
 
     let (mut sim, mut rt) = Runtime::boot(&nav_dir()).unwrap();
     sim.replay(&look.recording, &mut rt)
-        .expect("前瞻搜索手工攒的录像必须可重放且逐位一致");
+        .expect("束搜索手工攒的录像必须可重放且逐位一致");
     assert_eq!(sim.world.state_hash(), look.recording.final_hash);
 }
 
-/// 硬证据 3：同 (项目,seed,horizon) 两次 lookahead 逐字节一致。
+/// 硬证据 4：同 (项目,seed,depth,beam) 两次 lookahead 逐字节一致。
 #[test]
 fn lookahead_nav_is_deterministic_byte_for_byte() {
-    let a = run_lookahead(0, 600, 24);
-    let b = run_lookahead(0, 600, 24);
+    let a = run_lookahead(0, 600);
+    let b = run_lookahead(0, 600);
     assert_eq!(a.outcome, b.outcome);
     assert_eq!(a.ticks, b.ticks);
     let ja = serde_json::to_string(&a.recording).unwrap();
     let jb = serde_json::to_string(&b.recording).unwrap();
-    assert_eq!(ja, jb, "同 (项目,seed,horizon) 两次前瞻录像必须逐字节一致");
+    assert_eq!(ja, jb, "同 (项目,seed,depth,beam) 两次束搜索录像必须逐字节一致");
 }
 
 // ---- 默认 swarm 自动掺前瞻：声明 goal 的技巧/导航类不再被误报 unbeatable ----
@@ -129,7 +176,7 @@ fn default_swarm(dir: PathBuf, sessions: u64, max_ticks: u64) -> (vitric_playtes
 }
 
 /// 硬证据：声明了 goal 的 nav，默认 swarm 通关率 > 0 且不报 unbeatable——前瞻局把它通了。
-/// （nav 声明了 goal，default_plan 自动把末尾 2 局换成前瞻；前瞻 horizon=24 能算出跳墙序列。）
+/// （nav 声明了 goal，default_plan 自动把末尾 2 局换成束搜索前瞻；默认 swarm 深度足以算出跳墙序列。）
 #[test]
 fn nav_default_swarm_is_not_unbeatable_thanks_to_lookahead() {
     let (report, results) = default_swarm(nav_dir(), 8, 600);

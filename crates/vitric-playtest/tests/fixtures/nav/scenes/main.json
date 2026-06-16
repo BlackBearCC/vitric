@@ -22,7 +22,7 @@
       "name": "wall",
       "components": {
         "Position": { "x": 5, "y": 0 },
-        "Collider": { "w": 1, "h": 1 },
+        "Collider": { "w": 1, "h": 2 },
         "Solid": {}
       }
     },

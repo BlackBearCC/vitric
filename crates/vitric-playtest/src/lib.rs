@@ -53,5 +53,6 @@ pub use strategy::{
 };
 pub use swarm::{
     default_plan, run_llm_sessions, run_seed_swarm, run_swarm, run_swarm_with_config,
-    LabeledResult, SessionSpec, StrategyKind, DEFAULT_SWARM_LOOKAHEAD_HORIZON,
+    LabeledResult, SessionSpec, StrategyKind, DEFAULT_SWARM_LOOKAHEAD_BEAM,
+    DEFAULT_SWARM_LOOKAHEAD_DEPTH,
 };
