@@ -7,7 +7,7 @@ import json
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-REPLY = {"say": "诶,新来的!我是 Pip——这破地儿正缺个会拧螺丝的,你可算来了~", "mood": "兴奋"}
+REPLY = {"say": "诶,你可算来了!搭把手呗~", "mood": "兴奋"}
 
 
 class Handler(BaseHTTPRequestHandler):
