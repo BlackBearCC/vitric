@@ -468,6 +468,16 @@ pub fn run_session_lookahead(
     if look.beam_width == 0 {
         return Err("lookahead beam_width 必须 ≥ 1".to_string());
     }
+    // 投机搜索（expand_one）不重放 seed_replies。若种子录像带外部回复而投机不注入它们，
+    // 搜索树就建在「那条回复没发生」的错误未来上，选出的动作按错误世界规划（不影响 replay
+    // 安全——真步进照常注入、录像照常对得上——但规划质量错）。当前没有调用方给前瞻传
+    // seed_replies（种子探索走 run_session 不走前瞻），所以这里硬报错把哑雷变响雷：谁要给
+    // 前瞻接种子回复，必须先在 expand_one 的投机步里按 tick 注入，而不是默默跑出错规划。
+    if !cfg.seed_replies.is_empty() {
+        return Err("run_session_lookahead 暂不支持 seed_replies：投机搜索不会重放它们，\
+             规划会建在错误的世界上。要给前瞻接种子回复，先在 expand_one 的投机步里按 tick 注入"
+            .to_string());
+    }
 
     // 遥测累加器（与 run_session 同口径）
     let mut state_trace: Vec<u64> = Vec::new();
@@ -912,6 +922,24 @@ mod tests {
         let cfg = SessionConfig { max_ticks: 100, seed: 0, ..Default::default() };
         let res = run_session(&mut sim, &mut logic, &eng, &mut strat, &cfg).unwrap();
         assert_eq!(res.outcome, Outcome::Lose);
+    }
+
+    #[test]
+    fn lookahead_rejects_seed_replies() {
+        // 前瞻投机搜索不重放 seed_replies，会建在错误未来上规划——所以见非空就硬报错，
+        // 而不是默默跑出错规划（code review #1：把哑雷变响雷）。
+        let mut sim = Sim::new(1);
+        let mut logic = NeverEnds;
+        let eng = empty_engine();
+        let cfg = SessionConfig {
+            max_ticks: 100,
+            seed: 0,
+            seed_replies: vec![ReplyRecord { tick: 1, name: "oracle".to_string(), data: json!({}) }],
+            ..Default::default()
+        };
+        let err = run_session_lookahead(&mut sim, &mut logic, &eng, &cfg, &LookaheadConfig::default())
+            .unwrap_err();
+        assert!(err.contains("seed_replies"), "应明确报 seed_replies 不支持：{err}");
     }
 
     #[test]
