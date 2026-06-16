@@ -13,6 +13,16 @@
     "Cell": { "fields": { "kind": { "type": "text", "default": "regolith" } } },
     "Structure": { "fields": { "kind": { "type": "text", "default": "floor" } } },
     "Build": { "fields": { "kind": { "type": "text", "default": "floor" } } },
+    "Colony": {
+      "fields": {
+        "oxygen": { "type": "number", "default": 60 },
+        "power": { "type": "number", "default": 60 },
+        "food": { "type": "number", "default": 60 },
+        "o2_rate": { "type": "number", "default": 0 },
+        "pow_rate": { "type": "number", "default": 0 },
+        "food_rate": { "type": "number", "default": 0 }
+      }
+    },
     "Player": { "fields": {} },
     "Camera": {
       "fields": {

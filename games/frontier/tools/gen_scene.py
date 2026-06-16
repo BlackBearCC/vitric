@@ -54,6 +54,13 @@ entities.append({
     "name": "ui",
     "components": {"Build": {"kind": "floor"}},
 })
+# @colony:殖民地资源库存与产出速率(生存系统维护)
+entities.append({
+    "name": "colony",
+    "components": {
+        "Colony": {"oxygen": 60, "power": 60, "food": 60, "o2_rate": 0, "pow_rate": 0, "food_rate": 0},
+    },
+})
 
 out = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "scenes", "main.json"))
 with open(out, "w") as f:

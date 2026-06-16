@@ -1,0 +1,13 @@
+{
+  "rules": [
+    {
+      "id": "apply-rates",
+      "on": { "event": "tally" },
+      "do": [
+        { "set": "@colony.Colony.pow_rate", "to": "event.pow" },
+        { "set": "@colony.Colony.food_rate", "to": "event.food" },
+        { "set": "@colony.Colony.o2_rate", "to": "event.o2" }
+      ]
+    }
+  ]
+}

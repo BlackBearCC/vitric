@@ -3302,6 +3302,19 @@
      "kind": "floor"
     }
    }
+  },
+  {
+   "name": "colony",
+   "components": {
+    "Colony": {
+     "oxygen": 60,
+     "power": 60,
+     "food": 60,
+     "o2_rate": 0,
+     "pow_rate": 0,
+     "food_rate": 0
+    }
+   }
   }
  ]
 }
