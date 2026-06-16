@@ -3321,6 +3321,10 @@
     "Census": {
      "count": 1,
      "is_hub": 1
+    },
+    "Spawn": {
+     "timer": 8,
+     "cap": 4
     }
    }
   },

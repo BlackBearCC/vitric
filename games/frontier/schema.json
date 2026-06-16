@@ -19,6 +19,12 @@
         "is_hub": { "type": "int", "default": 0 }
       }
     },
+    "Spawn": {
+      "fields": {
+        "timer": { "type": "number", "default": 12 },
+        "cap": { "type": "int", "default": 4 }
+      }
+    },
     "Colony": {
       "fields": {
         "oxygen": { "type": "number", "default": 60 },

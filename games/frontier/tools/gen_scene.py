@@ -61,6 +61,7 @@ entities.append({
         "Colony": {"oxygen": 60, "power": 60, "food": 60, "o2_rate": 0, "pow_rate": 0, "food_rate": 0, "pop": 0,
                    "o2_i": 60, "pow_i": 60, "food_i": 60},
         "Census": {"count": 1, "is_hub": 1},
+        "Spawn": {"timer": 8, "cap": 4},
     },
 })
 # @hud_res / @hud_comp:屏幕顶部常驻 HUD(screen=true 锚定屏幕,不随相机)
