@@ -5,12 +5,14 @@
 //! - 所有存储用 `BTreeMap`：迭代顺序确定，同操作序列 = 同状态哈希。
 //! - 错误带路径和修复提示，给 LLM 看的。
 
+mod delta;
 mod entity;
 mod error;
 mod hash;
 mod spatial;
 mod world;
 
+pub use delta::scene_delta;
 pub use entity::EntityId;
 pub use error::EcsError;
 pub use hash::fnv1a_64;

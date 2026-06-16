@@ -291,6 +291,16 @@ impl GameLogic for Runtime {
         std::mem::take(&mut self.observed)
     }
 
+    /// 输入动作词汇：从规则集自省（和试玩 SceneView 同一份 `input_actions`）。
+    /// Runtime 是规则类逻辑、够得到 `self.rules`，所以返非空——dispatcher 持的
+    /// `dyn GameLogic` 够不到规则引擎，靠这条钩子把动作词汇递出去并进 describe。
+    fn available_actions(&self) -> Vec<(String, Vec<String>)> {
+        vitric_rules::input_actions(&self.rules.rules)
+            .into_iter()
+            .map(|ia| (ia.action, ia.phases))
+            .collect()
+    }
+
     /// 热重载：从磁盘重读规则+脚本，整体重建后原子替换；
     /// 任何一步失败都保持旧逻辑不动（不会半死不活）。
     /// 注意：schema/场景改动不在热重载范围（它们定义世界形状，改了要重启）。
@@ -1403,6 +1413,33 @@ mod tests {
         // 指向一个肯定不存在的目录：所有字面引用都应报"不存在"
         scan_sound_refs(&doc, "rules/test.json", Path::new("/nonexistent/sounds"), &mut missing);
         missing
+    }
+
+    #[test]
+    fn available_actions_surfaces_rule_input_actions() {
+        // 真 boot 一个有 input 规则的项目（jump：left/right/space/up 四个动作，无脚本免 esbuild），
+        // 断言 GameLogic::available_actions 返回规则自省出来的输入动作——这正是 describe
+        // 够不到规则时拿来并进输出的那份词汇。
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/jump");
+        let (_sim, rt) = Runtime::boot(&dir).expect("jump 示例应能 boot");
+        let actions = rt.available_actions();
+        let names: Vec<&str> = actions.iter().map(|(a, _)| a.as_str()).collect();
+        for want in ["left", "right", "space", "up"] {
+            assert!(names.contains(&want), "应含动作 {want}: {names:?}");
+        }
+        // distinct：每个动作只出现一次（即便有 pressed+released 两条规则）
+        assert_eq!(
+            names.iter().filter(|n| **n == "left").count(),
+            1,
+            "left 去重只一次: {names:?}"
+        );
+        // left 有 pressed+released 两条规则 → phases 收齐两相
+        let left = actions.iter().find(|(a, _)| a == "left").unwrap();
+        assert!(
+            left.1.contains(&"pressed".to_string()) && left.1.contains(&"released".to_string()),
+            "left 应收到 pressed+released 两 phase: {:?}",
+            left.1
+        );
     }
 
     #[test]

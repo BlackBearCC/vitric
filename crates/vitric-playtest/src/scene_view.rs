@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use vitric_ecs::{ascii_map, relate_in_world, AsciiMapOpts, EntityId, Placement, World};
-use vitric_rules::{Engine, Trigger};
+use vitric_rules::{input_actions, Engine};
 
 use crate::config::{
     DerivedSpec, DistanceMetric, ObservationConfig, PlaytestConfig, TerminalOverride,
@@ -443,28 +443,19 @@ fn project_observation(world: &World) -> Value {
     obs
 }
 
-/// 动作派生：枚举规则里所有 input 触发器的 filter.action，去重，
-/// 每个动作配 {pressed, released}（pressed 在前=策略主力，released 也列全）。
-/// 顺序确定：先按规则在规则集里的出现序收集 distinct action，再 ×{pressed,released}。
+/// 动作派生：枚举规则里所有 input 触发器的 distinct action，每个配 {pressed, released}
+/// （pressed 在前=策略主力，released 也列全）。
+///
+/// 「扫规则收动作词汇」的逻辑已提到 vitric-rules 的 [`input_actions`]（规则自省的天然
+/// 归属，describe 控制面和这里复用同一份，不再各抄一遍）。这里只做 SceneView 侧的适配：
+/// 取 distinct action 的出现序，把每个动作展开成 pressed/released 两相——SceneView 的
+/// affordance 合同是「这两相都可注入」，不取规则里实际声明的 phase（规则只写了 pressed
+/// 的动作，释放也仍是合法可注入的输入）。
 fn derive_actions(engine: &Engine) -> Vec<Action> {
-    let mut seen: Vec<String> = Vec::new();
-    for rule in &engine.rules.rules {
-        if let Trigger::Event { name, filter, .. } = &rule.trigger {
-            if name != "input" {
-                continue;
-            }
-            // 输入动作名由 filter 的 action 字段声明（见 jump/game.json）
-            if let Some(action) = filter.get("action").and_then(|v| v.as_str()) {
-                if !seen.iter().any(|a| a == action) {
-                    seen.push(action.to_string());
-                }
-            }
-        }
-    }
-    let mut actions = Vec::with_capacity(seen.len() * 2);
-    for a in seen {
-        actions.push(Action { action: a.clone(), phase: "pressed".to_string() });
-        actions.push(Action { action: a, phase: "released".to_string() });
+    let mut actions = Vec::new();
+    for ia in input_actions(&engine.rules) {
+        actions.push(Action { action: ia.action.clone(), phase: "pressed".to_string() });
+        actions.push(Action { action: ia.action, phase: "released".to_string() });
     }
     actions
 }

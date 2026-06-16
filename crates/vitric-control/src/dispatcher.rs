@@ -54,6 +54,10 @@ pub struct Dispatcher {
     /// 玩家存档仓库（vitric run 挂 `<项目>/saves/`；嵌入式/测试装配可以不挂，
     /// 此时存档相关方法显式报错而不是悄悄写到不知道哪里）。
     saves: Option<SaveStore>,
+    /// 上一次 render/describe 服务出去的场景视图（不含 actions/changes 这两个增量包，
+    /// 只存原始 visible/offscreen/… 主体，diff 才稳定）。下一次 describe 据它算「变了啥」。
+    /// 按本 dispatcher 实例存一份即可（一个连接/会话一个 dispatcher）。
+    last_describe: Option<Value>,
     pub ctl: LoopCtl,
 }
 
@@ -72,6 +76,7 @@ impl Dispatcher {
             last_tick_events: 0,
             events_count_tick: u64::MAX,
             saves: None,
+            last_describe: None,
             ctl: LoopCtl::default(),
         }
     }
@@ -501,7 +506,33 @@ impl Dispatcher {
                 let width = params.get("width").and_then(|v| v.as_u64()).unwrap_or(320) as u32;
                 let height = params.get("height").and_then(|v| v.as_u64()).unwrap_or(240) as u32;
                 // 带上素材仓库：文字对比度测量按真贴图渲底色（缺图才退纯色近似）
-                vitric_render::describe_world_with_assets(&sim.world, width, height, &self.assets)
+                let mut out =
+                    vitric_render::describe_world_with_assets(&sim.world, width, height, &self.assets)?;
+
+                // 帧间差量：相对上一次 describe 服务出去的那帧，只说「变了啥」。
+                // 默认就带（交互式取数最想知道「自上次以来变没变」）；第一次没有上一帧 → 不加
+                // changes 键（向后兼容：原有 visible/offscreen/… 字段不变）。算 changes 用的是
+                // 上一帧的原始主体（不含 actions/changes），存当前帧主体也只存原始主体——增量包
+                // 不进 diff，diff 才稳定。
+                if let Some(prev) = &self.last_describe {
+                    out["changes"] = vitric_ecs::scene_delta(prev, &out);
+                }
+                self.last_describe = Some(out.clone());
+
+                // 可选动作并进 describe：让 describe 不只说「画面里有啥/在哪」，还说「你能干啥」
+                // ——和试玩 SceneView 的 affordance 合一。dispatcher 持 dyn GameLogic 够不到规则，
+                // 动作词汇靠 GameLogic::available_actions 递出来（纯规则逻辑非空，其它默认空）。
+                // 形态对齐 SceneView 的 actions：每个动作 ×{pressed,released} 平铺。
+                // goal 是 playtest.json 的概念、控制面没加载它，这里不强塞——goal 仍只在
+                // SceneView/playtest 侧；不为了 goal 让控制面去耦合 playtest 配置。
+                let mut actions = Vec::new();
+                for (action, _phases) in logic.available_actions() {
+                    actions.push(json!({"action": action, "phase": "pressed"}));
+                    actions.push(json!({"action": action, "phase": "released"}));
+                }
+                out["actions"] = Value::Array(actions);
+
+                Ok(out)
             }
             "render/screenshot" => {
                 let width = params.get("width").and_then(|v| v.as_u64()).unwrap_or(320) as u32;
@@ -779,6 +810,7 @@ mod tests {
             &json!({"components": {
                 "Position": {"fields": {"x": {"type":"number"}, "y": {"type":"number"}}},
                 "Velocity": {"fields": {"x": {"type":"number"}, "y": {"type":"number"}}},
+                "Sprite": {"fields": {"w": {"type":"number"}, "h": {"type":"number"}}},
                 "Health": {"fields": {"hp": {"type":"int", "default": 100, "min": 0, "max": 100}}}
             }}),
             "schema.json",
@@ -1125,5 +1157,90 @@ mod tests {
         sim.world.despawn(p).unwrap();
         let e = call_err(&mut d, &mut sim, "world/get", json!({"entity": p.to_string()}));
         assert!(e.contains("不存在"), "{e}");
+    }
+
+    // ---- describe 并进 actions + 帧间差量 ----
+
+    /// 测试逻辑：available_actions 返一份固定动作词汇（模拟 Runtime 从规则自省的结果）。
+    /// 控制面持 dyn GameLogic 够不到规则，靠这条钩子把动作递进 describe。
+    struct WithActions;
+    impl GameLogic for WithActions {
+        fn on_tick(&mut self, _: &mut World, _: Vec<Event>, _: &mut vitric_sim::Pcg32, _: u64) -> Result<(), String> {
+            Ok(())
+        }
+        fn available_actions(&self) -> Vec<(String, Vec<String>)> {
+            vec![("left".into(), vec!["pressed".into(), "released".into()]), ("space".into(), vec!["pressed".into()])]
+        }
+    }
+
+    fn call_with(
+        d: &mut Dispatcher,
+        sim: &mut Sim,
+        logic: &mut dyn GameLogic,
+        method: &str,
+        params: Value,
+    ) -> Value {
+        let resp = d.handle(&json!({"method": method, "params": params}), sim, logic);
+        assert_eq!(resp["ok"], json!(true), "{method} 应成功: {resp}");
+        resp["result"].clone()
+    }
+
+    #[test]
+    fn describe_carries_actions_from_logic() {
+        // describe 顶层带 actions = 逻辑的动作词汇 ×{pressed,released} 平铺。
+        let (mut d, mut sim) = setup();
+        let mut logic = WithActions;
+        let out = call_with(&mut d, &mut sim, &mut logic, "render/describe", json!({}));
+        let acts = out["actions"].as_array().expect("describe 应有 actions");
+        // 2 个动作 ×2 phase = 4 条；动作名来自逻辑
+        assert_eq!(acts.len(), 4, "{acts:?}");
+        assert_eq!(acts[0], json!({"action": "left", "phase": "pressed"}));
+        assert_eq!(acts[1], json!({"action": "left", "phase": "released"}));
+        assert_eq!(acts[2], json!({"action": "space", "phase": "pressed"}));
+        assert_eq!(acts[3], json!({"action": "space", "phase": "released"}));
+    }
+
+    #[test]
+    fn describe_actions_empty_for_logic_without_rules() {
+        // 默认 GameLogic（()）available_actions 空 → actions 是空数组（仍带键，形态统一）。
+        let (mut d, mut sim) = setup();
+        let out = call(&mut d, &mut sim, "render/describe", json!({}));
+        assert_eq!(out["actions"], json!([]), "纯逻辑无动作: {out}");
+    }
+
+    #[test]
+    fn describe_changes_reflect_movement_across_two_frames() {
+        // 连续两次 describe，中间动了世界：第一次无 changes，第二次的 changes 反映移动/出现。
+        let (mut d, mut sim) = setup();
+        // 给 player 加 Sprite 让它进 describe 的 visible
+        let p = sim.world.entity("player").unwrap();
+        sim.world.set_component(p, "Sprite", json!({"w": 1.0, "h": 1.0})).unwrap();
+
+        // 第一帧：没有上一帧 → 不带 changes 键（向后兼容）
+        let first = call(&mut d, &mut sim, "render/describe", json!({}));
+        assert!(first.get("changes").is_none(), "第一帧不该有 changes: {first}");
+        // 原有主体字段照常在
+        assert!(first.get("visible").is_some() && first.get("camera").is_some());
+
+        // 改世界：player 右移 + 新 spawn 一个带 Sprite 的实体
+        sim.world.set_field(p, "Position.x", json!(50.0)).unwrap();
+        let star = sim.world.spawn_named("star").unwrap();
+        sim.world.set_component(star, "Position", json!({"x": 10.0, "y": 0.0})).unwrap();
+        sim.world.set_component(star, "Sprite", json!({"w": 1.0, "h": 1.0})).unwrap();
+
+        // 第二帧：带 changes，反映 player 移动 + star 出现
+        let second = call(&mut d, &mut sim, "render/describe", json!({}));
+        let changes = second.get("changes").expect("第二帧应有 changes");
+        // player 的 world 变了（id 用句柄字符串）
+        let pid = p.to_string();
+        let pchg = &changes["changed"][&pid];
+        assert!(!pchg.is_null(), "player 应在 changed: {changes}");
+        assert_eq!(pchg["world"][1], json!({"x": 50.0, "y": 0.0}), "新位置");
+        // star 出现在 appeared
+        let appeared = changes["appeared"].as_array().unwrap();
+        assert!(
+            appeared.iter().any(|e| e["name"] == json!("star")),
+            "star 应在 appeared: {appeared:?}"
+        );
     }
 }

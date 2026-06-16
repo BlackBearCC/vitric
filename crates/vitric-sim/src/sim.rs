@@ -49,6 +49,14 @@ pub trait GameLogic {
     fn restore_state(&mut self, _snap: &serde_json::Value) -> Result<(), String> {
         Ok(())
     }
+
+    /// 本逻辑当前「能干啥」的输入动作词汇：`(动作名, 它出现过的 phase 列表)`。
+    /// 控制面 describe 拿它告诉 agent「画面里有啥」之外还有「你能按什么」——和试玩
+    /// SceneView 的 affordance 合一。默认空：只有规则类逻辑（Runtime）够得到规则、能返非空；
+    /// sim 持的是 `dyn GameLogic`，够不到具体规则引擎，所以这条钩子由实现方按需重写。
+    fn available_actions(&self) -> Vec<(String, Vec<String>)> {
+        Vec::new()
+    }
 }
 
 /// 空逻辑（纯物理跑模拟用）。

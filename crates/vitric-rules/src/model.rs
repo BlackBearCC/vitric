@@ -52,6 +52,59 @@ pub struct RuleSet {
     pub rules: Vec<Rule>,
 }
 
+/// 规则自省出来的一个「可注入动作」：动作名 + 它在规则里出现过的 phase。
+/// 这是「这局能干啥」的权威词汇——describe（控制面）和 SceneView（试玩）都从它出发，
+/// 两边对齐到同一个真相。放在 vitric-rules 因为它纯是对规则集的内省（规则是动作的来源），
+/// 不该让消费方各自重抄一遍扫规则的逻辑。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputAction {
+    /// 输入动作名（input 触发器 filter 里的 action 字段值）。
+    pub action: String,
+    /// 这个动作在规则里出现过的 phase（"pressed" / "released"），按首次出现序去重。
+    pub phases: Vec<String>,
+}
+
+/// 从规则集派生「输入动作词汇」：扫所有 `input` 事件触发器，收 distinct action，
+/// 每个动作带上它出现过的 phase。
+///
+/// 顺序确定（输出必须可复现）：
+/// - action 按规则在规则集里的出现序首次见到时记下（后面再出现不挪位）；
+/// - 每个 action 的 phases 同样按首次出现序去重收集。
+///
+/// 不带 phase 字段的 input 触发器（filter 里没写 phase）只贡献动作名、不贡献 phase——
+/// 它对 pressed/released 都不挑，phases 留空由消费方按需补全（SceneView 默认补
+/// {pressed, released} 两相）。非 input 触发器（tick / collision / 自定义事件）一概不算。
+pub fn input_actions(rules: &RuleSet) -> Vec<InputAction> {
+    let mut out: Vec<InputAction> = Vec::new();
+    for rule in &rules.rules {
+        let Trigger::Event { name, filter, .. } = &rule.trigger else {
+            continue; // 只看 input 事件触发器
+        };
+        if name != "input" {
+            continue;
+        }
+        let Some(action) = filter.get("action").and_then(|v| v.as_str()) else {
+            continue; // input 触发器没声明具体 action 名 = 不贡献动作词汇
+        };
+        // phase 是可选的：写了就收，没写不收（动作仍记一份，phases 可能为空）
+        let phase = filter.get("phase").and_then(|v| v.as_str());
+        match out.iter_mut().find(|a| a.action == action) {
+            Some(existing) => {
+                if let Some(p) = phase {
+                    if !existing.phases.iter().any(|x| x == p) {
+                        existing.phases.push(p.to_string());
+                    }
+                }
+            }
+            None => {
+                let phases = phase.map(|p| vec![p.to_string()]).unwrap_or_default();
+                out.push(InputAction { action: action.to_string(), phases });
+            }
+        }
+    }
+    out
+}
+
 const OPS: &[&str] = &["==", "!=", "<", "<=", ">", ">=", "exists", "!exists"];
 const ACTION_KINDS: &[&str] = &["set", "add", "spawn", "despawn", "emit", "call"];
 
@@ -356,5 +409,80 @@ mod tests {
         assert!(codes.contains(&"VR009"), "未知操作符: {err}");
         assert!(codes.contains(&"VR002"), "id 重复: {err}");
         assert!(codes.contains(&"VR005"), "between 配错事件: {err}");
+    }
+
+    #[test]
+    fn input_actions_collects_distinct_actions_and_phases() {
+        // left 有 pressed+released 两条规则 → 一个动作两 phase；right 只有 pressed。
+        // tick / collision / 自定义事件触发器一概不算。
+        let set = RuleSet::parse(
+            &json!({"rules": [
+                {"id": "left-go", "on": {"event": "input", "filter": {"action": "left", "phase": "pressed"}},
+                 "do": [{"set": "@hero.Velocity.x", "to": -8}]},
+                {"id": "left-stop", "on": {"event": "input", "filter": {"action": "left", "phase": "released"}},
+                 "do": [{"set": "@hero.Velocity.x", "to": 0}]},
+                {"id": "right-go", "on": {"event": "input", "filter": {"action": "right", "phase": "pressed"}},
+                 "do": [{"set": "@hero.Velocity.x", "to": 8}]},
+                {"id": "tickrule", "on": "tick", "do": [{"emit": "noop", "data": {}}]},
+                {"id": "hitrule", "on": {"event": "collision", "between": ["A", "B"]},
+                 "do": [{"emit": "boom", "data": {}}]}
+            ]}),
+            "rules/game.json",
+        )
+        .unwrap();
+        let acts = input_actions(&set);
+        // distinct action 按出现序：left 先于 right；非 input 触发器不贡献
+        assert_eq!(acts.len(), 2, "只 left/right 两个动作: {acts:?}");
+        assert_eq!(acts[0].action, "left");
+        assert_eq!(acts[0].phases, vec!["pressed".to_string(), "released".to_string()]);
+        assert_eq!(acts[1].action, "right");
+        assert_eq!(acts[1].phases, vec!["pressed".to_string()]);
+    }
+
+    #[test]
+    fn input_actions_is_deterministic() {
+        let set = RuleSet::parse(
+            &json!({"rules": [
+                {"id": "a", "on": {"event": "input", "filter": {"action": "fire", "phase": "pressed"}},
+                 "do": [{"emit": "shot", "data": {}}]},
+                {"id": "b", "on": {"event": "input", "filter": {"action": "jump", "phase": "pressed"}},
+                 "do": [{"emit": "hop", "data": {}}]}
+            ]}),
+            "rules/game.json",
+        )
+        .unwrap();
+        assert_eq!(input_actions(&set), input_actions(&set));
+    }
+
+    #[test]
+    fn input_actions_action_without_phase_has_empty_phases() {
+        // input 触发器只声明 action、没写 phase（对两相都不挑）：动作仍记一份，phases 为空。
+        let set = RuleSet::parse(
+            &json!({"rules": [
+                {"id": "any", "on": {"event": "input", "filter": {"action": "menu"}},
+                 "do": [{"emit": "open", "data": {}}]}
+            ]}),
+            "rules/game.json",
+        )
+        .unwrap();
+        let acts = input_actions(&set);
+        assert_eq!(acts.len(), 1);
+        assert_eq!(acts[0].action, "menu");
+        assert!(acts[0].phases.is_empty(), "没声明 phase → phases 空: {acts:?}");
+    }
+
+    #[test]
+    fn input_actions_ignores_non_input_and_filterless_input() {
+        // 没有任何 input 触发器 → 空；input 触发器但 filter 没 action 字段也不贡献。
+        let set = RuleSet::parse(
+            &json!({"rules": [
+                {"id": "t", "on": "tick", "do": [{"emit": "x", "data": {}}]},
+                {"id": "noaction", "on": {"event": "input", "filter": {"phase": "pressed"}},
+                 "do": [{"emit": "y", "data": {}}]}
+            ]}),
+            "rules/game.json",
+        )
+        .unwrap();
+        assert!(input_actions(&set).is_empty());
     }
 }

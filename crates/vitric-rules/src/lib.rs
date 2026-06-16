@@ -26,4 +26,4 @@ mod engine;
 mod model;
 
 pub use engine::{Engine, RuleError, ScriptCall, TickOutput};
-pub use model::{Event, Rule, RuleSet, Trigger};
+pub use model::{input_actions, Event, InputAction, Rule, RuleSet, Trigger};
