@@ -36,8 +36,22 @@ vitric.system("tally", { query: ["Structure"], writes: [] }, (entities, ctx) => 
     else if (e.Structure.kind === "quarters") quarters += 1;
     else if (e.Structure.kind === "extractor") extractor += 1;
   }
-  // quarters 数也带上,给伙伴需求系统用(住所满足舒适)
-  ctx.emit("tally", { pow: conduit * PER, food: plot * PER, o2: plot * PER, water: extractor * PER, quarters: quarters });
+  // quarters 数给伙伴需求系统用;total 给阶段系统(殖民地发展度)用
+  ctx.emit("tally", { pow: conduit * PER, food: plot * PER, o2: plot * PER, water: extractor * PER, quarters: quarters, total: entities.length });
+});
+
+// 阶段:殖民地随"结构数 + 在场伙伴数"成长,落脚 → 立足 → 成形 → 兴旺(游戏曲线的进展感)。
+// 总在跑(@colony 有 Colony+Census),所以即便没人/没结构也对。
+vitric.system("stage", { query: ["Colony", "Census"], writes: ["Colony"] }, (entities, ctx) => {
+  for (const e of entities) {
+    const s = e.Colony.struct_count;
+    const n = e.Census.count;
+    let stage = "落脚";
+    if (s >= 6 && n >= 3) stage = "兴旺";
+    else if (s >= 3 && n >= 2) stage = "成形";
+    else if (s >= 1) stage = "立足";
+    e.Colony.stage = stage;
+  }
 });
 
 // 每帧:库存 += (产出速率 - 基础消耗) * dt,夹在 [0,100]。

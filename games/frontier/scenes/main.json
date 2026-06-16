@@ -3319,7 +3319,9 @@
      "o2_i": 60,
      "pow_i": 60,
      "food_i": 60,
-     "water_i": 60
+     "water_i": 60,
+     "struct_count": 0,
+     "stage": "\u843d\u811a"
     },
     "Census": {
      "count": 1,
