@@ -9,6 +9,23 @@
           "to": { "format": "氧 {}   电 {}   食 {}   人手 {}", "args": ["@colony.Colony.o2_i", "@colony.Colony.pow_i", "@colony.Colony.food_i", "@colony.Colony.pop"] }
         }
       ]
+    },
+    {
+      "id": "hud-comp",
+      "on": "tick",
+      "if": [ ["@companion", "exists"] ],
+      "do": [
+        {
+          "set": "@hud_comp.Text.content",
+          "to": { "format": "Pip · 舒适 {} · 心情 {}", "args": ["@companion.Need.comfort_i", "@companion.Mood.value"] }
+        }
+      ]
+    },
+    {
+      "id": "hud-comp-gone",
+      "on": "tick",
+      "if": [ ["@companion", "!exists"] ],
+      "do": [ { "set": "@hud_comp.Text.content", "to": "Pip 走了……" } ]
     }
   ]
 }

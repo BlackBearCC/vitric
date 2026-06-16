@@ -3336,6 +3336,21 @@
    }
   },
   {
+   "name": "hud_comp",
+   "components": {
+    "Position": {
+     "x": 0,
+     "y": 10.3
+    },
+    "Text": {
+     "content": "",
+     "size": 0.7,
+     "color": "#ffd9a0",
+     "screen": true
+    }
+   }
+  },
+  {
    "name": "companion",
    "components": {
     "Companion": {},
@@ -3354,7 +3369,9 @@
     "Need": {
      "comfort": 50,
      "quarters": 0,
-     "leave_timer": 0
+     "leave_timer": 0,
+     "voiced": 0,
+     "comfort_i": 50
     },
     "Wander": {
      "home_x": 6,

@@ -43,7 +43,8 @@
         "comfort": { "type": "number", "default": 50 },
         "quarters": { "type": "number", "default": 0 },
         "leave_timer": { "type": "number", "default": 0 },
-        "voiced": { "type": "number", "default": 0 }
+        "voiced": { "type": "number", "default": 0 },
+        "comfort_i": { "type": "int", "default": 50 }
       }
     },
     "Wander": {

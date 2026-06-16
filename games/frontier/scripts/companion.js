@@ -46,6 +46,7 @@ vitric.system(
       const n = e.Need;
       const rate = n.quarters > 0 ? COMFORT_UP : -COMFORT_DOWN;
       n.comfort = Math.max(0, Math.min(100, n.comfort + rate * ctx.dt));
+      n.comfort_i = Math.round(n.comfort); // HUD 显示用整数
       // 跌破阈值:开口提一次愿望(voiced 防刷屏;舒适回升后复位,下次还能提)
       if (n.comfort < WISH_AT && n.voiced < 1) {
         n.voiced = 1;

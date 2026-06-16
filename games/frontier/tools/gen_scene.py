@@ -62,12 +62,19 @@ entities.append({
                    "o2_i": 60, "pow_i": 60, "food_i": 60},
     },
 })
-# @hud_res:屏幕顶部常驻资源条(screen=true 锚定屏幕,不随相机)
+# @hud_res / @hud_comp:屏幕顶部常驻 HUD(screen=true 锚定屏幕,不随相机)
 entities.append({
     "name": "hud_res",
     "components": {
         "Position": {"x": 0, "y": 11.5},
         "Text": {"content": "", "size": 0.7, "color": "#cfe6ff", "screen": True},
+    },
+})
+entities.append({
+    "name": "hud_comp",
+    "components": {
+        "Position": {"x": 0, "y": 10.3},
+        "Text": {"content": "", "size": 0.7, "color": "#ffd9a0", "screen": True},
     },
 })
 # @companion:第一个活伙伴(LLM 驱动,走近按 t 说话,平时自己在家附近溜达)。
@@ -80,7 +87,7 @@ entities.append({
                     "speech": "语速快、爱用'诶''呐'、喜欢顺嘴吐槽"},
         "Mood": {"value": "好奇"},
         "ThinkReq": {"pending": 0},
-        "Need": {"comfort": 50, "quarters": 0, "leave_timer": 0},
+        "Need": {"comfort": 50, "quarters": 0, "leave_timer": 0, "voiced": 0, "comfort_i": 50},
         "Wander": {"home_x": 6, "home_y": 7, "tx": 6, "ty": 7, "timer": 2},
         "Position": {"x": 6, "y": 7},
         "Velocity": {"x": 0, "y": 0},
