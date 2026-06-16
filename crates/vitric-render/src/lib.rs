@@ -149,7 +149,7 @@ pub use ui_interact::{
 
 use serde_json::Value;
 
-use vitric_ecs::{relate, Placement, World};
+use vitric_ecs::{ascii_map, relate_in_world, AsciiMapOpts, Placement, World};
 
 /// 点光源数量上限。逐像素（CPU）/逐片元（GPU uniform 数组）都要遍历全部灯，
 /// 不设上限会把两条路径同时拖死；超了显式报错，不静默截断。
@@ -2513,13 +2513,14 @@ pub fn describe_world_with_assets(
         }
         entry.insert("sprite".into(), sprite);
 
-        // 以自我为中心关系：相对焦点的方位/距离/同行同列/相邻。焦点自己不输出这块
-        // （自己跟自己没关系）；没焦点时整块不出现（向后兼容）。复用 ecs 的共享算子，
-        // 和 SceneView 同源同值。dist_to_focal 兼作主次排序键（没焦点时为 0）。
+        // 以自我为中心关系：相对焦点的方位/距离/同行同列/相邻/遮挡。焦点自己不输出这块
+        // （自己跟自己没关系）；没焦点时整块不出现（向后兼容）。复用 ecs 的世界感知算子
+        // relate_in_world，和 SceneView 同源同值——一次带齐含 blocked（视线被第三方 Solid
+        // 挡没挡）。dist_to_focal 兼作主次排序键（没焦点时为 0）。
         let mut dist_to_focal = 0.0;
-        if let Some((fid, fplace)) = focal {
+        if let Some((fid, _fplace)) = focal {
             if fid != id {
-                let rel = relate(fplace, Placement::new(px, py, sw, sh));
+                let rel = relate_in_world(world, fid, id);
                 dist_to_focal = rel.distance;
                 entry.insert("relative_to_focal".into(), rel.to_json());
             }
@@ -2882,6 +2883,12 @@ pub fn describe_world_with_assets(
     // 没警告就不出现 warnings 键——"没有这个键 = 没发现问题"，agent 不用扫空数组
     if !warnings.is_empty() {
         out["warnings"] = json!(warnings);
+    }
+    // 以焦点为中心的 ASCII 格子图：有焦点才加顶层 ascii_map（无 follow 不加 = 向后兼容）。
+    // 和 SceneView 同源（都调 ecs::ascii_map，默认半径/自动推 cell），给模型一张粗略的
+    // 「谁在我哪个方向、隔几格、中间有没有墙(#)」的导航图。
+    if let Some((fid, _)) = focal {
+        out["ascii_map"] = ascii_map(world, fid, &AsciiMapOpts::default()).to_json();
     }
     Ok(out)
 }
@@ -4899,5 +4906,57 @@ mod tests {
             .collect();
         // 有名字的在前（hero 距 0、coin 距 3、star 距 5），无名 near 殿后
         assert_eq!(names, vec!["hero", "coin", "star", "<anon>"], "有名字优先、再按距离升序");
+    }
+
+    // ---- 视线遮挡（blocked）+ ASCII 格子图（ascii_map） ----
+
+    #[test]
+    fn describe_relative_carries_blocked_field() {
+        // relative_to_focal 现在带 blocked 字段：无墙 → false
+        let w = focal_world();
+        let d = describe_world(&w, 64, 64).unwrap();
+        let coin = d["visible"].as_array().unwrap().iter()
+            .find(|e| e["name"] == json!("coin")).unwrap();
+        assert_eq!(coin["relative_to_focal"]["blocked"], json!(false), "无墙不挡");
+    }
+
+    #[test]
+    fn describe_blocked_true_when_wall_between() {
+        // 焦点 hero(0,0) 和 coin(3,0) 之间立一面 Solid 墙(1.5,0) → blocked=true
+        let mut w = focal_world();
+        let wall = w.spawn();
+        w.set_component(wall, "Position", json!({"x": 1.5, "y": 0.0})).unwrap();
+        w.set_component(wall, "Collider", json!({"w": 0.5, "h": 2.0})).unwrap();
+        w.set_component(wall, "Solid", json!({})).unwrap();
+        let d = describe_world(&w, 64, 64).unwrap();
+        let coin = d["visible"].as_array().unwrap().iter()
+            .find(|e| e["name"] == json!("coin")).unwrap();
+        assert_eq!(coin["relative_to_focal"]["blocked"], json!(true), "中间有墙 → 挡");
+    }
+
+    #[test]
+    fn describe_has_ascii_map_with_focus() {
+        // 有 Camera.follow → 顶层有 ascii_map，@ 在正中
+        let w = focal_world();
+        let d = describe_world(&w, 64, 64).unwrap();
+        let map = &d["ascii_map"];
+        assert!(map.is_object(), "有焦点 → 有 ascii_map: {map:?}");
+        let grid = map["grid"].as_array().unwrap();
+        let center = grid.len() / 2;
+        let mid_row = grid[center].as_str().unwrap();
+        assert_eq!(mid_row.chars().nth(center), Some('@'), "@ 在正中");
+        assert_eq!(map["focal_at"], json!([center, center]));
+        // coin 在右边某格、进了图例
+        assert!(map["legend"].as_object().unwrap().values().any(|v| v == "coin"));
+    }
+
+    #[test]
+    fn describe_no_ascii_map_without_follow() {
+        // 向后兼容：没有 follow → 不出现 ascii_map 键
+        let mut w = world_one_red_sprite();
+        let cam = w.spawn();
+        w.set_component(cam, "Camera", json!({"x": 0.0, "y": 0.0, "scale": 8.0})).unwrap();
+        let d = describe_world(&w, 64, 64).unwrap();
+        assert!(d.get("ascii_map").is_none(), "无 follow 不该有 ascii_map");
     }
 }

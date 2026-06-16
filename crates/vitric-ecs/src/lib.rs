@@ -14,5 +14,8 @@ mod world;
 pub use entity::EntityId;
 pub use error::EcsError;
 pub use hash::fnv1a_64;
-pub use spatial::{relate, Direction, Placement, RelativeSpatial};
+pub use spatial::{
+    ascii_map, relate, relate_in_world, AsciiMap, AsciiMapOpts, Direction, Placement,
+    RelativeSpatial,
+};
 pub use world::World;

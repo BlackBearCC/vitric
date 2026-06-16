@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use vitric_ecs::{relate, EntityId, Placement, World};
+use vitric_ecs::{ascii_map, relate_in_world, AsciiMapOpts, EntityId, Placement, World};
 use vitric_rules::{Engine, Trigger};
 
 use crate::config::{
@@ -162,7 +162,8 @@ fn placement_of(world: &World, id: EntityId) -> Option<Placement> {
 
 /// 给一个实体对象（已建好的 `{"id","name","components"}` Map）追加 `relative_to_focal`，
 /// 并返回主次排序键 `(有名字, 到焦点距离)`。焦点自己不追加（自己跟自己没关系）、
-/// 没焦点或自身无 Position 时不追加。**和 describe 同源**：调同一个 `ecs::relate`。
+/// 没焦点或自身无 Position 时不追加。**和 describe 同源**：调同一个世界感知算子
+/// `ecs::relate_in_world`——一次带齐含 blocked（视线被第三方 Solid 挡没挡）。
 ///
 /// 排序键里距离没焦点时为 0（排序整体不启用，键被忽略）。
 fn attach_relative(
@@ -173,10 +174,12 @@ fn attach_relative(
     obj: &mut Map<String, Value>,
 ) -> (bool, f64) {
     let mut dist = 0.0;
-    if let Some((fid, fplace)) = focal {
+    if let Some((fid, _fplace)) = focal {
         if fid != id {
-            if let Some(p) = placement_of(world, id) {
-                let rel = relate(fplace, p);
+            // 自身有 Position 才追加（relate_in_world 内部取占位；这里先确认有坐标，
+            // 和原行为一致——无 Position 的实体不输出 relative_to_focal）
+            if placement_of(world, id).is_some() {
+                let rel = relate_in_world(world, fid, id);
                 dist = rel.distance;
                 obj.insert("relative_to_focal".to_string(), rel.to_json());
             }
@@ -295,7 +298,20 @@ fn project_observation_with_config(world: &World, cfg: &ObservationConfig) -> Va
     if focal.is_some() {
         sort_entities_by_focus(&mut entities, &mut keys);
     }
-    json!({ "entities": entities })
+    let mut obs = json!({ "entities": entities });
+    attach_ascii_map(world, focal, &mut obs);
+    obs
+}
+
+/// 有焦点时给 observation 加一张以焦点为中心的 ASCII 格子图（`ascii_map` 顶层键）。
+/// 和 describe 同源（都调 `ecs::ascii_map`，默认半径/自动推 cell）——agent 读这张图导航。
+/// 无焦点不加（向后兼容：默认 config / 无 follow 的输出逐字节不变）。
+fn attach_ascii_map(world: &World, focal: Option<(EntityId, Placement)>, obs: &mut Value) {
+    if let Some((fid, _)) = focal {
+        if let Some(map) = obs.as_object_mut() {
+            map.insert("ascii_map".to_string(), ascii_map(world, fid, &AsciiMapOpts::default()).to_json());
+        }
+    }
 }
 
 /// 对一个组件值套 relabel：遍历 cfg.relabel，凡 path 形如 `<实体>/<本组件>.<字段路径>` 的，
@@ -422,7 +438,9 @@ fn project_observation(world: &World) -> Value {
     if focal.is_some() {
         sort_entities_by_focus(&mut entities, &mut keys);
     }
-    json!({ "entities": entities })
+    let mut obs = json!({ "entities": entities });
+    attach_ascii_map(world, focal, &mut obs);
+    obs
 }
 
 /// 动作派生：枚举规则里所有 input 触发器的 filter.action，去重，
@@ -857,15 +875,16 @@ mod tests {
 
     #[test]
     fn observation_relative_value_matches_describe_shared_function() {
-        // 和 describe 同源：两处都调 ecs::relate，值必须一致。
-        use vitric_ecs::{relate, Placement};
+        // 和 describe 同源：两处都调 ecs::relate_in_world，值必须一致。
+        use vitric_ecs::relate_in_world;
         let eng = jump_like_engine();
         let w = focal_world();
         let view = SceneView::derive(&w, &eng, &TerminalSpec::default());
         let coin = find_ent(&view.observation, "coin");
-        // 焦点 hero(0,0,2x2)、目标 coin(3,0,无 Sprite→0x0)
-        let expected = relate(Placement::new(0.0, 0.0, 2.0, 2.0), Placement::new(3.0, 0.0, 0.0, 0.0))
-            .to_json();
+        let hero = w.entity("hero").unwrap();
+        let coin_id = w.entity("coin").unwrap();
+        // 直接调共享算子拿期望值——SceneView 必须逐字节一致（含 blocked）
+        let expected = relate_in_world(&w, hero, coin_id).to_json();
         assert_eq!(coin.get("relative_to_focal").unwrap(), &expected);
     }
 
@@ -912,5 +931,80 @@ mod tests {
         assert_eq!(spec.classify("ending-bad"), Some(Outcome::Win));
         assert_eq!(spec.classify("input"), None);
         assert_eq!(spec.classify("collision"), None);
+    }
+
+    // ---- 视线遮挡（blocked）+ ASCII 格子图（ascii_map） ----
+
+    /// 在 (x,y) 放一面 w×h 的 Solid 墙（Solid+Position+Collider）。
+    fn add_wall(w: &mut World, x: f64, y: f64, cw: f64, ch: f64) {
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": x, "y": y})).unwrap();
+        w.set_component(e, "Collider", json!({"w": cw, "h": ch})).unwrap();
+        w.set_component(e, "Solid", json!({})).unwrap();
+    }
+
+    #[test]
+    fn observation_relative_carries_blocked() {
+        // relative_to_focal 带 blocked：无墙 false、加墙后 true
+        let eng = jump_like_engine();
+        let mut w = focal_world(); // hero(0,0) 焦点 + coin(3,0)
+        let view = SceneView::derive(&w, &eng, &TerminalSpec::default());
+        let coin = find_ent(&view.observation, "coin");
+        assert_eq!(coin["relative_to_focal"]["blocked"], json!(false), "无墙不挡");
+        // 在 hero 和 coin 之间立墙
+        add_wall(&mut w, 1.5, 0.0, 0.5, 2.0);
+        let view = SceneView::derive(&w, &eng, &TerminalSpec::default());
+        let coin = find_ent(&view.observation, "coin");
+        assert_eq!(coin["relative_to_focal"]["blocked"], json!(true), "中间有墙 → 挡");
+    }
+
+    #[test]
+    fn observation_has_ascii_map_with_focus() {
+        // 有焦点 → observation 顶层有 ascii_map，@ 在正中、coin 进图例
+        let eng = jump_like_engine();
+        let w = focal_world();
+        let view = SceneView::derive(&w, &eng, &TerminalSpec::default());
+        let map = &view.observation["ascii_map"];
+        assert!(map.is_object(), "有焦点 → 有 ascii_map: {map:?}");
+        let grid = map["grid"].as_array().unwrap();
+        let center = grid.len() / 2;
+        assert_eq!(grid[center].as_str().unwrap().chars().nth(center), Some('@'));
+        assert!(map["legend"].as_object().unwrap().values().any(|v| v == "coin"));
+    }
+
+    #[test]
+    fn observation_no_ascii_map_without_focus() {
+        // 向后兼容：无 Camera.follow → 不出现 ascii_map 键
+        let eng = jump_like_engine();
+        let w = pos_world(); // 无 Camera
+        let view = SceneView::derive(&w, &eng, &TerminalSpec::default());
+        assert!(view.observation.get("ascii_map").is_none(), "无焦点不该有 ascii_map");
+    }
+
+    #[test]
+    fn observation_ascii_map_matches_shared_function() {
+        // 和 describe 同源：都调 ecs::ascii_map（默认 opts），值逐字节一致
+        use vitric_ecs::{ascii_map, AsciiMapOpts};
+        let eng = jump_like_engine();
+        let w = focal_world();
+        let view = SceneView::derive(&w, &eng, &TerminalSpec::default());
+        let hero = w.entity("hero").unwrap();
+        let expected = ascii_map(&w, hero, &AsciiMapOpts::default()).to_json();
+        assert_eq!(&view.observation["ascii_map"], &expected);
+    }
+
+    #[test]
+    fn config_observation_also_has_ascii_map_and_blocked() {
+        // 带 config 的派生（derive_with_config）同样附 ascii_map + blocked
+        use crate::config::PlaytestConfig;
+        let eng = jump_like_engine();
+        let mut w = focal_world();
+        add_wall(&mut w, 1.5, 0.0, 0.5, 2.0);
+        let view = SceneView::derive_with_config(
+            &w, &eng, &TerminalSpec::default(), &PlaytestConfig::default(),
+        );
+        assert!(view.observation.get("ascii_map").is_some(), "config 派生也有 ascii_map");
+        let coin = find_ent(&view.observation, "coin");
+        assert_eq!(coin["relative_to_focal"]["blocked"], json!(true));
     }
 }
