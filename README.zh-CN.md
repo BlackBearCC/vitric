@@ -1,87 +1,155 @@
 # Vitric
 
+[![CI](https://github.com/BlackBearCC/vitric/actions/workflows/ci.yml/badge.svg)](https://github.com/BlackBearCC/vitric/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/BlackBearCC/vitric)](https://github.com/BlackBearCC/vitric/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 [English](README.md) | 中文
 
-**The glass-box game engine for AI agents.**
+**一个确定性的、为 AI agent 而造的玻璃盒 2D 游戏引擎。**
 
 ![glow demo](docs/media/glow.gif)
 
-*↑ 这个 demo 的每一帧都是引擎自己渲的（CPU 光栅化，无 GPU），由 AI 通过控制面操作游戏并逐帧截图拼成——这正是引擎的卖点本身。*
+*↑ AI 生成的像素美术、2D 动态光照、粒子、相机跟随——每一帧都是 AI 通过控制面无头驱动游戏截下来的。*
 
-现有引擎为"人坐在编辑器前"设计，对 AI 是黑盒；Vitric 以 agent API 为中心——引擎的一切状态对 AI 可见、可操作、可验证，AI 能自主地**运行游戏 → 观察画面和状态 → 跑断言 → 修改 → 重来**，整个闭环不需要人插手。
+现有引擎是为坐在编辑器前的人设计的，对 AI 来说是黑盒。Vitric 围绕一套 **agent API** 来造：引擎里每一份状态都看得见、操作得了、验证得了，AI 可以自己**跑游戏 → 看像素和状态 → 断言 → 改 → 再来一遍**，全程不需要人。又因为模拟是逐位确定的，引擎还能**证明**关于一个游戏的事——比如某段录像确实能通关、一群 agent 怎么玩都卡不死它。
 
-## 现在就能跑
+## 目录
+
+- [快速开始](#快速开始) · [agent API](#agent-api) · [自动试玩](#自动试玩)
+- [特性](#特性) · [架构](#架构) · [示例](#示例) · [文档](#文档)
+- [MCP 与多 agent](#mcp-与多-agent) · [状态](#状态) · [参与贡献](#参与贡献) · [许可证](#许可证)
+
+## 快速开始
 
 ```bash
 cargo build --release
+BIN=./target/release/vitric
 
-# 校验示例项目（错误带路径+错误码+修复提示，一次报全）
-./target/release/vitric check examples/coin-run
+# 校验项目——报错带路径、稳定错误码、修复提示，一次全给
+$BIN check examples/coin-run
 
-# 跑起来（无头 + AI 控制面）
-./target/release/vitric run examples/coin-run --port 6173
+# 跑起来（无头 + AI 控制面，端口 6173）
+$BIN run examples/coin-run --port 6173
 
-# 素材和谐化：AI 出的图全项目统一到一张色板（见 docs/art-pipeline.md）
-./target/release/vitric assets examples/glow --colors 16
+# 自动试玩：一群确定性 agent 把游戏玩一遍，报告哪儿坏了
+$BIN playtest examples/coin-run --sessions 16 --html report.html
+
+# 交付门：把一段通关录像逐位重放、并要求触发胜利事件
+$BIN gate examples/spire
 ```
 
-另开一个终端，像 agent 一样把游戏打通关：
+Linux 和 Windows 的预编译二进制在 [releases 页](https://github.com/BlackBearCC/vitric/releases)。
+
+## agent API
+
+引擎无头运行，暴露一套 HTTP JSON-RPC 控制面。agent 像玩家一样玩游戏，只不过走的是数据：
 
 ```bash
 rpc() { curl -s -X POST http://127.0.0.1:6173/rpc -d "$1"; echo; }
 rpc '{"method":"sim/pause"}'
 rpc '{"method":"input/inject","params":{"action":"right"}}'
-rpc '{"method":"sim/step","params":{"ticks":60}}'                       # 确定性逐帧推进
-rpc '{"method":"world/get","params":{"entity":"@player"}}'              # 分数已经是 3
-rpc '{"method":"render/screenshot","params":{"path":"shot.png"}}'       # 无头截图，不需要 GPU
-rpc '{"method":"events/recent"}'                                        # collision → coin-collected → game-won 因果链全可见
+rpc '{"method":"sim/step","params":{"ticks":60}}'                  # 确定性的逐帧步进
+rpc '{"method":"world/get","params":{"entity":"@player"}}'         # 读任意实体的状态
+rpc '{"method":"render/describe"}'                                 # 语义视图：屏幕上有啥、在哪、谁压着谁
+rpc '{"method":"render/screenshot","params":{"path":"shot.png"}}'  # 无头截图，不要 GPU
+rpc '{"method":"events/recent"}'                                   # 因果链：碰撞 → 吃到金币 → 通关
 ```
 
-完整方法表见 [docs/agent-guide.md](docs/agent-guide.md)。
+完整方法参考：[docs/agent-guide.md](docs/agent-guide.md)（[English](docs/agent-guide.en.md)）。
 
-## 它凭什么是"AI 原生"
+## 自动试玩
 
-- **一切状态都是数据。** 场景、实体、规则、世界的每一帧都是强 schema 的 JSON——写入即校验，运行时可往返读回，存档=快照。没有藏在编辑器二进制里的状态。
-- **确定性 + 录像回放。** 固定步长、种子随机（跨 Rust/JS 同一条随机流）、输入录制。`vitric replay` 逐校验点验证，任何 bug 都能精确重放到出错前一帧——AI 调试从"猜"变成"看回放"。游戏是 agent 做的，所以引擎用确定性录像做不可伪造的交付证书：`vitric gate` 重放通关录像逐位验证 + 必须触发终局事件，"做完了"由机器裁决，不靠 agent 自述。
-- **规则正门 + 脚本安全带。** 80% 玩法是 `当 X 则 Y` 的声明式规则直译（刻意不图灵完备，级联死循环直接报错）；写不动的落到 JS 系统函数，但必须声明读写哪些组件，越权就拒——引擎永远知道每段逻辑的影响面。
-- **报错为 LLM 设计。** 每条错误带精确路径、稳定错误码、修复提示，一次报全不挤牙膏。
-- **无头即所见。** 截图是引擎内建能力，不需要 GPU、窗口或图形会话——CI 里、容器里、任何地方，agent 都能亲眼看到画面，像素逐字节确定（截图也能进断言）。
+`vitric playtest` 放一群确定性 agent 把游戏玩一遍，聚合出一份结构化报告——就是那种人肉做又慢又测不全的机械 QA。它清的是**地板**（机械正确性和数值平衡），不是**天花板**（好不好玩、手感、美术——那些还得人来判）。
+
+swarm 会报告：
+
+- **通关率与可达性**——到底通不通得了？哪些声明的结局没有任何一局走到？
+- **软锁**（卡死无解）——哪些操作顺序会把一局带进再也赢不了的死局，按触发条件聚类、可重放。
+- **废内容**——从没被任何一局用到的道具、技能、动作。
+- **节奏**——玩家普遍卡在哪、难度在哪突然劝退。
+- **数值崩**——经济跑飞（某个数无界地涨）/ 崩盘（归零卡死）/ 溢出。
+- **一招鲜**——某个动作或 build 碾压其他所有选择，让别的选项变得没意义。
+- **清晰度 / 连续性**——可选的 LLM 试玩员会提"我看不懂该干嘛"或"这段对话和前面一幕矛盾"。
+
+引擎有两点让这件事能成、也和别的引擎拉开差距：
+
+- **前瞻搜索。** 因为模拟是确定的、能精确存档/读档，agent 可以**试着**走一个动作、向前推几帧、给结果打分、再回退——真的在玩技巧类游戏，而不是瞎按。（`--strategy lookahead`。）
+- **证书当种子。** 一段 `vitric gate` 的通关录像既是"这游戏能通"的证明，又是 swarm 的种子：它在已知解法上做扰动（换顺序、走岔路、跳一步）找破绽——这是测解谜和剧情类游戏可行的办法。
+
+试玩门槛——零软锁、最低通关率、无不可达结局——可以声明成一道交付门（`vitric.json` 里的 `gates.playtest`），让"swarm 没能玩坏它"成为交付契约的一部分。报告能渲染成一页自包含的 HTML。详见 [docs/design-agent-playtest.md](docs/design-agent-playtest.md)。
+
+## 特性
+
+**确定性与验证**
+- 固定步长、播种的 PCG32 随机数（Rust 和 JS 共用一条流）、输入录制。
+- `vitric replay` 重跑一段录像、逐位校验检查点哈希——任何 bug 都能重放到它出问题的那一帧。
+- `vitric gate` 把通关录像变成一张伪造不了的交付证书：逐位重放 + 必须触发的终止事件 + 每个 tick 都求值的断言。"做完了"由机器裁决，不是 agent 自己说的。
+
+**一切皆数据**
+- 场景、实体、规则、世界的每一帧都是有强 schema 的 JSON——写入即校验、运行时可查、能往返。存档就是完整快照；没有藏在编辑器二进制里的状态。
+- 存档/读档是精确的——存档读档、重放、前瞻搜索都从这一个原语长出来。
+
+**编写玩法**
+- **规则优先。** 约 80% 的玩法是声明式的 `当 X 则 Y` 规则（故意不做图灵完备；级联死循环直接报错）。
+- **脚本带安全带。** 其余写成 JS/TS 系统，但必须声明自己读写哪些组件——没声明就写会被拒，所以引擎永远知道每个系统的影响范围。TypeScript 经 esbuild 编译，支持热重载。
+- **动画单一归属。** 声明式片段 + `Anim` 组件；引擎独占 `Sprite.image` 的写权，所以"我的动画被别的系统打断了"这类 bug 不可能发生。
+
+**渲染**（CPU 光栅化是确定性真相源，wgpu 的 GPU 路径与它对齐）
+- 2D 动态光照（环境光 + 点/聚/方向光），零配置的法线浮雕（`hero.png` + `hero_n.png`），2D 投影，泛光后效。
+- 屏上文字走语义描述（不靠 OCR）；内置点阵字体，或挂一个 TTF 出带比例字距、抗锯齿的矢量字（含中日韩）。
+- 无头截图逐字节确定、可拿来断言——不要 GPU、不要窗口、不要显示会话。
+- 帧动画流水线（`vitric assets --frames`）：去重、裁边、打图集、统一色板、BC7 纹理压缩——支持 BC 的 GPU 上，图集纹理的运行时显存约降 4 倍（在 RTX 4090 上验证过）。
+
+**AI 生成的美术**
+- `vitric assets` 把项目里的 PNG 统一到一套色板（确定性 median-cut），并程序化或图生图地生成法线贴图。
+
+**给 LLM 看的报错**
+- 每条报错都带精确路径、稳定错误码、修复提示——一次全报，不是一条一条挤牙膏。
 
 ## 架构
 
 ```
 crates/
-  vitric-ecs       确定性可内省 ECS（组件=JSON，迭代有序，快照/哈希）
+  vitric-ecs       确定性、可自省的 ECS（组件=JSON，有序遍历，快照/哈希）
   vitric-data      声明式数据层（schema 校验、场景实例化、项目加载）
-  vitric-rules     当X则Y 规则引擎（触发/条件/动作/级联保护）
-  vitric-script    QuickJS 脚本层（读写声明强制、确定性随机、热重载）
-  vitric-sim       固定步长模拟（PCG32、录像/重放校验、内建运动+碰撞）
-  vitric-control   AI 控制面（HTTP JSON-RPC：查/改/注输入/时间控制/断言/截图）
-  vitric-render    CPU 光栅化（world→PNG，无头可用；wgpu 呈现层在路上）
-  vitric-cli       vitric check / run / replay / gate
-examples/coin-run  示例：吃金币（规则/脚本/动画/分数 HUD/断言全覆盖）
-examples/cave-gen  示例：配方生成关卡——改一个 seed 或 Recipe 数字，整张关卡重新生成
-examples/jump      示例：平台跳跃（重力/落地/起跳/终局文字），纯规则零脚本
+  vitric-rules     当-X-则-Y 规则引擎（触发器/条件/动作/级联保护）
+  vitric-script    QuickJS 脚本（强制声明读写、确定性随机、热重载、TS 经 esbuild）
+  vitric-sim       固定步长模拟（PCG32、录制/重放、存档/读档、运动 + 碰撞）
+  vitric-render    CPU 光栅化 + wgpu GPU 镜像（世界→PNG 无头、光照/投影/泛光、语义描述）
+  vitric-control   AI 控制面（HTTP JSON-RPC：查询/修改/注入输入/时间控制/断言/截图）
+  vitric-playtest  agent 集群试玩（场景视图、策略含前瞻、种子探索、报告）
+  vitric-cli       vitric check / run / replay / gate / playtest / assets / bundle（+ 开窗、检查器、音频）
 ```
 
-设计稿与决策记录：[docs/AI原生游戏引擎-设计稿.md](docs/AI原生游戏引擎-设计稿.md) · 实施计划：[docs/plan.md](docs/plan.md)
+## 示例
 
-## MCP
+`examples/` 下是能直接跑、且都有测试覆盖的样例游戏：`coin-run`（规则 + 脚本 + 动画 + 音频）、`jump`（纯规则零脚本的平台跳跃）、`cave-gen`（按配方生成关卡）、`spire`、`glow`（动态光照）、`ui-menu`/`ui-gallery`、`intro`（时间轴/序列系统）等。
 
-`mcp/` 内置官方 MCP server（14 个工具）：任何 MCP 客户端（Claude Code / Cursor / Codex…）开箱即用地校验、启动、观察、操作、断言一个 Vitric 游戏。
+## 文档
+
+- [agent API 参考](docs/agent-guide.md)（[English](docs/agent-guide.en.md)） · [错误码表](docs/errors.md) · [美术流水线](docs/art-pipeline.md)
+- 设计稿：[agent 试玩](docs/design-agent-playtest.md)、[UI](docs/design-ui.md)、[帧动画](docs/design-frame-animation.md)、[补间/序列](docs/design-tween-sequence.md)
+- 给读仓库的 agent 看的 [llms.txt](llms.txt)。
+
+## MCP 与多 agent
+
+`mcp/` 自带一个官方 MCP server：任何 MCP 客户端（Claude Code / Cursor / Codex …）开箱即可校验、启动、观察、驱动、断言一个 Vitric 游戏。
 
 ```json
 { "mcpServers": { "vitric": { "command": "node", "args": ["<repo>/mcp/index.js"], "env": { "VITRIC_BIN": "<repo>/target/release/vitric" } } } }
 ```
 
-**员工随引擎发货**：角色工单（[`team/roles/`](team/README.md)）+ 协同黑板（`vitric team`）+ 地盘执法（`vitric turf`）内置引擎——任何 agent 平台都能直接用引擎本体跑多 agent 游戏班子（MCP 客户端经 `vitric_role` 工具领工单）。
-
-仓库另带两个 Claude Code skill：`.claude/skills/vitric/`（单 agent 开发手册）和 `.claude/skills/vitric-team/`（多 agent 班子编排：导演写 GDD 合同、按角色派 subagent 并行生产，打法见 [docs/team-playbook.md](docs/team-playbook.md)）。
+引擎还带了一套多 agent 班子工具：角色工单（`team/`）、协同黑板（`vitric team`）、地盘执法（`vitric turf`），所以 agent 平台可以直接用引擎本身跑一支多 agent 游戏开发班子。详见 [班子手册](docs/team-playbook.md)。
 
 ## 状态
 
-核心闭环已跑通（100+ 测试）：确定性录像回放、语义观察（render/describe）、热重载、精灵贴图+素材校验、声明式动画（引擎独占 Sprite.image 写权，动画不可能被打断）、平台物理（重力/Solid 挡停/grounded）、2D 动态光照（Ambient+点光/聚光/平行光，法线贴图浮雕——`hero.png` 配 `hero_n.png` 零配置启用，CPU/GPU 同一套公式；2D 投影——`Ambient.shadows: true` 开启，Solid 挡停身体的同一批实体顺便挡光零新增授权，point/spot 硬影、遮光体不自压黑、上限 256）+ 泛光后效（`Bloom{threshold, strength}`，光晕随分辨率成比例，CPU 截图仍是可断言的真相源）、屏上文字（describe 直出文本内容不用 OCR；默认内嵌点阵字体，清单 `font` 挂 TTF 即比例字距+抗锯齿的矢量文字，字体含 CJK 字形就能显示中文）、配方生成关卡、场景切换与流程（规则 emit `load-scene` 约定事件：菜单→关卡→结局；`Persist` 标记组件跨场景携带玩家/分数，`scene-loaded` 是每场景初始化钩子；切换在确定性流水线内执行，跨切换的录像重放/快照恢复逐位一致，check 校验清单里每个场景）、玩家存档（规则 emit `save-game` / `load-game` 约定事件：完整快照落 `saves/<槽名>.json` 带引擎版本校验，`vitric run --load slot1` 续玩；存档是纯输出副作用，读档是会话边界操作——录像期间显式拒绝，控制面有对称的 `save/write|load|list` RPC）、窗口呈现+检查器（点选/拖拽写回，选中态人机双向可见）、GPU 呈现（wgpu，`--renderer gpu`，真机已验；无头截图保持纯 CPU 逐字节确定）、音频、运行时 LLM（规则 emit `llm-ask`，回复以 `llm-reply` 事件走录像通道回来——带 LLM 内容的录像离线逐位重放，永远不碰网络）、交付门禁（`vitric gate`：check + 通关录像逐位重放 + must_emit 终局事件 + 断言集全程求值，全过才退出 0——无门禁项目不出证书）、TypeScript、MCP server、CI+二进制发布。`vitric assets` 把 AI 出的图统一到一张项目色板（确定性中位切分量化，原件自动备份，`--palette-lock` 让后补素材入伙老色板，法线贴图不参与量化），也能生成法线贴图（`--normals` 程序化倒角+Sobel 确定性生成，`--normals-ai` 走豆包 Seedream 图生图+逐像素合法化）。进行中：更多内建系统。
+1.0 之前，正在积极开发，API 可能变。核心是真实可用且有测试的（CI 里 650+ 个测试，含一个端到端用例：agent 通过 HTTP 通关游戏、录像逐位重放一致）。确定性、重放、交付门、无头渲染、光照/投影/泛光、规则 + TypeScript、存档/读档、场景流转、GPU 呈现、音频、素材统一、帧动画、试玩 swarm、MCP server 都已就位。二进制提供 Linux 和 Windows 版。
 
-## License
+## 参与贡献
 
-MIT
+欢迎提 issue 和 PR。`cargo test --workspace` 和 `cargo clippy --workspace --all-targets` 要全过（CI 两个都卡）。新增引擎系统要守确定性规则：所有状态可 JSON 序列化、所有遍历有序、模拟里不碰墙钟时间、不引入未声明的随机。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 BlackBearCC

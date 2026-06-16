@@ -1,53 +1,111 @@
 # Vitric
 
+[![CI](https://github.com/BlackBearCC/vitric/actions/workflows/ci.yml/badge.svg)](https://github.com/BlackBearCC/vitric/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/BlackBearCC/vitric)](https://github.com/BlackBearCC/vitric/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 English | [中文](README.zh-CN.md)
 
-**The glass-box game engine for AI agents.**
+**A deterministic, glass-box 2D game engine built for AI agents.**
 
 ![glow demo](docs/media/glow.gif)
 
-*↑ AI-generated pixel art, dynamic 2D lighting, particles, camera follow — and every frame was captured headlessly by an AI driving the game through the control plane. That loop is what this engine is for.*
+*↑ AI-generated pixel art, dynamic 2D lighting, particles, camera follow — every frame captured headlessly by an AI driving the game through the control plane.*
 
-Existing engines were designed for a human sitting in front of an editor; to an AI they are black boxes. Vitric is designed around an **agent API**: every piece of engine state is visible, operable, and verifiable, so an AI can autonomously **run the game → observe pixels and state → assert → modify → repeat** without a human in the loop.
+Existing engines were designed for a human in front of an editor; to an AI they are black boxes. Vitric is built around an **agent API**: every piece of engine state is visible, operable, and verifiable, so an AI can autonomously **run the game → observe pixels and state → assert → modify → repeat** without a human in the loop. Because the simulation is bit-exact deterministic, the engine can also *prove* things about a game — that a recording clears it, that a swarm of agents can't soft-lock it.
 
-## Try it now
+## Contents
+
+- [Quick start](#quick-start) · [The agent API](#the-agent-api) · [Automated playtesting](#automated-playtesting)
+- [Features](#features) · [Architecture](#architecture) · [Examples](#examples) · [Docs](#docs)
+- [MCP & multi-agent](#mcp--multi-agent) · [Status](#status) · [Contributing](#contributing) · [License](#license)
+
+## Quick start
 
 ```bash
 cargo build --release
+BIN=./target/release/vitric
 
-# Validate the sample project (errors come with paths, stable codes, and fix hints — all at once)
-./target/release/vitric check examples/coin-run
+# Validate a project — errors come with paths, stable codes, and fix hints, all at once
+$BIN check examples/coin-run
 
-# Run it (headless + AI control plane)
-./target/release/vitric run examples/coin-run --port 6173
+# Run it (headless + AI control plane on port 6173)
+$BIN run examples/coin-run --port 6173
 
-# Harmonize AI-generated art: quantize every project PNG onto one shared palette (see docs/art-pipeline.md)
-./target/release/vitric assets examples/glow --colors 16
+# Auto-playtest: a swarm of deterministic agents plays the game and reports what's broken
+$BIN playtest examples/coin-run --sessions 16 --html report.html
+
+# Delivery gate: replay a winning recording bit-exactly and require the win event
+$BIN gate examples/spire
 ```
 
-In another terminal, beat the game the way an agent would:
+Prebuilt binaries for Linux and Windows are on the [releases page](https://github.com/BlackBearCC/vitric/releases).
+
+## The agent API
+
+The engine runs headless and exposes an HTTP JSON-RPC control plane. An agent drives the game the same way a player would, but through data:
 
 ```bash
 rpc() { curl -s -X POST http://127.0.0.1:6173/rpc -d "$1"; echo; }
 rpc '{"method":"sim/pause"}'
 rpc '{"method":"input/inject","params":{"action":"right"}}'
 rpc '{"method":"sim/step","params":{"ticks":60}}'                  # deterministic frame-by-frame stepping
-rpc '{"method":"world/get","params":{"entity":"@player"}}'         # score is already 3
-rpc '{"method":"render/describe"}'                                 # semantic view: what is on screen, where, who overlaps whom
-rpc '{"method":"render/screenshot","params":{"path":"shot.png"}}'  # headless screenshot, no GPU required
-rpc '{"method":"events/recent"}'                                   # the full causal chain: collision → coin-collected → game-won
+rpc '{"method":"world/get","params":{"entity":"@player"}}'         # read any entity's state
+rpc '{"method":"render/describe"}'                                 # semantic view: what's on screen, where, who overlaps whom
+rpc '{"method":"render/screenshot","params":{"path":"shot.png"}}'  # headless screenshot, no GPU needed
+rpc '{"method":"events/recent"}'                                   # the causal chain: collision → coin-collected → game-won
 ```
 
 Full method reference: [docs/agent-guide.en.md](docs/agent-guide.en.md) ([中文](docs/agent-guide.md)).
 
-## What makes it AI-native
+## Automated playtesting
 
-- **Everything is data.** Scenes, entities, rules, and every frame of the world are strongly-schema'd JSON — validated on write, queryable at runtime, round-trippable. Saves are snapshots. There is no state hiding inside editor binaries.
-- **Determinism + replay.** Fixed timestep, seeded RNG (one stream shared across Rust and JS), input recording. `vitric replay` verifies checkpoint hashes; any bug can be replayed exactly to the frame before it broke. AI debugging goes from *guessing* to *watching the replay*. And since agents build the games, the engine turns deterministic recordings into unforgeable proofs of delivery: `vitric gate` replays a winning recording bit-exactly and requires the terminal event — "done" is decided by the machine, not claimed by the agent.
-- **Rules first, scripts with a seatbelt.** ~80% of gameplay is declarative `when X then Y` rules (deliberately not Turing-complete; cascade loops are a hard error). The rest goes into JS/TS systems that must declare which components they read and write — undeclared writes are rejected, so the engine always knows the blast radius of every piece of logic.
-- **Errors written for LLMs.** Every error carries a precise path, a stable code, and a fix hint — reported all at once, not one at a time.
-- **Headless is first-class.** Screenshots and semantic scene descriptions are built into the engine — no GPU, no window, no display session needed. In CI, in a container, anywhere: the agent sees the actual picture, byte-for-byte deterministic (screenshots can be asserted on).
-- **One animation owner.** Declarative clips + an `Anim` component; the engine has exclusive write access to `Sprite.image`. The "my animation got interrupted by some other system" class of bugs cannot exist.
+`vitric playtest` runs a swarm of deterministic agents through a game and aggregates a structured report — the kind of mechanical QA that's slow and incomplete by hand. It clears the *floor* (mechanical correctness and balance), not the *ceiling* (fun, feel, art — those still need a human).
+
+What the swarm reports:
+
+- **Clear rate & reachability** — can it be beaten at all? Which declared endings does no run reach?
+- **Soft-locks** — input orderings that strand a run in an unwinnable state, clustered and replayable.
+- **Dead content** — items, abilities, or actions no run ever uses.
+- **Pacing** — where runs stall; difficulty spikes.
+- **Number breakage** — economy runaway / collapse, overflow.
+- **Dominant strategy** — one action or build that makes every other choice meaningless.
+- **Clarity / continuity** — optional LLM playtesters flag "I couldn't tell what to do" or "this dialogue contradicts an earlier scene."
+
+Two properties of the engine make this work and set it apart:
+
+- **Lookahead search.** Because the sim is deterministic with exact snapshot/restore, an agent can *speculatively* try an action, roll forward a few ticks, score the result, and roll back — actually playing skill-based games instead of flailing randomly. (`--strategy lookahead`.)
+- **Certificates as seeds.** A `vitric gate` clearing recording is both a proof the game is beatable *and* a seed for the swarm: it perturbs the known solution (reorder, branch, drop a step) to find what breaks it — the tractable way to test puzzle and narrative games.
+
+Playtest thresholds — no soft-locks, a minimum clear rate, no unreachable endings — can be declared as a delivery gate (`gates.playtest` in `vitric.json`), so "the swarm couldn't break it" becomes part of the contract. Reports render to a self-contained HTML page. See [docs/design-agent-playtest.md](docs/design-agent-playtest.md).
+
+## Features
+
+**Determinism & verification**
+- Fixed timestep, seeded PCG32 RNG (one stream shared across Rust and JS), input recording.
+- `vitric replay` re-runs a recording and verifies checkpoint hashes bit-exactly — any bug replays to the exact frame it broke.
+- `vitric gate` turns a winning recording into an unforgeable delivery certificate: bit-exact replay + a required terminal event + assertions evaluated every tick. "Done" is decided by the machine, not claimed by the agent.
+
+**Everything is data**
+- Scenes, entities, rules, and every frame of the world are strongly-schema'd JSON — validated on write, queryable at runtime, round-trippable. Saves are full snapshots; there is no state hiding inside an editor binary.
+- Snapshot/restore is exact, which is what makes save/load, replay, and lookahead search all fall out of one primitive.
+
+**Authoring**
+- **Rules first.** ~80% of gameplay is declarative `when X then Y` rules (deliberately not Turing-complete; cascade loops are a hard error).
+- **Scripts with a seatbelt.** The rest is JS/TS systems that must declare the components they read and write — undeclared writes are rejected, so the engine always knows the blast radius of every system. TypeScript compiles via esbuild; hot reload supported.
+- **One animation owner.** Declarative clips + an `Anim` component; the engine has exclusive write access to `Sprite.image`, so "my animation got interrupted by another system" cannot happen.
+
+**Rendering** (CPU rasterizer is the deterministic truth source; wgpu GPU path mirrors it)
+- 2D dynamic lighting (ambient + point/spot/directional) with zero-config normal-mapped relief (`hero.png` + `hero_n.png`), 2D shadow casting, and a bloom post-effect.
+- On-screen text described semantically (no OCR); built-in bitmap font, or a TTF for proportional anti-aliased vector text including CJK.
+- Headless screenshots are byte-for-byte deterministic and can be asserted on — no GPU, window, or display session required.
+- Frame-animation pipeline (`vitric assets --frames`): dedupe, trim, atlas, palette, and BC7 texture compression — runtime VRAM for the texture atlas drops ~4× on BC-capable GPUs (verified on an RTX 4090).
+
+**AI-generated art**
+- `vitric assets` harmonizes a project's PNGs onto one shared palette (deterministic median-cut), and generates normal maps procedurally or via image-to-image.
+
+**Errors for LLMs**
+- Every error carries a precise path, a stable code, and a fix hint — all reported at once, not one at a time.
 
 ## Architecture
 
@@ -57,35 +115,41 @@ crates/
   vitric-data      declarative data layer (schema validation, scene instantiation, project loading)
   vitric-rules     when-X-then-Y rule engine (triggers/conditions/actions/cascade protection)
   vitric-script    QuickJS scripting (enforced read/write declarations, deterministic RNG, hot reload, TS via esbuild)
-  vitric-sim       fixed-timestep simulation (PCG32, record/replay verification, built-in motion + collision)
+  vitric-sim       fixed-timestep simulation (PCG32, record/replay, snapshot/restore, motion + collision)
+  vitric-render    CPU rasterizer + wgpu GPU mirror (world→PNG headless, lighting/shadows/bloom, semantic describe)
   vitric-control   AI control plane (HTTP JSON-RPC: query/mutate/inject input/time control/asserts/screenshots)
-  vitric-render    CPU rasterizer (world→PNG headless; sprite images with alpha; semantic describe)
-  vitric-cli       vitric check / run / replay / gate  (+ window presentation, inspector, audio)
-examples/coin-run  sample game: rules/scripts/animation/audio/score HUD, fully covered by e2e tests
-examples/cave-gen  sample game: recipe-generated levels — change one number, get a whole new level
-examples/jump      sample game: a platformer (gravity/landing/jump/win text) in pure rules, zero scripts
+  vitric-playtest  agent swarm playtesting (scene view, strategies incl. lookahead, seed exploration, report)
+  vitric-cli       vitric check / run / replay / gate / playtest / assets / bundle (+ window, inspector, audio)
 ```
 
-Design doc & decision record: [docs/AI原生游戏引擎-设计稿.md](docs/AI原生游戏引擎-设计稿.md) · Plan: [docs/plan.md](docs/plan.md) · Error catalog: [docs/errors.md](docs/errors.md)
+## Examples
 
-## MCP
+`examples/` holds runnable sample games, each fully covered by tests: `coin-run` (rules + scripts + animation + audio), `jump` (a platformer in pure rules, zero scripts), `cave-gen` (recipe-generated levels), `spire`, `glow` (dynamic lighting), `ui-menu`/`ui-gallery`, `intro` (the timeline/sequence system), and more.
 
-`mcp/` ships an official MCP server (14 tools): any MCP client (Claude Code / Cursor / Codex…) can validate, launch, observe, drive, and assert on a Vitric game out of the box.
+## Docs
+
+- [Agent API reference](docs/agent-guide.en.md) ([中文](docs/agent-guide.md)) · [Error catalog](docs/errors.md) · [Art pipeline](docs/art-pipeline.md)
+- Design records: [agent playtesting](docs/design-agent-playtest.md), [UI](docs/design-ui.md), [frame animation](docs/design-frame-animation.md), [tween/sequence](docs/design-tween-sequence.md)
+- [llms.txt](llms.txt) for agents reading the repo.
+
+## MCP & multi-agent
+
+`mcp/` ships an official MCP server: any MCP client (Claude Code / Cursor / Codex …) can validate, launch, observe, drive, and assert on a Vitric game out of the box.
 
 ```json
 { "mcpServers": { "vitric": { "command": "node", "args": ["<repo>/mcp/index.js"], "env": { "VITRIC_BIN": "<repo>/target/release/vitric" } } } }
 ```
 
-**The staff ships with the engine**: role work tickets ([`team/roles/`](team/README.md)), a coordination blackboard (`vitric team`), and turf enforcement (`vitric turf`) are built in — any agent platform can run a multi-agent game team off the engine itself (MCP clients fetch their tickets via the `vitric_role` tool).
-
-The repo also ships Claude Code skills — `.claude/skills/vitric/` (single-agent dev loop) and `.claude/skills/vitric-team/` (multi-agent team orchestration: a director writes the GDD contract and dispatches role subagents in parallel, per the [team playbook](docs/team-playbook.md)) — plus an [llms.txt](llms.txt).
+The engine also carries a multi-agent team harness: role work tickets (`team/`), a coordination blackboard (`vitric team`), and turf enforcement (`vitric turf`), so an agent platform can run a multi-agent game team off the engine itself. See the [team playbook](docs/team-playbook.md).
 
 ## Status
 
-The core loop is real and tested (100+ tests, including an e2e where an agent beats the game over HTTP and a recording replays hash-identically): deterministic replay, semantic observation, hot reload, sprite assets with validation, declarative animation, platformer physics (gravity / solid clipping / grounded), 2D dynamic lighting (Ambient + point/spot/directional lights) with normal-mapped relief (`hero.png` + `hero_n.png` naming pair, zero config; same math on CPU and GPU), 2D shadow casting (opt-in `Ambient.shadows: true`; Solid entities occlude light the same way they block bodies — zero new authoring; hard point/spot shadows, occluders never blacken themselves, cap 256) and a bloom post-effect (`Bloom{threshold, strength}`, halo scales with resolution, CPU screenshots stay the assertable truth), on-screen text (described semantically — no OCR; built-in bitmap font by default, or a manifest `font` TTF for proportional anti-aliased vector text incl. CJK), recipe-generated levels, scene switching & flow (rules emit the `load-scene` convention event for menu→level→ending; the `Persist` marker component carries player/score across scenes, `scene-loaded` is the per-scene init hook; switches run inside the deterministic pipeline, so recordings replay and snapshots restore bit-identically across them, and `vitric check` validates every scene in the manifest), player save/load (rules emit `save-game` / `load-game` convention events: full snapshots land in `saves/<slot>.json` with an engine-version check, `vitric run --load slot1` resumes a session; saving is a pure output side effect, loading is a session-boundary op — explicitly refused while recording — mirrored by `save/write|load|list` RPCs), window + inspector (click/drag writes back to the data layer; selection is visible to both human and AI), GPU presentation (wgpu, `--renderer gpu`, verified on real hardware; headless screenshots stay CPU and byte-deterministic), audio, runtime LLM (rules emit `llm-ask`, replies come back as `llm-reply` events through the recorded-input channel — recordings with LLM content replay bit-identically offline, never touching the network), delivery gates (`vitric gate`: project check + bit-exact playthrough replays + required terminal event + assertions evaluated every replayed tick; exit 0 only if all gates pass — no gates declared, no certificate), TypeScript scripts, MCP server, CI + binary releases. `vitric assets` harmonizes AI-generated art onto one shared project palette (deterministic median-cut quantization, originals backed up, `--palette-lock` keeps new assets on the existing look; normal maps are excluded from quantization) and generates normal maps (`--normals` deterministic procedural bevel+Sobel, or `--normals-ai` via Doubao Seedream image-to-image with per-pixel sanitization).
+Pre-1.0 and under active development; the API may change. The core is real and tested (650+ tests in CI, including an end-to-end run where an agent beats a game over HTTP and the recording replays hash-identically). Determinism, replay, gates, headless rendering, lighting/shadows/bloom, rules + TypeScript, save/load, scene flow, GPU presentation, audio, asset harmonization, frame animation, the playtest swarm, and the MCP server are all in place. Binaries ship for Linux and Windows.
 
-In progress: more built-in systems.
+## Contributing
+
+Issues and pull requests are welcome. `cargo test --workspace` and `cargo clippy --workspace --all-targets` should pass clean (CI enforces both). New engine systems should keep the determinism rules: all state JSON-serializable, all iteration ordered, no wall-clock or undeclared randomness in the simulation.
 
 ## License
 
-MIT
+[MIT](LICENSE) © 2026 BlackBearCC
