@@ -60,6 +60,12 @@ save("lander", img)
 save("floor", ground("floor", (138, 122, 100, 255)))
 img = Image.new("RGBA", (S, S), (58, 54, 64, 255)); ImageDraw.Draw(img).rectangle([0, 0, S - 1, S - 1], outline=lite((58, 54, 64, 255))); save("wall", img)
 img = ground("conduit", (138, 122, 100, 255)); ImageDraw.Draw(img).line([0, 16, S, 16], fill=(194, 162, 74, 255), width=3); save("conduit", img)
+# quarters:地板上一张床(伙伴的住所,满足舒适需求)
+img = ground("quarters", (138, 122, 100, 255))
+dd = ImageDraw.Draw(img)
+dd.rectangle([7, 9, 25, 24], fill=(120, 96, 132, 255), outline=dark((120, 96, 132, 255)))  # 床
+dd.rectangle([9, 11, 23, 15], fill=(208, 196, 220, 255))  # 枕头/被
+save("quarters", img)
 
 # --- 种养 ---
 img = ground("plot", (90, 70, 50, 255))

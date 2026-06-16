@@ -2,6 +2,8 @@
   "rules": [
     { "id": "talk", "on": { "event": "input", "filter": { "action": "t", "phase": "pressed" } }, "do": [ { "set": "@companion.ThinkReq.pending", "to": 1 } ] },
 
+    { "id": "feed-quarters", "on": { "event": "tally" }, "do": [ { "set": "@companion.Need.quarters", "to": "event.quarters" } ] },
+
     { "id": "llm-reply-route", "on": { "event": "llm-reply" }, "do": [ { "call": "__onReply", "with": { "id": "event.id", "text": "event.text" } } ] },
 
     { "id": "say", "on": { "event": "companion-said" }, "do": [

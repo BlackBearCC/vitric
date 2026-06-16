@@ -21,11 +21,14 @@ vitric.system("pop-tally", { query: ["Companion"], writes: [] }, (entities, ctx)
 vitric.system("tally", { query: ["Structure"], writes: [] }, (entities, ctx) => {
   let conduit = 0;
   let plot = 0;
+  let quarters = 0;
   for (const e of entities) {
     if (e.Structure.kind === "conduit") conduit += 1;
     else if (e.Structure.kind === "plot") plot += 1;
+    else if (e.Structure.kind === "quarters") quarters += 1;
   }
-  ctx.emit("tally", { pow: conduit * PER, food: plot * PER, o2: plot * PER });
+  // quarters 数也带上,给伙伴需求系统用(住所满足舒适)
+  ctx.emit("tally", { pow: conduit * PER, food: plot * PER, o2: plot * PER, quarters: quarters });
 });
 
 // 每帧:库存 += (产出速率 - 基础消耗) * dt,夹在 [0,100]。

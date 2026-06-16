@@ -3333,6 +3333,11 @@
     "ThinkReq": {
      "pending": 0
     },
+    "Need": {
+     "comfort": 50,
+     "quarters": 0,
+     "leave_timer": 0
+    },
     "Wander": {
      "home_x": 6,
      "home_y": 7,

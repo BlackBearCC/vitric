@@ -31,6 +31,29 @@ vitric.system(
   }
 );
 
+// need 系统:舒适需求随时间消长。有住所(quarters,由 feed-quarters 规则落进 Need.quarters)
+// 就回舒适、没有就掉;舒适见底后还宽限 LEAVE_GRACE 秒(温和有预警),仍不管才真走(despawn)。
+// 建个住所就能把舒适拉回来 → 留住人,体现"不满意就走、但能挽回"。
+const COMFORT_UP = 4.0;
+const COMFORT_DOWN = 4.0;
+const LEAVE_GRACE = 8.0;
+vitric.system("need", { query: ["Companion", "Need"], writes: ["Need"] }, (entities, ctx) => {
+  for (const e of entities) {
+    const n = e.Need;
+    const rate = n.quarters > 0 ? COMFORT_UP : -COMFORT_DOWN;
+    n.comfort = Math.max(0, Math.min(100, n.comfort + rate * ctx.dt));
+    if (n.comfort <= 0) {
+      n.leave_timer += ctx.dt;
+      if (n.leave_timer >= LEAVE_GRACE) {
+        ctx.emit("companion-left", { who: e.id });
+        ctx.despawn(e.id);
+      }
+    } else {
+      n.leave_timer = 0;
+    }
+  }
+});
+
 // think 系统:有人来搭话(ThinkReq.pending)就拼提示词问大模型,问完清掉 pending。
 vitric.system(
   "companion-think",

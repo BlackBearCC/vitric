@@ -35,6 +35,13 @@
     },
     "Mood": { "fields": { "value": { "type": "text", "default": "平静" } } },
     "ThinkReq": { "fields": { "pending": { "type": "number", "default": 0 } } },
+    "Need": {
+      "fields": {
+        "comfort": { "type": "number", "default": 50 },
+        "quarters": { "type": "number", "default": 0 },
+        "leave_timer": { "type": "number", "default": 0 }
+      }
+    },
     "Wander": {
       "fields": {
         "home_x": { "type": "number", "default": 0 },

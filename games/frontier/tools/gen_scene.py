@@ -71,6 +71,7 @@ entities.append({
                     "speech": "语速快、爱用'诶''呐'、喜欢顺嘴吐槽"},
         "Mood": {"value": "好奇"},
         "ThinkReq": {"pending": 0},
+        "Need": {"comfort": 50, "quarters": 0, "leave_timer": 0},
         "Wander": {"home_x": 6, "home_y": 7, "tx": 6, "ty": 7, "timer": 2},
         "Position": {"x": 6, "y": 7},
         "Velocity": {"x": 0, "y": 0},
