@@ -1,0 +1,9 @@
+{
+  "components": {
+    "Counter": {
+      "fields": {
+        "value": { "type": "number", "default": 0 }
+      }
+    }
+  }
+}

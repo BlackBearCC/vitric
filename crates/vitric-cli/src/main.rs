@@ -5,6 +5,7 @@
 //! - `vitric run <项目目录> [选项]`        无头运行 + AI 控制面
 //! - `vitric replay <项目目录> <录像.json>` 重放录像并校验确定性
 //! - `vitric playtest <项目目录> [选项]`     进程内自动试玩：单局出可重放录像（默认），--sessions N 并行跑批聚合地板报告，--seed-recording 种子式探索（扰动证书录像逮不可达结局/顺序软锁）
+//! - `vitric balance <项目目录> [选项]`      自动配平：调一个数值旋钮（--knob 文件#json-pointer），用 agent 集群试玩反复跑，二分搜索到让通关率落进 --target-clear-rate 的旋钮值（非单调退化线扫兜底）。绝不改用户文件（临时副本里改完即删）
 //! - `vitric gate <项目目录>`              交付门禁：check + 通关录像重放 + 断言集 + 可选 playtest 门（清单声明 gates.playtest 才跑：真跑 swarm 断言达标），全过才出证书
 //! - `vitric bundle <项目目录> [选项]`      发行打包：gate PASS 后把项目附进引擎副本，出自包含单文件（无证书不发行）
 //! - `vitric assets <项目目录> [选项]`      全项目 PNG 统一色板（AI 出图规整成一个调）
@@ -65,6 +66,7 @@ fn main() {
         Some("run") => cmd_run(&args[1..]),
         Some("replay") => cmd_replay(&args[1..]),
         Some("playtest") => cmd_playtest(&args[1..]),
+        Some("balance") => vitric_cli::balance::run(&args[1..]),
         Some("gate") => cmd_gate(&args[1..]),
         Some("bundle") => vitric_cli::bundle::run(&args[1..]),
         Some("run-embedded") => cmd_run_embedded(&args[1..]),
@@ -85,7 +87,7 @@ fn main() {
 }
 
 fn usage_and_exit() -> ! {
-    eprintln!("用法: vitric <check|run|replay|playtest|gate|bundle|assets|team|turf> <项目目录> [选项]\n详见 vitric 仓库 docs/");
+    eprintln!("用法: vitric <check|run|replay|playtest|balance|gate|bundle|assets|team|turf> <项目目录> [选项]\n详见 vitric 仓库 docs/");
     std::process::exit(2);
 }
 

@@ -1,0 +1,21 @@
+{
+  "rules": [
+    {
+      "id": "step",
+      "on": { "event": "input", "filter": { "action": "step", "phase": "pressed" } },
+      "do": [
+        { "add": "@world.Counter.value", "by": 1 }
+      ]
+    },
+    {
+      "id": "win-when-enough",
+      "on": "tick",
+      "if": [
+        ["@world.Counter.value", ">=", 20]
+      ],
+      "do": [
+        { "emit": "game-won", "data": {} }
+      ]
+    }
+  ]
+}
