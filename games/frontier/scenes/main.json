@@ -3313,7 +3313,25 @@
      "o2_rate": 0,
      "pow_rate": 0,
      "food_rate": 0,
-     "pop": 0
+     "pop": 0,
+     "o2_i": 60,
+     "pow_i": 60,
+     "food_i": 60
+    }
+   }
+  },
+  {
+   "name": "hud_res",
+   "components": {
+    "Position": {
+     "x": 0,
+     "y": 11.5
+    },
+    "Text": {
+     "content": "",
+     "size": 0.7,
+     "color": "#cfe6ff",
+     "screen": true
     }
    }
   },

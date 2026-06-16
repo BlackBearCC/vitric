@@ -21,7 +21,10 @@
         "o2_rate": { "type": "number", "default": 0 },
         "pow_rate": { "type": "number", "default": 0 },
         "food_rate": { "type": "number", "default": 0 },
-        "pop": { "type": "number", "default": 0 }
+        "pop": { "type": "int", "default": 0 },
+        "o2_i": { "type": "int", "default": 60 },
+        "pow_i": { "type": "int", "default": 60 },
+        "food_i": { "type": "int", "default": 60 }
       }
     },
     "Companion": { "fields": {} },
@@ -56,7 +59,8 @@
       "fields": {
         "content": { "type": "text", "default": "" },
         "size": { "type": "number", "default": 1 },
-        "color": { "type": "text", "default": "#ffffff" }
+        "color": { "type": "text", "default": "#ffffff" },
+        "screen": { "type": "bool", "default": false }
       }
     },
     "Player": { "fields": {} },

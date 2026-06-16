@@ -39,5 +39,9 @@ vitric.system("colony", { query: ["Colony"], writes: ["Colony"] }, (entities, ct
     c.power = clamp(c.power + (c.pow_rate + help - BASE_USE) * ctx.dt);
     c.oxygen = clamp(c.oxygen + (c.o2_rate + help - BASE_USE) * ctx.dt);
     c.food = clamp(c.food + (c.food_rate + help - BASE_USE) * ctx.dt);
+    // 取整给 HUD 显示用(format 模板直接读这几个,免得屏上是 53.9999)
+    c.o2_i = Math.round(c.oxygen);
+    c.pow_i = Math.round(c.power);
+    c.food_i = Math.round(c.food);
   }
 });

@@ -58,7 +58,16 @@ entities.append({
 entities.append({
     "name": "colony",
     "components": {
-        "Colony": {"oxygen": 60, "power": 60, "food": 60, "o2_rate": 0, "pow_rate": 0, "food_rate": 0, "pop": 0},
+        "Colony": {"oxygen": 60, "power": 60, "food": 60, "o2_rate": 0, "pow_rate": 0, "food_rate": 0, "pop": 0,
+                   "o2_i": 60, "pow_i": 60, "food_i": 60},
+    },
+})
+# @hud_res:屏幕顶部常驻资源条(screen=true 锚定屏幕,不随相机)
+entities.append({
+    "name": "hud_res",
+    "components": {
+        "Position": {"x": 0, "y": 11.5},
+        "Text": {"content": "", "size": 0.7, "color": "#cfe6ff", "screen": True},
     },
 })
 # @companion:第一个活伙伴(LLM 驱动,走近按 t 说话,平时自己在家附近溜达)。
