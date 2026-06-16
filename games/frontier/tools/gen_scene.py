@@ -61,7 +61,8 @@ entities.append({
         "Colony": {"oxygen": 60, "power": 60, "food": 60, "o2_rate": 0, "pow_rate": 0, "food_rate": 0, "pop": 0},
     },
 })
-# @companion:第一个活伙伴(LLM 驱动,走近按 t 说话)。人设现给死一个,后续改成现生成。
+# @companion:第一个活伙伴(LLM 驱动,走近按 t 说话,平时自己在家附近溜达)。
+# 人设现给死一个,后续改成现生成。话泡(Text)挂在伙伴身上,跟着它走。
 entities.append({
     "name": "companion",
     "components": {
@@ -70,17 +71,11 @@ entities.append({
                     "speech": "语速快、爱用'诶''呐'、喜欢顺嘴吐槽"},
         "Mood": {"value": "好奇"},
         "ThinkReq": {"pending": 0},
+        "Wander": {"home_x": 6, "home_y": 7, "tx": 6, "ty": 7, "timer": 2},
         "Position": {"x": 6, "y": 7},
         "Velocity": {"x": 0, "y": 0},
         "Sprite": {"w": 0.9, "h": 0.9, "image": "companion.png"},
-    },
-})
-# @bubble:伙伴头顶话泡(伙伴说话时填 Text.content)
-entities.append({
-    "name": "bubble",
-    "components": {
-        "Position": {"x": 6, "y": 8},
-        "Text": {"content": "", "size": 0.8, "color": "#ffe9b0"},
+        "Text": {"content": "", "size": 0.7, "color": "#ffe9b0"},
     },
 })
 

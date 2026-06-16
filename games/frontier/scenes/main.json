@@ -3333,6 +3333,13 @@
     "ThinkReq": {
      "pending": 0
     },
+    "Wander": {
+     "home_x": 6,
+     "home_y": 7,
+     "tx": 6,
+     "ty": 7,
+     "timer": 2
+    },
     "Position": {
      "x": 6,
      "y": 7
@@ -3345,19 +3352,10 @@
      "w": 0.9,
      "h": 0.9,
      "image": "companion.png"
-    }
-   }
-  },
-  {
-   "name": "bubble",
-   "components": {
-    "Position": {
-     "x": 6,
-     "y": 8
     },
     "Text": {
      "content": "",
-     "size": 0.8,
+     "size": 0.7,
      "color": "#ffe9b0"
     }
    }

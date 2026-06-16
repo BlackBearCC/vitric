@@ -6,7 +6,7 @@
 
     { "id": "say", "on": { "event": "companion-said" }, "do": [
       { "set": "@companion.Mood.value", "to": "event.mood" },
-      { "set": "@bubble.Text.content", "to": "event.say" }
+      { "set": "@companion.Text.content", "to": "event.say" }
     ] }
   ]
 }
