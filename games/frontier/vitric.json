@@ -4,7 +4,7 @@
   "font": "fonts/cjk.otf",
   "entry": "scenes/main.json",
   "scenes": [ "scenes/main.json" ],
-  "rules": [],
-  "scripts": [],
+  "rules": [ "rules/move.json", "rules/ui.json", "rules/economy.json", "rules/colony.json", "rules/hud.json", "rules/quest.json", "rules/farm.json" ],
+  "scripts": [ "scripts/colony.js", "scripts/economy.js", "scripts/crops.js" ],
   "seed": 1
 }

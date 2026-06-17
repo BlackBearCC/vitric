@@ -2,42 +2,30 @@
   "rules": [
     {
       "id": "hud-res",
+      "comment": "顶部资源条:阶段 + 氧/电/食/水/人手,每帧刷(读 @colony 的取整字段)。人手=pop(本增量恒 0)。",
       "on": "tick",
       "do": [
         {
-          "set": "@hud_res.Text.content",
-          "to": { "format": "【{}】  氧 {}  电 {}  食 {}  水 {}  人手 {}", "args": ["@colony.Colony.stage", "@colony.Colony.o2_i", "@colony.Colony.pow_i", "@colony.Colony.food_i", "@colony.Colony.water_i", "@colony.Census.count"] }
+          "set": "@hud_res.UiLabel.content",
+          "to": { "format": "【{}】  氧 {}  电 {}  食 {}  水 {}  人手 {}", "args": ["@colony.Colony.stage", "@colony.Colony.o2_i", "@colony.Colony.pow_i", "@colony.Colony.food_i", "@colony.Colony.water_i", "@colony.Colony.pop"] }
         }
       ]
     },
+
     {
-      "id": "hud-comp",
+      "id": "hud-inv",
+      "comment": "背包每格标签:<名> <数量>,每帧刷(读 @player.Inventory)。",
       "on": "tick",
-      "if": [ ["@companion", "exists"] ],
       "do": [
-        {
-          "set": "@hud_comp.Text.content",
-          "to": { "format": "Pip · 舒适 {} · 心情 {}", "args": ["@companion.Need.comfort_i", "@companion.Mood.value"] }
-        }
+        { "set": "@inv-ore_lbl.UiLabel.content",   "to": { "format": "矿石 {}", "args": ["@player.Inventory.ore"] } },
+        { "set": "@inv-wood_lbl.UiLabel.content",  "to": { "format": "木料 {}", "args": ["@player.Inventory.wood"] } },
+        { "set": "@inv-fiber_lbl.UiLabel.content", "to": { "format": "纤维 {}", "args": ["@player.Inventory.fiber"] } },
+        { "set": "@inv-seed_lbl.UiLabel.content",  "to": { "format": "麦种 {}", "args": ["@player.Inventory.seed"] } },
+        { "set": "@inv-wheat_lbl.UiLabel.content", "to": { "format": "麦子 {}", "args": ["@player.Inventory.wheat"] } },
+        { "set": "@inv-plank_lbl.UiLabel.content", "to": { "format": "木板 {}", "args": ["@player.Inventory.plank"] } },
+        { "set": "@inv-chair_lbl.UiLabel.content", "to": { "format": "椅子 {}", "args": ["@player.Inventory.chair"] } },
+        { "set": "@inv-lamp_lbl.UiLabel.content",  "to": { "format": "灯 {}",   "args": ["@player.Inventory.lamp"] } }
       ]
-    },
-    {
-      "id": "hud-comp-gone",
-      "on": "tick",
-      "if": [ ["@companion", "!exists"] ],
-      "do": [ { "set": "@hud_comp.Text.content", "to": "Pip 走了……" } ]
-    },
-    {
-      "id": "hud-flare-on",
-      "on": "tick",
-      "if": [ ["@colony.Event.flash", ">", 0] ],
-      "do": [ { "set": "@hud_evt.Text.content", "to": "！太阳耀斑 — 电、氧骤降!" } ]
-    },
-    {
-      "id": "hud-flare-off",
-      "on": "tick",
-      "if": [ ["@colony.Event.flash", "<=", 0] ],
-      "do": [ { "set": "@hud_evt.Text.content", "to": "" } ]
     }
   ]
 }

@@ -1,0 +1,45 @@
+{
+  "rules": [
+    {
+      "id": "quest-step1-done",
+      "comment": "主线1 修复信标:造出 beacon 时(且当前在 step1)→ step=2,发 quest-done{beacon}。守卫 step==1 保证只触发一次。",
+      "on": { "event": "built", "filter": { "kind": "beacon" } },
+      "if": [ ["@quest.QuestLog.step", "==", 1] ],
+      "do": [
+        { "set": "@quest.QuestLog.step", "to": 2 },
+        { "emit": "quest-done", "data": { "id": "beacon" } }
+      ]
+    },
+    {
+      "id": "quest-step2-done",
+      "comment": "主线2 种出第一茬:首次收到麦子(且当前在 step2)→ step=3。守卫 step==2 保证只首次触发。",
+      "on": { "event": "harvested", "filter": { "id": "wheat" } },
+      "if": [ ["@quest.QuestLog.step", "==", 2] ],
+      "do": [
+        { "set": "@quest.QuestLog.step", "to": 3 },
+        { "emit": "quest-done", "data": { "id": "wheat" } }
+      ]
+    },
+
+    {
+      "id": "quest-banner-1",
+      "comment": "任务栏文案按 step 刷(每 step 一条 tick 规则带守卫)。",
+      "on": "tick",
+      "if": [ ["@quest.QuestLog.step", "==", 1] ],
+      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:修复信标 — 切建造,选信标,点地放下" } ]
+    },
+    {
+      "id": "quest-banner-2",
+      "on": "tick",
+      "if": [ ["@quest.QuestLog.step", "==", 2] ],
+      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:种出第一茬 — 建种植台,切互动种麦,熟了收割" } ]
+    },
+    {
+      "id": "quest-banner-3",
+      "comment": "step>=3 需要伙伴(下个增量),先给占位文案。用 >= 兜住 step 3/4。",
+      "on": "tick",
+      "if": [ ["@quest.QuestLog.step", ">=", 3] ],
+      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:请到一个伙伴住下(后续开放)" } ]
+    }
+  ]
+}

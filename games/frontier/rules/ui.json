@@ -1,0 +1,50 @@
+{
+  "rules": [
+    {
+      "id": "ui-init",
+      "comment": "开局默认建造模式：显建造菜单(ox 208)、藏制作菜单(ox -3000 推出屏外,子按钮跟着没)。",
+      "on": { "event": "start" },
+      "do": [
+        { "set": "@build_menu.Ui.ox", "to": 208 },
+        { "set": "@craft_menu.Ui.ox", "to": -3000 }
+      ]
+    },
+    {
+      "id": "mode-build",
+      "comment": "切建造模式：set 模式 + 显建造菜单 + 藏制作菜单。",
+      "on": { "event": "ui-activate", "filter": { "action": "mode-build" } },
+      "do": [
+        { "set": "@uistate.Mode.value", "to": "build" },
+        { "set": "@build_menu.Ui.ox", "to": 208 },
+        { "set": "@craft_menu.Ui.ox", "to": -3000 }
+      ]
+    },
+    {
+      "id": "mode-craft",
+      "comment": "切制作模式：set 模式 + 显制作菜单 + 藏建造菜单。",
+      "on": { "event": "ui-activate", "filter": { "action": "mode-craft" } },
+      "do": [
+        { "set": "@uistate.Mode.value", "to": "craft" },
+        { "set": "@craft_menu.Ui.ox", "to": 208 },
+        { "set": "@build_menu.Ui.ox", "to": -3000 }
+      ]
+    },
+    {
+      "id": "mode-interact",
+      "comment": "切互动模式：两个菜单都藏(互动靠点地里的 plot/作物)。",
+      "on": { "event": "ui-activate", "filter": { "action": "mode-interact" } },
+      "do": [
+        { "set": "@uistate.Mode.value", "to": "interact" },
+        { "set": "@build_menu.Ui.ox", "to": -3000 },
+        { "set": "@craft_menu.Ui.ox", "to": -3000 }
+      ]
+    },
+
+    { "id": "pick-plot",      "on": { "event": "ui-activate", "filter": { "action": "pick-plot" } },      "do": [ { "set": "@uistate.Build.kind", "to": "plot" } ] },
+    { "id": "pick-wall",      "on": { "event": "ui-activate", "filter": { "action": "pick-wall" } },      "do": [ { "set": "@uistate.Build.kind", "to": "wall" } ] },
+    { "id": "pick-conduit",   "on": { "event": "ui-activate", "filter": { "action": "pick-conduit" } },   "do": [ { "set": "@uistate.Build.kind", "to": "conduit" } ] },
+    { "id": "pick-extractor", "on": { "event": "ui-activate", "filter": { "action": "pick-extractor" } }, "do": [ { "set": "@uistate.Build.kind", "to": "extractor" } ] },
+    { "id": "pick-quarters",  "on": { "event": "ui-activate", "filter": { "action": "pick-quarters" } },  "do": [ { "set": "@uistate.Build.kind", "to": "quarters" } ] },
+    { "id": "pick-beacon",    "on": { "event": "ui-activate", "filter": { "action": "pick-beacon" } },    "do": [ { "set": "@uistate.Build.kind", "to": "beacon" } ] }
+  ]
+}

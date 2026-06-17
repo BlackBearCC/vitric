@@ -179,6 +179,7 @@
         "timer": { "type": "number", "default": 0 }
       }
     },
-    "QuestLog": { "fields": { "step": { "type": "int", "default": 1 } } }
+    "QuestLog": { "fields": { "step": { "type": "int", "default": 1 } } },
+    "Cmd": { "fields": { "kind": { "type": "text", "default": "" }, "x": { "type": "number", "default": 0 }, "y": { "type": "number", "default": 0 } } }
   }
 }
