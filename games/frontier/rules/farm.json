@@ -2,74 +2,15 @@
   "rules": [
     {
       "id": "interact-click",
-      "comment": "互动模式下左键点地 → 调 interact 脚本(四舍五入格子坐标,写命令寄存器 @cmd)。",
+      "comment": "互动模式下左键点种植台 → 调 interact 脚本(用点中实体的句柄+组件直接种/收)。引擎已把命中实体 entity(句柄/名字)+comp(组件)带进 mouse 事件,不再要命令寄存器/格子匹配。把当前背包也喂进去。",
       "on": { "event": "mouse" },
       "if": [ ["@uistate.Mode.value", "==", "interact"] ],
-      "do": [ { "call": "interact", "with": { "x": "event.x", "y": "event.y" } } ]
-    },
-    {
-      "id": "cmd-apply",
-      "comment": "落命令寄存器:interact 脚本 emit cmd-set{kind,x,y} → 写 @cmd.Cmd,供下面的 tick-each 规则本帧之后读取匹配。",
-      "on": { "event": "cmd-set" },
-      "do": [
-        { "set": "@cmd.Cmd.kind", "to": "event.kind" },
-        { "set": "@cmd.Cmd.x", "to": "event.x" },
-        { "set": "@cmd.Cmd.y", "to": "event.y" }
-      ]
-    },
-
-    {
-      "id": "harvest",
-      "comment": "收割(每帧扫作物,文件序在 veto/plant 之前):命令是 interact 且这棵作物落在命令格子且已熟(stage>=3) → 麦子+2,删作物,发 harvested,清命令(kind 置空,防同帧再触发别的格)。",
-      "on": "tick",
-      "each": ["Crop", "Position"],
-      "if": [
-        ["@cmd.Cmd.kind", "==", "interact"],
-        ["self.Position.x", "==", "@cmd.Cmd.x"],
-        ["self.Position.y", "==", "@cmd.Cmd.y"],
-        ["self.Crop.stage", ">=", 3]
-      ],
-      "do": [
-        { "add": "@player.Inventory.wheat", "by": 2 },
-        { "despawn": "self" },
-        { "emit": "harvested", "data": { "id": "wheat", "n": 2 } },
-        { "set": "@cmd.Cmd.kind", "to": "" }
-      ]
-    },
-    {
-      "id": "plant-veto-occupied",
-      "comment": "占位否决(文件序在 harvest 之后、plant 之前):命令仍是 interact 且命令格子上已有作物(没被上面的收割清掉=未熟) → 把命令改成 busy,挡住下面的 plant,避免往已种的地里再种一棵(否则两棵作物叠同格)。",
-      "on": "tick",
-      "each": ["Crop", "Position"],
-      "if": [
-        ["@cmd.Cmd.kind", "==", "interact"],
-        ["self.Position.x", "==", "@cmd.Cmd.x"],
-        ["self.Position.y", "==", "@cmd.Cmd.y"]
-      ],
-      "do": [ { "set": "@cmd.Cmd.kind", "to": "busy" } ]
-    },
-    {
-      "id": "plant",
-      "comment": "种地(文件序最后):命令仍是 interact(没被收割消费、没被否决) 且命令格子上是个 plot 且有麦种 → 扣1麦种,在该格 spawn 一棵作物(匿名实体,Crop+Position+Sprite),发 planted,清命令。each 每帧对所有 plot 跑,靠格子匹配 + 清命令保证只种到点中那一个。",
-      "on": "tick",
-      "each": ["Structure", "Position"],
-      "if": [
-        ["@cmd.Cmd.kind", "==", "interact"],
-        ["self.Structure.kind", "==", "plot"],
-        ["self.Position.x", "==", "@cmd.Cmd.x"],
-        ["self.Position.y", "==", "@cmd.Cmd.y"],
-        ["@player.Inventory.seed", ">", 0]
-      ],
-      "do": [
-        { "add": "@player.Inventory.seed", "by": -1 },
-        { "spawn": { "components": {
-          "Crop": { "kind": "wheat", "stage": 0, "timer": 0 },
-          "Position": { "x": "@cmd.Cmd.x", "y": "@cmd.Cmd.y" },
-          "Sprite": { "w": 1, "h": 1, "color": "#7fbf5a" }
-        } } },
-        { "emit": "planted", "data": { "x": "@cmd.Cmd.x", "y": "@cmd.Cmd.y" } },
-        { "set": "@cmd.Cmd.kind", "to": "" }
-      ]
+      "do": [ { "call": "interact", "with": {
+        "entity": "event.entity", "comp": "event.comp", "x": "event.x", "y": "event.y",
+        "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+        "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
+      } } ]
     }
   ]
 }

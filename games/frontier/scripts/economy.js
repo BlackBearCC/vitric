@@ -70,23 +70,43 @@ vitric.fn("build", (a, ctx) => {
   const gy = Math.round(a.y);
   pay(inv, def.cost);
   // ctx.spawn(组件对象, 可选名字)——组件是扁平第一参数(不是 {components:...})；这里匿名 spawn。
-  ctx.spawn({
+  const comps = {
     Structure: { kind: a.kind },
     Position: { x: gx, y: gy },
     Sprite: { w: 1, h: 1, color: def.color },
-  });
+  };
+  // 种植台建出来就挂一个空 Crop——之后互动点它直接 setField 把作物种在这块地上(原地种,不再 spawn 另一个作物实体)。
+  if (a.kind === "plot") comps.Crop = { kind: "", stage: 0, timer: 0 };
+  ctx.spawn(comps);
   emitInv(ctx, inv);
   ctx.emit("built", { kind: a.kind, x: gx, y: gy });
 });
 
-// ---- 互动点击：规则在"互动模式 + 左键点地"时调，把点击世界坐标传进来 ----
-// 这里只负责把浮点点击四舍五入到整格,写进命令寄存器 @cmd（emit cmd-set,规则落 @cmd.Cmd）。
-// 真正的种地/收割由 rules/farm.json 的 tick-each 规则读 @cmd + 扫 plot/作物来做
-// （脚本够不到"点中格子上的那个 plot/作物"实体,只能把格子坐标交给规则去匹配）。
+// ---- 互动点击：规则把"点中的实体(a.entity 句柄/名字)+它的组件(a.comp)+当前背包"传进来 ----
+// 点中的若是种植台：空地 + 有种子 → 种(setField Crop.kind=wheat)；熟了(stage>=3) → 收(清空 + 麦子+2)。
+// 直接对"点中的那块地"用 ctx.setField 写——不再要命令寄存器/格子匹配(引擎已支持点击带命中实体 entity+comp)。
 vitric.fn("interact", (a, ctx) => {
-  const gx = Math.round(a.x);
-  const gy = Math.round(a.y);
-  ctx.emit("cmd-set", { kind: "interact", x: gx, y: gy });
+  const comp = a.comp || {};
+  const st = comp.Structure;
+  const crop = comp.Crop;
+  if (!st || st.kind !== "plot" || !crop) return; // 没点中种植台,忽略
+  const inv = readInv(a);
+  if (crop.kind === "" && (inv.seed | 0) > 0) {
+    // 种：扣 1 种子 + 把麦子作物挂在这块地上(原地)
+    inv.seed -= 1;
+    ctx.setField(a.entity, "Crop.kind", "wheat");
+    ctx.setField(a.entity, "Crop.stage", 0);
+    ctx.setField(a.entity, "Crop.timer", 0);
+    emitInv(ctx, inv);
+    ctx.emit("planted", { x: a.x, y: a.y });
+  } else if (crop.kind === "wheat" && (crop.stage | 0) >= 3) {
+    // 收：清空作物 + 麦子 +2
+    inv.wheat += 2;
+    ctx.setField(a.entity, "Crop.kind", "");
+    ctx.setField(a.entity, "Crop.stage", 0);
+    emitInv(ctx, inv);
+    ctx.emit("harvested", { id: "wheat", n: 2 });
+  }
 });
 
 // ---- 制作：规则在点配方按钮（craft-<id>）时调，把配方 id + 当前背包传进来 ----
