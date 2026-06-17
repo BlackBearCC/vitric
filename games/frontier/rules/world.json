@@ -1,0 +1,10 @@
+{
+  "rules": [
+    {
+      "id": "gen-wild",
+      "comment": "开局在家园右侧铺出野外区 + 资源点(genWild 脚本一次性 spawn,确定性)。",
+      "on": { "event": "start" },
+      "do": [ { "call": "genWild", "with": {} } ]
+    }
+  ]
+}

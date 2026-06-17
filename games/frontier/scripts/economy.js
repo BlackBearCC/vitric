@@ -88,10 +88,21 @@ vitric.fn("build", (a, ctx) => {
 // 直接对"点中的那块地"用 ctx.setField 写——不再要命令寄存器/格子匹配(引擎已支持点击带命中实体 entity+comp)。
 vitric.fn("interact", (a, ctx) => {
   const comp = a.comp || {};
+  const inv = readInv(a);
+  // 采集：点中野外资源点(矿脉/林木/纤维丛)且还有量且不在冷却 → 采一个进背包,该点 left-1 + 短冷却。
+  const node = comp.Node;
+  if (node && node.kind && (node.left | 0) > 0 && (node.cooldown || 0) <= 0) {
+    inv[node.kind] = (inv[node.kind] | 0) + 1;            // node.kind = ore/wood/fiber,正好是背包字段
+    ctx.setField(a.entity, "Node.left", (node.left | 0) - 1);
+    ctx.setField(a.entity, "Node.cooldown", 1.5);
+    emitInv(ctx, inv);
+    ctx.emit("gathered", { node: node.kind, id: node.kind, n: 1 });
+    return;
+  }
+  // 种田：点中种植台
   const st = comp.Structure;
   const crop = comp.Crop;
-  if (!st || st.kind !== "plot" || !crop) return; // 没点中种植台,忽略
-  const inv = readInv(a);
+  if (!st || st.kind !== "plot" || !crop) return; // 没点中种植台/资源点,忽略
   if (crop.kind === "" && (inv.seed | 0) > 0) {
     // 种：扣 1 种子 + 把麦子作物挂在这块地上(原地)
     inv.seed -= 1;
