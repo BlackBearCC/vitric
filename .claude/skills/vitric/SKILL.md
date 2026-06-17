@@ -1,12 +1,28 @@
 ---
 name: vitric
-description: Use when developing, running, testing, or debugging a Vitric game project — covers vitric check/run/replay commands, the HTTP control plane (query/mutate world state, inject input, time control, assertions, headless screenshots), writing schema/scenes/rules/scripts, and the deterministic replay debugging workflow.
+description: Use when developing, running, testing, or debugging a Vitric game project — covers vitric check/run/replay commands, the HTTP control plane (query/mutate world state, inject input, time control, assertions, headless screenshots), writing schema/scenes/rules/scripts, and the deterministic replay debugging workflow. FIRST step before building: survey the engine's existing components (UI/Inventory/Dialogue/scene-switching are all built-in) and examples/ — never hand-roll what the engine already provides.
 ---
 
 # 用 Vitric 开发游戏
 
 Vitric 是 glass-box 游戏引擎：一切状态对 agent 可见、可操作、可验证。你（agent）可以自主完成"改 → 校验 → 跑 → 看 → 测 → 修"全闭环，不需要人帮你看屏幕。
 （要多个 agent 分角色组队开发，用 `vitric-team` skill——本 skill 是单人开发手册。）
+
+## 第一步：动手前先盘引擎，别手搓它已有的能力
+
+写任何 schema/场景/规则/脚本**之前**，先花几分钟盘清引擎已经提供了什么。**跳过这一步、拿脑子里的"最小引擎"假想就开干，是把游戏做成"只有几个色块和一行文字的骨架"的头号原因。**
+
+1. 列引擎认的组件：
+   `grep -rhoE '"(Ui|UiRoot|Container|Panel|UiLabel|Button|Inventory|Dialogue|Sprite|Text|Camera|Collider|Light|Emitter|Persist)"' crates/*/src/*.rs | sort -u`
+2. 读 `docs/`（尤其 `design-ui.md`、`agent-guide.md` 的「引擎约定组件」）看每个能力怎么用。
+3. 翻 `examples/` 里跟你需求最近的照抄结构：UI→`ui-menu`/`ui-gallery`，多区域地图→看 `load-scene`+`Persist`，程序化关卡→`cave-gen`，完整小游戏→`ember`/`spire`。
+
+引擎**现成就有**、严禁再用 `Sprite`+`Text` 手搓的：
+- **UI 外壳**——`UiRoot/Ui/Container(VBox|HBox|Grid)/Panel/UiLabel/Button`，锚点+布局，点击由引擎发 `ui-activate{action}`。（不要用一行屏幕文字当 UI）
+- **背包/物品**——`Inventory`；**对话**——`Dialogue`；**碰撞触发**——`Collider`+`collision{a,b}`；**光照/粒子**——`Light`/`Emitter`。
+- **多区域地图切换**——`load-scene{scene}` 事件 + `Persist` 组件（玩家带背包跨区域、确定性可回放）。
+
+手搓这些 = 既丑、又不通用、还白费工夫。先用引擎的，缺了再说。
 
 ## 铁律
 
