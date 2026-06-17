@@ -1,5 +1,63 @@
 {
   "components": {
+    "UiRoot": {
+      "fields": {
+        "layout_hash": { "type": "text", "default": "" },
+        "focus": { "type": "text", "default": "" }
+      }
+    },
+    "Ui": {
+      "fields": {
+        "anchor": { "type": "text", "default": "manual" },
+        "ax": { "type": "number", "default": 0 },
+        "ay": { "type": "number", "default": 0 },
+        "ox": { "type": "number", "default": 0 },
+        "oy": { "type": "number", "default": 0 },
+        "w": { "type": "number", "default": 0 },
+        "h": { "type": "number", "default": 0 },
+        "parent": { "type": "entity" },
+        "weight": { "type": "number", "default": 0 },
+        "rx": { "type": "number", "default": 0 },
+        "ry": { "type": "number", "default": 0 },
+        "rw": { "type": "number", "default": 0 },
+        "rh": { "type": "number", "default": 0 }
+      }
+    },
+    "Container": {
+      "fields": {
+        "kind": { "type": "enum", "variants": ["VBox", "HBox", "Grid"], "default": "VBox" },
+        "gap": { "type": "number", "default": 0 },
+        "pad": { "type": "number", "default": 0 },
+        "columns": { "type": "int", "default": 1, "min": 1 },
+        "main": { "type": "enum", "variants": ["start", "center", "end"], "default": "start" },
+        "cross": { "type": "enum", "variants": ["start", "center", "end"], "default": "start" }
+      }
+    },
+    "Panel": {
+      "fields": {
+        "color": { "type": "text", "default": "#ffffff" },
+        "image": { "type": "text", "default": "" }
+      }
+    },
+    "UiLabel": {
+      "fields": {
+        "content": { "type": "text", "default": "" },
+        "size": { "type": "number", "default": 1 },
+        "color": { "type": "text", "default": "#ffffff" },
+        "reveal": { "type": "number", "default": 1 },
+        "align": { "type": "enum", "variants": ["start", "center", "end"], "default": "center" }
+      }
+    },
+    "Button": {
+      "fields": {
+        "action": { "type": "text", "default": "" },
+        "theme": { "type": "text", "default": "" },
+        "state": { "type": "enum", "variants": ["normal", "focused", "pressed", "disabled"], "default": "normal" },
+        "press_t": { "type": "int", "default": -1 },
+        "min_scale": { "type": "number", "default": 0.92 }
+      }
+    },
+
     "Position": { "fields": { "x": { "type": "number" }, "y": { "type": "number" } } },
     "Velocity": { "fields": { "x": { "type": "number", "default": 0 }, "y": { "type": "number", "default": 0 } } },
     "Sprite": {
@@ -10,27 +68,61 @@
         "color": { "type": "text", "default": "#ffffff" }
       }
     },
+    "Camera": {
+      "fields": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "scale": { "type": "number", "default": 8 },
+        "follow": { "type": "text", "default": "" },
+        "lerp": { "type": "number", "default": 1 }
+      }
+    },
+    "Text": {
+      "fields": {
+        "content": { "type": "text", "default": "" },
+        "size": { "type": "number", "default": 1 },
+        "color": { "type": "text", "default": "#ffffff" },
+        "screen": { "type": "bool", "default": false }
+      }
+    },
+    "Player": { "fields": {} },
+    "Collider": { "fields": { "w": { "type": "number", "default": 1 }, "h": { "type": "number", "default": 1 } } },
+
     "Cell": { "fields": { "kind": { "type": "text", "default": "regolith" } } },
     "Structure": { "fields": { "kind": { "type": "text", "default": "floor" } } },
+    "Portal": { "fields": { "to": { "type": "text", "default": "home" } } },
+
+    "Inventory": {
+      "fields": {
+        "ore": { "type": "int", "default": 0 },
+        "wood": { "type": "int", "default": 0 },
+        "fiber": { "type": "int", "default": 0 },
+        "seed": { "type": "int", "default": 5 },
+        "wheat": { "type": "int", "default": 0 },
+        "plank": { "type": "int", "default": 0 },
+        "chair": { "type": "int", "default": 0 },
+        "lamp": { "type": "int", "default": 0 }
+      }
+    },
+    "Mode": { "fields": { "value": { "type": "enum", "variants": ["build", "craft", "interact"], "default": "build" } } },
     "Build": { "fields": { "kind": { "type": "text", "default": "floor" } } },
-    "Census": {
+
+    "Crop": {
       "fields": {
-        "count": { "type": "int", "default": 0 },
-        "is_hub": { "type": "int", "default": 0 }
+        "kind": { "type": "text", "default": "wheat" },
+        "stage": { "type": "int", "default": 0 },
+        "timer": { "type": "number", "default": 0 }
       }
     },
-    "Spawn": {
+    "Node": {
       "fields": {
-        "timer": { "type": "number", "default": 12 },
-        "cap": { "type": "int", "default": 4 }
+        "kind": { "type": "text", "default": "ore" },
+        "left": { "type": "int", "default": 3 },
+        "max": { "type": "int", "default": 3 },
+        "cooldown": { "type": "number", "default": 0 }
       }
     },
-    "Event": {
-      "fields": {
-        "timer": { "type": "number", "default": 25 },
-        "flash": { "type": "number", "default": 0 }
-      }
-    },
+
     "Colony": {
       "fields": {
         "oxygen": { "type": "number", "default": 60 },
@@ -41,16 +133,24 @@
         "pow_rate": { "type": "number", "default": 0 },
         "food_rate": { "type": "number", "default": 0 },
         "water_rate": { "type": "number", "default": 0 },
-        "water_i": { "type": "int", "default": 60 },
-        "pop": { "type": "int", "default": 0 },
         "o2_i": { "type": "int", "default": 60 },
         "pow_i": { "type": "int", "default": 60 },
         "food_i": { "type": "int", "default": 60 },
+        "water_i": { "type": "int", "default": 60 },
+        "pop": { "type": "int", "default": 0 },
         "struct_count": { "type": "int", "default": 0 },
         "stage": { "type": "text", "default": "落脚" }
       }
     },
+    "Census": {
+      "fields": {
+        "count": { "type": "int", "default": 0 },
+        "is_hub": { "type": "int", "default": 0 }
+      }
+    },
+
     "Companion": { "fields": {} },
+    "Drifter": { "fields": {} },
     "Persona": {
       "fields": {
         "name": { "type": "text", "default": "旅人" },
@@ -79,23 +179,6 @@
         "timer": { "type": "number", "default": 0 }
       }
     },
-    "Text": {
-      "fields": {
-        "content": { "type": "text", "default": "" },
-        "size": { "type": "number", "default": 1 },
-        "color": { "type": "text", "default": "#ffffff" },
-        "screen": { "type": "bool", "default": false }
-      }
-    },
-    "Player": { "fields": {} },
-    "Camera": {
-      "fields": {
-        "x": { "type": "number" },
-        "y": { "type": "number" },
-        "scale": { "type": "number", "default": 8 },
-        "follow": { "type": "text", "default": "" },
-        "lerp": { "type": "number", "default": 1 }
-      }
-    }
+    "QuestLog": { "fields": { "step": { "type": "int", "default": 1 } } }
   }
 }
