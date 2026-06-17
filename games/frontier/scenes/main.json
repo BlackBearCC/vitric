@@ -37,7 +37,7 @@
     "Camera": {
      "x": 7,
      "y": 7,
-     "scale": 30,
+     "scale": 80,
      "follow": "player",
      "lerp": 0.12
     }
