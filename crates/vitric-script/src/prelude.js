@@ -116,6 +116,15 @@ function __makeCtx(payload, ops, rng) {
       if (typeof id !== "string") throw new Error("ctx.despawn: 参数必须是实体句柄字符串（实体对象上的 e.id）");
       ops.push({ op: "despawn", id });
     },
+    // 按"名字或句柄"写任意实体的一个字段——"点中一个东西就对它做事"靠这个：
+    // mouse 事件带 entity(名字或句柄)+comp，脚本判断点中的是什么后用 setField 写它。
+    // 句柄文本(如 "e3v0")或实体名字都行；和 spawn/despawn 一样在确定性 ops 阶段顺序应用，回放逐位一致。
+    // 组件/字段须已存在（写子字段不隐式建结构）。写是延迟的：同一回合内 setField 后立刻读读不到。
+    setField: (ref, path, value) => {
+      if (typeof ref !== "string" || !ref) throw new Error("ctx.setField: 第一个参数必须是实体名字或句柄字符串");
+      if (typeof path !== "string" || path.indexOf(".") < 0) throw new Error("ctx.setField: path 必须是 \"组件.字段\" 形式");
+      ops.push({ op: "setField", ref: ref, path: path, value: value });
+    },
     // 对外问话的薄封装：发一条 <service>-ask 事件，回复回来时由内置分发器 __onReply
     // 转给名为 onReply 的 vitric.fn。底层仍是裸的 ask/reply 事件 + 自动录回放，确定性不变。
     // “收”那半要游戏在规则里加一条把 <service>-reply 转进 __onReply（见 prelude 顶部 __onReply 注释）。

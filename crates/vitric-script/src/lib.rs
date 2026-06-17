@@ -324,6 +324,19 @@ impl ScriptEngine {
                         .map_err(|e: String| err(format!("despawn: {e}")))?;
                     world.despawn(id).map_err(|e| err(e.to_string()))?;
                 }
+                Some("setField") => {
+                    let r = op.get("ref").and_then(|v| v.as_str()).expect("prelude 已校验");
+                    let path = op.get("path").and_then(|v| v.as_str()).expect("prelude 已校验");
+                    let value = op.get("value").cloned().unwrap_or(Value::Null);
+                    // ref 是句柄文本(如 "e3v0")或实体名字——句柄优先,解析不了再当名字查
+                    let id: EntityId = match r.parse::<EntityId>() {
+                        Ok(id) => id,
+                        Err(_) => world.entity(r).map_err(|e| err(format!("setField: {e}")))?,
+                    };
+                    world
+                        .set_field(id, path, value)
+                        .map_err(|e| err(format!("setField: {e}")))?;
+                }
                 other => return Err(err(format!("未知操作 {other:?}"))),
             }
         }
@@ -821,6 +834,28 @@ mod tests {
         assert!(!w.is_alive(victim), "命名实体 despawn 后应不存活");
         assert!(w.entity("victim").is_err(), "名字应注销");
         assert!(w.query(&["Coin"]).is_empty(), "实体应从查询消失(不只名字)");
+    }
+
+    #[test]
+    fn ctx_set_field_writes_by_name_and_handle() {
+        // "点中一个东西就对它做事"的底座:ctx.setField 按名字或句柄写任意实体的一个字段。
+        let mut eng = engine_with(
+            r#"
+            vitric.system("poke", {query: ["Coin"], writes: []}, (entities, ctx) => {
+                ctx.setField("target", "Velocity.x", 7);                    // 按名字写别的实体
+                for (const e of entities) ctx.setField(e.id, "Coin.value", 9); // 按句柄写被查实体
+            });
+            "#,
+        );
+        let mut w = World::new();
+        let target = w.spawn_named("target").unwrap();
+        w.set_component(target, "Velocity", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let coin = w.spawn();
+        w.set_component(coin, "Coin", json!({"value": 1})).unwrap();
+        let mut rng = Pcg32::new(1);
+        eng.run_systems(&mut w, &mut rng, 0).unwrap();
+        assert_eq!(w.get_field(target, "Velocity.x").unwrap().as_f64(), Some(7.0), "按名字 setField");
+        assert_eq!(w.get_field(coin, "Coin.value").unwrap(), &json!(9), "按句柄 setField");
     }
 
     #[test]

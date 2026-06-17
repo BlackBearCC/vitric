@@ -649,14 +649,26 @@ pub fn inject_click(sim: &mut Sim, x: f64, y: f64, button: &str) -> Result<Value
         "right" => "mouse-alt",
         other => return Err(format!("button 必须是 left 或 right，拿到 {other:?}")),
     };
-    let entity = match vitric_render::pick_world(&sim.world, x, y)? {
-        Some(id) => match sim.world.name_of(id) {
-            Some(name) => json!(name),
-            None => json!(id.to_string()),
-        },
-        None => Value::Null,
+    let (entity, comp) = match vitric_render::pick_world(&sim.world, x, y)? {
+        Some(id) => {
+            let ent = match sim.world.name_of(id) {
+                Some(name) => json!(name),
+                None => json!(id.to_string()),
+            };
+            // 把命中实体的组件一并带进事件——脚本据此知道点中的是什么（是不是 plot、有没有 Crop），
+            // 再用 ctx.setField(event.entity, ...) 对它做事。匿名实体 entity 即句柄文本，照样可寻址。
+            let mut comps = serde_json::Map::new();
+            for name in sim.world.components_of(id) {
+                comps.insert(
+                    name.clone(),
+                    sim.world.get_component(id, &name).expect("components_of 列出").clone(),
+                );
+            }
+            (ent, Value::Object(comps))
+        }
+        None => (Value::Null, Value::Null),
     };
-    sim.inject_reply(event, json!({"x": x, "y": y, "entity": entity}));
+    sim.inject_reply(event, json!({"x": x, "y": y, "entity": entity, "comp": comp}));
     Ok(json!({"event": event, "entity": entity}))
 }
 
