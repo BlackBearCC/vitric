@@ -723,6 +723,12 @@
      "h": 1,
      "image": "",
      "color": "#5b5048"
+    },
+    "Text": {
+     "content": "岩",
+     "size": 0.46,
+     "color": "#ffffff",
+     "screen": false
     }
    }
   },
@@ -921,6 +927,12 @@
      "h": 1,
      "image": "",
      "color": "#9fc6d8"
+    },
+    "Text": {
+     "content": "冰",
+     "size": 0.46,
+     "color": "#ffffff",
+     "screen": false
     }
    }
   },
@@ -1173,6 +1185,12 @@
      "h": 1,
      "image": "",
      "color": "#5b5048"
+    },
+    "Text": {
+     "content": "岩",
+     "size": 0.46,
+     "color": "#ffffff",
+     "screen": false
     }
    }
   },
@@ -1299,6 +1317,12 @@
      "h": 1,
      "image": "",
      "color": "#caa45a"
+    },
+    "Text": {
+     "content": "矿",
+     "size": 0.46,
+     "color": "#ffffff",
+     "screen": false
     }
    }
   },
@@ -1335,6 +1359,12 @@
      "h": 1,
      "image": "",
      "color": "#9fc6d8"
+    },
+    "Text": {
+     "content": "冰",
+     "size": 0.46,
+     "color": "#ffffff",
+     "screen": false
     }
    }
   },
@@ -1659,6 +1689,12 @@
      "h": 1,
      "image": "",
      "color": "#9aa6bf"
+    },
+    "Text": {
+     "content": "登陆舱",
+     "size": 0.4,
+     "color": "#dfe7f5",
+     "screen": false
     }
    }
   },
@@ -1857,6 +1893,12 @@
      "h": 1,
      "image": "",
      "color": "#5b5048"
+    },
+    "Text": {
+     "content": "岩",
+     "size": 0.46,
+     "color": "#ffffff",
+     "screen": false
     }
    }
   },
@@ -2343,6 +2385,12 @@
      "h": 1,
      "image": "",
      "color": "#caa45a"
+    },
+    "Text": {
+     "content": "矿",
+     "size": 0.46,
+     "color": "#ffffff",
+     "screen": false
     }
    }
   },
@@ -2757,6 +2805,12 @@
      "h": 1,
      "image": "",
      "color": "#5b5048"
+    },
+    "Text": {
+     "content": "岩",
+     "size": 0.46,
+     "color": "#ffffff",
+     "screen": false
     }
    }
   },
@@ -2883,6 +2937,12 @@
      "h": 1,
      "image": "",
      "color": "#5b5048"
+    },
+    "Text": {
+     "content": "岩",
+     "size": 0.46,
+     "color": "#ffffff",
+     "screen": false
     }
    }
   },
@@ -3009,6 +3069,12 @@
      "h": 1,
      "image": "",
      "color": "#9fc6d8"
+    },
+    "Text": {
+     "content": "冰",
+     "size": 0.46,
+     "color": "#ffffff",
+     "screen": false
     }
    }
   },
@@ -3189,6 +3255,12 @@
      "h": 1,
      "image": "",
      "color": "#caa45a"
+    },
+    "Text": {
+     "content": "矿",
+     "size": 0.46,
+     "color": "#ffffff",
+     "screen": false
     }
    }
   },

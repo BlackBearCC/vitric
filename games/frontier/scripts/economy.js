@@ -9,12 +9,12 @@
 
 // 建造表（GDD）：kind -> 料；plot 免费。灰盒配色（无贴图，避免缺图崩渲染）。
 const BUILD = {
-  plot:      { cost: {},                       color: "#6b8f3a" }, // 种植台：绿
-  wall:      { cost: { wood: 1 },              color: "#8a7a5c" }, // 墙：土黄
-  conduit:   { cost: { ore: 1 },               color: "#d8a83a" }, // 电导管：琥珀（电）
-  extractor: { cost: { ore: 1 },               color: "#4aa6c8" }, // 抽水机：蓝（水）
-  quarters:  { cost: { plank: 2 },             color: "#c08a4a" }, // 住所：暖棕
-  beacon:    { cost: { ore: 2, plank: 2 },     color: "#e85a5a" }, // 信标：红（主线目标）
+  plot:      { cost: {},                   color: "#6b8f3a", label: "种植台" }, // 绿
+  wall:      { cost: { wood: 1 },          color: "#8a7a5c", label: "墙" },     // 土黄
+  conduit:   { cost: { ore: 1 },           color: "#d8a83a", label: "电导管" }, // 琥珀(电)
+  extractor: { cost: { ore: 1 },           color: "#4aa6c8", label: "抽水机" }, // 蓝(水)
+  quarters:  { cost: { plank: 2 },         color: "#c08a4a", label: "住所" },   // 暖棕
+  beacon:    { cost: { ore: 2, plank: 2 }, color: "#e85a5a", label: "信标" },   // 红(主线)
 };
 
 // 制作配方（GDD）：产物 -> 料。
@@ -74,6 +74,7 @@ vitric.fn("build", (a, ctx) => {
     Structure: { kind: a.kind },
     Position: { x: gx, y: gy },
     Sprite: { w: 1, h: 1, color: def.color },
+    Text: { content: def.label, size: 0.34, color: "#ffffff", screen: false }, // 名字标在结构上
   };
   // 种植台建出来就挂一个空 Crop——之后互动点它直接 setField 把作物种在这块地上(原地种,不再 spawn 另一个作物实体)。
   if (a.kind === "plot") comps.Crop = { kind: "", stage: 0, timer: 0 };
