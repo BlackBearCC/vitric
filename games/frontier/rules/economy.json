@@ -69,7 +69,7 @@
       "do": [
         { "set": "@player.Inventory.seed",  "to": 5 },
         { "set": "@player.Inventory.wood",  "to": 4 },
-        { "set": "@player.Inventory.ore",   "to": 6 },
+        { "set": "@player.Inventory.ore",   "to": 4 },
         { "set": "@player.Inventory.fiber", "to": 2 },
         { "set": "@player.Inventory.plank", "to": 2 }
       ]
