@@ -5853,10 +5853,23 @@
   {
    "name": "colony",
    "components": {
-    "Colony": {},
+    "Colony": {
+     "stage": "\u8d77\u6b65",
+     "day": 1,
+     "next_drifter_day": 3,
+     "drifters_invited": 0,
+     "drifters_spawned": 1,
+     "monument_built": 0
+    },
     "Census": {
      "count": 0,
      "is_hub": 1
+    },
+    "Clock": {
+     "day": 1,
+     "time": 0,
+     "tod": "\u6668",
+     "last_day_emit": 1
     }
    }
   },
@@ -5926,7 +5939,9 @@
   {
    "name": "drifter",
    "components": {
-    "Drifter": {},
+    "Drifter": {
+     "arrival_day": 1
+    },
     "Persona": {
      "name": "Lio",
      "archetype": "\u4e50\u5929\u53a8\u5b50",
@@ -5985,6 +6000,37 @@
     "UiLabel": {
      "size": 26,
      "color": "#e8e8ee",
+     "align": "center"
+    }
+   }
+  },
+  {
+   "name": "hud_time",
+   "components": {
+    "Ui": {
+     "anchor": "bottom-right",
+     "parent": "ui",
+     "ox": -16,
+     "oy": -16,
+     "w": 240,
+     "h": 44
+    },
+    "Panel": {
+     "color": "#161a24"
+    }
+   }
+  },
+  {
+   "name": "hud_time_lbl",
+   "components": {
+    "Ui": {
+     "anchor": "stretch",
+     "parent": "hud_time"
+    },
+    "UiLabel": {
+     "content": "\u7b2c 1 \u5929 \u00b7 \u6668",
+     "size": 26,
+     "color": "#cfe6ff",
      "align": "center"
     }
    }
@@ -6117,11 +6163,11 @@
      "ox": 16,
      "oy": 236,
      "w": 152,
-     "h": 300
+     "h": 360
     },
     "Container": {
      "kind": "VBox",
-     "gap": 8,
+     "gap": 6,
      "pad": 6,
      "main": "start",
      "cross": "center"
@@ -6135,7 +6181,7 @@
      "anchor": "top-left",
      "parent": "build_menu",
      "w": 152,
-     "h": 38
+     "h": 36
     },
     "Panel": {
      "color": "#33405e"
@@ -6155,7 +6201,7 @@
     },
     "UiLabel": {
      "content": "\u79cd\u690d\u53f0",
-     "size": 26,
+     "size": 24,
      "color": "#ffffff",
      "align": "center"
     }
@@ -6168,7 +6214,7 @@
      "anchor": "top-left",
      "parent": "build_menu",
      "w": 152,
-     "h": 38
+     "h": 36
     },
     "Panel": {
      "color": "#33405e"
@@ -6188,7 +6234,7 @@
     },
     "UiLabel": {
      "content": "\u7535\u5bfc\u7ba1",
-     "size": 26,
+     "size": 24,
      "color": "#ffffff",
      "align": "center"
     }
@@ -6201,7 +6247,7 @@
      "anchor": "top-left",
      "parent": "build_menu",
      "w": 152,
-     "h": 38
+     "h": 36
     },
     "Panel": {
      "color": "#33405e"
@@ -6221,7 +6267,7 @@
     },
     "UiLabel": {
      "content": "\u62bd\u6c34\u673a",
-     "size": 26,
+     "size": 24,
      "color": "#ffffff",
      "align": "center"
     }
@@ -6234,7 +6280,7 @@
      "anchor": "top-left",
      "parent": "build_menu",
      "w": 152,
-     "h": 38
+     "h": 36
     },
     "Panel": {
      "color": "#33405e"
@@ -6254,7 +6300,7 @@
     },
     "UiLabel": {
      "content": "\u4f4f\u6240",
-     "size": 26,
+     "size": 24,
      "color": "#ffffff",
      "align": "center"
     }
@@ -6267,7 +6313,7 @@
      "anchor": "top-left",
      "parent": "build_menu",
      "w": 152,
-     "h": 38
+     "h": 36
     },
     "Panel": {
      "color": "#33405e"
@@ -6287,7 +6333,7 @@
     },
     "UiLabel": {
      "content": "\u5899",
-     "size": 26,
+     "size": 24,
      "color": "#ffffff",
      "align": "center"
     }
@@ -6300,7 +6346,7 @@
      "anchor": "top-left",
      "parent": "build_menu",
      "w": 152,
-     "h": 38
+     "h": 36
     },
     "Panel": {
      "color": "#33405e"
@@ -6320,7 +6366,73 @@
     },
     "UiLabel": {
      "content": "\u4fe1\u6807",
-     "size": 26,
+     "size": 24,
+     "color": "#ffffff",
+     "align": "center"
+    }
+   }
+  },
+  {
+   "name": "build_plot2",
+   "components": {
+    "Ui": {
+     "anchor": "top-left",
+     "parent": "build_menu",
+     "w": 152,
+     "h": 36
+    },
+    "Panel": {
+     "color": "#33405e"
+    },
+    "Button": {
+     "action": "pick-plot2",
+     "state": "normal"
+    }
+   }
+  },
+  {
+   "name": "build_plot2_lbl",
+   "components": {
+    "Ui": {
+     "anchor": "stretch",
+     "parent": "build_plot2"
+    },
+    "UiLabel": {
+     "content": "plot2",
+     "size": 24,
+     "color": "#ffffff",
+     "align": "center"
+    }
+   }
+  },
+  {
+   "name": "build_monument",
+   "components": {
+    "Ui": {
+     "anchor": "top-left",
+     "parent": "build_menu",
+     "w": 152,
+     "h": 36
+    },
+    "Panel": {
+     "color": "#33405e"
+    },
+    "Button": {
+     "action": "pick-monument",
+     "state": "normal"
+    }
+   }
+  },
+  {
+   "name": "build_monument_lbl",
+   "components": {
+    "Ui": {
+     "anchor": "stretch",
+     "parent": "build_monument"
+    },
+    "UiLabel": {
+     "content": "monument",
+     "size": 24,
      "color": "#ffffff",
      "align": "center"
     }

@@ -1,0 +1,21 @@
+{
+  "rules": [
+    {
+      "id": "sync-clock-day",
+      "comment": "@colony.Clock.day 镜像到 @colony.Colony.day,供 quest/规则直接读不依赖 Clock。",
+      "on": "tick",
+      "do": [
+        { "set": "@colony.Colony.day", "to": "@colony.Clock.day" }
+      ]
+    },
+    {
+      "id": "clock-hud-tod",
+      "comment": "时间 HUD label:Day N · 时段。规则刷文字,scripts/clock.js 算时段。",
+      "on": "tick",
+      "do": [
+        { "set": "@hud_time_lbl.UiLabel.content",
+          "to": { "format": "第 {} 天 · {}", "args": ["@colony.Clock.day", "@colony.Clock.tod"] } }
+      ]
+    }
+  ]
+}

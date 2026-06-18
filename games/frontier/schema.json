@@ -89,8 +89,21 @@
     "Collider": { "fields": { "w": { "type": "number", "default": 1 }, "h": { "type": "number", "default": 1 } } },
 
     "Cell": { "fields": { "kind": { "type": "text", "default": "regolith" } } },
-    "Structure": { "fields": { "kind": { "type": "text", "default": "floor" } } },
+    "Structure": {
+      "fields": {
+        "kind": { "type": "text", "default": "floor" },
+        "tier": { "type": "int", "default": 1 }
+      }
+    },
     "Portal": { "fields": { "to": { "type": "text", "default": "home" } } },
+    "Clock": {
+      "fields": {
+        "day": { "type": "int", "default": 1 },
+        "time": { "type": "number", "default": 0 },
+        "tod": { "type": "text", "default": "晨" },
+        "last_day_emit": { "type": "int", "default": 0 }
+      }
+    },
 
     "Inventory": {
       "fields": {
@@ -139,7 +152,31 @@
         "water_i": { "type": "int", "default": 60 },
         "pop": { "type": "int", "default": 0 },
         "struct_count": { "type": "int", "default": 0 },
-        "stage": { "type": "text", "default": "落脚" }
+        "stage": { "type": "text", "default": "落脚" },
+        "milestone": { "type": "text", "default": "起步" },
+        "next_drifter_day": { "type": "int", "default": 3 },
+        "drifters_invited": { "type": "int", "default": 0 },
+        "drifters_spawned": { "type": "int", "default": 1 },
+        "monument_built": { "type": "int", "default": 0 },
+        "day": { "type": "int", "default": 1 },
+        "player_x": { "type": "number", "default": 0 },
+        "player_y": { "type": "number", "default": 0 },
+        "target_drifter": { "type": "text", "default": "" },
+        "target_drifter_x": { "type": "number", "default": 0 },
+        "target_drifter_y": { "type": "number", "default": 0 },
+        "target_drifter_name": { "type": "text", "default": "" },
+        "target_drifter_archetype": { "type": "text", "default": "" },
+        "target_drifter_traits": { "type": "text", "default": "" },
+        "target_drifter_speech": { "type": "text", "default": "" },
+        "target_companion": { "type": "text", "default": "" },
+        "target_companion_x": { "type": "number", "default": 0 },
+        "target_companion_y": { "type": "number", "default": 0 },
+        "target_companion_name": { "type": "text", "default": "" },
+        "target_companion_archetype": { "type": "text", "default": "" },
+        "target_companion_traits": { "type": "text", "default": "" },
+        "target_companion_speech": { "type": "text", "default": "" },
+        "companion_handles": { "type": "list", "of": { "type": "text" } },
+        "last_talk_reply": { "type": "text", "default": "" }
       }
     },
     "Census": {
@@ -150,7 +187,11 @@
     },
 
     "Companion": { "fields": {} },
-    "Drifter": { "fields": {} },
+    "Drifter": {
+      "fields": {
+        "arrival_day": { "type": "int", "default": 1 }
+      }
+    },
     "Persona": {
       "fields": {
         "name": { "type": "text", "default": "旅人" },

@@ -64,14 +64,15 @@
 
     {
       "id": "seed-start",
-      "comment": "开局给点起步料,让建造/制作/种地都够得着(spec 建议 seed5/wood4/ore4/fiber2)。再加 plank2 让信标(ore2+plank2)和住所(plank2)开局即可造,纵切能一路打到成形。",
+      "comment": "开局给点起步料,让建造/制作/种地都够得着(spec 建议 seed5/wood4/ore4/fiber2)。再加 plank2 让信标(ore2+plank2)和住所(plank2)开局即可造,纵切能一路打到成形。纵切要立丰碑通关(ore4+plank4+lamp2+wheat4),把 lamp 也给 2,seed 多给 5,木料多给 4,这样录像不需要外挂 grind。",
       "on": { "event": "start" },
       "do": [
-        { "set": "@player.Inventory.seed",  "to": 5 },
-        { "set": "@player.Inventory.wood",  "to": 4 },
-        { "set": "@player.Inventory.ore",   "to": 4 },
+        { "set": "@player.Inventory.seed",  "to": 10 },
+        { "set": "@player.Inventory.wood",  "to": 8 },
+        { "set": "@player.Inventory.ore",   "to": 6 },
         { "set": "@player.Inventory.fiber", "to": 2 },
-        { "set": "@player.Inventory.plank", "to": 2 }
+        { "set": "@player.Inventory.plank", "to": 6 },
+        { "set": "@player.Inventory.lamp",  "to": 2 }
       ]
     }
   ]

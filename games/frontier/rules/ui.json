@@ -46,6 +46,8 @@
     { "id": "pick-extractor", "on": { "event": "ui-activate", "filter": { "action": "pick-extractor" } }, "do": [ { "set": "@uistate.Build.kind", "to": "extractor" } ] },
     { "id": "pick-quarters",  "on": { "event": "ui-activate", "filter": { "action": "pick-quarters" } },  "do": [ { "set": "@uistate.Build.kind", "to": "quarters" } ] },
     { "id": "pick-beacon",    "on": { "event": "ui-activate", "filter": { "action": "pick-beacon" } },    "do": [ { "set": "@uistate.Build.kind", "to": "beacon" } ] },
+    { "id": "pick-plot2",     "on": { "event": "ui-activate", "filter": { "action": "pick-plot2" } },     "do": [ { "set": "@uistate.Build.kind", "to": "plot2" } ] },
+    { "id": "pick-monument",  "on": { "event": "ui-activate", "filter": { "action": "pick-monument" } },  "do": [ { "set": "@uistate.Build.kind", "to": "monument" } ] },
 
     { "id": "kb-plot",      "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "plot" } ] },
     { "id": "kb-wall",      "on": { "event": "input", "filter": { "action": "2", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "wall" } ] },
@@ -53,6 +55,8 @@
     { "id": "kb-extractor", "on": { "event": "input", "filter": { "action": "4", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "extractor" } ] },
     { "id": "kb-quarters",  "on": { "event": "input", "filter": { "action": "5", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "quarters" } ] },
     { "id": "kb-beacon",    "on": { "event": "input", "filter": { "action": "6", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "beacon" } ] },
+    { "id": "kb-plot2",     "on": { "event": "input", "filter": { "action": "7", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "plot2" } ] },
+    { "id": "kb-monument",  "on": { "event": "input", "filter": { "action": "8", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "monument" } ] },
 
     { "id": "kb-mode-build",    "on": { "event": "input", "filter": { "action": "q", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "build" } ] },
     { "id": "kb-mode-interact", "on": { "event": "input", "filter": { "action": "w", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "interact" } ] },

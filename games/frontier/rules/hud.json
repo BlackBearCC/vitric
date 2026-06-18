@@ -2,12 +2,22 @@
   "rules": [
     {
       "id": "hud-res",
-      "comment": "顶部资源条:阶段 + 氧/电/食/水/人手,每帧刷(读 @colony 的取整字段)。人手=pop(本增量恒 0)。",
+      "comment": "顶部资源条:阶段 + 氧/电/食/水/人手 + 第几天。每帧刷(读 @colony 的取整字段)。",
       "on": "tick",
       "do": [
         {
           "set": "@hud_res.UiLabel.content",
-          "to": { "format": "【{}】  氧 {}  电 {}  食 {}  水 {}  人手 {}", "args": ["@colony.Colony.stage", "@colony.Colony.o2_i", "@colony.Colony.pow_i", "@colony.Colony.food_i", "@colony.Colony.water_i", "@colony.Colony.pop"] }
+          "to": { "format": "【{}】 第{}天 · {}  氧 {}  电 {}  食 {}  水 {}  人手 {}",
+                  "args": [
+                    "@colony.Colony.stage",
+                    "@colony.Clock.day",
+                    "@colony.Clock.tod",
+                    "@colony.Colony.o2_i",
+                    "@colony.Colony.pow_i",
+                    "@colony.Colony.food_i",
+                    "@colony.Colony.water_i",
+                    "@colony.Colony.pop"
+                  ] }
         }
       ]
     },

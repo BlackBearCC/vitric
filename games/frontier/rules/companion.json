@@ -1,58 +1,45 @@
 {
   "rules": [
     {
-      "id": "drifter-shelter-on",
-      "comment": "有结构 + 伙伴存在 → shelter,舒适度恢复。",
-      "on": "tick",
-      "if": [["@companion", "exists"], ["@colony.Colony.struct_count", ">", 0]],
-      "do": [{ "set": "@companion.Need.quarters", "to": 1 }]
-    },
-    {
-      "id": "drifter-shelter-off",
-      "comment": "零结构 + 伙伴存在 → 无 shelter,舒适度衰减。",
-      "on": "tick",
-      "if": [["@companion", "exists"], ["@colony.Colony.struct_count", "==", 0]],
-      "do": [{ "set": "@companion.Need.quarters", "to": 0 }]
-    },
-
-    {
       "id": "drifter-talk",
-      "comment": "按 t 键且玩家靠近漂泊旅人(距离<4)时,发 LLM 对话。旅人人设传进 fn 当 prompt。",
+      "comment": "按 t 键且玩家靠近最近旅人(距离<4)时,发 LLM 对话。",
       "on": { "event": "input", "filter": { "action": "t", "phase": "pressed" } },
-      "if": [["@drifter", "exists"]],
+      "if": [["@colony.Colony.target_drifter", "!=", ""]],
       "do": [{ "call": "talkNearby", "with": {
-        "px": "@player.Position.x", "py": "@player.Position.y",
-        "dx": "@drifter.Position.x", "dy": "@drifter.Position.y",
-        "pname": "@drifter.Persona.name", "parch": "@drifter.Persona.archetype",
-        "ptraits": "@drifter.Persona.traits", "pspeech": "@drifter.Persona.speech",
-        "entity": "drifter"
+        "px": "@colony.Colony.player_x", "py": "@colony.Colony.player_y",
+        "dx": "@colony.Colony.target_drifter_x", "dy": "@colony.Colony.target_drifter_y",
+        "pname": "@colony.Colony.target_drifter_name", "parch": "@colony.Colony.target_drifter_archetype",
+        "ptraits": "@colony.Colony.target_drifter_traits", "pspeech": "@colony.Colony.target_drifter_speech"
       } }]
     },
 
     {
       "id": "companion-talk",
-      "comment": "旅人已入住后,T 键对话转给 Pip。",
+      "comment": "按 t 键,若旅人不靠近但伙伴靠近(<4),对话转给伙伴。",
       "on": { "event": "input", "filter": { "action": "t", "phase": "pressed" } },
-      "if": [["@companion", "exists"]],
+      "if": [
+        ["@colony.Colony.target_drifter", "==", ""],
+        ["@colony.Colony.target_companion", "!=", ""]
+      ],
       "do": [{ "call": "talkNearby", "with": {
-        "px": "@player.Position.x", "py": "@player.Position.y",
-        "dx": "@companion.Position.x", "dy": "@companion.Position.y",
-        "pname": "@companion.Persona.name", "parch": "@companion.Persona.archetype",
-        "ptraits": "@companion.Persona.traits", "pspeech": "@companion.Persona.speech",
-        "entity": "companion"
+        "px": "@colony.Colony.player_x", "py": "@colony.Colony.player_y",
+        "dx": "@colony.Colony.target_companion_x", "dy": "@colony.Colony.target_companion_y",
+        "pname": "@colony.Colony.target_companion_name", "parch": "@colony.Colony.target_companion_archetype",
+        "ptraits": "@colony.Colony.target_companion_traits", "pspeech": "@colony.Colony.target_companion_speech"
       } }]
     },
 
     {
       "id": "drifter-invite",
-      "comment": "按 i 键且靠近旅人时,发邀请。",
+      "comment": "按 i 键且最近旅人在范围内,发邀请事件,带 drifter_id 句柄。",
       "on": { "event": "input", "filter": { "action": "i", "phase": "pressed" } },
-      "if": [["@drifter", "exists"]],
-      "do": [{ "call": "inviteNearby", "with": {
-        "px": "@player.Position.x", "py": "@player.Position.y",
-        "dx": "@drifter.Position.x", "dy": "@drifter.Position.y",
-        "pname": "@drifter.Persona.name", "parch": "@drifter.Persona.archetype",
-        "ptraits": "@drifter.Persona.traits", "pspeech": "@drifter.Persona.speech"
+      "if": [["@colony.Colony.target_drifter", "!=", ""]],
+      "do": [{ "call": "inviteAnyNearby", "with": {
+        "px": "@colony.Colony.player_x", "py": "@colony.Colony.player_y",
+        "dx": "@colony.Colony.target_drifter_x", "dy": "@colony.Colony.target_drifter_y",
+        "drifter_id": "@colony.Colony.target_drifter",
+        "pname": "@colony.Colony.target_drifter_name", "parch": "@colony.Colony.target_drifter_archetype",
+        "ptraits": "@colony.Colony.target_drifter_traits", "pspeech": "@colony.Colony.target_drifter_speech"
       } }]
     },
 
@@ -71,31 +58,53 @@
 
     {
       "id": "companion-invite-process",
-      "comment": "邀请 → despawn 旧旅人 + 在家园 spawn 伙伴 + 任务推进。",
+      "comment": "邀请 → consumeDrifter(despawn by id + spawn companion + emit moved-in)。",
       "on": { "event": "companion-invited" },
       "do": [
-        { "despawn": "@drifter" },
-        { "call": "spawnCompanion", "with": { "persona": { "name": "event.name", "archetype": "event.archetype", "traits": "event.traits", "speech": "event.speech" } } }
+        { "call": "consumeDrifter", "with": {
+          "drifter_id": "event.drifter_id",
+          "name": "event.name",
+          "archetype": "event.archetype",
+          "traits": "event.traits",
+          "speech": "event.speech"
+        } }
       ]
     },
 
     {
-      "id": "companion-movein-quest",
-      "comment": "伙伴入住 → 如果 quest step==3,推进到 step 4。",
+      "id": "companion-movein-counter",
+      "comment": "每邀请一位伙伴入住,@colony.Colony.drifters_invited++(HUD 可见)。",
       "on": { "event": "companion-moved-in" },
-      "if": [ ["@quest.QuestLog.step", "==", 3] ],
       "do": [
-        { "set": "@quest.QuestLog.step", "to": 4 },
-        { "emit": "quest-done", "data": { "id": "companion" } }
+        { "add": "@colony.Colony.drifters_invited", "by": 1 }
+      ]
+    },
+
+    {
+      "id": "drifter-cadence",
+      "comment": "每隔一个游戏日 spawn 一个新旅人(最多 4 个,且场上没人时才 spawn)。",
+      "on": { "event": "day-start" },
+      "if": [
+        ["event.day", ">=", "@colony.Colony.next_drifter_day"],
+        ["@colony.Colony.drifters_spawned", "<", 4],
+        ["@colony.Colony.target_drifter", "==", ""]
+      ],
+      "do": [
+        { "call": "spawnNewDrifter", "with": {
+          "idx": "@colony.Colony.drifters_spawned",
+          "arrival_day": "event.day"
+        } },
+        { "add": "@colony.Colony.drifters_spawned", "by": 1 },
+        { "add": "@colony.Colony.next_drifter_day", "by": 2 }
       ]
     },
 
     {
       "id": "companion-leave",
-      "comment": "伙伴离开 → despawn @companion (如果还在就清掉)。",
+      "comment": "伙伴离开:companion-need 已自己 despawn,这里只发个事件让 HUD 显示。",
       "on": { "event": "companion-left" },
       "do": [
-        { "despawn": "@companion" }
+        { "emit": "companion-departed", "data": { "name": "event.name" } }
       ]
     }
   ]

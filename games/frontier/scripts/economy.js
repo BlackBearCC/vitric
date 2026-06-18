@@ -7,14 +7,19 @@
 // 够不到 @player.Inventory（它是别的实体）。所以规则把当前背包当参数传进来，
 // 这里算出扣完的新值，emit 回去让规则 set。
 
-// 建造表（GDD）：kind -> 料；plot 免费。灰盒配色（无贴图，避免缺图崩渲染）。
+// 建造表（GDD + 纵深）：kind -> 料 + tier + 配色 + label。
+//   tier 1: plot / wall / conduit / extractor / quarters / beacon
+//   tier 2: plot2   (高级种植台,产量 2x,需 plank+chair — 真本事才造得起)
+//   tier 3: monument (丰碑,通关结构,需 ore+plank+lamp+wheat — 集大成的资源投入)
 const BUILD = {
-  plot:      { cost: {},                   color: "#6b8f3a", label: "种植台" }, // 绿
-  wall:      { cost: { wood: 1 },          color: "#8a7a5c", label: "墙" },     // 土黄
-  conduit:   { cost: { ore: 1 },           color: "#d8a83a", label: "电导管" }, // 琥珀(电)
-  extractor: { cost: { ore: 1 },           color: "#4aa6c8", label: "抽水机" }, // 蓝(水)
-  quarters:  { cost: { plank: 2 },         color: "#c08a4a", label: "住所" },   // 暖棕
-  beacon:    { cost: { ore: 2, plank: 2 }, color: "#e85a5a", label: "信标" },   // 红(主线)
+  plot:      { cost: {},                              tier: 1, color: "#6b8f3a", label: "种植台" },
+  wall:      { cost: { wood: 1 },                     tier: 1, color: "#8a7a5c", label: "墙" },
+  conduit:   { cost: { ore: 1 },                      tier: 1, color: "#d8a83a", label: "电导管" },
+  extractor: { cost: { ore: 1 },                      tier: 1, color: "#4aa6c8", label: "抽水机" },
+  quarters:  { cost: { plank: 2 },                    tier: 1, color: "#c08a4a", label: "住所" },
+  beacon:    { cost: { ore: 2, plank: 2 },            tier: 1, color: "#e85a5a", label: "信标" },
+  plot2:     { cost: { plank: 3, chair: 1 },          tier: 2, color: "#a8e85a", label: "良田" },
+  monument:  { cost: { ore: 4, plank: 4, lamp: 2, wheat: 4 }, tier: 3, color: "#ffe066", label: "丰碑" },
 };
 
 // 制作配方（GDD）：产物 -> 料。
@@ -71,7 +76,7 @@ vitric.fn("build", (a, ctx) => {
   pay(inv, def.cost);
   // ctx.spawn(组件对象, 可选名字)——组件是扁平第一参数(不是 {components:...})；这里匿名 spawn。
   const comps = {
-    Structure: { kind: a.kind },
+    Structure: { kind: a.kind, tier: def.tier || 1 },
     Position: { x: gx, y: gy },
     Sprite: { w: 1, h: 1, color: def.color },
     Text: { content: def.label, size: 0.34, color: "#ffffff", screen: false }, // 名字标在结构上
