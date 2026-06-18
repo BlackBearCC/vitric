@@ -113,16 +113,14 @@ vitric.fn("interact", (a, ctx) => {
     }
     return;
   }
-  // ---- 野外资源点采集 ----
-  if (node && node.left > 0) {
+  // ---- 野外资源点采集(场景已预铺 6 个节点,left>0 即可采) ----
+  if (node && (node.left | 0) > 0) {
     const inv = readInv(a);
     const nodeKind = node.kind || "ore";
-    // 资源类型 → 物品 id
     const ITEM_MAP = { ore: "ore", wood: "wood", fiber: "fiber" };
     const itemId = ITEM_MAP[nodeKind] || "ore";
     inv[itemId] += 1;
-    // 减 left(通过 setField 写回)
-    ctx.setField(a.entity, "Node.left", node.left - 1);
+    ctx.setField(a.entity, "Node.left", (node.left | 0) - 1);
     emitInv(ctx, inv);
     ctx.emit("gathered", { node: nodeKind, id: itemId, n: 1 });
     return;
