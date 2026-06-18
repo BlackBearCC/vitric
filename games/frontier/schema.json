@@ -176,6 +176,8 @@
         "target_companion_traits": { "type": "text", "default": "" },
         "target_companion_speech": { "type": "text", "default": "" },
         "companion_handles": { "type": "list", "of": { "type": "text" } },
+        "companion_snapshot": { "type": "text", "default": "[]" },
+        "drifter_snapshot": { "type": "text", "default": "[]" },
         "last_talk_reply": { "type": "text", "default": "" }
       }
     },

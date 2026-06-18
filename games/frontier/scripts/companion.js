@@ -1,11 +1,20 @@
 // 伙伴系统:游荡 + 舒适度 + 离开 + 日夜作息 + 多旅人/多伙伴目标追踪
-// 三个子系统:
-//   companion-wander     Wander + Velocity 驱动作息游荡
-//   companion-need       Need 舒适衰减/恢复 → comfort 跌到 0 → leave_timer 到时 emit companion-left + 自己 despawn
-//   target-track         每帧维护 @colony.Colony.target_drifter / target_companion(就近的旅人/伙伴)
-//   companion-shelter    每帧按 Colony.struct_count 给所有 Companion.Need.quarters 同步
-//   companion-register   每帧维护 Colony.companion_handles 列表(增/减),让其他系统能遍历所有伙伴
-// 不依赖跨系统状态,全在组件里 + Colony 共享字段。
+//
+// 系统:
+//   cache-player-pos     Player+Position → Colony.player_x / player_y
+//   drifter-snapshot     Drifter+Position+Persona → Colony.drifter_snapshot (JSON)
+//   companion-snapshot   Companion+Position+Persona → Colony.companion_snapshot (JSON)
+//   companion-register   Companion → Colony.companion_handles (句柄列表, 给 companion-shelter 用)
+//   companion-shelter    Colony → 每句柄的 Need.quarters (struct_count > 0)
+//   target-drifter       Colony → Colony.target_drifter_* (找最近旅人)
+//   target-companion     Colony → Colony.target_companion_* (找最近伙伴)
+//   companion-wander     Companion+Wander+Position+Velocity → 散步
+//   companion-need       Companion+Need → 舒适度/离开
+//   talk-reply-apply-*   Colony → Text.content (给最近旅人/伙伴), 消费 last_talk_reply
+//
+// 数据流:cache-player-pos 写 Colony.player_x/y → snapshot 系统把 Drifter/Companion
+// 数据打包成 JSON 写 Colony → target-* / companion-shelter / talk-reply-apply-* 只读 Colony。
+// 跨系统数据全部活在 Colony 字段里,无任何模块级 let __ 共享变量。
 
 const WANDER_SPEED = 1.2;   // 散步速度
 const WANDER_RADIUS = 2.5;  // 围绕 home_x/y ± 半径
@@ -21,96 +30,105 @@ function compTodOf(tick) {
   return "夜";
 }
 
-// 闭包共享的玩家位置(由 cache-player-pos 写,由 target-track 读)
-let __playerX = 0;
-let __playerY = 0;
+// 把一个实体快照数组打包成 JSON 字符串(给 Colony.*_snapshot 用)。
+// id/Position/Persona 都已通过 query 校验存在。
+function packSnapshot(entities) {
+  const data = entities.map(e => ({
+    id: e.id,
+    x: e.Position.x, y: e.Position.y,
+    name: e.Persona.name || "",
+    archetype: e.Persona.archetype || "",
+    traits: e.Persona.traits || "",
+    speech: e.Persona.speech || "",
+  }));
+  return JSON.stringify(data);
+}
 
-// ---- 缓存玩家位置到 Colony(target-track 需要)----
+// 从 Colony 读快照 JSON,失败(空字段/损坏)返回空数组。
+function readSnapshot(raw) {
+  if (!raw || typeof raw !== "string") return [];
+  try { return JSON.parse(raw) || []; } catch (_) { return []; }
+}
+
+// ---- 缓存玩家位置到 Colony(target-* / companion-shelter / talk-reply-apply-* 需要)----
 vitric.system("cache-player-pos", { query: ["Player", "Position"], writes: ["Position"] }, (entities, ctx) => {
   for (const e of entities) {
     if (!e.Player) continue;
-    __playerX = e.Position.x;
-    __playerY = e.Position.y;
     ctx.setField("colony", "Colony.player_x", e.Position.x);
     ctx.setField("colony", "Colony.player_y", e.Position.y);
   }
 });
 
-// ---- 维护 Colony.companion_handles 列表 ----
-// 扫描所有 Companion 实体,出现在列表里的去掉,新出现的加上,被 despawn 的从列表里清掉。
-// 同时去重,避免重复。
+// ---- 旅人/伙伴快照:每帧把所有 Drifter / Companion 的 Position+Persona 打包成 JSON ----
+vitric.system("drifter-snapshot", { query: ["Drifter", "Position", "Persona"], writes: [] }, (entities, ctx) => {
+  ctx.setField("colony", "Colony.drifter_snapshot", packSnapshot(entities));
+});
+
+vitric.system("companion-snapshot", { query: ["Companion", "Position", "Persona"], writes: [] }, (entities, ctx) => {
+  ctx.setField("colony", "Colony.companion_snapshot", packSnapshot(entities));
+});
+
+// ---- 维护 Colony.companion_handles 句柄列表(companion-shelter 直接拿句柄 setField, 不用 parse JSON)----
 vitric.system("companion-register", { query: ["Companion"], writes: [] }, (entities, ctx) => {
-  // 当前在场的伙伴句柄
-  const alive = entities.map(e => e.id);
-  // 读 Colony.companion_handles — 但这里不能读 Colony。改用闭包。
-  // 闭包：每 tick 重置 alive set,重算 diff
-  const prev = __companionRegistry;
-  __companionRegistry = alive.slice();
-  // 把当前 alive 写回 Colony(整列替换)
-  ctx.setField("colony", "Colony.companion_handles", alive);
-});
-let __companionRegistry = [];
-
-// ---- 同步所有伙伴的 Need.quarters(基于 Colony.struct_count) ----
-// 这里不能直接读 Colony,所以用 @colony.* 的 setField 也不行（写不进读）。
-// 解决办法：用 companion-shelter-collect 系统先收集 struct_count 到闭包，
-//         companion-shelter 系统再迭代 Colony.companion_handles 设置每个的 Need.quarters。
-let __structCount = 0;
-vitric.system("companion-shelter-collect", { query: ["Structure"], writes: [] }, (entities, ctx) => {
-  __structCount = entities.length;
+  ctx.setField("colony", "Colony.companion_handles", entities.map(e => e.id));
 });
 
-// 现在 iterate companion_handles 这个 list 给每个 setField Need.quarters
-// 但 setField 是延迟的,需要 fn 来执行循环。这里用一个系统,它 query Companion,
-// 从闭包读 __structCount,直接写 Need.quarters。
-vitric.system("companion-shelter", { query: ["Companion", "Need"], writes: ["Need"] }, (entities, ctx) => {
-  const q = __structCount > 0 ? 1 : 0;
-  for (const e of entities) {
-    e.Need.quarters = q;
+// ---- 同步所有伙伴的 Need.quarters(基于 Colony.struct_count; 规则已经维护这个字段)----
+vitric.system("companion-shelter", { query: ["Colony"], writes: [] }, (entities, ctx) => {
+  const c = entities[0];
+  if (!c) return;
+  const q = c.Colony.struct_count > 0 ? 1 : 0;
+  for (const handle of (c.Colony.companion_handles || [])) {
+    if (typeof handle !== "string" || !handle) continue;
+    ctx.setField(handle, "Need.quarters", q);
   }
 });
 
-// ---- 维护最近旅人:扫描所有 Drifter,找离玩家最近的写入 Colony.target_drifter* ----
-vitric.system("target-drifter", { query: ["Drifter", "Position", "Persona"], writes: [] }, (entities, ctx) => {
-  let bestD2 = Infinity;
-  let best = null;
-  for (const e of entities) {
-    const dx = e.Position.x - __playerX;
-    const dy = e.Position.y - __playerY;
+// ---- 维护最近旅人:从 Colony.drifter_snapshot 里找离 player 最近的写入 Colony.target_drifter* ----
+vitric.system("target-drifter", { query: ["Colony"], writes: [] }, (entities, ctx) => {
+  const c = entities[0];
+  if (!c) return;
+  const snapshot = readSnapshot(c.Colony.drifter_snapshot);
+  const px = c.Colony.player_x || 0, py = c.Colony.player_y || 0;
+  let bestD2 = Infinity, best = null;
+  for (const d of snapshot) {
+    const dx = d.x - px, dy = d.y - py;
     const d2 = dx * dx + dy * dy;
-    if (d2 < bestD2) { bestD2 = d2; best = e; }
+    if (d2 < bestD2) { bestD2 = d2; best = d; }
   }
   if (best) {
     ctx.setField("colony", "Colony.target_drifter", best.id);
-    ctx.setField("colony", "Colony.target_drifter_x", best.Position.x);
-    ctx.setField("colony", "Colony.target_drifter_y", best.Position.y);
-    ctx.setField("colony", "Colony.target_drifter_name", best.Persona.name || "");
-    ctx.setField("colony", "Colony.target_drifter_archetype", best.Persona.archetype || "");
-    ctx.setField("colony", "Colony.target_drifter_traits", best.Persona.traits || "");
-    ctx.setField("colony", "Colony.target_drifter_speech", best.Persona.speech || "");
+    ctx.setField("colony", "Colony.target_drifter_x", best.x);
+    ctx.setField("colony", "Colony.target_drifter_y", best.y);
+    ctx.setField("colony", "Colony.target_drifter_name", best.name || "");
+    ctx.setField("colony", "Colony.target_drifter_archetype", best.archetype || "");
+    ctx.setField("colony", "Colony.target_drifter_traits", best.traits || "");
+    ctx.setField("colony", "Colony.target_drifter_speech", best.speech || "");
   } else {
     ctx.setField("colony", "Colony.target_drifter", "");
   }
 });
 
 // ---- 维护最近伙伴 ----
-vitric.system("target-companion", { query: ["Companion", "Position", "Persona"], writes: [] }, (entities, ctx) => {
-  let bestD2 = Infinity;
-  let best = null;
-  for (const e of entities) {
-    const dx = e.Position.x - __playerX;
-    const dy = e.Position.y - __playerY;
+vitric.system("target-companion", { query: ["Colony"], writes: [] }, (entities, ctx) => {
+  const c = entities[0];
+  if (!c) return;
+  const snapshot = readSnapshot(c.Colony.companion_snapshot);
+  const px = c.Colony.player_x || 0, py = c.Colony.player_y || 0;
+  let bestD2 = Infinity, best = null;
+  for (const d of snapshot) {
+    const dx = d.x - px, dy = d.y - py;
     const d2 = dx * dx + dy * dy;
-    if (d2 < bestD2) { bestD2 = d2; best = e; }
+    if (d2 < bestD2) { bestD2 = d2; best = d; }
   }
   if (best) {
     ctx.setField("colony", "Colony.target_companion", best.id);
-    ctx.setField("colony", "Colony.target_companion_x", best.Position.x);
-    ctx.setField("colony", "Colony.target_companion_y", best.Position.y);
-    ctx.setField("colony", "Colony.target_companion_name", best.Persona.name || "");
-    ctx.setField("colony", "Colony.target_companion_archetype", best.Persona.archetype || "");
-    ctx.setField("colony", "Colony.target_companion_traits", best.Persona.traits || "");
-    ctx.setField("colony", "Colony.target_companion_speech", best.Persona.speech || "");
+    ctx.setField("colony", "Colony.target_companion_x", best.x);
+    ctx.setField("colony", "Colony.target_companion_y", best.y);
+    ctx.setField("colony", "Colony.target_companion_name", best.name || "");
+    ctx.setField("colony", "Colony.target_companion_archetype", best.archetype || "");
+    ctx.setField("colony", "Colony.target_companion_traits", best.traits || "");
+    ctx.setField("colony", "Colony.target_companion_speech", best.speech || "");
   } else {
     ctx.setField("colony", "Colony.target_companion", "");
   }
@@ -173,7 +191,7 @@ vitric.system("companion-need", { query: ["Companion", "Need"], writes: ["Need"]
   }
 });
 
-// ---- 邀请旅人：规则收到 companion-invited 后调这个 fn ----
+// ---- 邀请旅人:规则收到 companion-invited 后调这个 fn ----
 // 把传入的 drifter_id despawn 掉,然后在玩家附近 spawn 一个带 Companion 的新实体。
 // 名字由 rules 通过 persona.name 传入。
 vitric.fn("consumeDrifter", (args, ctx) => {
@@ -202,8 +220,8 @@ vitric.fn("consumeDrifter", (args, ctx) => {
   ctx.emit("companion-moved-in", { name: persona.name });
 });
 
-// ---- 旅人到来：每个 game day 由 day-start 事件触发，根据 index 派一个人设 ----
-// 固定人设池（确定性 → 重放/录像一致）。最多 4 个。每个 spawn 不命名（避免与已有 @drifter 冲突）。
+// ---- 旅人到来:每个 game day 由 day-start 事件触发,根据 index 派一个人设 ----
+// 固定人设池(确定性 → 重放/录像一致)。最多 4 个。每个 spawn 不命名(避免与已有 @drifter 冲突)。
 const DRIFTER_POOL = [
   { name: "Mira",  archetype: "山地步兵",   traits: "坚忍,寡言,脚步轻",       speech: "简短、爱用省略号" },
   { name: "Kade",  archetype: "电工学徒",   traits: "好奇、爱拆东西、胆大",   speech: "语速快、夹英文" },
@@ -213,7 +231,7 @@ const DRIFTER_POOL = [
 vitric.fn("spawnNewDrifter", (args, ctx) => {
   const idx = (args.idx | 0) || 0;
   const persona = DRIFTER_POOL[idx % DRIFTER_POOL.length];
-  // 野外区域（x>=16），避免与已有资源点重合
+  // 野外区域(x>=16),避免与已有资源点重合
   const sx = 17 + Math.round(ctx.random() * 9); // 17..26
   const sy = 2 + Math.round(ctx.random() * 8);  // 2..10
   ctx.spawn({
@@ -239,8 +257,8 @@ vitric.fn("talkNearby", (args, ctx) => {
   const name = args.pname || "旅人";
   const arch = args.parch || "漂泊者";
   const traits = args.ptraits || "沉默";
-  const speech = args.speech || "寡言";
-  const prompt = "你是一个在荒星漂泊的旅人" + name + "(" + arch + ")，性格" + traits + "，说话" + speech + "。一个拓荒者走近了你，你主动说句话打个招呼。请用 JSON 格式回复：{\"say\":\"你说的话\",\"mood\":\"情绪\"}";
+  const speech = args.pspeech || "寡言";
+  const prompt = "你是一个在荒星漂泊的旅人" + name + "(" + arch + "),性格" + traits + ",说话" + speech + "。一个拓荒者走近了你,你主动说句话打个招呼。请用 JSON 格式回复:{\"say\":\"你说的话\",\"mood\":\"情绪\"}";
   ctx.ask("llm", prompt, "onTalkReply");
 });
 
@@ -260,8 +278,8 @@ vitric.fn("inviteAnyNearby", (args, ctx) => {
   });
 });
 
-// ---- LLM 回复通用：把回复存到 Colony.last_talk_reply，
-// talk-reply-apply 系统每帧把它落到目标实体的 Text.content 上 ----
+// ---- LLM 回复通用:把回复存到 Colony.last_talk_reply,
+// talk-reply-apply-* 系统每帧把它落到目标实体的 Text.content 上 ----
 vitric.fn("onTalkReply", (reply, ctx) => {
   const text = reply.text || "（对方点了点头）";
   let display = text;
@@ -271,35 +289,34 @@ vitric.fn("onTalkReply", (reply, ctx) => {
   } catch (_) {}
   ctx.setField("colony", "Colony.last_talk_reply", display);
 });
-let __lastTalkReply = "";
-vitric.system("talk-reply-apply-drifter", { query: ["Drifter", "Text", "Position"], writes: ["Text"] }, (entities, ctx) => {
-  const reply = __lastTalkReply;
+
+// ---- 把 last_talk_reply 落到最近的旅人/伙伴 Text.content;两个 apply 系统第一个命中就消费。
+// 谁更近谁拿到回复,另一个 apply 看到 last_talk_reply 已被清空就直接 return。
+function applyReplyToNearest(c, snapshotField, ctx) {
+  const reply = c.Colony.last_talk_reply || "";
   if (!reply) return;
-  // 写回距离玩家最近的 drifter
+  const snapshot = readSnapshot(c.Colony[snapshotField]);
+  const px = c.Colony.player_x || 0, py = c.Colony.player_y || 0;
   let bestD2 = Infinity, best = null;
-  for (const e of entities) {
-    const dx = e.Position.x - __playerX;
-    const dy = e.Position.y - __playerY;
+  for (const d of snapshot) {
+    const dx = d.x - px, dy = d.y - py;
     const d2 = dx * dx + dy * dy;
-    if (d2 < bestD2) { bestD2 = d2; best = e; }
+    if (d2 < bestD2) { bestD2 = d2; best = d; }
   }
   if (best) {
-    best.Text.content = reply;
-    __lastTalkReply = ""; // 只消费一次
+    ctx.setField(best.id, "Text.content", reply);
+    ctx.setField("colony", "Colony.last_talk_reply", ""); // 只消费一次
   }
+}
+
+vitric.system("talk-reply-apply-drifter", { query: ["Colony"], writes: [] }, (entities, ctx) => {
+  const c = entities[0];
+  if (!c) return;
+  applyReplyToNearest(c, "drifter_snapshot", ctx);
 });
-vitric.system("talk-reply-apply-companion", { query: ["Companion", "Text", "Position"], writes: ["Text"] }, (entities, ctx) => {
-  const reply = __lastTalkReply;
-  if (!reply) return;
-  let bestD2 = Infinity, best = null;
-  for (const e of entities) {
-    const dx = e.Position.x - __playerX;
-    const dy = e.Position.y - __playerY;
-    const d2 = dx * dx + dy * dy;
-    if (d2 < bestD2) { bestD2 = d2; best = e; }
-  }
-  if (best) {
-    best.Text.content = reply;
-    __lastTalkReply = "";
-  }
+
+vitric.system("talk-reply-apply-companion", { query: ["Colony"], writes: [] }, (entities, ctx) => {
+  const c = entities[0];
+  if (!c) return;
+  applyReplyToNearest(c, "companion_snapshot", ctx);
 });

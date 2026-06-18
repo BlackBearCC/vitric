@@ -45,10 +45,11 @@
     },
     {
       "id": "quest-step5-done",
-      "comment": "step5 温饱:day≥4 且 小麦存量≥5 → step=6。守卫 step==5 + inventory 闸门。",
+      "comment": "step5 温饱:day≥4 且 小麦存量≥5 → step=6。守卫 step==5 + day-floor + inventory 闸门。",
       "on": "tick",
       "if": [
         ["@quest.QuestLog.step", "==", 5],
+        ["@colony.Colony.day", ">=", 4],
         ["@player.Inventory.wheat", ">=", 5]
       ],
       "do": [
@@ -58,10 +59,11 @@
     },
     {
       "id": "quest-step6-done",
-      "comment": "step6 成群:day≥5 且 人手≥3 → step=7。守卫 step==6 + census 闸门。",
+      "comment": "step6 成群:day≥5 且 人手≥3 → step=7。守卫 step==6 + day-floor + census 闸门。",
       "on": "tick",
       "if": [
         ["@quest.QuestLog.step", "==", 6],
+        ["@colony.Colony.day", ">=", 5],
         ["@colony.Colony.pop", ">=", 3]
       ],
       "do": [
@@ -79,10 +81,11 @@
     },
     {
       "id": "game-won",
-      "comment": "step7 → day≥6 + 丰碑已立 → settlement-thrived → game-won。",
+      "comment": "step7 → day≥6(走 stage「兴旺」闸门)+ 丰碑已立 → settlement-thrived → game-won。",
       "on": "tick",
       "if": [
         ["@quest.QuestLog.step", "==", 7],
+        ["@colony.Colony.day", ">=", 6],
         ["@colony.Colony.monument_built", ">=", 1]
       ],
       "do": [
