@@ -38,27 +38,27 @@ vitric.system("companion-wander", { query: ["Companion", "Wander", "Position", "
   }
 });
 
-// ---- 舒适度：随时间衰减，有 quarters 附近则缓 ----
-// 查 quarters 用结构总量 >= 1 表示(简化：有 quarters 即有人造了住所，默认有住)。
-// 但在单系统内没法查 Structure 表，所以用一个独立字段 comfort_status
-// (正 ≈ 有 shelter 保护, 负 ≈ 在外面流浪赶快掉)。
-// 简化：只要有任意结构 >= 1 就认为有 shelter，因为玩家开局造 quarters 很快。
-// 更精确的去做在规则层面。
+// ---- 舒适度：规则层把 Need.quarters 设为 1/0（有 shelter 则 1），这里据此处理 ----
+// 有 shelter(quarters>0)：舒适度缓慢恢复。无 shelter：衰减 → leave_timer → 离开。
 vitric.system("companion-need", { query: ["Companion", "Need"], writes: ["Need"] }, (entities, ctx) => {
   for (const e of entities) {
     const n = e.Need;
-    // 基础衰减：在外面流浪时掉得快
-    n.comfort -= 0.08 * ctx.dt;
-    // 舒适度低于 0 开始累积 leave_timer
-    if (n.comfort <= 0) {
-      n.leave_timer += ctx.dt;
-      if (n.leave_timer >= 15) {
-        // 够了，离开
-        ctx.emit("companion-left", { name: e.Persona ? e.Persona.name : "未知旅人" });
+    if (n.quarters > 0) {
+      // 有 shelter：舒适度缓慢恢复（上限 100），leave_timer 归零
+      n.comfort += 0.05 * ctx.dt;
+      n.leave_timer = 0;
+    } else {
+      // 无 shelter：舒适度衰减
+      n.comfort -= 0.08 * ctx.dt;
+      if (n.comfort <= 0) {
+        n.leave_timer += ctx.dt;
+        if (n.leave_timer >= 15) {
+          ctx.emit("companion-left", { name: e.Persona ? e.Persona.name : "未知旅人" });
+          n.leave_timer = 0;
+        }
+      } else {
         n.leave_timer = 0;
       }
-    } else {
-      n.leave_timer = 0;
     }
     n.comfort = n.comfort < 0 ? 0 : (n.comfort > 100 ? 100 : n.comfort);
     n.comfort_i = Math.round(n.comfort);

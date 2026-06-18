@@ -1,9 +1,25 @@
 {
   "rules": [
     {
+      "id": "drifter-shelter-on",
+      "comment": "有结构 + 伙伴存在 → shelter,舒适度恢复。",
+      "on": "tick",
+      "if": [["@companion", "exists"], ["@colony.Colony.struct_count", ">", 0]],
+      "do": [{ "set": "@companion.Need.quarters", "to": 1 }]
+    },
+    {
+      "id": "drifter-shelter-off",
+      "comment": "零结构 + 伙伴存在 → 无 shelter,舒适度衰减。",
+      "on": "tick",
+      "if": [["@companion", "exists"], ["@colony.Colony.struct_count", "==", 0]],
+      "do": [{ "set": "@companion.Need.quarters", "to": 0 }]
+    },
+
+    {
       "id": "drifter-talk",
       "comment": "按 t 键且玩家靠近漂泊旅人(距离<4)时,发 LLM 对话。旅人人设传进 fn 当 prompt。",
       "on": { "event": "input", "filter": { "action": "t", "phase": "pressed" } },
+      "if": [["@drifter", "exists"]],
       "do": [{ "call": "talkNearby", "with": {
         "px": "@player.Position.x", "py": "@player.Position.y",
         "dx": "@drifter.Position.x", "dy": "@drifter.Position.y",
@@ -17,6 +33,7 @@
       "id": "companion-talk",
       "comment": "旅人已入住后,T 键对话转给 Pip。",
       "on": { "event": "input", "filter": { "action": "t", "phase": "pressed" } },
+      "if": [["@companion", "exists"]],
       "do": [{ "call": "talkNearby", "with": {
         "px": "@player.Position.x", "py": "@player.Position.y",
         "dx": "@companion.Position.x", "dy": "@companion.Position.y",
@@ -30,6 +47,7 @@
       "id": "drifter-invite",
       "comment": "按 i 键且靠近旅人时,发邀请。",
       "on": { "event": "input", "filter": { "action": "i", "phase": "pressed" } },
+      "if": [["@drifter", "exists"]],
       "do": [{ "call": "inviteNearby", "with": {
         "px": "@player.Position.x", "py": "@player.Position.y",
         "dx": "@drifter.Position.x", "dy": "@drifter.Position.y",
