@@ -4,7 +4,12 @@
   "font": "fonts/cjk.otf",
   "entry": "scenes/main.json",
   "scenes": [ "scenes/main.json" ],
-  "rules": [ "rules/move.json", "rules/ui.json", "rules/economy.json", "rules/colony.json", "rules/hud.json", "rules/quest.json", "rules/farm.json" ],
-  "scripts": [ "scripts/colony.js", "scripts/economy.js", "scripts/crops.js" ],
-  "seed": 1
+  "rules": [ "rules/move.json", "rules/ui.json", "rules/economy.json", "rules/colony.json", "rules/hud.json", "rules/quest.json", "rules/farm.json", "rules/companion.json" ],
+  "scripts": [ "scripts/colony.js", "scripts/economy.js", "scripts/crops.js", "scripts/companion.js" ],
+  "seed": 1,
+  "gates": {
+    "playthroughs": [{"recording": "qa/clear.json", "must_emit": "game-won"}],
+    "check": true,
+    "max_ticks": 100000
+  }
 }

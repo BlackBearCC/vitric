@@ -85,28 +85,47 @@ vitric.fn("build", (a, ctx) => {
 
 // ---- 互动点击：规则把"点中的实体(a.entity 句柄/名字)+它的组件(a.comp)+当前背包"传进来 ----
 // 点中的若是种植台：空地 + 有种子 → 种(setField Crop.kind=wheat)；熟了(stage>=3) → 收(清空 + 麦子+2)。
+// 点中的若是野外资源点(Node)：采集 ore/wood/fiber 进背包。
 // 直接对"点中的那块地"用 ctx.setField 写——不再要命令寄存器/格子匹配(引擎已支持点击带命中实体 entity+comp)。
 vitric.fn("interact", (a, ctx) => {
   const comp = a.comp || {};
   const st = comp.Structure;
   const crop = comp.Crop;
-  if (!st || st.kind !== "plot" || !crop) return; // 没点中种植台,忽略
-  const inv = readInv(a);
-  if (crop.kind === "" && (inv.seed | 0) > 0) {
-    // 种：扣 1 种子 + 把麦子作物挂在这块地上(原地)
-    inv.seed -= 1;
-    ctx.setField(a.entity, "Crop.kind", "wheat");
-    ctx.setField(a.entity, "Crop.stage", 0);
-    ctx.setField(a.entity, "Crop.timer", 0);
+  const node = comp.Node;
+  // ---- 种植台 ----
+  if (st && st.kind === "plot" && crop) {
+    const inv = readInv(a);
+    if (crop.kind === "" && (inv.seed | 0) > 0) {
+      // 种：扣 1 种子 + 把麦子作物挂在这块地上(原地)
+      inv.seed -= 1;
+      ctx.setField(a.entity, "Crop.kind", "wheat");
+      ctx.setField(a.entity, "Crop.stage", 0);
+      ctx.setField(a.entity, "Crop.timer", 0);
+      emitInv(ctx, inv);
+      ctx.emit("planted", { x: a.x, y: a.y });
+    } else if (crop.kind === "wheat" && (crop.stage | 0) >= 3) {
+      // 收：清空作物 + 麦子 +2
+      inv.wheat += 2;
+      ctx.setField(a.entity, "Crop.kind", "");
+      ctx.setField(a.entity, "Crop.stage", 0);
+      emitInv(ctx, inv);
+      ctx.emit("harvested", { id: "wheat", n: 2 });
+    }
+    return;
+  }
+  // ---- 野外资源点采集 ----
+  if (node && node.left > 0) {
+    const inv = readInv(a);
+    const nodeKind = node.kind || "ore";
+    // 资源类型 → 物品 id
+    const ITEM_MAP = { ore: "ore", wood: "wood", fiber: "fiber" };
+    const itemId = ITEM_MAP[nodeKind] || "ore";
+    inv[itemId] += 1;
+    // 减 left(通过 setField 写回)
+    ctx.setField(a.entity, "Node.left", node.left - 1);
     emitInv(ctx, inv);
-    ctx.emit("planted", { x: a.x, y: a.y });
-  } else if (crop.kind === "wheat" && (crop.stage | 0) >= 3) {
-    // 收：清空作物 + 麦子 +2
-    inv.wheat += 2;
-    ctx.setField(a.entity, "Crop.kind", "");
-    ctx.setField(a.entity, "Crop.stage", 0);
-    emitInv(ctx, inv);
-    ctx.emit("harvested", { id: "wheat", n: 2 });
+    ctx.emit("gathered", { node: nodeKind, id: itemId, n: 1 });
+    return;
   }
 });
 

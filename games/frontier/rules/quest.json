@@ -36,10 +36,40 @@
     },
     {
       "id": "quest-banner-3",
-      "comment": "step>=3 需要伙伴(下个增量),先给占位文案。用 >= 兜住 step 3/4。",
+      "comment": "step=3:请伙伴。独立规则,不再用 >= 兜底。",
       "on": "tick",
-      "if": [ ["@quest.QuestLog.step", ">=", 3] ],
-      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:请到一个伙伴住下(后续开放)" } ]
+      "if": [ ["@quest.QuestLog.step", "==", 3] ],
+      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:请到一个伙伴住下 — 走到野外按 T 搭话,按 I 邀请" } ]
+    },
+    {
+      "id": "quest-banner-4",
+      "comment": "step=4:聚落兴旺。",
+      "on": "tick",
+      "if": [ ["@quest.QuestLog.step", "==", 4] ],
+      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:让聚落兴旺起来 — 建造≥6座结构 + 人手≥2" } ]
+    },
+    {
+      "id": "quest-step4-done",
+      "comment": "主线4 聚落兴旺:结构≥6且人手≥2时发 settlement-thrived。守卫 step==4 只触发一次。",
+      "on": "tick",
+      "if": [
+        ["@quest.QuestLog.step", "==", 4],
+        ["@colony.Colony.struct_count", ">=", 6],
+        ["@colony.Colony.pop", ">=", 2]
+      ],
+      "do": [
+        { "emit": "settlement-thrived", "data": {} }
+      ]
+    },
+    {
+      "id": "game-won",
+      "comment": "聚落兴旺 → 终局信号 game-won。守卫 step==4 只发一次。",
+      "on": { "event": "settlement-thrived" },
+      "if": [ ["@quest.QuestLog.step", "==", 4] ],
+      "do": [
+        { "set": "@quest.QuestLog.step", "to": 5 },
+        { "emit": "game-won", "data": {} }
+      ]
     }
   ]
 }

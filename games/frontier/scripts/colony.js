@@ -1,11 +1,10 @@
-// 生存底盘：殖民地 氧/电/食/水 随时间掉，靠结构产出续上；消耗随人口涨（本增量人口=0）。
-// 单系统不能跨实体聚合，所以分两步：
+// 生存底盘：殖民地 氧/电/食/水 随时间掉，靠结构产出续上；消耗随人口涨。
+// 分三步：
 //   tally 系统数产出结构 → emit "tally" 速率 → rules/colony.json 落到 @colony.*_rate
+//   census 系统数伙伴 → emit "census-tick" → rules 落 @colony.Colony.pop
 //   colony 系统每帧按 (产出 - 基础消耗) 调库存，夹在 [0,100]，不死人。
-// 产出映射（GDD 建造表）：plot→食+氧，conduit→电，extractor→水。
-// 本增量砍掉：census/伙伴普查（无伙伴）、cosmic 耀斑（GDD 明确砍）。pop 恒 0。
 
-const BASE_USE = 1.4;     // 每秒固定底噪（电/氧/食/水各自）——殖民地活着就在烧。给宽，别盖过经营节奏。
+const BASE_USE = 1.4;     // 每秒固定底噪（电/氧/食/水各自）——殖民地活着就在烧。
 const PER = 3.0;          // 每个产出结构每秒产量
 
 function clamp(v) {
@@ -32,6 +31,16 @@ vitric.system("tally", { query: ["Structure"], writes: [] }, (entities, ctx) => 
   });
 });
 
+// 数伙伴（Census.is_hub==0 的实体）→ 殖民人口。发 census-tick{pop} → rules 写回 @colony.Colony.pop。
+vitric.system("census", { query: ["Census"], writes: [] }, (entities, ctx) => {
+  let pop = 0;
+  for (const e of entities) {
+    if (e.Census.is_hub) continue; // 跳过 @colony（枢纽标记）
+    pop += 1;
+  }
+  ctx.emit("census-tick", { pop: pop });
+});
+
 // 阶段：随结构数成长，落脚 → 立足 → 成形 → 兴旺（进展感）。本增量人手恒 0，
 // "兴旺"需人手≥2（伙伴未做），所以本增量最多到"成形"——符合纵切，伙伴一来即可兴旺。
 vitric.system("stage", { query: ["Colony"], writes: ["Colony"] }, (entities, ctx) => {
@@ -47,11 +56,11 @@ vitric.system("stage", { query: ["Colony"], writes: ["Colony"] }, (entities, ctx
 });
 
 // 每帧：库存 += (产出速率 - 基础消耗) * dt，夹 [0,100]；取整给 HUD 读。
-// pop 恒 0（无伙伴），所以消耗就是底噪，产出就是结构速率。
+// 消耗 = BASE_USE + pop * 0.5（人口多了烧更快）。
 vitric.system("colony", { query: ["Colony"], writes: ["Colony"] }, (entities, ctx) => {
   for (const e of entities) {
     const c = e.Colony;
-    const draw = BASE_USE; // 人口 0：无人均消耗
+    const draw = BASE_USE + c.pop * 0.5;
     c.power = clamp(c.power + (c.pow_rate - draw) * ctx.dt);
     c.oxygen = clamp(c.oxygen + (c.o2_rate - draw) * ctx.dt);
     c.food = clamp(c.food + (c.food_rate - draw) * ctx.dt);

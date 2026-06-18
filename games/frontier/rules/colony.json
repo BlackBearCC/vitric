@@ -10,6 +10,14 @@
         { "set": "@colony.Colony.water_rate", "to": "event.water" },
         { "set": "@colony.Colony.struct_count", "to": "event.total" }
       ]
+    },
+    {
+      "id": "apply-census",
+      "comment": "census-tick{pop} → @colony.Colony.pop。",
+      "on": { "event": "census-tick" },
+      "do": [
+        { "set": "@colony.Colony.pop", "to": "event.pop" }
+      ]
     }
   ]
 }
