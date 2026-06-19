@@ -59,12 +59,13 @@
     },
     {
       "id": "quest-step6-done",
-      "comment": "step6 成群:day≥5 且 人手≥3 → step=7。守卫 step==6 + day-floor + census 闸门。",
+      "comment": "step6 成群:day≥5 + 人手≥3 + 至少 1 位伙伴好感≥50(用心养到会帮忙那档)→ step=7。守卫 step==6 + day-floor + census + 关系闸门。",
       "on": "tick",
       "if": [
         ["@quest.QuestLog.step", "==", 6],
         ["@colony.Colony.day", ">=", 5],
-        ["@colony.Colony.pop", ">=", 3]
+        ["@colony.Colony.pop", ">=", 3],
+        ["@colony.Colony.companion_happy_count", ">=", 1]
       ],
       "do": [
         { "set": "@quest.QuestLog.step", "to": 7 },

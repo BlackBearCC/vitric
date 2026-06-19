@@ -20,6 +20,22 @@ use vitric_sim::Pcg32;
 
 const PRELUDE: &str = include_str!("prelude.js");
 
+thread_local! {
+    /// 当前 call_js 期间可读的 World 裸指针。run_one_system/call_fn 调 JS 前设、调完清,
+    /// 窗口外恒为 null。QuickJS 单线程同步执行,__getFieldRaw 只在这窗口内读它。
+    static WORLD_PTR: std::cell::Cell<*const World> = std::cell::Cell::new(std::ptr::null());
+}
+
+/// ctx.getField 的解析:句柄(可带 @ 前缀)或实体名 → 该字段值;实体/字段缺失返回 None。
+fn resolve_field(world: &World, reference: &str, path: &str) -> Option<Value> {
+    let stripped = reference.strip_prefix('@').unwrap_or(reference);
+    let id = match stripped.parse::<EntityId>() {
+        Ok(id) => id,
+        Err(_) => world.entity(stripped).ok()?,
+    };
+    world.get_field(id, path).ok().cloned()
+}
+
 /// 一个已注册系统的声明。
 #[derive(Debug, Clone)]
 pub struct SystemDecl {
@@ -101,8 +117,39 @@ impl ScriptEngine {
             systems: Vec::new(),
             fns: Vec::new(),
         };
+        engine.register_natives()?;
         engine.eval_file("<prelude>", PRELUDE)?;
         Ok(engine)
+    }
+
+    /// 注册给脚本用的原生函数。目前只有 __getFieldRaw(ref, path)→JSON 串,供 prelude 的
+    /// ctx.getField 调:直接查 live World 的单个字段,缺失返回字面量 "undefined"。
+    fn register_natives(&self) -> Result<(), ScriptError> {
+        self.context.with(|ctx| {
+            let make_err = |e: rquickjs::Error| ScriptError::Load {
+                file: "<natives>".into(),
+                message: e.to_string(),
+            };
+            let f = Function::new(ctx.clone(), |reference: String, path: String| -> String {
+                WORLD_PTR.with(|p| {
+                    let ptr = p.get();
+                    if ptr.is_null() {
+                        return "undefined".to_string();
+                    }
+                    // 安全性:指针仅在 run_one_system/call_fn 调 JS 的同步窗口内非空,
+                    // 那期间 world 的 &mut 不被使用,QuickJS 单线程,无并发与读写别名。
+                    let world: &World = unsafe { &*ptr };
+                    match resolve_field(world, &reference, &path) {
+                        Some(v) => {
+                            serde_json::to_string(&v).unwrap_or_else(|_| "undefined".to_string())
+                        }
+                        None => "undefined".to_string(),
+                    }
+                })
+            })
+            .map_err(make_err)?;
+            ctx.globals().set("__getFieldRaw", f).map_err(make_err)
+        })
     }
 
     /// 加载一个脚本文件（按调用顺序求值，系统按注册顺序执行）。
@@ -169,7 +216,11 @@ impl ScriptEngine {
             "rng": rng_to_json(rng),
         });
 
-        let result_str = self.call_js("__runSystem", (idx as i32, payload.to_string()), &location)?;
+        // 给本次 JS 调用开 getField 读 live World 的窗口,调完立刻关。
+        WORLD_PTR.with(|p| p.set(world as *const World));
+        let call = self.call_js("__runSystem", (idx as i32, payload.to_string()), &location);
+        WORLD_PTR.with(|p| p.set(std::ptr::null()));
+        let result_str = call?;
         let mut result: Value = serde_json::from_str(&result_str).map_err(|e| ScriptError::Op {
             location: location.clone(),
             message: format!("返回值不是合法 JSON: {e}"),
@@ -267,8 +318,10 @@ impl ScriptEngine {
             "tick": tick,
             "rng": rng_to_json(rng),
         });
-        let result_str =
-            self.call_js("__callFn", (function.to_string(), payload.to_string()), &location)?;
+        WORLD_PTR.with(|p| p.set(world as *const World));
+        let call = self.call_js("__callFn", (function.to_string(), payload.to_string()), &location);
+        WORLD_PTR.with(|p| p.set(std::ptr::null()));
+        let result_str = call?;
         let mut result: Value = serde_json::from_str(&result_str).map_err(|e| ScriptError::Op {
             location: location.clone(),
             message: format!("返回值不是合法 JSON: {e}"),
@@ -328,10 +381,12 @@ impl ScriptEngine {
                     let r = op.get("ref").and_then(|v| v.as_str()).expect("prelude 已校验");
                     let path = op.get("path").and_then(|v| v.as_str()).expect("prelude 已校验");
                     let value = op.get("value").cloned().unwrap_or(Value::Null);
-                    // ref 是句柄文本(如 "e3v0")或实体名字——句柄优先,解析不了再当名字查
-                    let id: EntityId = match r.parse::<EntityId>() {
+                    // ref 是句柄文本(如 "e3v0")或实体名字——句柄优先,解析不了再当名字查。
+                    // 名字容许带 @ 前缀(规则里 "@名字" 是惯例),这里统一剥掉。
+                    let stripped = r.strip_prefix('@').unwrap_or(r);
+                    let id: EntityId = match stripped.parse::<EntityId>() {
                         Ok(id) => id,
-                        Err(_) => world.entity(r).map_err(|e| err(format!("setField: {e}")))?,
+                        Err(_) => world.entity(stripped).map_err(|e| err(format!("setField: {e}")))?,
                     };
                     world
                         .set_field(id, path, value)

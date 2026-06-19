@@ -5889,7 +5889,8 @@
      "name": "Pip",
      "archetype": "\u8bdd\u75e8\u6280\u5de5",
      "traits": "\u70ed\u5fc3,\u85cf\u4e0d\u4f4f\u8bdd,\u7231\u5012\u817e\u673a\u5668",
-     "speech": "\u8bed\u901f\u5feb\u3001\u7231\u7528'\u8bf6''\u5450'\u3001\u559c\u6b22\u987a\u5634\u5410\u69fd"
+     "speech": "\u8bed\u901f\u5feb\u3001\u7231\u7528'\u8bf6''\u5450'\u3001\u559c\u6b22\u987a\u5634\u5410\u69fd",
+     "preferred": "ore,plank"
     },
     "Mood": {
      "value": "\u597d\u5947"
@@ -5946,7 +5947,8 @@
      "name": "Lio",
      "archetype": "\u4e50\u5929\u53a8\u5b50",
      "traits": "\u8d2a\u5403,\u7231\u5f20\u7f57,\u8bb0\u4ec7\u53c8\u5065\u5fd8",
-     "speech": "\u70ed\u7edc,\u7231\u7528\u611f\u53f9\u53f7"
+     "speech": "\u70ed\u7edc,\u7231\u7528\u611f\u53f9\u53f7",
+     "preferred": "wheat,seed"
     },
     "Mood": {
      "value": "\u597d\u5947"
@@ -5987,7 +5989,7 @@
    "h": 56
   },
   "Panel": {
-   "color": "#161a24"
+   "color": "#252e44"
   }
  }
 },
@@ -6016,14 +6018,34 @@
   "Ui": {
    "anchor": "top-center",
    "parent": "hud_bar",
+   "ox": -180,
    "oy": 0,
-   "w": 1100,
+   "w": 700,
    "h": 56
   },
   "UiLabel": {
-   "content": "矿0  木0  纤维0  麦0  食▐░",
+   "content": "矿0  木0  纤维0  麦0",
    "size": 22,
    "color": "#e8e8ee",
+   "align": "center"
+  }
+ }
+},
+{
+ "name": "hud_food_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "top-center",
+   "parent": "hud_bar",
+   "ox": 380,
+   "oy": 0,
+   "w": 420,
+   "h": 56
+  },
+  "UiLabel": {
+   "content": "食 0/100 [░░░░░░░░░░]",
+   "size": 22,
+   "color": "#ffd58a",
    "align": "center"
   }
  }
@@ -6047,19 +6069,37 @@
   }
  }
 },
+{
+ "name": "hud_companion_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "top-center",
+   "parent": "ui",
+   "oy": 88,
+   "w": 900,
+   "h": 32
+  },
+  "UiLabel": {
+   "content": "",
+   "size": 18,
+   "color": "#a8e8a8",
+   "align": "center"
+  }
+ }
+},
  {
  "name": "quest_card",
  "components": {
   "Ui": {
    "anchor": "top-right",
    "parent": "ui",
-   "ox": -24,
+   "ox": -32,
    "oy": 104,
    "w": 280,
    "h": 88
   },
   "Panel": {
-   "color": "#161a24"
+   "color": "#252e44"
   }
  }
 },

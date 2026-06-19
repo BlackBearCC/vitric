@@ -5,7 +5,7 @@
   "entry": "scenes/main.json",
   "scenes": [ "scenes/main.json" ],
   "rules": [ "rules/move.json", "rules/ui.json", "rules/economy.json", "rules/colony.json", "rules/hud.json", "rules/quest.json", "rules/farm.json", "rules/companion.json", "rules/time.json" ],
-  "scripts": [ "scripts/colony.js", "scripts/economy.js", "scripts/crops.js", "scripts/companion.js", "scripts/clock.js" ],
+  "scripts": [ "scripts/colony.js", "scripts/economy.js", "scripts/crops.js", "scripts/companion.js", "scripts/clock.js", "scripts/hud.js" ],
   "seed": 1,
   "render": {
     "width": 1920,

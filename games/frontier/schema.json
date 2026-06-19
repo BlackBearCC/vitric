@@ -124,7 +124,8 @@
       "fields": {
         "kind": { "type": "text", "default": "wheat" },
         "stage": { "type": "int", "default": 0 },
-        "timer": { "type": "number", "default": 0 }
+        "timer": { "type": "number", "default": 0 },
+        "_tend_t": { "type": "number", "default": 0 }
       }
     },
     "Node": {
@@ -175,10 +176,21 @@
         "target_companion_archetype": { "type": "text", "default": "" },
         "target_companion_traits": { "type": "text", "default": "" },
         "target_companion_speech": { "type": "text", "default": "" },
+        "target_companion_preferred": { "type": "text", "default": "" },
+        "target_companion_affinity": { "type": "number", "default": 0 },
+        "target_companion_affinity_i": { "type": "int", "default": 0 },
+        "target_companion_talked_today": { "type": "int", "default": 0 },
+        "target_companion_gifted_today": { "type": "int", "default": 0 },
+        "target_companion_mood": { "type": "text", "default": "" },
+        "last_talk_target": { "type": "text", "default": "" },
+        "_day_anchor": { "type": "int", "default": 0 },
         "companion_handles": { "type": "list", "of": { "type": "text" } },
         "companion_snapshot": { "type": "text", "default": "[]" },
         "drifter_snapshot": { "type": "text", "default": "[]" },
-        "last_talk_reply": { "type": "text", "default": "" }
+        "last_talk_reply": { "type": "text", "default": "" },
+        "food_bar": { "type": "text", "default": "食 0/100 [░░░░░░░░░░]" },
+        "companion_happy_count": { "type": "int", "default": 0 },
+        "companion_affinity_avg": { "type": "number", "default": 0 }
       }
     },
     "Census": {
@@ -199,7 +211,8 @@
         "name": { "type": "text", "default": "旅人" },
         "archetype": { "type": "text", "default": "" },
         "traits": { "type": "text", "default": "" },
-        "speech": { "type": "text", "default": "" }
+        "speech": { "type": "text", "default": "" },
+        "preferred": { "type": "text", "default": "" }
       }
     },
     "Mood": { "fields": { "value": { "type": "text", "default": "平静" } } },
@@ -210,7 +223,13 @@
         "quarters": { "type": "number", "default": 0 },
         "leave_timer": { "type": "number", "default": 0 },
         "voiced": { "type": "number", "default": 0 },
-        "comfort_i": { "type": "int", "default": 50 }
+        "comfort_i": { "type": "int", "default": 50 },
+        "affinity": { "type": "number", "default": 30 },
+        "affinity_i": { "type": "int", "default": 30 },
+        "talked_today": { "type": "int", "default": 0 },
+        "gifted_today": { "type": "int", "default": 0 },
+        "last_interact_day": { "type": "int", "default": 1 },
+        "contribution_timer": { "type": "number", "default": 0 }
       }
     },
     "Wander": {

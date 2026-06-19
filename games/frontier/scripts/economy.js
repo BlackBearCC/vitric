@@ -18,7 +18,7 @@ const BUILD = {
   conduit:   { cost: { ore: 1 },                      tier: 1, color: "#d8a83a", label: "电导管", size: 1.0 },
   extractor: { cost: { ore: 1 },                      tier: 1, color: "#4aa6c8", label: "抽水机", size: 1.0 },
   quarters:  { cost: { plank: 2 },                    tier: 1, color: "#c08a4a", label: "住所",   size: 1.1 },
-  beacon:    { cost: { ore: 2, plank: 2 },            tier: 1, color: "#e85a5a", label: "信标",   size: 1.8 },
+  beacon:    { cost: { ore: 2, plank: 2 },            tier: 1, color: "#f5b942", label: "信标",   size: 1.8 },
   plot2:     { cost: { plank: 3, chair: 1 },          tier: 2, color: "#a8e85a", label: "良田",   size: 1.05 },
   monument:  { cost: { ore: 4, plank: 4, lamp: 2, wheat: 4 }, tier: 3, color: "#ffe066", label: "丰碑", size: 2.0 },
 };

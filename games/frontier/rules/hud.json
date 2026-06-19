@@ -2,18 +2,17 @@
   "rules": [
     {
       "id": "hud-res",
-      "comment": "顶部 HUD 资源段(中):矿/木/纤维/麦/食血条。每帧刷 @colony 与 @player。",
+      "comment": "顶部 HUD 资源段(中):矿/木/纤维/麦。每帧刷 @player。食段单独走 hud_food_lbl(脚本维护 bar 串)。",
       "on": "tick",
       "do": [
         {
           "set": "@hud_res_lbl.UiLabel.content",
-          "to": { "format": "矿 {}   木 {}   纤维 {}   麦 {}   食 {}/100",
+          "to": { "format": "矿 {}   木 {}   纤维 {}   麦 {}",
                   "args": [
                     "@player.Inventory.ore",
                     "@player.Inventory.wood",
                     "@player.Inventory.fiber",
-                    "@player.Inventory.wheat",
-                    "@colony.Colony.food_i"
+                    "@player.Inventory.wheat"
                   ] }
         }
       ]
@@ -26,6 +25,17 @@
         {
           "set": "@hud_stage_lbl.UiLabel.content",
           "to": { "format": "聚落▸{}", "args": ["@colony.Colony.stage"] }
+        }
+      ]
+    },
+    {
+      "id": "hud-food-bar",
+      "comment": "食段(中右):food-bar 系统每帧写 Colony.food_bar(串带 10 格进度条),这里直拉。",
+      "on": "tick",
+      "do": [
+        {
+          "set": "@hud_food_lbl.UiLabel.content",
+          "to": "@colony.Colony.food_bar"
         }
       ]
     },

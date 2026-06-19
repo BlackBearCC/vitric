@@ -2,12 +2,13 @@
   "rules": [
     {
       "id": "drifter-talk",
-      "comment": "按 t 键且玩家靠近最近旅人(距离<4)时,发 LLM 对话。",
+      "comment": "按 t 键且玩家靠近最近旅人(距离<4)时,发 LLM 对话。pid 给 onTalkReply 算 +affinity 用。",
       "on": { "event": "input", "filter": { "action": "t", "phase": "pressed" } },
       "if": [["@colony.Colony.target_drifter", "!=", ""]],
       "do": [{ "call": "talkNearby", "with": {
         "px": "@colony.Colony.player_x", "py": "@colony.Colony.player_y",
         "dx": "@colony.Colony.target_drifter_x", "dy": "@colony.Colony.target_drifter_y",
+        "pid": "@colony.Colony.target_drifter",
         "pname": "@colony.Colony.target_drifter_name", "parch": "@colony.Colony.target_drifter_archetype",
         "ptraits": "@colony.Colony.target_drifter_traits", "pspeech": "@colony.Colony.target_drifter_speech"
       } }]
@@ -15,7 +16,7 @@
 
     {
       "id": "companion-talk",
-      "comment": "按 t 键,若旅人不靠近但伙伴靠近(<4),对话转给伙伴。",
+      "comment": "按 t 键,若旅人不靠近但伙伴靠近(<4),对话转给伙伴。pid 给 onTalkReply 算 +affinity 用。",
       "on": { "event": "input", "filter": { "action": "t", "phase": "pressed" } },
       "if": [
         ["@colony.Colony.target_drifter", "==", ""],
@@ -24,8 +25,26 @@
       "do": [{ "call": "talkNearby", "with": {
         "px": "@colony.Colony.player_x", "py": "@colony.Colony.player_y",
         "dx": "@colony.Colony.target_companion_x", "dy": "@colony.Colony.target_companion_y",
+        "pid": "@colony.Colony.target_companion",
         "pname": "@colony.Colony.target_companion_name", "parch": "@colony.Colony.target_companion_archetype",
         "ptraits": "@colony.Colony.target_companion_traits", "pspeech": "@colony.Colony.target_companion_speech"
+      } }]
+    },
+
+    {
+      "id": "companion-gift",
+      "comment": "按 g 键且最近伙伴在范围内,送一件背包物品给他/她 +affinity(命中偏好 +12,普通 +3)。",
+      "on": { "event": "input", "filter": { "action": "g", "phase": "pressed" } },
+      "if": [["@colony.Colony.target_companion", "!=", ""]],
+      "do": [{ "call": "giveGiftNearby", "with": {
+        "px": "@colony.Colony.player_x", "py": "@colony.Colony.player_y",
+        "dx": "@colony.Colony.target_companion_x", "dy": "@colony.Colony.target_companion_y",
+        "pid": "@colony.Colony.target_companion",
+        "ppreferred": "@colony.Colony.target_companion_preferred",
+        "ore": "@player.Inventory.ore",   "wood": "@player.Inventory.wood",
+        "fiber": "@player.Inventory.fiber", "seed": "@player.Inventory.seed",
+        "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
       } }]
     },
 

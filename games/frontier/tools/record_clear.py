@@ -32,6 +32,57 @@ def click(x, y): return rpc("input/click", {"x": x, "y": y})
 def inp(action, phase="pressed"): rpc("input/inject", {"action": action, "phase": phase})
 def wget(entity): return rpc("world/get", {"entity": entity})
 
+def goto_companion(max_iter=20):
+    """把玩家挪到离最近伙伴 <2.5 格(gift/talk 需 dist<4)。伙伴会游荡,每步重读位置。"""
+    for _ in range(max_iter):
+        try:
+            ents = rpc("world/entities", {"components": ["Companion", "Position"]})["result"]
+            pp = wget("@player")["result"]["components"]["Position"]
+        except Exception:
+            return
+        px, py = pp["x"], pp["y"]
+        best = None; bd = 1e9
+        for e in ents:
+            p = e.get("components", {}).get("Position")
+            if not p: continue
+            d = (p["x"] - px) ** 2 + (p["y"] - py) ** 2
+            if d < bd: bd = d; best = p
+        if not best or bd <= 2.5 * 2.5:
+            return
+        dx, dy = best["x"] - px, best["y"] - py
+        # 本作坐标:"up" 键 = +y(实测玩家按 up 后 y 增大)。
+        d = ("right" if dx > 0 else "left") if abs(dx) >= abs(dy) else ("up" if dy > 0 else "down")
+        inp(d); step(20); inp(d, "released"); step(2)
+
+def goto_xy(tx, ty, near=2.0, max_iter=40):
+    """把玩家走到目标点 <near 格。x 主轴优先,"up"=+y。"""
+    for _ in range(max_iter):
+        try:
+            pp = wget("@player")["result"]["components"]["Position"]
+        except Exception:
+            return
+        px, py = pp["x"], pp["y"]
+        dx, dy = tx - px, ty - py
+        if dx * dx + dy * dy <= near * near:
+            return
+        d = ("right" if dx > 0 else "left") if abs(dx) >= abs(dy) else ("up" if dy > 0 else "down")
+        inp(d); step(20); inp(d, "released"); step(2)
+
+def dump_companions(tag):
+    try:
+        ents = rpc("world/entities", {"components": ["Companion", "Need", "Position"]})["result"]
+    except Exception as e:
+        print(f"[DUMP {tag}] err {e}"); return
+    c = wget("@colony")["result"]["components"]["Colony"]
+    try:
+        pp = wget("@player")["result"]["components"]["Position"]; pps = f"({pp.get('x')},{pp.get('y')})"
+    except Exception: pps = "?"
+    print(f"[DUMP {tag}] happy_count={c.get('companion_happy_count')} pop={c.get('pop')} day={c.get('day')} player={pps}")
+    for e in ents:
+        comp = e.get("components", {})
+        n = comp.get("Need", {}); p = comp.get("Position", {})
+        print(f"    {e.get('id')} aff={n.get('affinity')} comfort={n.get('comfort')} quarters={n.get('quarters')} talked={n.get('talked_today')} gifted={n.get('gifted_today')} pos=({p.get('x')},{p.get('y')})")
+
 def check(msg, cond, detail=""):
     if not cond: print(f"[FAIL] {msg} {detail}"); sys.exit(1)
     print(f"[OK] {msg}")
@@ -112,9 +163,20 @@ try:
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
     check("step==4 (Lio 入住)", s == 4, f"actual={s}")
 
-    # 走回家
+    # 先走回家:Lio 入住后住在聚落(home 5~9),玩家此刻还在野外(x~23),在野外 gift/talk 打不到他。
+    # 回到聚落两人同处家园,互动才落得到。
     inp("left"); step(250)
     inp("left", "released"); step(5)
+    # iter2:在家把 Lio 养到 happy(affinity>=50)。送偏好(wheat/seed)+12×2 + 对话 +3×3 = +33(25→58)。
+    # 每次互动后 step 拉开:+affinity 走 setField 延迟落地,挨太近会读到旧值互相覆盖、累加不上。
+    print("    iter2 关系:在家 gift×2 + talk×3 把 Lio 养到 happy(>=50)")
+    goto_companion()
+    for _ in range(2):
+        inp("g"); step(15)
+    for _ in range(3):
+        inp("t"); step(15)
+    step(10)
+    dump_companions("Day1-after-care")
 
     # === 等到 Day 3 (立足) ===
     print("\n--- 等到 Day 3 (立足) ---")
@@ -171,20 +233,14 @@ try:
                 target_e = e; break
         if target_e:
             pos = target_e["components"]["Position"]
-            # 走过去
-            inp("right"); step(180)
-            inp("right", "released"); step(3)
-            inp("up"); step(60)
-            inp("up", "released"); step(3)
-            inp("right"); step(60)
-            inp("right", "released"); step(3)
+            goto_xy(pos["x"], pos["y"], near=2.0)   # 读旅人真实位置导航过去(不再硬走固定路径)
             invite()
             invites_done += 1
-            inp("left"); step(200)
-            inp("left", "released"); step(3)
+            goto_xy(8, 7, near=2.5)                  # 回聚落中心,便于下一轮种收
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
     c = wget("@colony")["result"]["components"]["Colony"]
     print(f"  pop={c['pop']} step={s}")
+    dump_companions("Day5-成群-check")
     check("step>=7 (成群)", s >= 7, f"actual={s}")
 
     # === Day 6: 立丰碑 → game-won ===

@@ -125,6 +125,15 @@ function __makeCtx(payload, ops, rng) {
       if (typeof path !== "string" || path.indexOf(".") < 0) throw new Error("ctx.setField: path 必须是 \"组件.字段\" 形式");
       ops.push({ op: "setField", ref: ref, path: path, value: value });
     },
+    // 读一个实体的字段值(同 setField 的 ref 解析规则:句柄或名字)。
+    // 原生 __getFieldRaw 直接查 live World 的单个字段(O(1)),不再每次调用全量打包世界快照。
+    // 字段/实体缺失返回 undefined;读到的值反映本次调用开始时的世界(与 setField 延迟落地语义一致)。
+    getField: (ref, path) => {
+      if (typeof ref !== "string" || !ref) throw new Error("ctx.getField: 第一个参数必须是实体名字或句柄字符串");
+      if (typeof path !== "string" || path.indexOf(".") < 0) throw new Error("ctx.getField: path 必须是 \"组件.字段\" 形式");
+      const raw = __getFieldRaw(ref, path);
+      return raw === "undefined" ? undefined : JSON.parse(raw);
+    },
     // 对外问话的薄封装：发一条 <service>-ask 事件，回复回来时由内置分发器 __onReply
     // 转给名为 onReply 的 vitric.fn。底层仍是裸的 ask/reply 事件 + 自动录回放，确定性不变。
     // “收”那半要游戏在规则里加一条把 <service>-reply 转进 __onReply（见 prelude 顶部 __onReply 注释）。
@@ -140,6 +149,10 @@ function __makeCtx(payload, ops, rng) {
     },
   };
 }
+
+// ---- 字段读取:ctx.getField 走原生 __getFieldRaw(直接查 live World,见 Rust 侧) ----
+// 不再有 JS 侧的世界快照解析:Rust 注册的 __getFieldRaw(ref, path) 返回该字段的 JSON 串,
+// 实体/字段缺失返回字面量 "undefined"。这样每次读是单字段 O(1),不用每个 system/fn 全量打包世界。
 
 // ---- 数字保真序列化 ----
 // QuickJS 的 JSON.stringify 打印 f64 不是最短往返（-7.3666666666666645 会
