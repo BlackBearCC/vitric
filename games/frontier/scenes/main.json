@@ -5808,8 +5808,8 @@
     },
     "Inventory": {},
     "Sprite": {
-     "w": 0.9,
-     "h": 0.9,
+     "w": 0.8,
+     "h": 0.8,
      "image": "",
      "color": "#ffd24a"
     }
@@ -5924,8 +5924,8 @@
      "y": 0
     },
     "Sprite": {
-     "w": 0.9,
-     "h": 0.9,
+     "w": 0.8,
+     "h": 0.8,
      "image": "",
      "color": "#e8963a"
     },
@@ -5963,8 +5963,8 @@
      "h": 0.9
     },
     "Sprite": {
-     "w": 0.9,
-     "h": 0.9,
+     "w": 0.8,
+     "h": 0.8,
      "image": "",
      "color": "#d4a06a"
     },
@@ -5975,849 +5975,900 @@
     }
    }
   },
-  {
-   "name": "hud_bar",
-   "components": {
-    "Ui": {
-     "anchor": "top-center",
-     "parent": "ui",
-     "oy": 12,
-     "w": 1180,
-     "h": 48
-    },
-    "Panel": {
-     "color": "#161a24"
-    }
-   }
+ {
+ "name": "hud_bar",
+ "components": {
+  "Ui": {
+   "anchor": "top-center",
+   "parent": "ui",
+   "ox": 24,
+   "oy": 24,
+   "w": 1872,
+   "h": 56
   },
-  {
-   "name": "hud_res",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "hud_bar"
-    },
-    "UiLabel": {
-     "size": 26,
-     "color": "#e8e8ee",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "hud_time",
-   "components": {
-    "Ui": {
-     "anchor": "bottom-right",
-     "parent": "ui",
-     "ox": -16,
-     "oy": -16,
-     "w": 240,
-     "h": 44
-    },
-    "Panel": {
-     "color": "#161a24"
-    }
-   }
-  },
-  {
-   "name": "hud_time_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "hud_time"
-    },
-    "UiLabel": {
-     "content": "\u7b2c 1 \u5929 \u00b7 \u6668",
-     "size": 26,
-     "color": "#cfe6ff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "mode_box",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "ui",
-     "ox": 16,
-     "oy": 72,
-     "w": 128,
-     "h": 148
-    },
-    "Container": {
-     "kind": "VBox",
-     "gap": 8,
-     "pad": 6,
-     "main": "start",
-     "cross": "center"
-    }
-   }
-  },
-  {
-   "name": "mode_build",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "mode_box",
-     "w": 128,
-     "h": 42
-    },
-    "Panel": {
-     "color": "#2c3550"
-    },
-    "Button": {
-     "action": "mode-build",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "mode_build_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "mode_build"
-    },
-    "UiLabel": {
-     "content": "\u5efa\u9020",
-     "size": 28,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "mode_craft",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "mode_box",
-     "w": 128,
-     "h": 42
-    },
-    "Panel": {
-     "color": "#2c3550"
-    },
-    "Button": {
-     "action": "mode-craft",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "mode_craft_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "mode_craft"
-    },
-    "UiLabel": {
-     "content": "\u5236\u4f5c",
-     "size": 28,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "mode_interact",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "mode_box",
-     "w": 128,
-     "h": 42
-    },
-    "Panel": {
-     "color": "#2c3550"
-    },
-    "Button": {
-     "action": "mode-interact",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "mode_interact_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "mode_interact"
-    },
-    "UiLabel": {
-     "content": "\u4e92\u52a8",
-     "size": 28,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "build_menu",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "ui",
-     "ox": 16,
-     "oy": 236,
-     "w": 152,
-     "h": 360
-    },
-    "Container": {
-     "kind": "VBox",
-     "gap": 6,
-     "pad": 6,
-     "main": "start",
-     "cross": "center"
-    }
-   }
-  },
-  {
-   "name": "build_plot",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "build_menu",
-     "w": 152,
-     "h": 36
-    },
-    "Panel": {
-     "color": "#33405e"
-    },
-    "Button": {
-     "action": "pick-plot",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "build_plot_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "build_plot"
-    },
-    "UiLabel": {
-     "content": "\u79cd\u690d\u53f0",
-     "size": 24,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "build_conduit",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "build_menu",
-     "w": 152,
-     "h": 36
-    },
-    "Panel": {
-     "color": "#33405e"
-    },
-    "Button": {
-     "action": "pick-conduit",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "build_conduit_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "build_conduit"
-    },
-    "UiLabel": {
-     "content": "\u7535\u5bfc\u7ba1",
-     "size": 24,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "build_extractor",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "build_menu",
-     "w": 152,
-     "h": 36
-    },
-    "Panel": {
-     "color": "#33405e"
-    },
-    "Button": {
-     "action": "pick-extractor",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "build_extractor_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "build_extractor"
-    },
-    "UiLabel": {
-     "content": "\u62bd\u6c34\u673a",
-     "size": 24,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "build_quarters",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "build_menu",
-     "w": 152,
-     "h": 36
-    },
-    "Panel": {
-     "color": "#33405e"
-    },
-    "Button": {
-     "action": "pick-quarters",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "build_quarters_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "build_quarters"
-    },
-    "UiLabel": {
-     "content": "\u4f4f\u6240",
-     "size": 24,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "build_wall",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "build_menu",
-     "w": 152,
-     "h": 36
-    },
-    "Panel": {
-     "color": "#33405e"
-    },
-    "Button": {
-     "action": "pick-wall",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "build_wall_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "build_wall"
-    },
-    "UiLabel": {
-     "content": "\u5899",
-     "size": 24,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "build_beacon",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "build_menu",
-     "w": 152,
-     "h": 36
-    },
-    "Panel": {
-     "color": "#33405e"
-    },
-    "Button": {
-     "action": "pick-beacon",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "build_beacon_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "build_beacon"
-    },
-    "UiLabel": {
-     "content": "\u4fe1\u6807",
-     "size": 24,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "build_plot2",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "build_menu",
-     "w": 152,
-     "h": 36
-    },
-    "Panel": {
-     "color": "#33405e"
-    },
-    "Button": {
-     "action": "pick-plot2",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "build_plot2_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "build_plot2"
-    },
-    "UiLabel": {
-     "content": "plot2",
-     "size": 24,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "build_monument",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "build_menu",
-     "w": 152,
-     "h": 36
-    },
-    "Panel": {
-     "color": "#33405e"
-    },
-    "Button": {
-     "action": "pick-monument",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "build_monument_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "build_monument"
-    },
-    "UiLabel": {
-     "content": "monument",
-     "size": 24,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "craft_menu",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "ui",
-     "ox": 16,
-     "oy": 236,
-     "w": 152,
-     "h": 156
-    },
-    "Container": {
-     "kind": "VBox",
-     "gap": 8,
-     "pad": 6,
-     "main": "start",
-     "cross": "center"
-    }
-   }
-  },
-  {
-   "name": "craft_plank",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "craft_menu",
-     "w": 152,
-     "h": 40
-    },
-    "Panel": {
-     "color": "#3a3357"
-    },
-    "Button": {
-     "action": "craft-plank",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "craft_plank_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "craft_plank"
-    },
-    "UiLabel": {
-     "content": "\u6728\u677f",
-     "size": 26,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "craft_chair",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "craft_menu",
-     "w": 152,
-     "h": 40
-    },
-    "Panel": {
-     "color": "#3a3357"
-    },
-    "Button": {
-     "action": "craft-chair",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "craft_chair_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "craft_chair"
-    },
-    "UiLabel": {
-     "content": "\u6905\u5b50",
-     "size": 26,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "craft_lamp",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "craft_menu",
-     "w": 152,
-     "h": 40
-    },
-    "Panel": {
-     "color": "#3a3357"
-    },
-    "Button": {
-     "action": "craft-lamp",
-     "state": "normal"
-    }
-   }
-  },
-  {
-   "name": "craft_lamp_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "craft_lamp"
-    },
-    "UiLabel": {
-     "content": "\u706f",
-     "size": 26,
-     "color": "#ffffff",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "inv_grid",
-   "components": {
-    "Ui": {
-     "anchor": "bottom-left",
-     "parent": "ui",
-     "ox": 16,
-     "oy": -16,
-     "w": 392,
-     "h": 150
-    },
-    "Container": {
-     "kind": "Grid",
-     "gap": 6,
-     "pad": 6,
-     "columns": 4,
-     "main": "start",
-     "cross": "start"
-    },
-    "Panel": {
-     "color": "#14171f"
-    }
-   }
-  },
-  {
-   "name": "inv-ore",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "inv_grid"
-    },
-    "Panel": {
-     "color": "#242a38"
-    }
-   }
-  },
-  {
-   "name": "inv-ore_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "inv-ore"
-    },
-    "UiLabel": {
-     "size": 24,
-     "color": "#ffd24a",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "inv-wood",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "inv_grid"
-    },
-    "Panel": {
-     "color": "#242a38"
-    }
-   }
-  },
-  {
-   "name": "inv-wood_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "inv-wood"
-    },
-    "UiLabel": {
-     "size": 24,
-     "color": "#ffd24a",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "inv-fiber",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "inv_grid"
-    },
-    "Panel": {
-     "color": "#242a38"
-    }
-   }
-  },
-  {
-   "name": "inv-fiber_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "inv-fiber"
-    },
-    "UiLabel": {
-     "size": 24,
-     "color": "#ffd24a",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "inv-seed",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "inv_grid"
-    },
-    "Panel": {
-     "color": "#242a38"
-    }
-   }
-  },
-  {
-   "name": "inv-seed_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "inv-seed"
-    },
-    "UiLabel": {
-     "size": 24,
-     "color": "#ffd24a",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "inv-wheat",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "inv_grid"
-    },
-    "Panel": {
-     "color": "#242a38"
-    }
-   }
-  },
-  {
-   "name": "inv-wheat_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "inv-wheat"
-    },
-    "UiLabel": {
-     "size": 24,
-     "color": "#ffd24a",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "inv-plank",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "inv_grid"
-    },
-    "Panel": {
-     "color": "#242a38"
-    }
-   }
-  },
-  {
-   "name": "inv-plank_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "inv-plank"
-    },
-    "UiLabel": {
-     "size": 24,
-     "color": "#ffd24a",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "inv-chair",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "inv_grid"
-    },
-    "Panel": {
-     "color": "#242a38"
-    }
-   }
-  },
-  {
-   "name": "inv-chair_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "inv-chair"
-    },
-    "UiLabel": {
-     "size": 24,
-     "color": "#ffd24a",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "inv-lamp",
-   "components": {
-    "Ui": {
-     "anchor": "top-left",
-     "parent": "inv_grid"
-    },
-    "Panel": {
-     "color": "#242a38"
-    }
-   }
-  },
-  {
-   "name": "inv-lamp_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "inv-lamp"
-    },
-    "UiLabel": {
-     "size": 24,
-     "color": "#ffd24a",
-     "align": "center"
-    }
-   }
-  },
-  {
-   "name": "quest_banner",
-   "components": {
-    "Ui": {
-     "anchor": "top-right",
-     "parent": "ui",
-     "ox": 16,
-     "oy": 12,
-     "w": 520,
-     "h": 52
-    },
-    "Panel": {
-     "color": "#161a24"
-    }
-   }
-  },
-  {
-   "name": "quest_banner_lbl",
-   "components": {
-    "Ui": {
-     "anchor": "stretch",
-     "parent": "quest_banner"
-    },
-    "UiLabel": {
-     "size": 26,
-     "color": "#cfe6ff",
-     "align": "center"
-    }
-   }
+  "Panel": {
+   "color": "#161a24"
   }
+ }
+},
+ {
+ "name": "hud_day_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "hud_bar",
+   "ox": 16,
+   "oy": 0,
+   "w": 360,
+   "h": 56
+  },
+  "UiLabel": {
+   "content": "☀ 第 1 天 · 晨",
+   "size": 28,
+   "color": "#ffe9b0",
+   "align": "start"
+  }
+ }
+},
+ {
+ "name": "hud_res_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "top-center",
+   "parent": "hud_bar",
+   "oy": 0,
+   "w": 1100,
+   "h": 56
+  },
+  "UiLabel": {
+   "content": "矿0  木0  纤维0  麦0  食▐░",
+   "size": 22,
+   "color": "#e8e8ee",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "hud_stage_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "top-right",
+   "parent": "hud_bar",
+   "ox": -16,
+   "oy": 0,
+   "w": 360,
+   "h": 56
+  },
+  "UiLabel": {
+   "content": "聚落▸起步",
+   "size": 22,
+   "color": "#cfe6ff",
+   "align": "end"
+  }
+ }
+},
+ {
+ "name": "quest_card",
+ "components": {
+  "Ui": {
+   "anchor": "top-right",
+   "parent": "ui",
+   "ox": -24,
+   "oy": 104,
+   "w": 280,
+   "h": 88
+  },
+  "Panel": {
+   "color": "#161a24"
+  }
+ }
+},
+ {
+ "name": "quest_title_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "quest_card",
+   "ox": 16,
+   "oy": 12,
+   "w": 248,
+   "h": 32
+  },
+  "UiLabel": {
+   "content": "当前目标",
+   "size": 28,
+   "color": "#ffe9b0",
+   "align": "start"
+  }
+ }
+},
+ {
+ "name": "quest_sub_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "quest_card",
+   "ox": 16,
+   "oy": 48,
+   "w": 248,
+   "h": 28
+  },
+  "UiLabel": {
+   "content": "切建造 → 选结构 → 点地放下",
+   "size": 18,
+   "color": "#c0c8d8",
+   "align": "start"
+  }
+ }
+},
+ {
+ "name": "mode_row",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "ui",
+   "ox": 24,
+   "oy": 104,
+   "w": 180,
+   "h": 44
+  },
+  "Container": {
+   "kind": "HBox",
+   "gap": 6,
+   "pad": 9,
+   "main": "start",
+   "cross": "center"
+  }
+ }
+},
+ {
+ "name": "mode_build",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "mode_row",
+   "w": 50,
+   "h": 28
+  },
+  "Panel": {
+   "color": "#3a4a6b"
+  },
+  "Button": {
+   "action": "mode-build",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "mode_build_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "mode_build"
+  },
+  "UiLabel": {
+   "content": "建造",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "mode_craft",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "mode_row",
+   "w": 50,
+   "h": 28
+  },
+  "Panel": {
+   "color": "#3a4a6b"
+  },
+  "Button": {
+   "action": "mode-craft",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "mode_craft_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "mode_craft"
+  },
+  "UiLabel": {
+   "content": "制作",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "mode_interact",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "mode_row",
+   "w": 50,
+   "h": 28
+  },
+  "Panel": {
+   "color": "#3a4a6b"
+  },
+  "Button": {
+   "action": "mode-interact",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "mode_interact_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "mode_interact"
+  },
+  "UiLabel": {
+   "content": "互动",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "build_menu",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "ui",
+   "ox": 24,
+   "oy": 160,
+   "w": 180,
+   "h": 400
+  },
+  "Container": {
+   "kind": "VBox",
+   "gap": 8,
+   "pad": 12,
+   "main": "start",
+   "cross": "center"
+  }
+ }
+},
+ {
+ "name": "build_plot",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "build_menu",
+   "w": 156,
+   "h": 36
+  },
+  "Panel": {
+   "color": "#33405e"
+  },
+  "Button": {
+   "action": "pick-plot",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "build_plot_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "build_plot"
+  },
+  "UiLabel": {
+   "content": "种植台",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "build_conduit",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "build_menu",
+   "w": 156,
+   "h": 36
+  },
+  "Panel": {
+   "color": "#33405e"
+  },
+  "Button": {
+   "action": "pick-conduit",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "build_conduit_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "build_conduit"
+  },
+  "UiLabel": {
+   "content": "电导管",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "build_extractor",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "build_menu",
+   "w": 156,
+   "h": 36
+  },
+  "Panel": {
+   "color": "#33405e"
+  },
+  "Button": {
+   "action": "pick-extractor",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "build_extractor_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "build_extractor"
+  },
+  "UiLabel": {
+   "content": "抽水机",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "build_quarters",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "build_menu",
+   "w": 156,
+   "h": 36
+  },
+  "Panel": {
+   "color": "#33405e"
+  },
+  "Button": {
+   "action": "pick-quarters",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "build_quarters_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "build_quarters"
+  },
+  "UiLabel": {
+   "content": "住所",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "build_wall",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "build_menu",
+   "w": 156,
+   "h": 36
+  },
+  "Panel": {
+   "color": "#33405e"
+  },
+  "Button": {
+   "action": "pick-wall",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "build_wall_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "build_wall"
+  },
+  "UiLabel": {
+   "content": "墙",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "build_beacon",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "build_menu",
+   "w": 156,
+   "h": 36
+  },
+  "Panel": {
+   "color": "#33405e"
+  },
+  "Button": {
+   "action": "pick-beacon",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "build_beacon_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "build_beacon"
+  },
+  "UiLabel": {
+   "content": "信标",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "build_plot2",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "build_menu",
+   "w": 156,
+   "h": 36
+  },
+  "Panel": {
+   "color": "#33405e"
+  },
+  "Button": {
+   "action": "pick-plot2",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "build_plot2_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "build_plot2"
+  },
+  "UiLabel": {
+   "content": "良田",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "build_monument",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "build_menu",
+   "w": 156,
+   "h": 36
+  },
+  "Panel": {
+   "color": "#33405e"
+  },
+  "Button": {
+   "action": "pick-monument",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "build_monument_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "build_monument"
+  },
+  "UiLabel": {
+   "content": "丰碑",
+   "size": 18,
+   "color": "#ffe066",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "craft_menu",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "ui",
+   "ox": -3000,
+   "oy": 160,
+   "w": 180,
+   "h": 160
+  },
+  "Container": {
+   "kind": "VBox",
+   "gap": 8,
+   "pad": 12,
+   "main": "start",
+   "cross": "center"
+  }
+ }
+},
+ {
+ "name": "craft_plank",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "craft_menu",
+   "w": 156,
+   "h": 36
+  },
+  "Panel": {
+   "color": "#3a3357"
+  },
+  "Button": {
+   "action": "craft-plank",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "craft_plank_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "craft_plank"
+  },
+  "UiLabel": {
+   "content": "木板",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "craft_chair",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "craft_menu",
+   "w": 156,
+   "h": 36
+  },
+  "Panel": {
+   "color": "#3a3357"
+  },
+  "Button": {
+   "action": "craft-chair",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "craft_chair_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "craft_chair"
+  },
+  "UiLabel": {
+   "content": "椅子",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "craft_lamp",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "craft_menu",
+   "w": 156,
+   "h": 36
+  },
+  "Panel": {
+   "color": "#3a3357"
+  },
+  "Button": {
+   "action": "craft-lamp",
+   "state": "normal"
+  }
+ }
+},
+ {
+ "name": "craft_lamp_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "craft_lamp"
+  },
+  "UiLabel": {
+   "content": "灯",
+   "size": 18,
+   "color": "#ffffff",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "inv_row",
+ "components": {
+  "Ui": {
+   "anchor": "bottom-left",
+   "parent": "ui",
+   "ox": 24,
+   "oy": -24,
+   "w": 848,
+   "h": 120
+  },
+  "Container": {
+   "kind": "HBox",
+   "gap": 8,
+   "pad": 12,
+   "main": "start",
+   "cross": "center"
+  },
+  "Panel": {
+   "color": "#14171f"
+  }
+ }
+},
+ {
+ "name": "inv-ore",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "inv_row",
+   "w": 96,
+   "h": 96
+  },
+  "Panel": {
+   "color": "#242a38"
+  }
+ }
+},
+ {
+ "name": "inv-ore_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "inv-ore"
+  },
+  "UiLabel": {
+   "size": 18,
+   "color": "#ffd24a",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "inv-wood",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "inv_row",
+   "w": 96,
+   "h": 96
+  },
+  "Panel": {
+   "color": "#242a38"
+  }
+ }
+},
+ {
+ "name": "inv-wood_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "inv-wood"
+  },
+  "UiLabel": {
+   "size": 18,
+   "color": "#ffd24a",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "inv-fiber",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "inv_row",
+   "w": 96,
+   "h": 96
+  },
+  "Panel": {
+   "color": "#242a38"
+  }
+ }
+},
+ {
+ "name": "inv-fiber_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "inv-fiber"
+  },
+  "UiLabel": {
+   "size": 18,
+   "color": "#ffd24a",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "inv-seed",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "inv_row",
+   "w": 96,
+   "h": 96
+  },
+  "Panel": {
+   "color": "#242a38"
+  }
+ }
+},
+ {
+ "name": "inv-seed_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "inv-seed"
+  },
+  "UiLabel": {
+   "size": 18,
+   "color": "#ffd24a",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "inv-wheat",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "inv_row",
+   "w": 96,
+   "h": 96
+  },
+  "Panel": {
+   "color": "#242a38"
+  }
+ }
+},
+ {
+ "name": "inv-wheat_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "inv-wheat"
+  },
+  "UiLabel": {
+   "size": 18,
+   "color": "#ffd24a",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "inv-plank",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "inv_row",
+   "w": 96,
+   "h": 96
+  },
+  "Panel": {
+   "color": "#242a38"
+  }
+ }
+},
+ {
+ "name": "inv-plank_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "inv-plank"
+  },
+  "UiLabel": {
+   "size": 18,
+   "color": "#ffd24a",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "inv-chair",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "inv_row",
+   "w": 96,
+   "h": 96
+  },
+  "Panel": {
+   "color": "#242a38"
+  }
+ }
+},
+ {
+ "name": "inv-chair_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "inv-chair"
+  },
+  "UiLabel": {
+   "size": 18,
+   "color": "#ffd24a",
+   "align": "center"
+  }
+ }
+},
+ {
+ "name": "inv-lamp",
+ "components": {
+  "Ui": {
+   "anchor": "top-left",
+   "parent": "inv_row",
+   "w": 96,
+   "h": 96
+  },
+  "Panel": {
+   "color": "#242a38"
+  }
+ }
+},
+ {
+ "name": "inv-lamp_lbl",
+ "components": {
+  "Ui": {
+   "anchor": "stretch",
+   "parent": "inv-lamp"
+  },
+  "UiLabel": {
+   "size": 18,
+   "color": "#ffd24a",
+   "align": "center"
+  }
+ }
+}
  ]
 }

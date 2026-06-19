@@ -7,19 +7,20 @@
 // 够不到 @player.Inventory（它是别的实体）。所以规则把当前背包当参数传进来，
 // 这里算出扣完的新值，emit 回去让规则 set。
 
-// 建造表（GDD + 纵深）：kind -> 料 + tier + 配色 + label。
-//   tier 1: plot / wall / conduit / extractor / quarters / beacon
-//   tier 2: plot2   (高级种植台,产量 2x,需 plank+chair — 真本事才造得起)
-//   tier 3: monument (丰碑,通关结构,需 ore+plank+lamp+wheat — 集大成的资源投入)
+// 建造表（GDD + 纵深）：kind -> 料 + tier + 配色 + label + 视觉尺寸。
+//   尺寸分层（按 _layout_spec.md 第 3 节）：
+//   - 普通结构 plot/wall/conduit/extractor/plot2 = 1.0~1.1（在地块之上微凸）
+//   - quarters 住所 1.1（比墙高一点）
+//   - beacon 信标 1.8 / monument 丰碑 2.0（地标,场上最大最显眼）
 const BUILD = {
-  plot:      { cost: {},                              tier: 1, color: "#6b8f3a", label: "种植台" },
-  wall:      { cost: { wood: 1 },                     tier: 1, color: "#8a7a5c", label: "墙" },
-  conduit:   { cost: { ore: 1 },                      tier: 1, color: "#d8a83a", label: "电导管" },
-  extractor: { cost: { ore: 1 },                      tier: 1, color: "#4aa6c8", label: "抽水机" },
-  quarters:  { cost: { plank: 2 },                    tier: 1, color: "#c08a4a", label: "住所" },
-  beacon:    { cost: { ore: 2, plank: 2 },            tier: 1, color: "#e85a5a", label: "信标" },
-  plot2:     { cost: { plank: 3, chair: 1 },          tier: 2, color: "#a8e85a", label: "良田" },
-  monument:  { cost: { ore: 4, plank: 4, lamp: 2, wheat: 4 }, tier: 3, color: "#ffe066", label: "丰碑" },
+  plot:      { cost: {},                              tier: 1, color: "#6b8f3a", label: "种植台", size: 1.0 },
+  wall:      { cost: { wood: 1 },                     tier: 1, color: "#8a7a5c", label: "墙",     size: 1.0 },
+  conduit:   { cost: { ore: 1 },                      tier: 1, color: "#d8a83a", label: "电导管", size: 1.0 },
+  extractor: { cost: { ore: 1 },                      tier: 1, color: "#4aa6c8", label: "抽水机", size: 1.0 },
+  quarters:  { cost: { plank: 2 },                    tier: 1, color: "#c08a4a", label: "住所",   size: 1.1 },
+  beacon:    { cost: { ore: 2, plank: 2 },            tier: 1, color: "#e85a5a", label: "信标",   size: 1.8 },
+  plot2:     { cost: { plank: 3, chair: 1 },          tier: 2, color: "#a8e85a", label: "良田",   size: 1.05 },
+  monument:  { cost: { ore: 4, plank: 4, lamp: 2, wheat: 4 }, tier: 3, color: "#ffe066", label: "丰碑", size: 2.0 },
 };
 
 // 制作配方（GDD）：产物 -> 料。
@@ -78,7 +79,7 @@ vitric.fn("build", (a, ctx) => {
   const comps = {
     Structure: { kind: a.kind, tier: def.tier || 1 },
     Position: { x: gx, y: gy },
-    Sprite: { w: 1, h: 1, color: def.color },
+    Sprite: { w: def.size, h: def.size, color: def.color },
     Text: { content: def.label, size: 0.34, color: "#ffffff", screen: false }, // 名字标在结构上
   };
   // 种植台建出来就挂一个空 Crop——之后互动点它直接 setField 把作物种在这块地上(原地种,不再 spawn 另一个作物实体)。

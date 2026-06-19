@@ -7,6 +7,11 @@
   "rules": [ "rules/move.json", "rules/ui.json", "rules/economy.json", "rules/colony.json", "rules/hud.json", "rules/quest.json", "rules/farm.json", "rules/companion.json", "rules/time.json" ],
   "scripts": [ "scripts/colony.js", "scripts/economy.js", "scripts/crops.js", "scripts/companion.js", "scripts/clock.js" ],
   "seed": 1,
+  "render": {
+    "width": 1920,
+    "height": 1080,
+    "note": "渲染分辨率锁 1920x1080,与引擎 UI_REFERENCE_VIEWPORT 一致,所有 UI 尺寸/字号按此设计"
+  },
   "gates": {
     "playthroughs": [{"recording": "qa/clear.json", "must_emit": "game-won"}],
     "check": true,

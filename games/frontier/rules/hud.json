@@ -2,39 +2,46 @@
   "rules": [
     {
       "id": "hud-res",
-      "comment": "顶部资源条:阶段 + 氧/电/食/水/人手 + 第几天。每帧刷(读 @colony 的取整字段)。",
+      "comment": "顶部 HUD 资源段(中):矿/木/纤维/麦/食血条。每帧刷 @colony 与 @player。",
       "on": "tick",
       "do": [
         {
-          "set": "@hud_res.UiLabel.content",
-          "to": { "format": "【{}】 第{}天 · {}  氧 {}  电 {}  食 {}  水 {}  人手 {}",
+          "set": "@hud_res_lbl.UiLabel.content",
+          "to": { "format": "矿 {}   木 {}   纤维 {}   麦 {}   食 {}/100",
                   "args": [
-                    "@colony.Colony.stage",
-                    "@colony.Clock.day",
-                    "@colony.Clock.tod",
-                    "@colony.Colony.o2_i",
-                    "@colony.Colony.pow_i",
-                    "@colony.Colony.food_i",
-                    "@colony.Colony.water_i",
-                    "@colony.Colony.pop"
+                    "@player.Inventory.ore",
+                    "@player.Inventory.wood",
+                    "@player.Inventory.fiber",
+                    "@player.Inventory.wheat",
+                    "@colony.Colony.food_i"
                   ] }
         }
       ]
     },
-
     {
-      "id": "hud-inv",
-      "comment": "背包每格标签:<名> <数量>,每帧刷(读 @player.Inventory)。",
+      "id": "hud-stage",
+      "comment": "顶部 HUD 阶段段(右):聚落▸阶段名。每帧刷 @colony。",
       "on": "tick",
       "do": [
-        { "set": "@inv-ore_lbl.UiLabel.content",   "to": { "format": "矿石 {}", "args": ["@player.Inventory.ore"] } },
-        { "set": "@inv-wood_lbl.UiLabel.content",  "to": { "format": "木料 {}", "args": ["@player.Inventory.wood"] } },
-        { "set": "@inv-fiber_lbl.UiLabel.content", "to": { "format": "纤维 {}", "args": ["@player.Inventory.fiber"] } },
-        { "set": "@inv-seed_lbl.UiLabel.content",  "to": { "format": "麦种 {}", "args": ["@player.Inventory.seed"] } },
-        { "set": "@inv-wheat_lbl.UiLabel.content", "to": { "format": "麦子 {}", "args": ["@player.Inventory.wheat"] } },
-        { "set": "@inv-plank_lbl.UiLabel.content", "to": { "format": "木板 {}", "args": ["@player.Inventory.plank"] } },
-        { "set": "@inv-chair_lbl.UiLabel.content", "to": { "format": "椅子 {}", "args": ["@player.Inventory.chair"] } },
-        { "set": "@inv-lamp_lbl.UiLabel.content",  "to": { "format": "灯 {}",   "args": ["@player.Inventory.lamp"] } }
+        {
+          "set": "@hud_stage_lbl.UiLabel.content",
+          "to": { "format": "聚落▸{}", "args": ["@colony.Colony.stage"] }
+        }
+      ]
+    },
+    {
+      "id": "hud-inv",
+      "comment": "背包每格标签:<名> <数量>,每帧刷(读 @player.Inventory)。字号 18 走小字档。",
+      "on": "tick",
+      "do": [
+        { "set": "@inv-ore_lbl.UiLabel.content",   "to": { "format": "矿 {}",  "args": ["@player.Inventory.ore"] } },
+        { "set": "@inv-wood_lbl.UiLabel.content",  "to": { "format": "木 {}",  "args": ["@player.Inventory.wood"] } },
+        { "set": "@inv-fiber_lbl.UiLabel.content", "to": { "format": "纤 {}",  "args": ["@player.Inventory.fiber"] } },
+        { "set": "@inv-seed_lbl.UiLabel.content",  "to": { "format": "种 {}",  "args": ["@player.Inventory.seed"] } },
+        { "set": "@inv-wheat_lbl.UiLabel.content", "to": { "format": "麦 {}",  "args": ["@player.Inventory.wheat"] } },
+        { "set": "@inv-plank_lbl.UiLabel.content", "to": { "format": "板 {}",  "args": ["@player.Inventory.plank"] } },
+        { "set": "@inv-chair_lbl.UiLabel.content", "to": { "format": "椅 {}",  "args": ["@player.Inventory.chair"] } },
+        { "set": "@inv-lamp_lbl.UiLabel.content",  "to": { "format": "灯 {}",  "args": ["@player.Inventory.lamp"] } }
       ]
     }
   ]

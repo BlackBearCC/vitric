@@ -9,12 +9,12 @@
       ]
     },
     {
-      "id": "clock-hud-tod",
-      "comment": "时间 HUD label:Day N · 时段。规则刷文字,scripts/clock.js 算时段。",
+      "id": "clock-hud-day",
+      "comment": "时间 HUD label(顶部 HUD 左):Day N · 时段。规则刷文字,scripts/clock.js 算时段。",
       "on": "tick",
       "do": [
-        { "set": "@hud_time_lbl.UiLabel.content",
-          "to": { "format": "第 {} 天 · {}", "args": ["@colony.Clock.day", "@colony.Clock.tod"] } }
+        { "set": "@hud_day_lbl.UiLabel.content",
+          "to": { "format": "☀ 第 {} 天 · {}", "args": ["@colony.Clock.day", "@colony.Clock.tod"] } }
       ]
     }
   ]

@@ -24,7 +24,8 @@ vitric.fn("genWild", (a, ctx) => {
     ctx.spawn({
       Node: { kind: n[0], left: 5, max: 5, cooldown: 0 },
       Position: { x: n[1], y: n[2] },
-      Sprite: { w: 1, h: 1, image: "", color: n[4] },
+      // 资源点 ≈ 0.9：比地块小一点,像"散落物",名字标签让玩家知道这是什么
+      Sprite: { w: 0.9, h: 0.9, image: "", color: n[4] },
       Text: { content: n[3], size: 0.34, color: "#ffffff", screen: false },
     });
   }

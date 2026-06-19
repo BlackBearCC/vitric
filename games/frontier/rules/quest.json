@@ -97,52 +97,76 @@
 
     {
       "id": "quest-banner-1",
-      "comment": "任务栏文案每帧刷。",
+      "comment": "任务卡(右上)两行:目标名 + 一句怎么做。每帧刷。",
       "on": "tick",
       "if": [ ["@quest.QuestLog.step", "==", 1] ],
-      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:修复信标 — 切建造(q),选信标(6),点地放下" } ]
+      "do": [
+        { "set": "@quest_title_lbl.UiLabel.content", "to": "修复信标" },
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "切建造(q) → 选信标(6) → 点地放下" }
+      ]
     },
     {
       "id": "quest-banner-2",
       "on": "tick",
       "if": [ ["@quest.QuestLog.step", "==", 2] ],
-      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:种出第一茬 — 建种植台,种麦,等熟收" } ]
+      "do": [
+        { "set": "@quest_title_lbl.UiLabel.content", "to": "种出第一茬" },
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "建种植台 → 撒麦种 → 等熟收" }
+      ]
     },
     {
       "id": "quest-banner-3",
       "on": "tick",
       "if": [ ["@quest.QuestLog.step", "==", 3] ],
-      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:请第一个伙伴 — 走向野外,靠近后按 I 邀请" } ]
+      "do": [
+        { "set": "@quest_title_lbl.UiLabel.content", "to": "请第一位伙伴" },
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "走向野外,靠近旅人后按 I 邀请" }
+      ]
     },
     {
       "id": "quest-banner-4",
       "on": "tick",
       "if": [ ["@quest.QuestLog.step", "==", 4] ],
-      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:立足脚跟 — 等到第 3 天,建 3 座以上结构" } ]
+      "do": [
+        { "set": "@quest_title_lbl.UiLabel.content", "to": "立足脚跟" },
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "等到第 3 天,凑齐 3 座结构" }
+      ]
     },
     {
       "id": "quest-banner-5",
       "on": "tick",
       "if": [ ["@quest.QuestLog.step", "==", 5] ],
-      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:食物富足 — 攒 5 麦子(收几茬即可),等过第 4 天" } ]
+      "do": [
+        { "set": "@quest_title_lbl.UiLabel.content", "to": "食物富足" },
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "攒 5 麦子(收几茬即可),等过第 4 天" }
+      ]
     },
     {
       "id": "quest-banner-6",
       "on": "tick",
       "if": [ ["@quest.QuestLog.step", "==", 6] ],
-      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:多人聚居 — 等过第 5 天,把第 2、3 个伙伴请回家" } ]
+      "do": [
+        { "set": "@quest_title_lbl.UiLabel.content", "to": "多人聚居" },
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "等过第 5 天,把第 2、3 个伙伴请回家" }
+      ]
     },
     {
       "id": "quest-banner-7",
       "on": "tick",
       "if": [ ["@quest.QuestLog.step", "==", 7] ],
-      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "目标:建造丰碑 — 等过第 6 天,攒 ore×4+plank×4+lamp×2+wheat×4 立丰碑" } ]
+      "do": [
+        { "set": "@quest_title_lbl.UiLabel.content", "to": "建造丰碑" },
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "等过第 6 天,攒 ore×4+plank×4+lamp×2+wheat×4 立丰碑" }
+      ]
     },
     {
       "id": "quest-banner-8",
       "on": "tick",
       "if": [ ["@quest.QuestLog.step", "==", 8] ],
-      "do": [ { "set": "@quest_banner_lbl.UiLabel.content", "to": "聚落兴旺!通关!" } ]
+      "do": [
+        { "set": "@quest_title_lbl.UiLabel.content", "to": "聚落兴旺" },
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "通关!" }
+      ]
     }
   ]
 }
