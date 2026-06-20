@@ -2,246 +2,804 @@
   "components": {
     "UiRoot": {
       "fields": {
-        "layout_hash": { "type": "text", "default": "" },
-        "focus": { "type": "text", "default": "" }
+        "layout_hash": {
+          "type": "text",
+          "default": ""
+        },
+        "focus": {
+          "type": "text",
+          "default": ""
+        }
       }
     },
     "Ui": {
       "fields": {
-        "anchor": { "type": "text", "default": "manual" },
-        "ax": { "type": "number", "default": 0 },
-        "ay": { "type": "number", "default": 0 },
-        "ox": { "type": "number", "default": 0 },
-        "oy": { "type": "number", "default": 0 },
-        "w": { "type": "number", "default": 0 },
-        "h": { "type": "number", "default": 0 },
-        "parent": { "type": "entity" },
-        "weight": { "type": "number", "default": 0 },
-        "rx": { "type": "number", "default": 0 },
-        "ry": { "type": "number", "default": 0 },
-        "rw": { "type": "number", "default": 0 },
-        "rh": { "type": "number", "default": 0 }
+        "anchor": {
+          "type": "text",
+          "default": "manual"
+        },
+        "ax": {
+          "type": "number",
+          "default": 0
+        },
+        "ay": {
+          "type": "number",
+          "default": 0
+        },
+        "ox": {
+          "type": "number",
+          "default": 0
+        },
+        "oy": {
+          "type": "number",
+          "default": 0
+        },
+        "w": {
+          "type": "number",
+          "default": 0
+        },
+        "h": {
+          "type": "number",
+          "default": 0
+        },
+        "parent": {
+          "type": "entity"
+        },
+        "weight": {
+          "type": "number",
+          "default": 0
+        },
+        "rx": {
+          "type": "number",
+          "default": 0
+        },
+        "ry": {
+          "type": "number",
+          "default": 0
+        },
+        "rw": {
+          "type": "number",
+          "default": 0
+        },
+        "rh": {
+          "type": "number",
+          "default": 0
+        }
       }
     },
     "Container": {
       "fields": {
-        "kind": { "type": "enum", "variants": ["VBox", "HBox", "Grid"], "default": "VBox" },
-        "gap": { "type": "number", "default": 0 },
-        "pad": { "type": "number", "default": 0 },
-        "columns": { "type": "int", "default": 1, "min": 1 },
-        "main": { "type": "enum", "variants": ["start", "center", "end"], "default": "start" },
-        "cross": { "type": "enum", "variants": ["start", "center", "end"], "default": "start" }
+        "kind": {
+          "type": "enum",
+          "variants": [
+            "VBox",
+            "HBox",
+            "Grid"
+          ],
+          "default": "VBox"
+        },
+        "gap": {
+          "type": "number",
+          "default": 0
+        },
+        "pad": {
+          "type": "number",
+          "default": 0
+        },
+        "columns": {
+          "type": "int",
+          "default": 1,
+          "min": 1
+        },
+        "main": {
+          "type": "enum",
+          "variants": [
+            "start",
+            "center",
+            "end"
+          ],
+          "default": "start"
+        },
+        "cross": {
+          "type": "enum",
+          "variants": [
+            "start",
+            "center",
+            "end"
+          ],
+          "default": "start"
+        }
       }
     },
     "Panel": {
       "fields": {
-        "color": { "type": "text", "default": "#ffffff" },
-        "image": { "type": "text", "default": "" }
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        },
+        "image": {
+          "type": "text",
+          "default": ""
+        }
       }
     },
     "UiLabel": {
       "fields": {
-        "content": { "type": "text", "default": "" },
-        "size": { "type": "number", "default": 1 },
-        "color": { "type": "text", "default": "#ffffff" },
-        "reveal": { "type": "number", "default": 1 },
-        "align": { "type": "enum", "variants": ["start", "center", "end"], "default": "center" }
+        "content": {
+          "type": "text",
+          "default": ""
+        },
+        "size": {
+          "type": "number",
+          "default": 1
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        },
+        "reveal": {
+          "type": "number",
+          "default": 1
+        },
+        "align": {
+          "type": "enum",
+          "variants": [
+            "start",
+            "center",
+            "end"
+          ],
+          "default": "center"
+        }
       }
     },
     "Button": {
       "fields": {
-        "action": { "type": "text", "default": "" },
-        "theme": { "type": "text", "default": "" },
-        "state": { "type": "enum", "variants": ["normal", "focused", "pressed", "disabled"], "default": "normal" },
-        "press_t": { "type": "int", "default": -1 },
-        "min_scale": { "type": "number", "default": 0.92 }
+        "action": {
+          "type": "text",
+          "default": ""
+        },
+        "theme": {
+          "type": "text",
+          "default": ""
+        },
+        "state": {
+          "type": "enum",
+          "variants": [
+            "normal",
+            "focused",
+            "pressed",
+            "disabled"
+          ],
+          "default": "normal"
+        },
+        "press_t": {
+          "type": "int",
+          "default": -1
+        },
+        "min_scale": {
+          "type": "number",
+          "default": 0.92
+        }
       }
     },
-
-    "Position": { "fields": { "x": { "type": "number" }, "y": { "type": "number" } } },
-    "Velocity": { "fields": { "x": { "type": "number", "default": 0 }, "y": { "type": "number", "default": 0 } } },
+    "Position": {
+      "fields": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "Velocity": {
+      "fields": {
+        "x": {
+          "type": "number",
+          "default": 0
+        },
+        "y": {
+          "type": "number",
+          "default": 0
+        }
+      }
+    },
     "Sprite": {
       "fields": {
-        "w": { "type": "number" },
-        "h": { "type": "number" },
-        "image": { "type": "text", "default": "" },
-        "color": { "type": "text", "default": "#ffffff" }
+        "w": {
+          "type": "number"
+        },
+        "h": {
+          "type": "number"
+        },
+        "image": {
+          "type": "text",
+          "default": ""
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        }
       }
     },
     "Camera": {
       "fields": {
-        "x": { "type": "number" },
-        "y": { "type": "number" },
-        "scale": { "type": "number", "default": 8 },
-        "follow": { "type": "text", "default": "" },
-        "lerp": { "type": "number", "default": 1 }
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "scale": {
+          "type": "number",
+          "default": 8
+        },
+        "follow": {
+          "type": "text",
+          "default": ""
+        },
+        "lerp": {
+          "type": "number",
+          "default": 1
+        },
+        "view_h": {
+          "type": "number",
+          "default": 0
+        }
       }
     },
     "Text": {
       "fields": {
-        "content": { "type": "text", "default": "" },
-        "size": { "type": "number", "default": 1 },
-        "color": { "type": "text", "default": "#ffffff" },
-        "screen": { "type": "bool", "default": false }
+        "content": {
+          "type": "text",
+          "default": ""
+        },
+        "size": {
+          "type": "number",
+          "default": 1
+        },
+        "color": {
+          "type": "text",
+          "default": "#ffffff"
+        },
+        "screen": {
+          "type": "bool",
+          "default": false
+        }
       }
     },
-    "Player": { "fields": {} },
-    "Collider": { "fields": { "w": { "type": "number", "default": 1 }, "h": { "type": "number", "default": 1 } } },
-
-    "Cell": { "fields": { "kind": { "type": "text", "default": "regolith" } } },
+    "Player": {
+      "fields": {}
+    },
+    "Collider": {
+      "fields": {
+        "w": {
+          "type": "number",
+          "default": 1
+        },
+        "h": {
+          "type": "number",
+          "default": 1
+        }
+      }
+    },
+    "Cell": {
+      "fields": {
+        "kind": {
+          "type": "text",
+          "default": "regolith"
+        }
+      }
+    },
     "Structure": {
       "fields": {
-        "kind": { "type": "text", "default": "floor" },
-        "tier": { "type": "int", "default": 1 }
+        "kind": {
+          "type": "text",
+          "default": "floor"
+        },
+        "tier": {
+          "type": "int",
+          "default": 1
+        }
       }
     },
-    "Portal": { "fields": { "to": { "type": "text", "default": "home" } } },
+    "Portal": {
+      "fields": {
+        "to": {
+          "type": "text",
+          "default": "home"
+        }
+      }
+    },
     "Clock": {
       "fields": {
-        "day": { "type": "int", "default": 1 },
-        "time": { "type": "number", "default": 0 },
-        "tod": { "type": "text", "default": "晨" },
-        "last_day_emit": { "type": "int", "default": 0 }
+        "day": {
+          "type": "int",
+          "default": 1
+        },
+        "time": {
+          "type": "number",
+          "default": 0
+        },
+        "tod": {
+          "type": "text",
+          "default": "晨"
+        },
+        "last_day_emit": {
+          "type": "int",
+          "default": 0
+        }
       }
     },
-
     "Inventory": {
       "fields": {
-        "ore": { "type": "int", "default": 0 },
-        "wood": { "type": "int", "default": 0 },
-        "fiber": { "type": "int", "default": 0 },
-        "seed": { "type": "int", "default": 5 },
-        "wheat": { "type": "int", "default": 0 },
-        "plank": { "type": "int", "default": 0 },
-        "chair": { "type": "int", "default": 0 },
-        "lamp": { "type": "int", "default": 0 }
+        "ore": {
+          "type": "int",
+          "default": 0
+        },
+        "wood": {
+          "type": "int",
+          "default": 0
+        },
+        "fiber": {
+          "type": "int",
+          "default": 0
+        },
+        "seed": {
+          "type": "int",
+          "default": 5
+        },
+        "wheat": {
+          "type": "int",
+          "default": 0
+        },
+        "plank": {
+          "type": "int",
+          "default": 0
+        },
+        "chair": {
+          "type": "int",
+          "default": 0
+        },
+        "lamp": {
+          "type": "int",
+          "default": 0
+        }
       }
     },
-    "Mode": { "fields": { "value": { "type": "enum", "variants": ["build", "craft", "interact"], "default": "build" } } },
-    "Build": { "fields": { "kind": { "type": "text", "default": "floor" } } },
-
+    "Mode": {
+      "fields": {
+        "value": {
+          "type": "enum",
+          "variants": [
+            "build",
+            "craft",
+            "interact"
+          ],
+          "default": "build"
+        }
+      }
+    },
+    "Build": {
+      "fields": {
+        "kind": {
+          "type": "text",
+          "default": "floor"
+        }
+      }
+    },
     "Crop": {
       "fields": {
-        "kind": { "type": "text", "default": "wheat" },
-        "stage": { "type": "int", "default": 0 },
-        "timer": { "type": "number", "default": 0 },
-        "_tend_t": { "type": "number", "default": 0 }
+        "kind": {
+          "type": "text",
+          "default": "wheat"
+        },
+        "stage": {
+          "type": "int",
+          "default": 0
+        },
+        "timer": {
+          "type": "number",
+          "default": 0
+        },
+        "_tend_t": {
+          "type": "number",
+          "default": 0
+        }
       }
     },
     "Node": {
       "fields": {
-        "kind": { "type": "text", "default": "ore" },
-        "left": { "type": "int", "default": 3 },
-        "max": { "type": "int", "default": 3 },
-        "cooldown": { "type": "number", "default": 0 }
+        "kind": {
+          "type": "text",
+          "default": "ore"
+        },
+        "left": {
+          "type": "int",
+          "default": 3
+        },
+        "max": {
+          "type": "int",
+          "default": 3
+        },
+        "cooldown": {
+          "type": "number",
+          "default": 0
+        }
       }
     },
-
     "Colony": {
       "fields": {
-        "oxygen": { "type": "number", "default": 60 },
-        "power": { "type": "number", "default": 60 },
-        "food": { "type": "number", "default": 60 },
-        "water": { "type": "number", "default": 60 },
-        "o2_rate": { "type": "number", "default": 0 },
-        "pow_rate": { "type": "number", "default": 0 },
-        "food_rate": { "type": "number", "default": 0 },
-        "water_rate": { "type": "number", "default": 0 },
-        "o2_i": { "type": "int", "default": 60 },
-        "pow_i": { "type": "int", "default": 60 },
-        "food_i": { "type": "int", "default": 60 },
-        "water_i": { "type": "int", "default": 60 },
-        "pop": { "type": "int", "default": 0 },
-        "struct_count": { "type": "int", "default": 0 },
-        "stage": { "type": "text", "default": "落脚" },
-        "milestone": { "type": "text", "default": "起步" },
-        "next_drifter_day": { "type": "int", "default": 3 },
-        "drifters_invited": { "type": "int", "default": 0 },
-        "drifters_spawned": { "type": "int", "default": 1 },
-        "monument_built": { "type": "int", "default": 0 },
-        "day": { "type": "int", "default": 1 },
-        "player_x": { "type": "number", "default": 0 },
-        "player_y": { "type": "number", "default": 0 },
-        "target_drifter": { "type": "text", "default": "" },
-        "target_drifter_x": { "type": "number", "default": 0 },
-        "target_drifter_y": { "type": "number", "default": 0 },
-        "target_drifter_name": { "type": "text", "default": "" },
-        "target_drifter_archetype": { "type": "text", "default": "" },
-        "target_drifter_traits": { "type": "text", "default": "" },
-        "target_drifter_speech": { "type": "text", "default": "" },
-        "target_companion": { "type": "text", "default": "" },
-        "target_companion_x": { "type": "number", "default": 0 },
-        "target_companion_y": { "type": "number", "default": 0 },
-        "target_companion_name": { "type": "text", "default": "" },
-        "target_companion_archetype": { "type": "text", "default": "" },
-        "target_companion_traits": { "type": "text", "default": "" },
-        "target_companion_speech": { "type": "text", "default": "" },
-        "target_companion_preferred": { "type": "text", "default": "" },
-        "target_companion_affinity": { "type": "number", "default": 0 },
-        "target_companion_affinity_i": { "type": "int", "default": 0 },
-        "target_companion_talked_today": { "type": "int", "default": 0 },
-        "target_companion_gifted_today": { "type": "int", "default": 0 },
-        "target_companion_mood": { "type": "text", "default": "" },
-        "last_talk_target": { "type": "text", "default": "" },
-        "_day_anchor": { "type": "int", "default": 0 },
-        "companion_handles": { "type": "list", "of": { "type": "text" } },
-        "companion_snapshot": { "type": "text", "default": "[]" },
-        "drifter_snapshot": { "type": "text", "default": "[]" },
-        "last_talk_reply": { "type": "text", "default": "" },
-        "food_bar": { "type": "text", "default": "食 0/100 [░░░░░░░░░░]" },
-        "companion_happy_count": { "type": "int", "default": 0 },
-        "companion_affinity_avg": { "type": "number", "default": 0 }
+        "oxygen": {
+          "type": "number",
+          "default": 60
+        },
+        "power": {
+          "type": "number",
+          "default": 60
+        },
+        "food": {
+          "type": "number",
+          "default": 60
+        },
+        "water": {
+          "type": "number",
+          "default": 60
+        },
+        "o2_rate": {
+          "type": "number",
+          "default": 0
+        },
+        "pow_rate": {
+          "type": "number",
+          "default": 0
+        },
+        "food_rate": {
+          "type": "number",
+          "default": 0
+        },
+        "water_rate": {
+          "type": "number",
+          "default": 0
+        },
+        "o2_i": {
+          "type": "int",
+          "default": 60
+        },
+        "pow_i": {
+          "type": "int",
+          "default": 60
+        },
+        "food_i": {
+          "type": "int",
+          "default": 60
+        },
+        "water_i": {
+          "type": "int",
+          "default": 60
+        },
+        "pop": {
+          "type": "int",
+          "default": 0
+        },
+        "struct_count": {
+          "type": "int",
+          "default": 0
+        },
+        "stage": {
+          "type": "text",
+          "default": "落脚"
+        },
+        "milestone": {
+          "type": "text",
+          "default": "起步"
+        },
+        "next_drifter_day": {
+          "type": "int",
+          "default": 3
+        },
+        "drifters_invited": {
+          "type": "int",
+          "default": 0
+        },
+        "drifters_spawned": {
+          "type": "int",
+          "default": 1
+        },
+        "monument_built": {
+          "type": "int",
+          "default": 0
+        },
+        "day": {
+          "type": "int",
+          "default": 1
+        },
+        "player_x": {
+          "type": "number",
+          "default": 0
+        },
+        "player_y": {
+          "type": "number",
+          "default": 0
+        },
+        "target_drifter": {
+          "type": "text",
+          "default": ""
+        },
+        "target_drifter_x": {
+          "type": "number",
+          "default": 0
+        },
+        "target_drifter_y": {
+          "type": "number",
+          "default": 0
+        },
+        "target_drifter_name": {
+          "type": "text",
+          "default": ""
+        },
+        "target_drifter_archetype": {
+          "type": "text",
+          "default": ""
+        },
+        "target_drifter_traits": {
+          "type": "text",
+          "default": ""
+        },
+        "target_drifter_speech": {
+          "type": "text",
+          "default": ""
+        },
+        "target_companion": {
+          "type": "text",
+          "default": ""
+        },
+        "target_companion_x": {
+          "type": "number",
+          "default": 0
+        },
+        "target_companion_y": {
+          "type": "number",
+          "default": 0
+        },
+        "target_companion_name": {
+          "type": "text",
+          "default": ""
+        },
+        "target_companion_archetype": {
+          "type": "text",
+          "default": ""
+        },
+        "target_companion_traits": {
+          "type": "text",
+          "default": ""
+        },
+        "target_companion_speech": {
+          "type": "text",
+          "default": ""
+        },
+        "target_companion_preferred": {
+          "type": "text",
+          "default": ""
+        },
+        "target_companion_affinity": {
+          "type": "number",
+          "default": 0
+        },
+        "target_companion_affinity_i": {
+          "type": "int",
+          "default": 0
+        },
+        "target_companion_talked_today": {
+          "type": "int",
+          "default": 0
+        },
+        "target_companion_gifted_today": {
+          "type": "int",
+          "default": 0
+        },
+        "target_companion_mood": {
+          "type": "text",
+          "default": ""
+        },
+        "last_talk_target": {
+          "type": "text",
+          "default": ""
+        },
+        "_day_anchor": {
+          "type": "int",
+          "default": 0
+        },
+        "companion_handles": {
+          "type": "list",
+          "of": {
+            "type": "text"
+          }
+        },
+        "companion_snapshot": {
+          "type": "text",
+          "default": "[]"
+        },
+        "drifter_snapshot": {
+          "type": "text",
+          "default": "[]"
+        },
+        "last_talk_reply": {
+          "type": "text",
+          "default": ""
+        },
+        "food_bar": {
+          "type": "text",
+          "default": "食 0/100 [░░░░░░░░░░]"
+        },
+        "companion_happy_count": {
+          "type": "int",
+          "default": 0
+        },
+        "companion_affinity_avg": {
+          "type": "number",
+          "default": 0
+        }
       }
     },
     "Census": {
       "fields": {
-        "count": { "type": "int", "default": 0 },
-        "is_hub": { "type": "int", "default": 0 }
+        "count": {
+          "type": "int",
+          "default": 0
+        },
+        "is_hub": {
+          "type": "int",
+          "default": 0
+        }
       }
     },
-
-    "Companion": { "fields": {} },
+    "Companion": {
+      "fields": {}
+    },
     "Drifter": {
       "fields": {
-        "arrival_day": { "type": "int", "default": 1 }
+        "arrival_day": {
+          "type": "int",
+          "default": 1
+        }
       }
     },
     "Persona": {
       "fields": {
-        "name": { "type": "text", "default": "旅人" },
-        "archetype": { "type": "text", "default": "" },
-        "traits": { "type": "text", "default": "" },
-        "speech": { "type": "text", "default": "" },
-        "preferred": { "type": "text", "default": "" }
+        "name": {
+          "type": "text",
+          "default": "旅人"
+        },
+        "archetype": {
+          "type": "text",
+          "default": ""
+        },
+        "traits": {
+          "type": "text",
+          "default": ""
+        },
+        "speech": {
+          "type": "text",
+          "default": ""
+        },
+        "preferred": {
+          "type": "text",
+          "default": ""
+        }
       }
     },
-    "Mood": { "fields": { "value": { "type": "text", "default": "平静" } } },
-    "ThinkReq": { "fields": { "pending": { "type": "number", "default": 0 } } },
+    "Mood": {
+      "fields": {
+        "value": {
+          "type": "text",
+          "default": "平静"
+        }
+      }
+    },
+    "ThinkReq": {
+      "fields": {
+        "pending": {
+          "type": "number",
+          "default": 0
+        }
+      }
+    },
     "Need": {
       "fields": {
-        "comfort": { "type": "number", "default": 50 },
-        "quarters": { "type": "number", "default": 0 },
-        "leave_timer": { "type": "number", "default": 0 },
-        "voiced": { "type": "number", "default": 0 },
-        "comfort_i": { "type": "int", "default": 50 },
-        "affinity": { "type": "number", "default": 30 },
-        "affinity_i": { "type": "int", "default": 30 },
-        "talked_today": { "type": "int", "default": 0 },
-        "gifted_today": { "type": "int", "default": 0 },
-        "last_interact_day": { "type": "int", "default": 1 },
-        "contribution_timer": { "type": "number", "default": 0 }
+        "comfort": {
+          "type": "number",
+          "default": 50
+        },
+        "quarters": {
+          "type": "number",
+          "default": 0
+        },
+        "leave_timer": {
+          "type": "number",
+          "default": 0
+        },
+        "voiced": {
+          "type": "number",
+          "default": 0
+        },
+        "comfort_i": {
+          "type": "int",
+          "default": 50
+        },
+        "affinity": {
+          "type": "number",
+          "default": 30
+        },
+        "affinity_i": {
+          "type": "int",
+          "default": 30
+        },
+        "talked_today": {
+          "type": "int",
+          "default": 0
+        },
+        "gifted_today": {
+          "type": "int",
+          "default": 0
+        },
+        "last_interact_day": {
+          "type": "int",
+          "default": 1
+        },
+        "contribution_timer": {
+          "type": "number",
+          "default": 0
+        }
       }
     },
     "Wander": {
       "fields": {
-        "home_x": { "type": "number", "default": 0 },
-        "home_y": { "type": "number", "default": 0 },
-        "tx": { "type": "number", "default": 0 },
-        "ty": { "type": "number", "default": 0 },
-        "timer": { "type": "number", "default": 0 }
+        "home_x": {
+          "type": "number",
+          "default": 0
+        },
+        "home_y": {
+          "type": "number",
+          "default": 0
+        },
+        "tx": {
+          "type": "number",
+          "default": 0
+        },
+        "ty": {
+          "type": "number",
+          "default": 0
+        },
+        "timer": {
+          "type": "number",
+          "default": 0
+        }
       }
     },
-    "QuestLog": { "fields": { "step": { "type": "int", "default": 1 } } },
-    "Cmd": { "fields": { "kind": { "type": "text", "default": "" }, "x": { "type": "number", "default": 0 }, "y": { "type": "number", "default": 0 } } }
+    "QuestLog": {
+      "fields": {
+        "step": {
+          "type": "int",
+          "default": 1
+        }
+      }
+    },
+    "Cmd": {
+      "fields": {
+        "kind": {
+          "type": "text",
+          "default": ""
+        },
+        "x": {
+          "type": "number",
+          "default": 0
+        },
+        "y": {
+          "type": "number",
+          "default": 0
+        }
+      }
+    }
   }
 }
