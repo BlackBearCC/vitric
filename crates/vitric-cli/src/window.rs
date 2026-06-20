@@ -329,11 +329,13 @@ impl ApplicationHandler for WindowedGame {
         if self.window.is_some() {
             return;
         }
-        // 默认 960x540 窗口:远程桌面/录屏场景全屏暗色渐变是编码最差情况,
-        // 像素越多越卡;要大屏自己最大化或 F11 无边框全屏
+        // 默认无边框全屏:真机上手玩,UI 按 1920x1080 参考视口铺满屏幕才看得清。
+        // F11 仍可切回窗口(兜底窗口化尺寸 1920x1080,而非以前的 960x540)。
+        // (远程/录屏不走这条窗口路径,用 render/screenshot 离屏渲染,不受影响。)
         let attrs = Window::default_attributes()
             .with_title(self.title.as_str())
-            .with_inner_size(LogicalSize::new(960.0, 540.0));
+            .with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)))
+            .with_inner_size(LogicalSize::new(1920.0, 1080.0));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
