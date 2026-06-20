@@ -44,6 +44,21 @@
     {
      "set": "@intro_panel.Ui.ox",
      "to": -6000
+    },
+    { "set": "@hud_bar.Ui.ox", "to": -6000 },
+    { "set": "@hud_companion_lbl.Ui.ox", "to": -6000 },
+    { "set": "@quest_card.Ui.ox", "to": -6000 },
+    { "set": "@mode_row.Ui.ox", "to": -6000 },
+    { "set": "@build_menu.Ui.ox", "to": -6000 },
+    { "set": "@craft_menu.Ui.ox", "to": -6000 },
+    { "set": "@inv_row.Ui.ox", "to": -6000 },
+    {
+     "set": "@narration_lbl.UiLabel.content",
+     "to": ""
+    },
+    {
+     "set": "@toast_lbl.UiLabel.content",
+     "to": ""
     }
    ]
   },
