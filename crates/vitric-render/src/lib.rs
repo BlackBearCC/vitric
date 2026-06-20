@@ -139,8 +139,8 @@ mod ui_interact;
 pub use assets::{is_normal_map_name, normal_map_name, Assets, Image};
 pub use font::{revealed_chars, FontStore, GlyphPlacement, RasterGlyph};
 pub use ui::{
-    has_ui, layout_input_hash, layout_runs, solve_layout, Align, Anchor, ContainerKind, Layout,
-    UiRect, ALIGN_NAMES, ANCHOR_NAMES, CONTAINER_KINDS,
+    has_ui, layout_input_hash, layout_runs, point_over_ui, solve_layout, Align, Anchor,
+    ContainerKind, Layout, UiRect, ALIGN_NAMES, ANCHOR_NAMES, CONTAINER_KINDS,
 };
 pub use ui_interact::{
     modulate_rgb, navigate, press_modulate, press_scale, ui_press_feedback, ButtonState, Dir,

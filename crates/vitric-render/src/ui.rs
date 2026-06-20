@@ -184,6 +184,31 @@ pub fn has_ui(world: &World) -> bool {
     !world.query(&["UiRoot"]).is_empty()
 }
 
+/// 屏幕点 (px,py)（与渲染同坐标系——参照分辨率像素）是否压在任何"挡手"的 UI 元素上
+/// （带 Panel 或 Button 的可见节点）。窗口据此在光标压住菜单/面板时挡掉**世界点击**和
+/// **建造落点预览**，避免点穿到下面的地图（之前菜单上点击会穿透、还在菜单底下显绿格子）。
+/// 挪到屏外（ox=-6000）隐藏的元素 rect 在屏外，自然不命中。
+pub fn point_over_ui(world: &World, width: u32, height: u32, px: f64, py: f64) -> bool {
+    if !has_ui(world) {
+        return false;
+    }
+    let layout = match solve_layout(world, width, height) {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+    for id in world.query(&["Ui"]) {
+        if !world.has_component(id, "Panel") && !world.has_component(id, "Button") {
+            continue;
+        }
+        if let Some(r) = layout.get(&id) {
+            if px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// 一个 UI 节点的静态输入（解算前从组件读出来；rx/ry/rw/rh 是输出不读）。
 struct Node {
     id: EntityId,
@@ -677,6 +702,29 @@ mod tests {
         assert_eq!(rect(&l, &w, "man"), UiRect { x: 45.0, y: 60.0, w: 20.0, h: 20.0 });
         // stretch：(8,8) 起，宽高各减 16 → 184x84
         assert_eq!(rect(&l, &w, "str"), UiRect { x: 8.0, y: 8.0, w: 184.0, h: 84.0 });
+    }
+
+    #[test]
+    fn point_over_ui_hits_panels_and_buttons_not_bare_nodes() {
+        // 视口 200x100。面板贴左上 (0,0)-(40,20)，按钮贴右上 (160,0)-(200,20)，
+        // 一个只有 Ui 的裸节点居中 (80,40)-(120,60)。
+        let mut w = ui_world();
+        let p = w.spawn_named("panel").unwrap();
+        set_ui(&mut w, p, "top-left", 0.0, 0.0, 0.0, 0.0, 40.0, 20.0, "", 0.0);
+        w.set_component(p, "Panel", json!({ "color": "#ffffff" })).unwrap();
+        let b = w.spawn_named("btn").unwrap();
+        set_ui(&mut w, b, "top-right", 0.0, 0.0, 0.0, 0.0, 40.0, 20.0, "", 0.0);
+        w.set_component(b, "Button", json!({ "action": "x", "state": "normal" })).unwrap();
+        let bare = w.spawn_named("bare").unwrap();
+        set_ui(&mut w, bare, "center", 0.0, 0.0, 0.0, 0.0, 40.0, 20.0, "", 0.0);
+
+        // 面板内 / 按钮内 → 命中（挡掉世界点击）
+        assert!(point_over_ui(&w, 200, 100, 10.0, 10.0), "面板内应命中");
+        assert!(point_over_ui(&w, 200, 100, 180.0, 10.0), "按钮内应命中");
+        // 裸 Ui 节点（无 Panel/Button）不挡手——其覆盖区仍放行世界点击
+        assert!(!point_over_ui(&w, 200, 100, 100.0, 50.0), "裸 Ui 节点不该挡手");
+        // 空白地图区 / 面板按钮之外 → 不命中
+        assert!(!point_over_ui(&w, 200, 100, 50.0, 10.0), "面板外不该命中");
     }
 
     #[test]

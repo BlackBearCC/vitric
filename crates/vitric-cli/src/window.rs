@@ -33,6 +33,12 @@ use crate::audio::Audio;
 use crate::gpu::GpuPresenter;
 use crate::step_once;
 
+/// 渲染/输入统一参照分辨率。UI 布局与点击拾取都以 1920×1080 为基准，所以窗口任意
+/// 尺寸都先渲染到这个分辨率再拉伸上屏、光标也映射到这个空间——保证 4K 等高分屏下
+/// UI 不会缩成屏角一小撮、世界点击不错位。
+const REF_W: u32 = 1920;
+const REF_H: u32 = 1080;
+
 /// 上屏路径选择（来自 `--renderer`）。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Renderer {
@@ -123,10 +129,14 @@ impl WindowedGame {
                 if surface.resize(w, h).is_err() {
                     return;
                 }
-                let rgba = match vitric_render::render_world(
+                // 固定按 1920×1080 参照分辨率渲染，再拉伸铺满窗口。UI 布局/点击拾取都
+                // 以 1920×1080 为参照系，渲染锁同一参照系才对得齐——否则 4K 等分辨率下
+                // 固定像素的 UI 会缩成屏角一小撮、世界点击也错位。self.cursor 已在
+                // CursorMoved 里映射到参照空间，viewport() 也返回参照尺寸，全链路一致。
+                let mut rgba = match vitric_render::render_world(
                     &self.sim.world,
-                    size.width,
-                    size.height,
+                    REF_W,
+                    REF_H,
                     self.dispatcher.assets(),
                     self.sim.tick,
                 ) {
@@ -136,14 +146,13 @@ impl WindowedGame {
                         return;
                     }
                 };
-                let mut rgba = rgba;
                 // 检查器高亮：选中实体画青色描边（人点的或 AI inspect/select 设的）
                 if let Some(selected) = self.dispatcher.selection() {
                     let _ = vitric_render::draw_selection_outline(
                         &mut rgba,
                         &self.sim.world,
-                        size.width,
-                        size.height,
+                        REF_W,
+                        REF_H,
                         selected,
                         self.sim.tick,
                     );
@@ -168,31 +177,45 @@ impl WindowedGame {
                         .to_string();
                     if mode == "build" && !kind.is_empty() {
                         let (px, py) = self.cursor;
-                        if let Ok((wx, wy)) = vitric_render::screen_to_world(
-                            &self.sim.world,
-                            size.width,
-                            size.height,
-                            px,
-                            py,
-                        ) {
-                            let _ = vitric_render::draw_build_preview(
-                                &mut rgba,
+                        // 光标在菜单/面板上时不画落点预览（只在地图上方显示）
+                        if !vitric_render::point_over_ui(&self.sim.world, REF_W, REF_H, px, py) {
+                            if let Ok((wx, wy)) = vitric_render::screen_to_world(
                                 &self.sim.world,
-                                size.width,
-                                size.height,
-                                wx,
-                                wy,
-                                self.sim.tick,
-                            );
+                                REF_W,
+                                REF_H,
+                                px,
+                                py,
+                            ) {
+                                let _ = vitric_render::draw_build_preview(
+                                    &mut rgba,
+                                    &self.sim.world,
+                                    REF_W,
+                                    REF_H,
+                                    wx,
+                                    wy,
+                                    self.sim.tick,
+                                );
+                            }
                         }
                     }
                 }
                 let Ok(mut frame) = surface.buffer_mut() else {
                     return;
                 };
-                // RGBA8 → softbuffer 的 0RGB u32
-                for (dst, px) in frame.iter_mut().zip(rgba.chunks_exact(4)) {
-                    *dst = ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | px[2] as u32;
+                // 1920×1080 帧最近邻拉伸到窗口尺寸 → softbuffer 0RGB u32。
+                // 宽高比不一致时按各轴独立缩放（轻微拉伸），优先铺满 + 渲染/点击一致。
+                let (sw, sh) = (size.width, size.height);
+                for y in 0..sh {
+                    let sy = (y as u64 * REF_H as u64 / sh as u64) as u32;
+                    let srow = (sy * REF_W) as usize * 4;
+                    let drow = (y * sw) as usize;
+                    for x in 0..sw {
+                        let sx = (x as u64 * REF_W as u64 / sw as u64) as u32;
+                        let si = srow + sx as usize * 4;
+                        frame[drow + x as usize] = ((rgba[si] as u32) << 16)
+                            | ((rgba[si + 1] as u32) << 8)
+                            | rgba[si + 2] as u32;
+                    }
                 }
                 let _ = frame.present();
             }
@@ -212,8 +235,9 @@ impl WindowedGame {
     }
 
     fn viewport(&self) -> Option<(u32, u32)> {
+        // 输入用的视口恒为参照分辨率（渲染锁同一参照系）——光标已映射到该空间
         let size = self.window.as_ref()?.inner_size();
-        (size.width > 0 && size.height > 0).then_some((size.width, size.height))
+        (size.width > 0 && size.height > 0).then_some((REF_W, REF_H))
     }
 
     /// 左键按下：同一次点击两个含义——
@@ -224,6 +248,10 @@ impl WindowedGame {
         let Some((w, h)) = self.viewport() else { return };
         let (px, py) = self.cursor;
         self.inject_mouse(w, h, "left");
+        // 光标压在 UI 上时不做世界拾取/拖拽（否则会抓起菜单背后的世界实体）
+        if vitric_render::point_over_ui(&self.sim.world, w, h, px, py) {
+            return;
+        }
         match vitric_render::pick(&self.sim.world, w, h, px, py) {
             Ok(Some(id)) => {
                 self.dispatcher.set_selection(Some(id));
@@ -252,13 +280,18 @@ impl WindowedGame {
     /// 坐标用不抖的相机（screen_to_world）：点击对的是世界本体，抖动只是视觉装饰。
     fn inject_mouse(&mut self, w: u32, h: u32, button: &str) {
         let (px, py) = self.cursor;
-        match vitric_render::screen_to_world(&self.sim.world, w, h, px, py) {
-            Ok((wx, wy)) => {
-                if let Err(e) = vitric_control::inject_click(&mut self.sim, wx, wy, button) {
-                    eprintln!("[vitric] 鼠标点击注入失败: {e}");
+        // 光标压在 UI（菜单/面板）上时，这次点击归 UI——不再往世界注入，避免点穿到
+        // 下面的地图（之前点建造菜单会同时在菜单底下的瓦片上触发世界点击）
+        let over_ui = vitric_render::point_over_ui(&self.sim.world, w, h, px, py);
+        if !over_ui {
+            match vitric_render::screen_to_world(&self.sim.world, w, h, px, py) {
+                Ok((wx, wy)) => {
+                    if let Err(e) = vitric_control::inject_click(&mut self.sim, wx, wy, button) {
+                        eprintln!("[vitric] 鼠标点击注入失败: {e}");
+                    }
                 }
+                Err(e) => eprintln!("[vitric] 鼠标点击坐标换算失败: {e}"),
             }
-            Err(e) => eprintln!("[vitric] 鼠标点击坐标换算失败: {e}"),
         }
         // 场上有 UI 时，同一次点击额外注入 UI 点击（屏幕归一化坐标，拾取推迟到 tick 内
         // 换算到参照系 1920×1080 比 UI 矩形）。世界点击与 UI 点击两套坐标系并存：
@@ -448,7 +481,14 @@ impl ApplicationHandler for WindowedGame {
                 self.handle_key(event)
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor = (position.x, position.y);
+                // 光标存进 1920×1080 参照空间（与渲染/拾取一致）：按窗口实际尺寸缩放
+                self.cursor = match self.window.as_ref().map(|w| w.inner_size()) {
+                    Some(s) if s.width > 0 && s.height > 0 => (
+                        position.x * REF_W as f64 / s.width as f64,
+                        position.y * REF_H as f64 / s.height as f64,
+                    ),
+                    _ => (position.x, position.y),
+                };
                 self.mouse_drag();
             }
             WindowEvent::MouseInput { state, button, .. } => match (state, button) {
