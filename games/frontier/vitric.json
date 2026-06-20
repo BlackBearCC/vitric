@@ -17,7 +17,8 @@
     "rules/companion.json",
     "rules/time.json",
     "rules/narrative.json",
-    "rules/toast.json"
+    "rules/toast.json",
+    "rules/affordability.json"
   ],
   "scripts": [
     "scripts/colony.js",

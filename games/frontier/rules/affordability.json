@@ -1,0 +1,21 @@
+{
+  "rules": [
+    { "id": "build-dim-all", "comment": "每帧先把所有建造项压暗,再由下面 afford-* 把造得起的点亮(规则按序,后者覆盖)。", "on": "tick", "do": [
+      { "set": "@build_plot.Panel.color", "to": "#262a33" },
+      { "set": "@build_wall.Panel.color", "to": "#262a33" },
+      { "set": "@build_conduit.Panel.color", "to": "#262a33" },
+      { "set": "@build_extractor.Panel.color", "to": "#262a33" },
+      { "set": "@build_quarters.Panel.color", "to": "#262a33" },
+      { "set": "@build_beacon.Panel.color", "to": "#262a33" },
+      { "set": "@build_plot2.Panel.color", "to": "#262a33" },
+      { "set": "@build_monument.Panel.color", "to": "#262a33" } ] },
+    { "id": "afford-plot", "on": "tick", "do": [ { "set": "@build_plot.Panel.color", "to": "#33405e" } ] },
+    { "id": "afford-wall", "on": "tick", "if": [ ["@player.Inventory.wood", ">=", 1] ], "do": [ { "set": "@build_wall.Panel.color", "to": "#33405e" } ] },
+    { "id": "afford-conduit", "on": "tick", "if": [ ["@player.Inventory.ore", ">=", 1] ], "do": [ { "set": "@build_conduit.Panel.color", "to": "#33405e" } ] },
+    { "id": "afford-extractor", "on": "tick", "if": [ ["@player.Inventory.ore", ">=", 1] ], "do": [ { "set": "@build_extractor.Panel.color", "to": "#33405e" } ] },
+    { "id": "afford-quarters", "on": "tick", "if": [ ["@player.Inventory.plank", ">=", 2] ], "do": [ { "set": "@build_quarters.Panel.color", "to": "#33405e" } ] },
+    { "id": "afford-beacon", "on": "tick", "if": [ ["@player.Inventory.ore", ">=", 2], ["@player.Inventory.plank", ">=", 2] ], "do": [ { "set": "@build_beacon.Panel.color", "to": "#33405e" } ] },
+    { "id": "afford-plot2", "on": "tick", "if": [ ["@player.Inventory.plank", ">=", 3], ["@player.Inventory.chair", ">=", 1] ], "do": [ { "set": "@build_plot2.Panel.color", "to": "#33405e" } ] },
+    { "id": "afford-monument", "on": "tick", "if": [ ["@player.Inventory.ore", ">=", 4], ["@player.Inventory.plank", ">=", 4], ["@player.Inventory.lamp", ">=", 2], ["@player.Inventory.wheat", ">=", 4] ], "do": [ { "set": "@build_monument.Panel.color", "to": "#33405e" } ] }
+  ]
+}
