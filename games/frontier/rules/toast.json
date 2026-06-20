@@ -23,6 +23,12 @@
       { "set": "@toast_lbl.Toast.timer", "to": 2.0 } ] },
     { "id": "toast-craft-fail", "on": { "event": "craft-fail" }, "do": [
       { "set": "@toast_lbl.UiLabel.content", "to": "材料不够" },
-      { "set": "@toast_lbl.Toast.timer", "to": 2.0 } ] }
+      { "set": "@toast_lbl.Toast.timer", "to": 2.0 } ] },
+    { "id": "toast-invited", "on": { "event": "companion-invited" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": { "format": "{} 加入了聚落！", "args": ["event.name"] } },
+      { "set": "@toast_lbl.Toast.timer", "to": 2.6 } ] },
+    { "id": "toast-invite-fail", "on": { "event": "invite-fail" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": "走近旅人(约 4 格内)再按 I 邀请" },
+      { "set": "@toast_lbl.Toast.timer", "to": 2.2 } ] }
   ]
 }

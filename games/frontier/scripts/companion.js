@@ -175,6 +175,25 @@ vitric.system("companion-hint", { query: ["Colony"], writes: [] }, (ents, ctx) =
   }
 });
 
+// ---- 交互可发现性:旅人(可邀请入伙)头顶提示。6 格内开始提示引导走近,
+// 4 格内(可邀请范围)变成"✋按 I 邀请"。和伙伴标记区分:旅人是青色、按 I。----
+vitric.system("drifter-hint", { query: ["Colony"], writes: [] }, (ents, ctx) => {
+  const c = ents[0];
+  if (!c) return;
+  const tid = c.Colony.target_drifter || "";
+  const px = c.Colony.player_x || 0, py = c.Colony.player_y || 0;
+  const tx = c.Colony.target_drifter_x || 0, ty = c.Colony.target_drifter_y || 0;
+  const d2 = (tx - px) * (tx - px) + (ty - py) * (ty - py);
+  if (tid !== "" && d2 <= 36.0) {
+    ctx.setField("drifter_marker", "Position.x", tx);
+    ctx.setField("drifter_marker", "Position.y", ty + 0.95);
+    ctx.setField("drifter_marker", "Text.content", d2 <= 16.0 ? "! 按 I 邀请" : "旅人 · 走近按 I");
+  } else {
+    ctx.setField("drifter_marker", "Position.y", -999.0);
+    ctx.setField("drifter_marker", "Text.content", "");
+  }
+});
+
 // ---- 游荡:随 timer 换目标点,到了就停、等 timer 再动 ----
 vitric.system("companion-wander", { query: ["Companion", "Wander", "Position", "Velocity"], writes: ["Wander", "Velocity"] }, (entities, ctx) => {
   for (const e of entities) {
@@ -353,10 +372,10 @@ vitric.fn("talkNearby", (args, ctx) => {
 
 // ---- 邀请(按 i):靠近目标则发邀请事件 ----
 vitric.fn("inviteAnyNearby", (args, ctx) => {
-  const px = args.px | 0, py = args.py | 0;
-  const dx = args.dx | 0, dy = args.dy | 0;
+  const px = +args.px || 0, py = +args.py || 0;
+  const dx = +args.dx || 0, dy = +args.dy || 0;
   const dist2 = (px - dx) * (px - dx) + (py - dy) * (py - dy);
-  if (dist2 > 16) return;
+  if (dist2 > 16) { ctx.emit("invite-fail", {}); return; } // 太远:给个"走近点"提示
   if (!args.drifter_id) return;
   ctx.emit("companion-invited", {
     drifter_id: args.drifter_id,
