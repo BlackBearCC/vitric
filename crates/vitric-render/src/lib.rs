@@ -2386,6 +2386,53 @@ pub fn draw_selection_outline(
     Ok(())
 }
 
+/// 在已渲染的帧上画"建造落点预览"：光标所在世界格画一块半透明绿虚影 + 亮边，
+/// 让玩家在点下去之前就看清这次建造会落在哪一格。只在建造模式且选了类型时由窗口侧调用。
+/// `wx,wy` 是光标对应的世界坐标（窗口先 screen_to_world 得到），落点吸附到最近整格。
+/// `tick` 必须和这帧 render_world 同一个——跟着抖屏走才不错位。
+pub fn draw_build_preview(
+    buf: &mut [u8],
+    world: &World,
+    width: u32,
+    height: u32,
+    wx: f64,
+    wy: f64,
+    tick: u64,
+) -> Result<(), String> {
+    let (cam_x, cam_y, scale) = camera_of(world, tick, height)?;
+    // 吸附到最近整格（建造落在点中的瓦片）
+    let gx = wx.round();
+    let gy = wy.round();
+    let cx = (width as f64) / 2.0 + (gx - cam_x) * scale;
+    let cy = (height as f64) / 2.0 - (gy - cam_y) * scale;
+    let half = scale / 2.0; // 1×1 世界格
+    let x0 = (cx - half).floor().max(0.0) as i64;
+    let x1 = ((cx + half).ceil().min(width as f64) as i64 - 1).max(x0);
+    let y0 = (cy - half).floor().max(0.0) as i64;
+    let y1 = ((cy + half).ceil().min(height as f64) as i64 - 1).max(y0);
+    const FILL: [u8; 3] = [120, 235, 150];
+    const EDGE: [u8; 4] = [190, 255, 205, 255];
+    let bw = 2i64; // 边框宽
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
+                continue;
+            }
+            let i = ((y as u32 * width + x as u32) * 4) as usize;
+            let edge = x < x0 + bw || x > x1 - bw || y < y0 + bw || y > y1 - bw;
+            if edge {
+                buf[i..i + 4].copy_from_slice(&EDGE);
+            } else {
+                // 内部与底色 35% 混合，呈半透明虚影
+                for c in 0..3 {
+                    buf[i + c] = ((buf[i + c] as u32 * 65 + FILL[c] as u32 * 35) / 100) as u8;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// RGBA 像素 → PNG 字节。
 pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();

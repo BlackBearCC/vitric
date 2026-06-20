@@ -148,6 +148,45 @@ impl WindowedGame {
                         self.sim.tick,
                     );
                 }
+                // 建造落点预览：建造模式且选了类型时，光标所在格画半透明绿虚影
+                if let Ok(uistate) = self.sim.world.entity("uistate") {
+                    let mode = self
+                        .sim
+                        .world
+                        .get_field(uistate, "Mode.value")
+                        .ok()
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let kind = self
+                        .sim
+                        .world
+                        .get_field(uistate, "Build.kind")
+                        .ok()
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if mode == "build" && !kind.is_empty() {
+                        let (px, py) = self.cursor;
+                        if let Ok((wx, wy)) = vitric_render::screen_to_world(
+                            &self.sim.world,
+                            size.width,
+                            size.height,
+                            px,
+                            py,
+                        ) {
+                            let _ = vitric_render::draw_build_preview(
+                                &mut rgba,
+                                &self.sim.world,
+                                size.width,
+                                size.height,
+                                wx,
+                                wy,
+                                self.sim.tick,
+                            );
+                        }
+                    }
+                }
                 let Ok(mut frame) = surface.buffer_mut() else {
                     return;
                 };
