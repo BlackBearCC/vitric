@@ -1,0 +1,25 @@
+{
+  "rules": [
+    {
+      "id": "intro-dismiss-q",
+      "comment": "按 Q(切建造=任务第一步指示)即收起开场序章,自然衔接玩法。",
+      "on": { "event": "input", "filter": { "action": "q", "phase": "pressed" } },
+      "do": [{ "set": "@intro_panel.Ui.ox", "to": -6000 }]
+    },
+    {
+      "id": "intro-dismiss-built",
+      "comment": "兜底:开始建造也收起序章。",
+      "on": { "event": "built" },
+      "do": [{ "set": "@intro_panel.Ui.ox", "to": -6000 }]
+    },
+    {
+      "id": "ending-show",
+      "comment": "通关 settlement-thrived/game-won → 弹结局,收起其它 overlay。",
+      "on": { "event": "game-won" },
+      "do": [
+        { "set": "@ending_panel.Ui.ox", "to": 0 },
+        { "set": "@intro_panel.Ui.ox", "to": -6000 }
+      ]
+    }
+  ]
+}

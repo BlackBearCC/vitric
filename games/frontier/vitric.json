@@ -3,9 +3,29 @@
   "schema": "schema.json",
   "font": "fonts/cjk.otf",
   "entry": "scenes/main.json",
-  "scenes": [ "scenes/main.json" ],
-  "rules": [ "rules/move.json", "rules/ui.json", "rules/economy.json", "rules/colony.json", "rules/hud.json", "rules/quest.json", "rules/farm.json", "rules/companion.json", "rules/time.json" ],
-  "scripts": [ "scripts/colony.js", "scripts/economy.js", "scripts/crops.js", "scripts/companion.js", "scripts/clock.js", "scripts/hud.js" ],
+  "scenes": [
+    "scenes/main.json"
+  ],
+  "rules": [
+    "rules/move.json",
+    "rules/ui.json",
+    "rules/economy.json",
+    "rules/colony.json",
+    "rules/hud.json",
+    "rules/quest.json",
+    "rules/farm.json",
+    "rules/companion.json",
+    "rules/time.json",
+    "rules/narrative.json"
+  ],
+  "scripts": [
+    "scripts/colony.js",
+    "scripts/economy.js",
+    "scripts/crops.js",
+    "scripts/companion.js",
+    "scripts/clock.js",
+    "scripts/hud.js"
+  ],
   "seed": 1,
   "render": {
     "width": 1920,
@@ -13,7 +33,12 @@
     "note": "渲染分辨率锁 1920x1080,与引擎 UI_REFERENCE_VIEWPORT 一致,所有 UI 尺寸/字号按此设计"
   },
   "gates": {
-    "playthroughs": [{"recording": "qa/clear.json", "must_emit": "game-won"}],
+    "playthroughs": [
+      {
+        "recording": "qa/clear.json",
+        "must_emit": "game-won"
+      }
+    ],
     "check": true,
     "max_ticks": 100000
   }
