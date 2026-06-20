@@ -16,7 +16,8 @@
     "rules/farm.json",
     "rules/companion.json",
     "rules/time.json",
-    "rules/narrative.json"
+    "rules/narrative.json",
+    "rules/toast.json"
   ],
   "scripts": [
     "scripts/colony.js",
@@ -24,7 +25,8 @@
     "scripts/crops.js",
     "scripts/companion.js",
     "scripts/clock.js",
-    "scripts/hud.js"
+    "scripts/hud.js",
+    "scripts/toast.js"
   ],
   "seed": 1,
   "render": {

@@ -800,6 +800,14 @@
           "default": 0
         }
       }
+    },
+    "Toast": {
+      "fields": {
+        "timer": {
+          "type": "number",
+          "default": 0
+        }
+      }
     }
   }
 }

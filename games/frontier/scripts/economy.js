@@ -71,7 +71,7 @@ vitric.fn("build", (a, ctx) => {
   if (!def) return; // 未知 kind（没选）——忽略
   if (typeof a.entity !== "string" || !/^t_[0-9]+_[0-9]+$/.test(a.entity)) return; // 没点中地表瓦片
   const inv = readInv(a);
-  if (!canPay(inv, def.cost)) return; // 料不够，静默不建
+  if (!canPay(inv, def.cost)) { ctx.emit("build-fail", { kind: a.kind, label: def.label }); return; } // 料不够 → 通知
   const gx = Math.round(a.x);
   const gy = Math.round(a.y);
   pay(inv, def.cost);
@@ -86,7 +86,7 @@ vitric.fn("build", (a, ctx) => {
   if (a.kind === "plot") comps.Crop = { kind: "", stage: 0, timer: 0 };
   ctx.spawn(comps);
   emitInv(ctx, inv);
-  ctx.emit("built", { kind: a.kind, x: gx, y: gy });
+  ctx.emit("built", { kind: a.kind, label: def.label, x: gx, y: gy });
 });
 
 // ---- 互动点击：规则把"点中的实体(a.entity 句柄/名字)+它的组件(a.comp)+当前背包"传进来 ----
@@ -109,6 +109,8 @@ vitric.fn("interact", (a, ctx) => {
       ctx.setField(a.entity, "Crop.timer", 0);
       emitInv(ctx, inv);
       ctx.emit("planted", { x: a.x, y: a.y });
+    } else if (crop.kind === "" && (inv.seed | 0) <= 0) {
+      ctx.emit("plant-fail", {});
     } else if (crop.kind === "wheat" && (crop.stage | 0) >= 3) {
       // 收：清空作物 + 麦子 +2
       inv.wheat += 2;
@@ -139,7 +141,7 @@ vitric.fn("craft", (a, ctx) => {
   const rec = CRAFT[a.id];
   if (!rec) return;
   const inv = readInv(a);
-  if (!canPay(inv, rec.cost)) return;
+  if (!canPay(inv, rec.cost)) { ctx.emit("craft-fail", { id: a.id }); return; }
   pay(inv, rec.cost);
   inv[rec.out] += 1;
   emitInv(ctx, inv);

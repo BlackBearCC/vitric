@@ -59,7 +59,7 @@
     { "id": "kb-monument",  "on": { "event": "input", "filter": { "action": "8", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "monument" } ] },
 
     { "id": "kb-mode-build",    "on": { "event": "input", "filter": { "action": "q", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "build" } ] },
-    { "id": "kb-mode-interact", "on": { "event": "input", "filter": { "action": "w", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "interact" } ] },
+    { "id": "kb-mode-interact", "on": { "event": "input", "filter": { "action": "r", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "interact" } ] },
     { "id": "kb-mode-craft",    "on": { "event": "input", "filter": { "action": "e", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "craft" } ] }
   ]
 }

@@ -394,13 +394,16 @@ impl ApplicationHandler for WindowedGame {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } => {
-                // Esc 优先作检查器的取消选中；没有选中时才进游戏输入
+                // Esc:有选中先取消选中;没选中则退出游戏(真机上手玩要能一键退出)。
                 if matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
                     && event.state == ElementState::Pressed
-                    && self.dispatcher.selection().is_some()
                 {
-                    self.dispatcher.set_selection(None);
-                    self.drag = None;
+                    if self.dispatcher.selection().is_some() {
+                        self.dispatcher.set_selection(None);
+                        self.drag = None;
+                    } else {
+                        event_loop.exit();
+                    }
                     return;
                 }
                 self.handle_key(event)

@@ -1,0 +1,28 @@
+{
+  "rules": [
+    { "id": "toast-built", "on": { "event": "built" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": { "format": "建好了 · {}", "args": ["event.label"] } },
+      { "set": "@toast_lbl.Toast.timer", "to": 2.5 } ] },
+    { "id": "toast-build-fail", "on": { "event": "build-fail" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": { "format": "材料不够,造不了 {}", "args": ["event.label"] } },
+      { "set": "@toast_lbl.Toast.timer", "to": 2.5 } ] },
+    { "id": "toast-planted", "on": { "event": "planted" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": "种下了麦种" },
+      { "set": "@toast_lbl.Toast.timer", "to": 2.0 } ] },
+    { "id": "toast-plant-fail", "on": { "event": "plant-fail" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": "没有麦种了,先种几茬或买点" },
+      { "set": "@toast_lbl.Toast.timer", "to": 2.0 } ] },
+    { "id": "toast-harvested", "on": { "event": "harvested" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": { "format": "收获麦子 ×{}", "args": ["event.n"] } },
+      { "set": "@toast_lbl.Toast.timer", "to": 2.0 } ] },
+    { "id": "toast-gathered", "on": { "event": "gathered" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": { "format": "采到 {} ×{}", "args": ["event.id", "event.n"] } },
+      { "set": "@toast_lbl.Toast.timer", "to": 1.6 } ] },
+    { "id": "toast-crafted", "on": { "event": "crafted" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": { "format": "做好了 {}", "args": ["event.id"] } },
+      { "set": "@toast_lbl.Toast.timer", "to": 2.0 } ] },
+    { "id": "toast-craft-fail", "on": { "event": "craft-fail" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": "材料不够" },
+      { "set": "@toast_lbl.Toast.timer", "to": 2.0 } ] }
+  ]
+}

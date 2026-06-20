@@ -88,10 +88,10 @@ def check(msg, cond, detail=""):
     print(f"[OK] {msg}")
 
 def plant(x, y):
-    inp("w"); step(2); click(x, y); step(3)
+    inp("r"); step(2); click(x, y); step(3)
 
 def harvest(x, y):
-    inp("w"); step(2); click(x, y); step(3)
+    inp("r"); step(2); click(x, y); step(3)
 
 def build_wall(x, y):
     inp("q"); step(2); inp("2"); step(2); click(x, y); step(5)
