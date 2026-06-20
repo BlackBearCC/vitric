@@ -156,6 +156,25 @@ vitric.system("target-companion", { query: ["Colony"], writes: [] }, (entities, 
   }
 });
 
+// ---- 交互可发现性:玩家靠近最近伙伴(互动范围内)时,头顶浮一个"!"标记 + 提示按键。
+// 用独立的 companion_marker 实体(不占用伙伴说话气泡的 Text)。走开就移出视野。----
+vitric.system("companion-hint", { query: ["Colony"], writes: [] }, (ents, ctx) => {
+  const c = ents[0];
+  if (!c) return;
+  const tid = c.Colony.target_companion || "";
+  const px = c.Colony.player_x || 0, py = c.Colony.player_y || 0;
+  const tx = c.Colony.target_companion_x || 0, ty = c.Colony.target_companion_y || 0;
+  const near = tid !== "" && ((tx - px) * (tx - px) + (ty - py) * (ty - py)) <= 16.0; // 互动范围内(dist<4)
+  if (near) {
+    ctx.setField("companion_marker", "Position.x", tx);
+    ctx.setField("companion_marker", "Position.y", ty + 0.95);
+    ctx.setField("companion_marker", "Text.content", "! G送礼 T对话");
+  } else {
+    ctx.setField("companion_marker", "Position.y", -999.0);
+    ctx.setField("companion_marker", "Text.content", "");
+  }
+});
+
 // ---- 游荡:随 timer 换目标点,到了就停、等 timer 再动 ----
 vitric.system("companion-wander", { query: ["Companion", "Wander", "Position", "Velocity"], writes: ["Wander", "Velocity"] }, (entities, ctx) => {
   for (const e of entities) {

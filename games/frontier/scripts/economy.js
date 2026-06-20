@@ -135,6 +135,27 @@ vitric.fn("interact", (a, ctx) => {
   }
 });
 
+// ---- 交互可发现性：种植台头顶标签随状态变，让玩家一眼看出"这块能点、现在能干嘛" ----
+// （之前固定显示"种植台"，玩家不知道可交互。现在：空→可种植 / 长→生长中 / 熟→可收获）
+vitric.system("plot-hint", { query: ["Crop", "Text"], writes: ["Text"] }, (entities, ctx) => {
+  for (const e of entities) {
+    const k = e.Crop.kind || "";
+    const stage = e.Crop.stage | 0;
+    const t = k === "" ? "▸可种植" : (stage >= 3 ? "✓可收获" : "…生长中");
+    if (e.Text.content !== t) e.Text.content = t;
+  }
+});
+
+// ---- 交互可发现性：野外资源点标签补一句"可采"，提示能点采集 ----
+vitric.system("node-hint", { query: ["Node", "Text"], writes: ["Text"] }, (entities, ctx) => {
+  for (const e of entities) {
+    const left = e.Node.left | 0;
+    const base = e.Node.kind === "wood" ? "林木" : (e.Node.kind === "fiber" ? "纤维" : "矿脉");
+    const t = left > 0 ? base + "·可采" : base + "·空";
+    if (e.Text.content !== t) e.Text.content = t;
+  }
+});
+
 // ---- 制作：规则在点配方按钮（craft-<id>）时调，把配方 id + 当前背包传进来 ----
 // 够料：扣料 + 产物 +1 → emit inv-set（产物的 +1 已并进绝对值）+ emit crafted。不够：no-op。
 vitric.fn("craft", (a, ctx) => {
