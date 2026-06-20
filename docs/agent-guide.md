@@ -83,6 +83,16 @@ curl -s :6173/rpc -d '{"method":"world/get","params":{"entity":"@player"}}'     
 复现 bug：`vitric run my-game --ticks 600 --record bug.json` 录下来，
 `vitric replay my-game bug.json` 任何时候逐帧复现；重放跑偏会精确报告在哪个校验点开始不一致。
 
+## 给人看整局回放（web 端）
+
+`render/describe` / `render/screenshot` 是给 agent 自己看的。要把**整局过程**给人（产品/策划）回看、或自己一眼扫完体验是否顺，用**状态流回放**——纯数据、无图片无视频，浏览器现画：
+
+1. **抓状态流**：经控制面驱动一局（或跑现成通关脚本），每隔若干 tick 调一次 `sim/snapshot` 收成数组；同时给关键帧标一句"在做什么"（建造/种收/邀请…）当操作日志。产物是 `{"snaps":[...每帧世界状态...], "acts":[...每帧动作或""...]}` 的 JSON。范例：`games/frontier/tools/capture_replay.py`。
+2. **生成回放页**：`python scripts/build_replay.py <状态流.json> <out.html>` → 一个**自包含 HTML 回放页**（项目的 web 端）：canvas 逐帧重画世界 + UI，带操作日志侧栏（点击跳帧）、玩家高亮、角色/颜色图例、播放/暂停/拖进度。整局 delta 编码 + gzip 仅约 10KB——无任何图片或视频，纯状态数据在浏览器现画（引擎渲染的简化同构版）。
+3. **看**：HTML 任意浏览器直接打开；放到你自己的静态 host / 项目 web 端即可分享。
+
+确定性保证：`sim/snapshot` 是全量的（世界/tick/RNG/未消化输入），回放与原局逐位一致。
+
 ## 给模型读的画面
 
 除了逐个实体列清单，`render/describe` 还多给四样东西，让模型不用对着原始坐标自己算几何就能读懂画面。前两样只在画面有**焦点**时出现——焦点就是被 `Camera.follow` 跟随的那个实体（`follow` 为空 / 没配 / 指向不存在的实体 = 没焦点，这两样直接不出现，所以没用相机跟随的游戏拿到的还是和以前逐字节一样的旧响应）。`actions` 和 `changes` 跟有没有焦点无关，照常出。
