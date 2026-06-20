@@ -334,6 +334,7 @@ impl ApplicationHandler for WindowedGame {
         // (远程/录屏不走这条窗口路径,用 render/screenshot 离屏渲染,不受影响。)
         let attrs = Window::default_attributes()
             .with_title(self.title.as_str())
+            .with_active(true)
             .with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)))
             .with_inner_size(LogicalSize::new(1920.0, 1080.0));
         let window = match event_loop.create_window(attrs) {
@@ -344,6 +345,9 @@ impl ApplicationHandler for WindowedGame {
                 return;
             }
         };
+        // 启动即抢键盘焦点:从 cmd/bat 拉起时,焦点常留在那个控制台窗口上,
+        // 全屏游戏盖在上面却收不到按键 —— 这里主动 focus 一次,免得玩家先手点一下。
+        window.focus_window();
         match self.renderer {
             Renderer::Cpu => {
                 let context = match softbuffer::Context::new(window.clone()) {
