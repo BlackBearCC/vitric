@@ -1,25 +1,171 @@
 {
-  "rules": [
-    {
-      "id": "intro-dismiss-q",
-      "comment": "按 Q(切建造=任务第一步指示)即收起开场序章,自然衔接玩法。",
-      "on": { "event": "input", "filter": { "action": "q", "phase": "pressed" } },
-      "do": [{ "set": "@intro_panel.Ui.ox", "to": -6000 }]
-    },
-    {
-      "id": "intro-dismiss-built",
-      "comment": "兜底:开始建造也收起序章。",
-      "on": { "event": "built" },
-      "do": [{ "set": "@intro_panel.Ui.ox", "to": -6000 }]
-    },
-    {
-      "id": "ending-show",
-      "comment": "通关 settlement-thrived/game-won → 弹结局,收起其它 overlay。",
-      "on": { "event": "game-won" },
-      "do": [
-        { "set": "@ending_panel.Ui.ox", "to": 0 },
-        { "set": "@intro_panel.Ui.ox", "to": -6000 }
-      ]
+ "rules": [
+  {
+   "id": "intro-dismiss-q",
+   "comment": "按 Q(切建造=任务第一步指示)即收起开场序章,自然衔接玩法。",
+   "on": {
+    "event": "input",
+    "filter": {
+     "action": "q",
+     "phase": "pressed"
     }
-  ]
+   },
+   "do": [
+    {
+     "set": "@intro_panel.Ui.ox",
+     "to": -6000
+    }
+   ]
+  },
+  {
+   "id": "intro-dismiss-built",
+   "comment": "兜底:开始建造也收起序章。",
+   "on": {
+    "event": "built"
+   },
+   "do": [
+    {
+     "set": "@intro_panel.Ui.ox",
+     "to": -6000
+    }
+   ]
+  },
+  {
+   "id": "ending-show",
+   "comment": "通关 settlement-thrived/game-won → 弹结局,收起其它 overlay。",
+   "on": {
+    "event": "game-won"
+   },
+   "do": [
+    {
+     "set": "@ending_panel.Ui.ox",
+     "to": 0
+    },
+    {
+     "set": "@intro_panel.Ui.ox",
+     "to": -6000
+    }
+   ]
+  },
+  {
+   "id": "beat-beacon",
+   "comment": "剧情旁白:beacon",
+   "on": {
+    "event": "quest-done"
+   },
+   "if": [
+    [
+     "event.id",
+     "==",
+     "beacon"
+    ]
+   ],
+   "do": [
+    {
+     "set": "@narration_lbl.UiLabel.content",
+     "to": "信标重新亮起,微光刺破荒原的夜——母船或许还能收到。"
+    }
+   ]
+  },
+  {
+   "id": "beat-wheat",
+   "comment": "剧情旁白:wheat",
+   "on": {
+    "event": "quest-done"
+   },
+   "if": [
+    [
+     "event.id",
+     "==",
+     "wheat"
+    ]
+   ],
+   "do": [
+    {
+     "set": "@narration_lbl.UiLabel.content",
+     "to": "第一茬麦子熟了。捧着这把谷粒,你第一次觉得能在这儿活下去。"
+    }
+   ]
+  },
+  {
+   "id": "beat-first-companion",
+   "comment": "剧情旁白:first-companion",
+   "on": {
+    "event": "quest-done"
+   },
+   "if": [
+    [
+     "event.id",
+     "==",
+     "first-companion"
+    ]
+   ],
+   "do": [
+    {
+     "set": "@narration_lbl.UiLabel.content",
+     "to": "旅人 Lio 放下行囊住了下来。荒原上,你不再是唯一的人影。"
+    }
+   ]
+  },
+  {
+   "id": "beat-立足",
+   "comment": "剧情旁白:立足",
+   "on": {
+    "event": "quest-done"
+   },
+   "if": [
+    [
+     "event.id",
+     "==",
+     "立足"
+    ]
+   ],
+   "do": [
+    {
+     "set": "@narration_lbl.UiLabel.content",
+     "to": "三座结构立稳,这片废墟开始有了「家」的轮廓。"
+    }
+   ]
+  },
+  {
+   "id": "beat-温饱",
+   "comment": "剧情旁白:温饱",
+   "on": {
+    "event": "quest-done"
+   },
+   "if": [
+    [
+     "event.id",
+     "==",
+     "温饱"
+    ]
+   ],
+   "do": [
+    {
+     "set": "@narration_lbl.UiLabel.content",
+     "to": "粮仓有了余裕,日子不再只为下一顿饭打转。"
+    }
+   ]
+  },
+  {
+   "id": "beat-成群",
+   "comment": "剧情旁白:成群",
+   "on": {
+    "event": "quest-done"
+   },
+   "if": [
+    [
+     "event.id",
+     "==",
+     "成群"
+    ]
+   ],
+   "do": [
+    {
+     "set": "@narration_lbl.UiLabel.content",
+     "to": "邻居渐渐多了,炊烟与笑声在聚落里升起——他们开始搭手帮忙。"
+    }
+   ]
+  }
+ ]
 }
