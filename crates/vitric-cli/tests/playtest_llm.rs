@@ -1,12 +1,17 @@
-//! LLM 档埋雷验收（设计稿十一节第 5 阶段）：在叙事埋雷项目 `branching` 上跑一局 **LLM 拟人玩**
-//! （真 `Runtime::boot` + 假 LLM 客户端，不碰网络），断言两件事：
-//!   1. **LLM 吐的定性 note 进报告 qualitative_notes**——脚本化假客户端在某 tick 回一条
-//!      `{"action":..., "note":"管理员这句和上一幕矛盾"}`，断言这条矛盾 note 出现在聚合报告里；
-//!   2. **LLM 那局录像可重放复现**——LLM 推理不确定，但它选的输入照样录进录像，
-//!      `Sim::replay` 必须逐位复现通过（这是「可定位」的根基）。
+//! LLM tier mine-laying acceptance (design draft section 11 stage 5): run one session of **LLM
+//! persona play** on the narrative mine-laying project `branching` (real `Runtime::boot` + fake
+//! LLM client, no network touched), asserting two things:
+//!   1. **The qualitative note the LLM emits enters the report qualitative_notes** — the scripted
+//!      fake client returns a `{"action":..., "note":"this line contradicts the previous scene"}` at some tick;
+//!      assert this contradiction note appears in the aggregated report;
+//!   2. **The LLM session's recording is replayable** — LLM inference is non-deterministic, but
+//!      the inputs it chooses are still recorded; `Sim::replay` must reproduce bit-by-bit (this
+//!      is the foundation of "locatability").
 //!
-//! 还验：非 LLM 路径不受影响（不传 client 的策略档局没有 note、行为不变）。
-//! 假客户端按提示词内容决定动作（读 observation 的世界态），不靠脆弱的调用计数。
+//! Also verifies: the non-LLM path is unaffected (sessions of strategies without a client have
+//! no notes, behavior unchanged).
+//! The fake client decides actions based on prompt content (reads the world state from
+//! observation), not on fragile call counting.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -21,7 +26,8 @@ fn branching_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../vitric-playtest/tests/fixtures/branching")
 }
 
-/// 工厂：每次 boot 一份运行时 + 复制只读 Engine（和别的 playtest 集成测试同款）。
+/// Factory: boot a runtime each time + clone the read-only Engine (same as the other playtest
+/// integration tests).
 fn factory(
     dir: PathBuf,
 ) -> impl Fn() -> Result<(vitric_sim::Sim, Runtime, vitric_rules::Engine), String> {
@@ -32,15 +38,18 @@ fn factory(
     }
 }
 
-/// 假 LLM 客户端：读提示词里的世界态，**像拟人一样**一步步把 branching 玩到 ending-bad
-/// （take-key → open-door → go-bad），并在做 open-door 那一步顺手吐一条剧情矛盾 note。
+/// Fake LLM client: reads the world state from the prompt, **like a persona** step by step plays
+/// branching to ending-bad (take-key → open-door → go-bad), and at the open-door step emits a
+/// plot-contradiction note along the way.
 ///
-/// 决策完全看提示词（不靠调用计数，免得 no-op tick 错位）：
-/// - 还没拿钥匙（"key": false）→ take-key；
-/// - 拿了钥匙、门还没开（"door_open": false）→ open-door（这一步附矛盾 note）；
-/// - 门开了 → go-bad（奔 ending-bad）。
+/// Decisions are entirely based on the prompt (not call counting, to avoid no-op tick
+/// misalignment):
+/// - key not yet taken ("key": false) → take-key;
+/// - key taken, door not yet open ("door_open": false) → open-door (this step attaches the
+///   contradiction note);
+/// - door open → go-bad (heading to ending-bad).
 ///
-/// 全程不碰网络。`prompts` 记下每次收到的提示词，便于断言。
+/// No network touched throughout. `prompts` records every received prompt for assertions.
 struct ScriptedFake {
     prompts: Mutex<Vec<String>>,
 }
@@ -54,13 +63,15 @@ impl ScriptedFake {
 impl LlmClient for ScriptedFake {
     fn complete(&self, prompt: &str) -> Result<String, String> {
         self.prompts.lock().unwrap().push(prompt.to_string());
-        // 提示词里 observation 是 pretty JSON：直接子串判世界态推进到哪一步
+        // observation in the prompt is pretty JSON: directly substring-check the world state to
+        // see which step we are at
         let key_taken = prompt.contains("\"key\": true");
         let door_open = prompt.contains("\"door_open\": true");
         let reply = if !key_taken {
             r#"{"action": "take-key", "phase": "pressed"}"#.to_string()
         } else if !door_open {
-            // 开门这一步顺手吐一条剧情连续性矛盾 note（埋雷验收的核心断言对象）
+            // Emit a plot-continuity contradiction note on the door-open step (the core assertion
+            // target of mine-laying acceptance)
             r#"{"action": "open-door", "phase": "pressed", "note": "管理员这句和上一幕矛盾", "kind": "continuity"}"#
                 .to_string()
         } else {
@@ -75,7 +86,7 @@ fn llm_note_lands_in_report_and_its_recording_replays() {
     let dir = branching_dir();
     let client: Arc<dyn LlmClient> = Arc::new(ScriptedFake::new());
 
-    // 跑 1 局 LLM 拟人玩（用真 boot，假 client）
+    // Run 1 session of LLM persona play (real boot, fake client)
     let terminal = TerminalSpec::default();
     let results = run_llm_sessions(
         factory(dir.clone()),
@@ -90,18 +101,19 @@ fn llm_note_lands_in_report_and_its_recording_replays() {
     assert_eq!(results.len(), 1);
     let lr = &results[0];
 
-    // LLM 一步步玩到了 ending-bad（拟人玩真推进了游戏，不是空转）
+    // The LLM step-by-step played to ending-bad (persona play really advanced the game, not
+    // spinning)
     assert_eq!(lr.result.outcome, Outcome::Win, "ending-bad 归 Win，LLM 应玩到");
     assert!(
         lr.result.fired_events.contains(&"ending-bad".to_string()),
         "LLM 应触达 ending-bad，实际 {:?}",
         lr.result.fired_events
     );
-    // 它选的输入进了录像（take-key/open-door/go-bad）
+    // The inputs it chose entered the recording (take-key/open-door/go-bad)
     let actions: Vec<&str> = lr.result.recording.inputs.iter().map(|r| r.action.as_str()).collect();
     assert!(actions.contains(&"open-door"), "LLM 选的输入应进录像: {actions:?}");
 
-    // 1) 聚合报告：那条矛盾 note 进 qualitative_notes
+    // 1) Aggregated report: the contradiction note enters qualitative_notes
     let (_, rt) = Runtime::boot(&dir).unwrap();
     let report = aggregate_with_endings(&results, &rt.rules, &terminal);
     assert!(
@@ -117,10 +129,11 @@ fn llm_note_lands_in_report_and_its_recording_replays() {
         .expect("矛盾 note 必须出现在 qualitative_notes");
     assert_eq!(contradiction.kind, "continuity", "kind 应归一为 continuity");
     assert!(contradiction.representative.ticks > 0, "note 簇应挂得到可重放代表录像");
-    // summary 诚实标「待人复核」
+    // summary honestly marks "pending human review"
     assert!(report.summary.contains("待人复核"), "summary 应标 LLM note 待复核: {}", report.summary);
 
-    // 2) LLM 那局录像可重放复现（LLM 非确定，但它选的输入录下来照样逐位重放）
+    // 2) The LLM session's recording is replayable (LLM is non-deterministic, but the inputs it
+    // chose were recorded and still replay bit-by-bit)
     let (mut sim, mut rt) = Runtime::boot(&dir).unwrap();
     sim.replay(&lr.result.recording, &mut rt)
         .expect("LLM 局录像必须可 Sim::replay 逐位复现");
@@ -128,8 +141,9 @@ fn llm_note_lands_in_report_and_its_recording_replays() {
 
 #[test]
 fn llm_session_recording_replays_via_direct_strategy() {
-    // 直接用 LlmStrategy + run_session 跑（不经 run_llm_sessions），同样断言录像可重放——
-    // 验「LLM 策略选的输入走的就是普通 inject_input 录像通道」。
+    // Run directly with LlmStrategy + run_session (not via run_llm_sessions), same recording
+    // replay assertion — verifies "the inputs chosen by the LLM strategy go through the normal
+    // inject_input recording channel".
     let dir = branching_dir();
     let (mut sim, mut rt) = Runtime::boot(&dir).unwrap();
     let engine = rt.rules.clone();
@@ -139,20 +153,21 @@ fn llm_session_recording_replays_via_direct_strategy() {
     let res = run_session(&mut sim, &mut rt, &engine, &mut strat, &cfg).unwrap();
 
     assert_eq!(res.outcome, Outcome::Win, "LLM 应玩到 ending-bad");
-    // 这局直接拿到的 notes 里有矛盾 note（session 收 note 通道通了）
+    // The notes from this session include the contradiction note (the session note channel works)
     assert!(
         res.notes.iter().any(|n| n.text.contains("矛盾") && n.kind == "continuity"),
         "session.notes 应含矛盾 note，实际 {:?}",
         res.notes
     );
-    // 录像可重放
+    // Recording is replayable
     let (mut sim2, mut rt2) = Runtime::boot(&dir).unwrap();
     sim2.replay(&res.recording, &mut rt2).expect("LLM 局录像必须可重放");
 }
 
 #[test]
 fn non_llm_path_unchanged_no_notes() {
-    // 非 LLM 路径不受影响：纯策略档（脚本回放）的局不产 note、行为不变。
+    // Non-LLM path is unaffected: pure strategy sessions (script replay) produce no notes,
+    // behavior unchanged.
     use vitric_playtest::ScriptedStrategy;
     use vitric_sim::{InputRecord, Recording};
 
@@ -177,8 +192,10 @@ fn non_llm_path_unchanged_no_notes() {
 
 #[test]
 fn llm_session_outcome_is_deterministic_with_deterministic_fake() {
-    // 假 client 是确定的（同提示词同回复）→ 整局也确定。验「LLM 局录像确定与否取决于 client」：
-    // 用确定的假 client 时，两次跑录像逐字节一致（真 LLM 非确定，那是 client 的事，本档兜不住）。
+    // The fake client is deterministic (same prompt → same reply) → the whole session is also
+    // deterministic. Verify "whether an LLM session recording is deterministic depends on the
+    // client": with a deterministic fake client, two runs produce byte-identical recordings (a
+    // real LLM is non-deterministic, that is the client's business, this tier cannot help).
     let dir = branching_dir();
     let run = || {
         let client: Arc<dyn LlmClient> = Arc::new(ScriptedFake::new());

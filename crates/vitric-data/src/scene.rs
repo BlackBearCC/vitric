@@ -4,7 +4,7 @@ use vitric_ecs::World;
 
 use crate::{Schema, ValidationReport};
 
-/// 场景文件：实体列表，每个实体可命名、挂组件。
+/// Scene file: a list of entities, each of which can be named and have components attached.
 ///
 /// ```json
 /// { "entities": [
@@ -18,7 +18,7 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// 解析 + 按 schema 校验（不落地到 World，只验数据）。
+    /// Parse + validate against the schema (does not land in World; only validates the data).
     pub fn parse(doc: Value, file: &str, schema: &Schema) -> Result<Scene, ValidationReport> {
         let mut report = ValidationReport::default();
         validate_scene(&doc, file, schema, &mut report);
@@ -36,7 +36,7 @@ fn validate_scene(doc: &Value, file: &str, schema: &Schema, report: &mut Validat
         );
         return;
     };
-    // 收集实体名：查重 + 给 entity 引用校验用
+    // Collect entity names: for duplicate detection + for entity reference validation
     let mut names: Vec<&str> = Vec::new();
     for (i, ent) in entities.iter().enumerate() {
         if let Some(name) = ent.get("name").and_then(|v| v.as_str()) {
@@ -62,7 +62,7 @@ fn validate_scene(doc: &Value, file: &str, schema: &Schema, report: &mut Validat
             );
             continue;
         };
-        // 归一化后的组件值收一份，供 UI 值级校验跨字段看（锚点/容器类型/Grid 列数）
+        // Collect a copy of the normalized component values, for UI value-level cross-field validation (anchor / container kind / Grid columns)
         let mut normalized_comps = serde_json::Map::new();
         for (cname, cval) in comps {
             let cpath = format!("{epath}/components/{cname}");
@@ -79,7 +79,7 @@ fn validate_scene(doc: &Value, file: &str, schema: &Schema, report: &mut Validat
                 continue;
             };
             let normalized = cschema.normalize(cval, &cpath, report);
-            // entity 类型字段引用的实体名必须在场景里存在
+            // entity-typed fields must reference entity names that exist in the scene
             for (fname, fdef) in &cschema.fields {
                 if matches!(fdef.ty, crate::FieldType::Entity) {
                     if let Some(refname) = normalized.get(fname).and_then(|v| v.as_str()) {
@@ -99,16 +99,16 @@ fn validate_scene(doc: &Value, file: &str, schema: &Schema, report: &mut Validat
             }
             normalized_comps.insert(cname.clone(), normalized);
         }
-        // UI 值级语义校验（锚点预设名 / 容器类型 / Grid 列数 / 对齐名）——引擎兜底，
-        // 不依赖作者把字段声明成 enum。组件存在性已由上面的 schema 校验保证。
+        // UI value-level semantic validation (anchor preset name / container kind / Grid columns / alignment name) — engine backstop,
+        // does not rely on the author declaring fields as enums. Component existence is already ensured by the schema validation above.
         crate::ui_check::validate_ui_components(&normalized_comps, &epath, report);
     }
 }
 
-/// 把校验过的场景落地进 World：建实体、填归一化后的组件值。
+/// Land the validated scene into World: create entities, fill in the normalized component values.
 ///
-/// 实体引用（entity 字段里的名字）在落地时解析成运行时句柄 "e<i>v<g>"——
-/// 场景文件用名字（人/AI 好写），运行时用句柄（精确无歧义）。
+/// Entity references (names in entity fields) are resolved into runtime handles "e<i>v<g>" at landing —
+/// scene files use names (easy for humans/AI to write), runtime uses handles (precise and unambiguous).
 pub fn instantiate_scene(scene: &Scene, schema: &Schema, world: &mut World) -> Result<(), ValidationReport> {
     let mut report = ValidationReport::default();
     let entities = scene
@@ -117,7 +117,7 @@ pub fn instantiate_scene(scene: &Scene, schema: &Schema, world: &mut World) -> R
         .and_then(|v| v.as_array())
         .expect("Scene::parse 已校验结构");
 
-    // 第一遍：建实体（先全部建出来，引用解析才有目标）
+    // First pass: create entities (build them all first, so reference resolution has targets)
     let mut ids = Vec::with_capacity(entities.len());
     for (i, ent) in entities.iter().enumerate() {
         let id = match ent.get("name").and_then(|v| v.as_str()) {
@@ -138,7 +138,7 @@ pub fn instantiate_scene(scene: &Scene, schema: &Schema, world: &mut World) -> R
         ids.push(id);
     }
 
-    // 第二遍：填组件，entity 字段的名字换成句柄
+    // Second pass: fill components, swap names in entity fields for handles
     for (i, ent) in entities.iter().enumerate() {
         let comps = ent
             .get("components")
@@ -156,7 +156,7 @@ pub fn instantiate_scene(scene: &Scene, schema: &Schema, world: &mut World) -> R
                         if let Ok(target) = world.entity(&refname) {
                             normalized[fname] = Value::String(target.to_string());
                         }
-                        // 不存在的引用 Scene::parse 已报过，这里不重复
+                        // Non-existent references were already reported by Scene::parse; not duplicated here
                     }
                 }
             }
@@ -206,8 +206,8 @@ mod tests {
 
     #[test]
     fn emitter_schema_rejects_bad_fields_with_paths() {
-        // 发射器组件走与其他组件完全相同的 schema 校验：非法 kind（枚举）、
-        // 越界 spread、未知字段都要报错并带完整路径——vitric check 的红灯就是这里
+        // The emitter component goes through exactly the same schema validation as other components: illegal kind (enum),
+        // out-of-range spread, and unknown fields all get reported with full paths — vitric check's red lights come from here
         let s = Schema::parse(
             &json!({"components": {
                 "Position": {"fields": {"x": {"type":"number"}, "y": {"type":"number"}}},
@@ -244,22 +244,22 @@ mod tests {
         )
         .unwrap_err();
         let text = err.to_string();
-        // 枚举值非法（VD022）：路径直指 kind 字段
+        // Illegal enum value (VD022): path points directly at the kind field
         assert!(
             text.contains("VD022") && text.contains("scenes/main.json#/entities/0/components/Emitter/kind"),
             "{text}"
         );
-        // 越界（VD021）：spread > 360
+        // Out of range (VD021): spread > 360
         assert!(
             text.contains("VD021") && text.contains("Emitter/spread"),
             "{text}"
         );
-        // 未知字段（VD003）：ttl 不属于 Emitter
+        // Unknown field (VD003): ttl does not belong to Emitter
         assert!(
             text.contains("VD003") && text.contains("Emitter/ttl"),
             "{text}"
         );
-        // 合法写法照常通过
+        // A legal form still passes
         Scene::parse(
             json!({"entities": [
                 {"name": "sparks", "components": {
@@ -275,8 +275,8 @@ mod tests {
 
     #[test]
     fn ui_semantic_errors_surface_with_paths() {
-        // UI 值级校验走完整场景路径：非法锚点名 / 未知容器类型 / Grid 列数 0 都带
-        // 路径 + VD07x 码报出来（schema 字段先过类型，再过 UI 语义）。
+        // UI value-level validation goes through the full scene path: illegal anchor name / unknown container kind / Grid columns 0 all get
+        // reported with path + VD07x code (schema fields pass type first, then UI semantics).
         let s = Schema::parse(
             &json!({"components": {
                 "UiRoot": {"fields": {}},
@@ -308,7 +308,7 @@ mod tests {
         assert!(text.contains("VD070") && text.contains("Ui/anchor"), "非法锚点: {text}");
         assert!(text.contains("VD071") && text.contains("Container/kind"), "未知容器: {text}");
         assert!(text.contains("VD072") && text.contains("Container/columns"), "Grid 列数 0: {text}");
-        // 合法 UI 照常通过
+        // Legal UI still passes
         Scene::parse(
             json!({"entities": [
                 {"name": "ui", "components": {"UiRoot": {}}},
@@ -341,12 +341,12 @@ mod tests {
 
         let player = w.entity("player").unwrap();
         let pet = w.entity("pet").unwrap();
-        // 名字引用解析成了句柄
+        // Name reference resolved into a handle
         assert_eq!(
             w.get_field(pet, "Follow.target").unwrap(),
             &json!(player.to_string())
         );
-        // 默认值填上了
+        // Default values filled in
         let coins = w.query(&["Coin"]);
         assert_eq!(coins.len(), 1);
         assert_eq!(w.get_field(coins[0], "Coin.value").unwrap(), &json!(1));

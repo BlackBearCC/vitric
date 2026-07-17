@@ -1,13 +1,13 @@
-//! vitric check 对帧进口图集产物（*-atlas.json sidecar）的校验：
-//! 图集缺失 / 帧表非法 / uv（rect）越界 / 帧图引用缺失，每条都带路径 + VDxxx 码红灯；
-//! 合法产物 check 绿灯。
+//! vitric check validation of frame import atlas artifacts (*-atlas.json sidecar):
+//! atlas missing / frame table invalid / uv (rect) out of bounds / frame image reference missing,
+//! each red with path + VDxxx code; valid artifacts check green.
 
 use std::fs;
 use std::path::PathBuf;
 
 use vitric_cli::runtime;
 
-/// 最小可 check 项目（带 assets/）。
+/// Minimal checkable project (with assets/).
 fn make_project(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vitric-framescheck-{}-{tag}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -47,7 +47,8 @@ fn write_sidecar(dir: &std::path::Path, body: &str) {
     fs::write(dir.join("assets").join("clip-atlas.json"), body).unwrap();
 }
 
-/// 合法产物：图集 png 在、帧表合法、rect 不越界、帧图都在 → check 绿灯。
+/// Valid artifacts: atlas png present, frame table valid, rect in-bounds, frame images all
+/// present → check green.
 #[test]
 fn valid_atlas_products_pass() {
     let dir = make_project("valid");
@@ -61,12 +62,12 @@ fn valid_atlas_products_pass() {
     runtime::check(&dir).expect("合法图集产物 check 该过");
 }
 
-/// 图集 png 缺失 → 红灯，点名图集名。
+/// Atlas png missing → red, naming the atlas.
 #[test]
 fn missing_atlas_png_fails() {
     let dir = make_project("noatlas");
     write_png(&dir, "clip/frame000.png");
-    // atlas 字段指向不存在的 clip-atlas.png（没 write_png 它）
+    // atlas field points to non-existent clip-atlas.png (did not write_png it)
     write_sidecar(
         &dir,
         r#"{"clip":"clip","atlas":"clip-atlas.png","compressed":null,"atlas_size":[2,2],
@@ -77,7 +78,7 @@ fn missing_atlas_png_fails() {
     assert!(err.contains("clip-atlas.png"), "点名图集: {err}");
 }
 
-/// 帧表非法（缺 frames 数组）→ 红灯。
+/// Frame table invalid (missing frames array) → red.
 #[test]
 fn missing_frame_table_fails() {
     let dir = make_project("noframes");
@@ -90,13 +91,13 @@ fn missing_frame_table_fails() {
     assert!(err.contains("VD0A6"), "缺帧表错误码: {err}");
 }
 
-/// uv（rect）越界 → 红灯，带路径。
+/// uv (rect) out of bounds → red, with path.
 #[test]
 fn rect_out_of_bounds_fails() {
     let dir = make_project("oob");
     write_png(&dir, "clip-atlas.png");
     write_png(&dir, "clip/frame000.png");
-    // rect [0,0,4,4] 越出 atlas_size [2,2]
+    // rect [0,0,4,4] exceeds atlas_size [2,2]
     write_sidecar(
         &dir,
         r#"{"clip":"clip","atlas":"clip-atlas.png","compressed":null,"atlas_size":[2,2],
@@ -107,12 +108,12 @@ fn rect_out_of_bounds_fails() {
     assert!(err.contains("clip-atlas.json"), "带 sidecar 路径: {err}");
 }
 
-/// 帧图引用缺失 → 红灯，点名帧图。
+/// Frame image reference missing → red, naming the frame image.
 #[test]
 fn missing_frame_image_fails() {
     let dir = make_project("noframeimg");
     write_png(&dir, "clip-atlas.png");
-    // 不写 frame000.png
+    // Do not write frame000.png
     write_sidecar(
         &dir,
         r#"{"clip":"clip","atlas":"clip-atlas.png","compressed":null,"atlas_size":[2,2],

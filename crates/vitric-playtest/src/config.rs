@@ -1,71 +1,71 @@
-//! 每游戏的试玩视图覆盖（设计稿一节「自动推 + 可选覆盖」、十一节第 6 条）。
+//! Per-game playtest view overrides (design draft section 1 "auto-derive + optional overrides", section 11 item 6).
 //!
-//! 默认情况下 Scene View 从 schema/rules 自动推一份能跑的（任何游戏开箱即试）。游戏可选
-//! 在项目根放一份 `playtest.json` 把视图打磨得更顺：挑相关字段、改人话标签、声明派生量
-//! （如「到出口的曼哈顿距离」）、给 greedy 指个优化目标、覆盖终止事件名。
+//! By default Scene View auto-derives a working view from the schema/rules (any game is playtestable out of the box). A game may optionally
+//! place a `playtest.json` at the project root to polish the view: pick relevant fields, relabel with human-readable names, declare derived
+//! quantities (e.g. "Manhattan distance to the exit"), give greedy an optimization target, or override terminal event names.
 //!
-//! **覆盖是打磨，不是前提**：没有 `playtest.json` 时 [`PlaytestConfig::default`] 让所有行为
-//! 和阶段 1~5 逐字节一致（向后兼容由测试锁）。这里只解析 + 校验配置成结构体，怎么把它套进
-//! 投影/策略/终止见 [`crate::scene_view`] 和 [`crate::strategy`]。
+//! **Overrides are polish, not a prerequisite**: without `playtest.json`, [`PlaytestConfig::default`] keeps all behavior
+//! byte-identical to stages 1~5 (backward compatibility is locked by tests). This module only parses + validates config into structs;
+//! how it gets applied to projection/strategy/termination is in [`crate::scene_view`] and [`crate::strategy`].
 //!
-//! **派生量不做 DSL**：只支持三种内置量（distance/alias/count），刻意不做表达式引擎——
-//! 复杂派生留给游戏自己在规则里算出一个字段，这里只做「把已有数据换个角度看」的轻量声明。
+//! **No DSL for derived quantities**: only three built-in quantities are supported (distance/alias/count), deliberately no expression engine —
+//! complex derivations are left to the game to compute as a field in its own rules; here we only do lightweight declarations of "viewing existing data from another angle".
 
 use serde_json::Value;
 
-/// 一份每游戏试玩配置。所有字段都可缺省（缺了就回到自动推的默认行为）。
+/// A per-game playtest config. All fields are optional (omitting falls back to the auto-derived default behavior).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PlaytestConfig {
-    /// 观测投影的覆盖（挑组件/重命名/派生量）。
+    /// Observation projection overrides (pick components / rename / derived quantities).
     pub observation: ObservationConfig,
-    /// greedy 的优化目标（None=无目标，greedy 退化为可复现随机，和阶段 1 一致）。
+    /// greedy's optimization target (None = no target, greedy degrades to reproducible random, consistent with stage 1).
     pub goal: Option<GoalSpec>,
-    /// 终止事件名覆盖（None=用 TerminalSpec::default）。
+    /// Terminal event name overrides (None = use TerminalSpec::default).
     pub terminal: Option<TerminalOverride>,
 }
 
-/// 观测投影的覆盖。
+/// Observation projection overrides.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ObservationConfig {
-    /// 白名单：只保留这些组件名（非空时覆盖默认装饰剔除——白名单外的一律剔）。
-    /// 空=不启用白名单，走默认「剔装饰、留其余」。
+    /// Whitelist: only keep these component names (when non-empty, overrides the default decoration stripping — anything outside the whitelist is stripped).
+    /// Empty = whitelist disabled, falls back to the default "strip decorations, keep the rest".
     pub include: Vec<String>,
-    /// 黑名单：额外剔除这些组件名（在默认装饰剔除之上叠加）。
+    /// Blacklist: additionally strip these component names (stacked on top of the default decoration stripping).
     pub exclude: Vec<String>,
-    /// 字段重命名：observation 里的路径 → 人话标签。路径形如 `<实体>/<组件>.<字段>`
-    /// （和数值遥测同款 key），命中就把那个叶子的键换成人话名（不改值、不改结构层级）。
+    /// Field renaming: a path in observation → a human-readable label. The path looks like `<entity>/<component>.<field>`
+    /// (same key style as numeric telemetry); on hit, that leaf's key is replaced with the human-readable name (value and structural level are unchanged).
     pub relabel: Vec<Relabel>,
-    /// 派生量声明：算进 observation 的一个 `"derived"` 子对象（纯投影，不进哈希）。
+    /// Derived quantity declarations: computed into a `"derived"` sub-object of observation (pure projection, not hashed).
     pub derived: Vec<DerivedSpec>,
 }
 
-/// 一条字段重命名。
+/// One field rename.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Relabel {
-    /// 原始路径（`<实体>/<组件>.<字段>`）。
+    /// Original path (`<entity>/<component>.<field>`).
     pub path: String,
-    /// 换上的人话名。
+    /// The human-readable name to apply.
     pub name: String,
 }
 
-/// 一个派生量声明（三种内置之一）。算出来挂进 `observation.derived[name]`。
+/// One derived quantity declaration (one of the three built-ins). Computed and attached to `observation.derived[name]`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DerivedSpec {
-    /// 两个命名实体的 Position 距离（曼哈顿或欧氏）。任一实体不存在/无 Position → 该量为 null。
+    /// Distance between the Positions of two named entities (Manhattan or Euclidean). If either entity is missing or has no Position → the quantity is null.
     Distance {
         name: String,
         from: String,
         to: String,
         metric: DistanceMetric,
     },
-    /// 字段别名：把某个 observation 叶子的值原样镜像到 `derived[name]`（方便 greedy/人直接读）。
+    /// Field alias: mirrors the value of some observation leaf verbatim into `derived[name]` (for greedy/humans to read directly).
     Alias { name: String, path: String },
-    /// 计数：带某组件的存活实体数。
+    /// Count: number of live entities with a given component.
     Count { name: String, component: String },
 }
 
 impl DerivedSpec {
-    /// 这个派生量挂进 `derived` 子对象时用的键。
+    /// The key used when this derived quantity is attached to the `derived` sub-object.
     pub fn name(&self) -> &str {
         match self {
             DerivedSpec::Distance { name, .. } => name,
@@ -75,30 +75,30 @@ impl DerivedSpec {
     }
 }
 
-/// 距离度量。
+/// Distance metric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DistanceMetric {
     Manhattan,
     Euclidean,
 }
 
-/// greedy 的优化目标：朝某个派生量的方向走。
+/// greedy's optimization target: move toward/against a derived quantity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GoalSpec {
-    /// 目标派生量名（必须是 `observation.config.derived` 里声明过的量）。
+    /// Target derived quantity name (must be a quantity declared in `observation.config.derived`).
     pub quantity: String,
-    /// 优化方向。
+    /// Optimization direction.
     pub direction: GoalDirection,
 }
 
-/// 目标方向：让目标量变小（如奔出口=距离 min）还是变大（如攒资源=数量 max）。
+/// Target direction: make the quantity smaller (e.g. head for the exit = distance min) or larger (e.g. hoard resources = count max).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalDirection {
     Min,
     Max,
 }
 
-/// 终止事件名覆盖（缺省字段回退到 TerminalSpec::default 的对应集合）。
+/// Terminal event name overrides (omitted fields fall back to the corresponding set in TerminalSpec::default).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TerminalOverride {
     pub win_events: Option<Vec<String>>,
@@ -107,8 +107,8 @@ pub struct TerminalOverride {
 }
 
 impl PlaytestConfig {
-    /// 从 `playtest.json` 的 JSON 文档解析。`path` 只用于报错定位（vitric check 风格）。
-    /// 缺字段给合理默认；非法配置返回带路径的明确错误（不静默吞）。
+    /// Parse from the JSON document of `playtest.json`. `path` is only used for error location (vitric check style).
+    /// Missing fields get reasonable defaults; invalid config returns a clear error with the path (not silently swallowed).
     pub fn parse(doc: &Value, path: &str) -> Result<PlaytestConfig, String> {
         let root = doc
             .as_object()
@@ -127,7 +127,7 @@ impl PlaytestConfig {
             Some(v) => Some(parse_terminal(v, path)?),
         };
 
-        // 一致性校验：goal 引用的派生量必须真被声明过（否则 greedy 永远读不到目标，是配置 bug）
+        // Consistency check: the derived quantity referenced by goal must actually be declared (otherwise greedy can never read the target — a config bug)
         if let Some(g) = &goal {
             let declared = observation.derived.iter().any(|d| d.name() == g.quantity);
             if !declared {
@@ -141,8 +141,8 @@ impl PlaytestConfig {
         Ok(PlaytestConfig { observation, goal, terminal })
     }
 
-    /// 从项目根加载 `playtest.json`。不存在返回 None（=用默认 config，行为不变）；
-    /// 存在但解析失败返回 Err（带路径，vitric check 风格）。
+    /// Load `playtest.json` from the project root. Returns None if it does not exist (= use the default config, behavior unchanged);
+    /// returns Err if it exists but parsing fails (with the path, vitric check style).
     pub fn load(project_dir: &std::path::Path) -> Result<Option<PlaytestConfig>, String> {
         let path = project_dir.join("playtest.json");
         if !path.exists() {
@@ -168,7 +168,7 @@ fn parse_observation(v: &Value, path: &str) -> Result<ObservationConfig, String>
         let ro = rv
             .as_object()
             .ok_or_else(|| format!("{path}: observation.relabel 必须是对象（path→人话名）"))?;
-        // BTreeMap 序遍历（serde_json Map 默认按插入序；为确定，先收集再按 key 排）
+        // Iterate in BTreeMap order (serde_json Map defaults to insertion order; for determinism, collect first then sort by key)
         let mut pairs: Vec<(&String, &Value)> = ro.iter().collect();
         pairs.sort_by(|a, b| a.0.cmp(b.0));
         for (k, val) in pairs {
@@ -187,7 +187,7 @@ fn parse_observation(v: &Value, path: &str) -> Result<ObservationConfig, String>
         for (i, item) in arr.iter().enumerate() {
             derived.push(parse_derived(item, path, i)?);
         }
-        // 派生量名不能重名（重名会互相覆盖，是配置 bug）
+        // Derived quantity names must not collide (collisions would overwrite each other — a config bug)
         let mut seen = std::collections::BTreeSet::new();
         for d in &derived {
             if !seen.insert(d.name().to_string()) {
@@ -218,7 +218,7 @@ fn parse_derived(item: &Value, path: &str, idx: usize) -> Result<DerivedSpec, St
             let name = need_str("name")?;
             let from = need_str("from")?;
             let to = need_str("to")?;
-            // metric 可缺省 → manhattan
+            // metric is optional → defaults to manhattan
             let metric = match obj.get("metric").and_then(|v| v.as_str()) {
                 None | Some("manhattan") => DistanceMetric::Manhattan,
                 Some("euclidean") => DistanceMetric::Euclidean,
@@ -265,7 +265,7 @@ fn parse_terminal(v: &Value, path: &str) -> Result<TerminalOverride, String> {
     Ok(TerminalOverride { win_events, lose_events, ending_prefixes })
 }
 
-/// 缺省=空数组（已启用但没写就当空）。
+/// Default = empty array (enabled but omitted is treated as empty).
 fn parse_string_array(v: Option<&Value>, path: &str, field: &str) -> Result<Vec<String>, String> {
     match v {
         None | Some(Value::Null) => Ok(Vec::new()),
@@ -281,7 +281,7 @@ fn parse_string_array(v: Option<&Value>, path: &str, field: &str) -> Result<Vec<
     }
 }
 
-/// 缺省=None（区分「没写这个覆盖」和「写了空数组」——None 回退到默认集合）。
+/// Default = None (distinguishes "this override was not written" from "an empty array was written" — None falls back to the default set).
 fn parse_opt_string_array(
     v: Option<&Value>,
     path: &str,
@@ -330,7 +330,7 @@ mod tests {
         .unwrap();
         assert_eq!(c.observation.include, vec!["Position", "Resources"]);
         assert_eq!(c.observation.exclude, vec!["Debug"]);
-        // relabel 按 path 排序（确定）
+        // relabel sorted by path (deterministic)
         assert_eq!(c.observation.relabel.len(), 2);
         assert_eq!(c.observation.relabel[0].path, "hero/Position.x");
         assert_eq!(c.observation.relabel[0].name, "横坐标");
@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(t.ending_prefixes, None, "没写的字段=None，回退默认");
     }
 
-    // ---- 非法配置：带路径报错 ----
+    // ---- Invalid config: error with path ----
 
     #[test]
     fn reject_non_object_root() {
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn reject_goal_without_declared_quantity() {
-        // goal 引用了一个没声明的派生量 → 报错（greedy 永远读不到目标）
+        // goal references an undeclared derived quantity → error (greedy can never read the target)
         let err = PlaytestConfig::parse(
             &json!({"goal": {"quantity": "ghost", "direction": "min"}}),
             "bad.json",

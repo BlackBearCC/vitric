@@ -1,9 +1,11 @@
-//! UI 控件（布局 1.1）端到端 + 系统级：布局系统每 tick 推进、脏标记零重算、
-//! 快照/回放续播一致、镜头变化 UI 不飘、灰盒 demo 摆位正确、render 真的画出来。
+//! UI controls (layout 1.1) end-to-end + system-level: the layout system advances each tick,
+//! dirty-flag zero recompute, snapshot/replay continuation consistent, UI does not drift with
+//! camera, the gray-box demo is positioned correctly, render actually draws it.
 //!
-//! 用 examples/ui-gallery 这个纯控件原语拼出来的"主菜单灰盒"证明：引擎只给通用
-//! 控件（Panel/Label/Container/锚点），具体界面是项目用积木拼的用法（不可交互，
-//! 交互见 1.2）。
+//! Uses examples/ui-gallery, a "main menu gray box" assembled from pure control primitives, to
+//! prove: the engine only provides generic controls (Panel/Label/Container/anchor); specific
+//! interfaces are assembled by the project from building blocks (non-interactive;
+//! interaction is covered in 1.2).
 
 use std::path::{Path, PathBuf};
 
@@ -17,25 +19,30 @@ fn demo_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/ui-gallery")
 }
 
-/// `layout_runs()` 背后是 vitric-render 里一个进程级全局原子计数器 `LAYOUT_RUNS`，
-/// 每次真解算布局就 +1（给测试观测用，不是产品逻辑）。集成测试默认在同一个测试
-/// binary 里并行跑：A 在数"重算了几次"时，B 只要也触发了一次布局 solve，就会把
-/// 这个全局计数器 +1，污染 A 的断言 → 间歇性失败（单线程跑必过，并行偶发挂）。
+/// `layout_runs()` is backed by a process-level global atomic counter `LAYOUT_RUNS` in
+/// vitric-render, +1 each time layout is actually solved (for test observation, not product
+/// logic). Integration tests run in parallel by default inside the same test binary: while A is
+/// counting "how many recomputes happened", as long as B triggers one layout solve it bumps this
+/// global counter by 1, polluting A's assertion → intermittent failure (passes single-threaded,
+/// occasionally fails when parallel).
 ///
-/// 这把进程级串行锁让"所有会触发布局解算或读取 layout_runs 计数的测试"在函数开头
-/// 各自拿锁、守卫活到函数结束，从而彼此串行、计数器不再被并发污染。它只串行这些
-/// 计数敏感的测试，不碰产品代码（全局计数器保留）。锁中毒（持锁测试 panic）不影响
-/// 后续测试——下面统一用 `.unwrap_or_else(|e| e.into_inner())` 兜 poisoned。
+/// This process-level serial lock lets "every test that triggers layout solving or reads the
+/// layout_runs counter" acquire the lock at function entry and hold the guard until function end,
+/// so they run serially and the counter is no longer polluted by concurrency. It only serializes
+/// these counter-sensitive tests and does not touch product code (the global counter is kept).
+/// Lock poisoning (the holding test panics) does not affect subsequent tests — we uniformly use
+/// `.unwrap_or_else(|e| e.into_inner())` to recover from a poisoned lock below.
 static LAYOUT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// 拿测试串行锁；锁被前一个 panic 的测试毒化时仍取回内层守卫，不连累后续测试。
+/// Acquire the test serial lock; when the lock was poisoned by a previous test's panic, still
+/// take back the inner guard so subsequent tests are not affected.
 fn lock_layout_tests() -> std::sync::MutexGuard<'static, ()> {
     LAYOUT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-// ---- 系统级：advance_ui_layout 直接驱动一个 World ----
+// ---- System-level: advance_ui_layout directly drives a World ----
 
-/// 造一个根 + 居中 Panel（400x200）的最小 UI 世界（无字体依赖）。
+/// Build a minimal UI world (font-free): a root + a centered Panel (400x200).
 fn ui_world() -> (World, vitric_ecs::EntityId) {
     let mut w = World::new();
     let root = w.spawn_named("ui").unwrap();
@@ -54,12 +61,13 @@ fn ui_world() -> (World, vitric_ecs::EntityId) {
 
 #[test]
 fn layout_system_writes_rects_into_components() {
-    // 本测试不读 layout_runs，但 advance_ui_layout 会让全局计数器 +1，会污染并行
-    // 跑的计数敏感测试，故也拿这把串行锁，与它们错开。
+    // This test does not read layout_runs, but advance_ui_layout will bump the global counter
+    // by 1, polluting parallel counter-sensitive tests, so it also takes this serial lock to
+    // stagger against them.
     let _guard = lock_layout_tests();
     let (mut w, panel) = ui_world();
     advance_ui_layout(&mut w, (1000, 600)).unwrap();
-    // 居中 400x200 于 1000x600 视口 → x=300, y=200
+    // Centered 400x200 within a 1000x600 viewport → x=300, y=200
     assert_eq!(w.get_field(panel, "Ui.rx").unwrap(), &json!(300.0));
     assert_eq!(w.get_field(panel, "Ui.ry").unwrap(), &json!(200.0));
     assert_eq!(w.get_field(panel, "Ui.rw").unwrap(), &json!(400.0));
@@ -68,15 +76,16 @@ fn layout_system_writes_rects_into_components() {
 
 #[test]
 fn static_ui_recomputes_zero_times_across_many_ticks() {
-    // 性能硬要求：静止 UI 连播 N tick，布局重算 0 次（脏标记）。
+    // Hard performance requirement: a static UI played for N consecutive ticks → 0 layout
+    // recomputes (dirty flag).
     let _guard = lock_layout_tests();
     let (mut w, _panel) = ui_world();
-    // 第一次：脏（layout_hash 空），解算一次
+    // First time: dirty (layout_hash empty), solves once
     let before = layout_runs();
     advance_ui_layout(&mut w, (1000, 600)).unwrap();
     let after_first = layout_runs();
     assert!(after_first > before, "首次应解算一次");
-    // 之后 50 tick UI 没动：布局算法一次都不该再跑
+    // Next 50 ticks the UI did not move: the layout algorithm must not run again
     for _ in 0..50 {
         advance_ui_layout(&mut w, (1000, 600)).unwrap();
     }
@@ -89,20 +98,20 @@ fn mutating_ui_marks_dirty_and_recomputes_once() {
     let (mut w, panel) = ui_world();
     advance_ui_layout(&mut w, (1000, 600)).unwrap();
     let settled = layout_runs();
-    // 改尺寸 → 脏 → 下一 tick 解算一次，再静止又零重算
+    // Change size → dirty → next tick solves once, then static again with zero recompute
     w.set_field(panel, "Ui.w", json!(500.0)).unwrap();
     advance_ui_layout(&mut w, (1000, 600)).unwrap();
     let after_change = layout_runs();
     assert_eq!(after_change, settled + 1, "改尺寸应触发恰好一次重算");
     advance_ui_layout(&mut w, (1000, 600)).unwrap();
     assert_eq!(layout_runs(), after_change, "改完再静止应零重算");
-    // 新尺寸已写回
+    // New size written back
     assert_eq!(w.get_field(panel, "Ui.rw").unwrap(), &json!(500.0));
 }
 
 #[test]
 fn empty_ui_world_is_zero_cost() {
-    // 没有 UiRoot：advance_ui_layout 不解算（layout_runs 不增）。
+    // No UiRoot: advance_ui_layout does not solve (layout_runs unchanged).
     let _guard = lock_layout_tests();
     let mut w = World::new();
     let before = layout_runs();
@@ -112,32 +121,38 @@ fn empty_ui_world_is_zero_cost() {
 
 #[test]
 fn snapshot_restore_preserves_layout_state() {
-    // 快照/回放：布局态（rx/ry/rw/rh + layout_hash）随组件进快照，回放后续播一致。
+    // Snapshot/replay: layout state (rx/ry/rw/rh + layout_hash) goes into the snapshot with the
+    // components; continued playback after replay is consistent.
     let _guard = lock_layout_tests();
     let (mut w, panel) = ui_world();
     advance_ui_layout(&mut w, (1000, 600)).unwrap();
     let snap = w.snapshot();
     let hash_before = w.state_hash();
 
-    // 在另一个世界里恢复
+    // Restore in another world
     let mut w2 = World::new();
     w2.restore(&snap).unwrap();
     assert_eq!(w2.state_hash(), hash_before, "回放后状态哈希必须一致");
     let panel2 = w2.entity("panel").unwrap();
     assert_eq!(w2.get_field(panel2, "Ui.rx").unwrap(), &json!(300.0));
-    // 回放后续播：UI 没动 → 零重算（layout_hash 已随快照带回）
+    // Continued playback after replay: UI did not move → zero recompute (layout_hash was brought
+    // back with the snapshot)
     let runs = layout_runs();
     advance_ui_layout(&mut w2, (1000, 600)).unwrap();
     assert_eq!(layout_runs(), runs, "回放后静止 UI 续播应零重算");
-    // panel 句柄只在原世界有意义；这里仅确认它存在过（回放对的是名字 panel2）
+    // The panel handle only makes sense in the original world; here we just confirm it once
+    // existed (replay targets the name panel2)
     assert!(w.is_alive(panel));
 }
 
 #[test]
 fn layout_is_independent_of_camera() {
-    // UI 屏幕空间：镜头移动/缩放/抖动 UI 屏幕位置不变（证明不经相机变换）。
-    // 在同一个世界里加一个会动的相机，solve_layout 的结果不随相机变。
-    // 两次 solve_layout 会让全局计数器 +2，会污染计数敏感测试，故也拿锁串行。
+    // UI screen space: when the camera moves/scales/shakes, the UI's screen position does not
+    // change (proves it does not go through the camera transform).
+    // Add a moving camera to the same world; solve_layout's result does not change with the
+    // camera.
+    // Two solve_layout calls bump the global counter by +2, polluting counter-sensitive tests,
+    // so this also takes the lock to serialize.
     let _guard = lock_layout_tests();
     let (mut w, panel) = ui_world();
     let cam = w.spawn_named("camera").unwrap();
@@ -146,7 +161,7 @@ fn layout_is_independent_of_camera() {
     let l0 = solve_layout(&w, 1000, 600).unwrap();
     let r0 = *l0.get(&panel).unwrap();
 
-    // 移动相机 + 改缩放
+    // Move camera + change scale
     w.set_field(cam, "Camera.x", json!(123.0)).unwrap();
     w.set_field(cam, "Camera.y", json!(-77.0)).unwrap();
     w.set_field(cam, "Camera.scale", json!(20.0)).unwrap();
@@ -157,71 +172,81 @@ fn layout_is_independent_of_camera() {
     assert_eq!(r0, UiRect { x: 300.0, y: 200.0, w: 400.0, h: 200.0 });
 }
 
-// ---- 端到端：examples/ui-gallery 灰盒 demo ----
+// ---- End-to-end: examples/ui-gallery gray-box demo ----
 
 #[test]
 fn gallery_demo_boots_and_lays_out_three_buttons() {
-    // step + solve_layout 都让全局计数器 +1，拿锁避免污染计数敏感测试。
+    // Both step and solve_layout bump the global counter by +1; take the lock to avoid polluting
+    // counter-sensitive tests.
     let _guard = lock_layout_tests();
     let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
-    // 跑一 tick：布局系统把 menu-vbox 的三个按钮排好（参照视口 = UI_REFERENCE_VIEWPORT）
+    // Run one tick: the layout system lays out the three buttons of menu-vbox (reference
+    // viewport = UI_REFERENCE_VIEWPORT)
     sim.step(&mut rt).unwrap();
 
     let w = &sim.world;
     let (vw, vh) = UI_REFERENCE_VIEWPORT;
-    // 直接用 solver 验布局（和写回组件同一份纯函数）
+    // Verify layout directly with the solver (same pure function used to write back to components)
     let layout = solve_layout(w, vw, vh).unwrap();
     let rect = |name: &str| *layout.get(&w.entity(name).unwrap()).unwrap();
 
-    // menu-panel 居中 600x420 于 1920x1080 → x=660, y=330
+    // menu-panel centered 600x420 within 1920x1080 → x=660, y=330
     let mp = rect("menu-panel");
     assert_eq!(mp, UiRect { x: 660.0, y: 330.0, w: 600.0, h: 420.0 });
 
-    // 三个按钮在 VBox 里竖排、cross=center 水平居中、gap=24、固定高 72。
+    // Three buttons stacked vertically in VBox, cross=center horizontally centered, gap=24, fixed
+    // height 72.
     let b0 = rect("btn-start");
     let b1 = rect("btn-options");
     let b2 = rect("btn-quit");
-    // 等宽等高
+    // Equal width and height
     assert_eq!(b0.w, 480.0);
     assert_eq!(b0.h, 72.0);
     assert_eq!(b1.w, 480.0);
     assert_eq!(b2.w, 480.0);
-    // 竖排：每个比上一个低 72+24=96
+    // Vertical: each is 72+24=96 lower than the previous
     assert_eq!(b1.y - b0.y, 96.0);
     assert_eq!(b2.y - b1.y, 96.0);
-    // cross=center：三个按钮 x 相同（水平居中于 VBox 内容区）
+    // cross=center: the three buttons share the same x (horizontally centered in the VBox
+    // content area)
     assert_eq!(b0.x, b1.x);
     assert_eq!(b1.x, b2.x);
 
-    // 按钮 label stretch 填满按钮框
+    // Button label stretch fills the button frame
     let lbl = rect("btn-start-label");
     assert_eq!(lbl, b0, "stretch 的 label 应与按钮框完全重合");
 }
 
 #[test]
 fn gallery_demo_renders_without_error_and_ui_overlay_present() {
-    // 渲染一帧（CPU 真相源）：UI 灰盒画出来，画面非空背景（菜单面板覆盖中心）。
-    // step + render_world 内部都会 solve_layout，让全局计数器增长，拿锁串行。
+    // Render one frame (CPU source of truth): the UI gray box is drawn, the image has a non-empty
+    // background (the menu panel covers the center).
+    // Both step and render_world solve_layout internally, bumping the global counter; take the
+    // lock to serialize.
     let _guard = lock_layout_tests();
     let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
     sim.step(&mut rt).unwrap();
     let (w, h) = (960u32, 540u32);
     let buf =
         vitric_render::render_world(&sim.world, w, h, rt_assets(&demo_dir()), sim.tick).unwrap();
-    // 画面中心落在 VBox 中间那个按钮上（#3a4a6b），证明 Panel 叠加层画出来了；
-    // 不是清屏背景灰蓝（#181a21）也不是面板底色——按钮盖在面板之上。
+    // The center of the image lands on the middle button of the VBox (#3a4a6b), proving the Panel
+    // overlay was drawn;
+    // it is not the clear-screen background gray-blue (#181a21) nor the panel base color — the
+    // button sits on top of the panel.
     let center = ((h / 2) * w + w / 2) as usize * 4;
     let px = [buf[center], buf[center + 1], buf[center + 2]];
     assert_eq!(px, [0x3a, 0x4a, 0x6b], "中心应是按钮色，证明 UI Panel 叠加层画出来了");
-    // 面板边角（中心面板左上角内一点）应是面板底色 #1b1d26，证明背景框也在
-    // menu-panel 居中 600x420 于 960x540 → 左上 (180, 60)；取 (190,70) 在面板内、按钮外
+    // A panel corner (a point just inside the top-left of the center panel) should be the panel
+    // base color #1b1d26, proving the background frame is also present
+    // menu-panel centered 600x420 within 960x540 → top-left (180, 60); take (190,70) inside the
+    // panel, outside the buttons
     let corner = (70 * w + 190) as usize * 4;
     assert_eq!(
         [buf[corner], buf[corner + 1], buf[corner + 2]],
         [0x1b, 0x1d, 0x26],
         "面板内非按钮处应是面板底色"
     );
-    // 同一帧渲两次逐字节一致（确定性）
+    // Rendering the same frame twice is byte-identical (determinism)
     let buf2 =
         vitric_render::render_world(&sim.world, w, h, rt_assets(&demo_dir()), sim.tick).unwrap();
     assert_eq!(buf, buf2, "同一世界同一 tick 渲两次必须逐字节相同");
@@ -229,8 +254,10 @@ fn gallery_demo_renders_without_error_and_ui_overlay_present() {
 
 #[test]
 fn gallery_demo_ui_does_not_drift_with_camera_in_render() {
-    // 渲染层证明：移动相机后，UI 中心像素颜色不变（UI 不随镜头飘）。
-    // step + 两次 render_world 都会 solve_layout，让全局计数器增长，拿锁串行。
+    // Render-layer proof: after moving the camera, the UI center pixel color does not change (UI
+    // does not drift with the camera).
+    // Both step and two render_world calls solve_layout, bumping the global counter; take the
+    // lock to serialize.
     let _guard = lock_layout_tests();
     let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
     sim.step(&mut rt).unwrap();
@@ -241,7 +268,7 @@ fn gallery_demo_ui_does_not_drift_with_camera_in_render() {
         vitric_render::render_world(&sim.world, w, h, rt_assets(&demo_dir()), sim.tick).unwrap();
     let px_a = [buf_a[center], buf_a[center + 1], buf_a[center + 2]];
 
-    // 移动相机（demo 有个 camera 实体）
+    // Move the camera (the demo has a camera entity)
     let cam = sim.world.entity("camera").unwrap();
     sim.world.set_field(cam, "Camera.x", json!(50.0)).unwrap();
     sim.world.set_field(cam, "Camera.scale", json!(20.0)).unwrap();
@@ -252,9 +279,9 @@ fn gallery_demo_ui_does_not_drift_with_camera_in_render() {
     assert_eq!(px_a, px_b, "镜头移动/缩放后 UI 中心像素必须不变（屏幕空间叠加）");
 }
 
-// ---- check：坏 UI 项目逐项报路径错误 ----
+// ---- check: a bad UI project reports path errors item by item ----
 
-/// 写一个最小 UI 项目（schema + 一个场景）。`scene_entities` 注入要测的实体。
+/// Write a minimal UI project (schema + one scene). `scene_entities` injects the entities to test.
 fn make_ui_project(tag: &str, scene_entities: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vitric-uicheck-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -266,7 +293,8 @@ fn make_ui_project(tag: &str, scene_entities: &str) -> PathBuf {
             "scenes":["scenes/main.json"],"seed":1}"#,
     )
     .unwrap();
-    // schema：把 anchor/kind 声明成 text（不靠 enum），证明引擎兜底校验 UI 语义
+    // schema: anchor/kind declared as text (not enum) to prove the engine falls back to
+    // validating UI semantics
     std::fs::write(
         dir.join("schema.json"),
         r##"{"components":{
@@ -324,9 +352,9 @@ fn check_reports_missing_panel_image() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// 加载 demo 素材（含字体）——render_world 需要字体来画矢量 label。
+/// Load demo assets (including fonts) — render_world needs fonts to draw vector labels.
 fn rt_assets(dir: &Path) -> &'static vitric_render::Assets {
-    // 测试里一次性 leak 成 'static 省得每次重载（只在测试进程里）
+    // In tests, leak once into 'static to avoid reloading each time (test-process only)
     let mut a = vitric_render::Assets::load_dir(&dir.join("assets")).unwrap();
     a.load_font(&dir.join("fonts/DejaVuSans.ttf")).unwrap();
     Box::leak(Box::new(a))

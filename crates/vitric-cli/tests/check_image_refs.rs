@@ -1,14 +1,14 @@
-//! `vitric check` 扫脚本/规则字面贴图引用的端到端：
-//! 真实事故原型——脚本 ctx.spawn 用了不存在的 "dust.png"，check 绿灯、
-//! 游戏跑到一半渲染硬炸。现在这类引用必须在 check 期就红灯。
+//! `vitric check` scans literal texture references in scripts/rules end-to-end:
+//! real incident prototype — the script ctx.spawn used a non-existent "dust.png", check was green,
+//! and the game hard-crashed mid-render. Now such references must go red during check.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use vitric_cli::runtime;
 
-/// 最小可 check 项目：一个组件、一个实体、一个 .js 脚本、一个规则文件。
-/// `script` / `rule_doc` 由各测试注入要扫的内容。
+/// Minimal checkable project: one component, one entity, one .js script, one rule file.
+/// `script` / `rule_doc` are injected by each test with the content to scan.
 fn make_project(tag: &str, script: &str, rule_doc: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vitric-imgref-{}-{tag}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -39,7 +39,7 @@ fn make_project(tag: &str, script: &str, rule_doc: &str) -> PathBuf {
 
 const EMPTY_RULES: &str = r#"{"rules": []}"#;
 
-/// 1x1 不透明白 PNG 写进 assets/（让缺失的引用变"存在"）。
+/// Write a 1x1 opaque white PNG into assets/ (to turn a missing reference "present").
 fn write_png(path: &Path) {
     let file = fs::File::create(path).unwrap();
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), 1, 1);
@@ -60,7 +60,7 @@ fn check_fails_on_script_literal_missing_png_then_passes_with_it() {
     assert!(err.contains("missing.png"), "报错点名贴图: {err}");
     assert!(err.contains("scripts/fx.js"), "报错点名脚本文件: {err}");
     assert!(err.contains("动态拼接"), "局限要在错误里说清: {err}");
-    // 把图补进 assets/ 之后同一项目过 check
+    // After dropping the image into assets/, the same project passes check
     write_png(&dir.join("assets/missing.png"));
     runtime::check(&dir).expect("图补上了 check 该过");
     fs::remove_dir_all(&dir).unwrap();
@@ -68,7 +68,7 @@ fn check_fails_on_script_literal_missing_png_then_passes_with_it() {
 
 #[test]
 fn check_ignores_dynamic_image_concatenation() {
-    // 动态拼接是文档化局限：不报（误报会让 agent 学会无视 check）
+    // Dynamic concatenation is a documented limitation: not reported (false positives would teach the agent to ignore check)
     let dir = make_project(
         "dynamic",
         r#"vitric.fn("burst", (ctx, args) => {

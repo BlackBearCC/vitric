@@ -1,23 +1,23 @@
-// 伙伴系统:游荡 + 舒适度 + 离开 + 日夜作息 + 多旅人/多伙伴目标追踪
+// Companion system: wandering + comfort + departure + day/night routine + multi-drifter/multi-companion target tracking
 //
-// 系统:
+// Systems:
 //   cache-player-pos     Player+Position → Colony.player_x / player_y
 //   drifter-snapshot     Drifter+Position+Persona → Colony.drifter_snapshot (JSON)
 //   companion-snapshot   Companion+Position+Persona → Colony.companion_snapshot (JSON)
-//   companion-register   Companion → Colony.companion_handles (句柄列表, 给 companion-shelter 用)
-//   companion-shelter    Colony → 每句柄的 Need.quarters (struct_count > 0)
-//   target-drifter       Colony → Colony.target_drifter_* (找最近旅人)
-//   target-companion     Colony → Colony.target_companion_* (找最近伙伴)
-//   companion-wander     Companion+Wander+Position+Velocity → 散步
-//   companion-need       Companion+Need → 舒适度/离开
-//   talk-reply-apply-*   Colony → Text.content (给最近旅人/伙伴), 消费 last_talk_reply
+//   companion-register   Companion → Colony.companion_handles (handle list, for companion-shelter)
+//   companion-shelter    Colony → each handle's Need.quarters (struct_count > 0)
+//   target-drifter       Colony → Colony.target_drifter_* (find nearest drifter)
+//   target-companion     Colony → Colony.target_companion_* (find nearest companion)
+//   companion-wander     Companion+Wander+Position+Velocity → wander
+//   companion-need       Companion+Need → comfort / departure
+//   talk-reply-apply-*   Colony → Text.content (to nearest drifter/companion); consumes last_talk_reply
 //
-// 数据流:cache-player-pos 写 Colony.player_x/y → snapshot 系统把 Drifter/Companion
-// 数据打包成 JSON 写 Colony → target-* / companion-shelter / talk-reply-apply-* 只读 Colony。
-// 跨系统数据全部活在 Colony 字段里,无任何模块级 let __ 共享变量。
+// Data flow: cache-player-pos writes Colony.player_x/y → snapshot systems pack
+// Drifter/Companion data into JSON and write to Colony → target-* / companion-shelter / talk-reply-apply-* only read Colony.
+// All cross-system data lives in Colony fields; no module-level `let __` shared variables.
 
-const WANDER_SPEED = 1.2;   // 散步速度
-const WANDER_RADIUS = 2.5;  // 围绕 home_x/y ± 半径
+const WANDER_SPEED = 1.2;   // wander speed
+const WANDER_RADIUS = 2.5;  // around home_x/y ± radius
 const COMP_DAY_SEC = 60.0;
 const COMP_TICK_PER_SEC = 60;
 
@@ -30,8 +30,8 @@ function compTodOf(tick) {
   return "夜";
 }
 
-// 把一个实体快照数组打包成 JSON 字符串(给 Colony.*_snapshot 用)。
-// id/Position/Persona 都已通过 query 校验存在。
+// Pack an entity snapshot array into a JSON string (for Colony.*_snapshot).
+// id/Position/Persona have all been verified present via the query.
 function packSnapshot(entities) {
   const data = entities.map(e => ({
     id: e.id,
@@ -45,13 +45,13 @@ function packSnapshot(entities) {
   return JSON.stringify(data);
 }
 
-// 从 Colony 读快照 JSON,失败(空字段/损坏)返回空数组。
+// Read snapshot JSON from Colony; on failure (empty field / corrupt) return an empty array.
 function readSnapshot(raw) {
   if (!raw || typeof raw !== "string") return [];
   try { return JSON.parse(raw) || []; } catch (_) { return []; }
 }
 
-// ---- 缓存玩家位置到 Colony(target-* / companion-shelter / talk-reply-apply-* 需要)----
+// ---- Cache player position into Colony (needed by target-* / companion-shelter / talk-reply-apply-*) ----
 vitric.system("cache-player-pos", { query: ["Player", "Position"], writes: ["Position"] }, (entities, ctx) => {
   for (const e of entities) {
     if (!e.Player) continue;
@@ -60,7 +60,7 @@ vitric.system("cache-player-pos", { query: ["Player", "Position"], writes: ["Pos
   }
 });
 
-// ---- 旅人/伙伴快照:每帧把所有 Drifter / Companion 的 Position+Persona 打包成 JSON ----
+// ---- Drifter/companion snapshot: every frame pack all Drifter / Companion Position+Persona into JSON ----
 vitric.system("drifter-snapshot", { query: ["Drifter", "Position", "Persona"], writes: [] }, (entities, ctx) => {
   ctx.setField("colony", "Colony.drifter_snapshot", packSnapshot(entities));
 });
@@ -69,12 +69,12 @@ vitric.system("companion-snapshot", { query: ["Companion", "Position", "Persona"
   ctx.setField("colony", "Colony.companion_snapshot", packSnapshot(entities));
 });
 
-// ---- 维护 Colony.companion_handles 句柄列表(companion-shelter 直接拿句柄 setField, 不用 parse JSON)----
+// ---- Maintain Colony.companion_handles handle list (companion-shelter uses handles directly via setField, no JSON parse) ----
 vitric.system("companion-register", { query: ["Companion"], writes: [] }, (entities, ctx) => {
   ctx.setField("colony", "Colony.companion_handles", entities.map(e => e.id));
 });
 
-// ---- 同步所有伙伴的 Need.quarters(基于 Colony.struct_count; 规则已经维护这个字段)----
+// ---- Sync all companions' Need.quarters (based on Colony.struct_count; the rule already maintains this field) ----
 vitric.system("companion-shelter", { query: ["Colony"], writes: [] }, (entities, ctx) => {
   const c = entities[0];
   if (!c) return;
@@ -85,7 +85,7 @@ vitric.system("companion-shelter", { query: ["Colony"], writes: [] }, (entities,
   }
 });
 
-// ---- 维护最近旅人:从 Colony.drifter_snapshot 里找离 player 最近的写入 Colony.target_drifter* ----
+// ---- Maintain nearest drifter: find the one closest to the player from Colony.drifter_snapshot, write to Colony.target_drifter* ----
 vitric.system("target-drifter", { query: ["Colony"], writes: [] }, (entities, ctx) => {
   const c = entities[0];
   if (!c) return;
@@ -110,15 +110,15 @@ vitric.system("target-drifter", { query: ["Colony"], writes: [] }, (entities, ct
   }
 });
 
-// ---- 维护最近伙伴 ----
-// 查询 Colony + Companion + Need + Persona + Position + Mood + Text,找最近伙伴,
-// 把它和它的实时状态(id/位置/Persona/Need/Mood)都快照到 Colony.* 字段。
-// 这样规则调 fn 时(talk / gift)能直接拿 @colony.Colony.target_companion_xxx 传给 fn,
-// 不用在 fn 里跨实体读字段(ctx 没有 getField)。
-// query 只放 [Colony]:仿 target-drifter,从 companion_snapshot 找最近伙伴。
-// (绝不能把 Companion 塞进 query —— 没有实体同时具备 Colony 和 Companion,会让本系统匹配 0 个、
-//  从不运行 → target_companion 永远为空 → gift/talk 永远找不到目标。这是 iter2 互动层此前的死因。)
-// 位置/人设字段直接取自快照;Need/Mood 不在快照里,用 ctx.getField 按句柄读 live 值。
+// ---- Maintain nearest companion ----
+// Query Colony + Companion + Need + Persona + Position + Mood + Text, find the nearest companion,
+// and snapshot it and its live state (id/position/Persona/Need/Mood) into Colony.* fields.
+// That way, when a rule calls a fn (talk / gift), it can pass @colony.Colony.target_companion_xxx straight to the fn
+// without the fn having to read fields across entities (ctx has no getField).
+// query only contains [Colony]: like target-drifter, find the nearest companion from companion_snapshot.
+// (Companion must NOT be added to the query — no entity has both Colony and Companion, so the system would match 0 entities and
+//  never run → target_companion stays empty forever → gift/talk can never find a target. This was the previous cause of death for iter2 interaction layer.)
+// Position/persona fields come straight from the snapshot; Need/Mood are not in the snapshot, so use ctx.getField by handle to read live values.
 vitric.system("target-companion", { query: ["Colony"], writes: [] }, (entities, ctx) => {
   const c = entities[0];
   if (!c) return;
@@ -156,15 +156,16 @@ vitric.system("target-companion", { query: ["Colony"], writes: [] }, (entities, 
   }
 });
 
-// ---- 交互可发现性:玩家靠近最近伙伴(互动范围内)时,头顶浮一个"!"标记 + 提示按键。
-// 用独立的 companion_marker 实体(不占用伙伴说话气泡的 Text)。走开就移出视野。----
+// ---- Interaction discoverability: when the player is near the nearest companion (within
+// interaction range), float a "!" marker + key hint above their head. Uses a separate
+// companion_marker entity (does not occupy the companion's speech bubble Text). Moves out of view when walking away. ----
 vitric.system("companion-hint", { query: ["Colony"], writes: [] }, (ents, ctx) => {
   const c = ents[0];
   if (!c) return;
   const tid = c.Colony.target_companion || "";
   const px = c.Colony.player_x || 0, py = c.Colony.player_y || 0;
   const tx = c.Colony.target_companion_x || 0, ty = c.Colony.target_companion_y || 0;
-  const near = tid !== "" && ((tx - px) * (tx - px) + (ty - py) * (ty - py)) <= 16.0; // 互动范围内(dist<4)
+  const near = tid !== "" && ((tx - px) * (tx - px) + (ty - py) * (ty - py)) <= 16.0; // within interaction range (dist<4)
   if (near) {
     ctx.setField("companion_marker", "Position.x", tx);
     ctx.setField("companion_marker", "Position.y", ty + 0.95);
@@ -175,8 +176,9 @@ vitric.system("companion-hint", { query: ["Colony"], writes: [] }, (ents, ctx) =
   }
 });
 
-// ---- 交互可发现性:旅人(可邀请入伙)头顶提示。6 格内开始提示引导走近,
-// 4 格内(可邀请范围)变成"✋按 I 邀请"。和伙伴标记区分:旅人是青色、按 I。----
+// ---- Interaction discoverability: hint above drifter (can be invited to join). At 6 tiles,
+// start prompting to approach; at 4 tiles (invitable range), show "press I to invite".
+// Distinguished from companion marker: drifter is cyan, press I. ----
 vitric.system("drifter-hint", { query: ["Colony"], writes: [] }, (ents, ctx) => {
   const c = ents[0];
   if (!c) return;
@@ -194,7 +196,7 @@ vitric.system("drifter-hint", { query: ["Colony"], writes: [] }, (ents, ctx) => 
   }
 });
 
-// ---- 游荡:随 timer 换目标点,到了就停、等 timer 再动 ----
+// ---- Wander: switch target points on a timer; stop when reached, wait for timer to move again ----
 vitric.system("companion-wander", { query: ["Companion", "Wander", "Position", "Velocity"], writes: ["Wander", "Velocity"] }, (entities, ctx) => {
   for (const e of entities) {
     const w = e.Wander;
@@ -221,10 +223,10 @@ vitric.system("companion-wander", { query: ["Companion", "Wander", "Position", "
   }
 });
 
-// ---- 舒适度:日夜节奏 + 住所 ----
-// 白天:无 shelter 缓慢衰减;有 shelter 缓慢恢复。
-// 夜里:无 shelter 快速衰减;有 shelter 加速恢复。
-// comfort 跌到 0 → leave_timer 累计,15 秒 → 直接 despawn 自己
+// ---- Comfort: day/night rhythm + housing ----
+// Day: no shelter → slow decay; with shelter → slow recovery.
+// Night: no shelter → fast decay; with shelter → accelerated recovery.
+// comfort hitting 0 → leave_timer accrues; at 15 seconds → despawn self
 vitric.system("companion-need", { query: ["Companion", "Need"], writes: ["Need"] }, (entities, ctx) => {
   const tod = compTodOf(ctx.tick);
   const isNight = tod === "夜";
@@ -251,10 +253,10 @@ vitric.system("companion-need", { query: ["Companion", "Need"], writes: ["Need"]
   }
 });
 
-// ---- 邀请旅人:规则收到 companion-invited 后调这个 fn ----
-// 把传入的 drifter_id despawn 掉,然后在玩家附近 spawn 一个带 Companion 的新实体。
-// 名字由 rules 通过 persona.name 传入。preferred 由 args 或按名字查 DRIFTER_POOL 补全。
-// 不同伙伴不同色相(从名字 hash → HSL),让聚落视觉上住着不同人。
+// ---- Invite drifter: the rule calls this fn after receiving companion-invited ----
+// Despawn the passed drifter_id, then spawn a new entity with Companion near the player.
+// The name is passed in via persona.name by the rules. preferred is filled from args or looked up in DRIFTER_POOL by name.
+// Different companions get different hues (from name hash → HSL), so visually the colony is populated by distinct people.
 function personaPreferred(name) {
   for (let i = 0; i < DRIFTER_POOL.length; i++) {
     if (DRIFTER_POOL[i].name === name) return DRIFTER_POOL[i].preferred || "";
@@ -267,11 +269,11 @@ function personaHash(name) {
   return h;
 }
 function personaColor(name) {
-  // 用 hash 派一个 0..360 的色相,固定 s/l 暖色 — 同一名字永远同色。
+  // Derive a 0..360 hue from the hash, fixed s/l warm color — same name always yields the same color.
   const hue = ((personaHash(name) % 360) + 360) % 360;
-  // 暖色过滤:把色相压到 [10, 60] 区间(暖橙/黄/红),避免冷蓝/绿。
+  // Warm filter: compress the hue into [10, 60] (warm orange/yellow/red), avoiding cold blue/green.
   const warm = 10 + ((hue % 50) | 0);
-  // hsv → rgb(简版,纯数字,确定性)
+  // hsv → rgb (simplified, pure numbers, deterministic)
   const s = 0.55, v = 0.78;
   const c = v * s;
   const x = c * (1 - Math.abs(((warm / 60) % 2) - 1));
@@ -321,10 +323,10 @@ vitric.fn("consumeDrifter", (args, ctx) => {
   ctx.emit("companion-moved-in", { name: persona.name });
 });
 
-// ---- 旅人到来:每个 game day 由 day-start 事件触发,根据 index 派一个人设 ----
-// 固定人设池(确定性 → 重放/录像一致)。每个 spawn 不命名(避免与已有 @drifter 冲突)。
-// 每人设带"偏好物品"(preferred,逗号分隔)→ iter2 送礼系统用:送对其 +12 好感、送错 +3 好感。
-// 6 个差异化人设:不同名字/原型/性格/说话风格/偏好,不是千篇一律的同一模板。
+// ---- Drifter arrival: triggered by the day-start event every game day; pick a persona by index ----
+// Fixed persona pool (deterministic → replay/recording consistent). Each spawn is unnamed (avoids collision with existing @drifter).
+// Each persona carries "preferred items" (preferred, comma-separated) → used by the iter2 gift system: matching gift +12 affinity, wrong +3 affinity.
+// 6 differentiated personas: distinct name/archetype/personality/speech style/preferred, not a single cookie-cutter template.
 const DRIFTER_POOL = [
   { name: "Mira",  archetype: "山地步兵",   traits: "坚忍,寡言,脚步轻",           speech: "简短、爱用省略号",     preferred: "fiber,wood" },
   { name: "Kade",  archetype: "电工学徒",   traits: "好奇、爱拆东西、胆大",       speech: "语速快、夹英文",       preferred: "ore,plank" },
@@ -336,7 +338,7 @@ const DRIFTER_POOL = [
 vitric.fn("spawnNewDrifter", (args, ctx) => {
   const idx = (args.idx | 0) || 0;
   const persona = DRIFTER_POOL[idx % DRIFTER_POOL.length];
-  // 野外区域(x>=16),避免与已有资源点重合
+  // Wild area (x>=16), avoid overlapping existing resource nodes
   const sx = 17 + Math.round(ctx.random() * 9); // 17..26
   const sy = 2 + Math.round(ctx.random() * 8);  // 2..10
   ctx.spawn({
@@ -352,9 +354,9 @@ vitric.fn("spawnNewDrifter", (args, ctx) => {
   ctx.emit("drifter-arrived", { name: persona.name, x: sx, y: sy });
 });
 
-// ---- 对话(按 t):靠近目标则发 LLM 对话 ----
-// 距离检查 + 用 LLM 生成对白 + 把目标 id 暂存到 Colony.last_talk_target,
-// onTalkReply 收到回复时给它 +affinity 并把亲和力增长记到该天/该伙伴。
+// ---- Talk (press t): if near a target, fire an LLM conversation ----
+// Distance check + use LLM to generate dialogue + stash the target id in Colony.last_talk_target;
+// onTalkReply gives it +affinity when the reply comes back and records the affinity gain for that day/companion.
 vitric.fn("talkNearby", (args, ctx) => {
   const px = args.px | 0, py = args.py | 0;
   const dx = args.dx | 0, dy = args.dy | 0;
@@ -364,13 +366,13 @@ vitric.fn("talkNearby", (args, ctx) => {
   const arch = args.parch || "漂泊者";
   const traits = args.ptraits || "沉默";
   const speech = args.pspeech || "寡言";
-  const pid = args.pid || ""; // 目标实体的句柄(伙伴或旅人)
+  const pid = args.pid || ""; // handle of the target entity (companion or drifter)
   const prompt = "你是一个在荒星漂泊的旅人" + name + "(" + arch + "),性格" + traits + ",说话" + speech + "。一个拓荒者走近了你,你主动说句话打个招呼。请用 JSON 格式回复:{\"say\":\"你说的话\",\"mood\":\"情绪\"}";
   ctx.setField("colony", "Colony.last_talk_target", pid);
   ctx.ask("llm", prompt, "onTalkReply");
 });
 
-// ---- 邀请(按 i):靠近目标则发邀请事件 ----
+// ---- Invite (press i): if near a target, fire the invite event ----
 vitric.fn("inviteAnyNearby", (args, ctx) => {
   const px = +args.px || 0, py = +args.py || 0;
   const dx = +args.dx || 0, dy = +args.dy || 0;
@@ -386,13 +388,13 @@ vitric.fn("inviteAnyNearby", (args, ctx) => {
   });
 });
 
-// ---- 物品全集(与 schema Inventory 对齐)——礼物选择 + 写回用 ----
+// ---- Full item set (aligned with the Inventory schema) — for gift selection and write-back ----
 const ITEM_KINDS = ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp"];
 
-// ---- 送礼(按 g):靠近伙伴时,选背包里第一件"该伙伴偏好的"物品 → 送礼 +affinity ----
-// 选礼策略:优先选偏好物品 → 没有偏好物品则选背包里数量 > 0 的第一件。
-// 偏好命中 +12 好感,普通 +3 好感(每天都送上限 2 次,gifted_today 守卫)。
-// 写回:扣背包 → emit inv-set(由 economy.js 同一套绝对值回写法落到 @player.Inventory.*)。
+// ---- Gift (press g): when near a companion, pick the first "preferred by this companion" item in the inventory → gift +affinity ----
+// Gift-pick strategy: prefer preferred items → if no preferred item, pick the first item with quantity > 0.
+// Preferred hit +12 affinity, generic +3 affinity (cap of 2 gifts per day; guarded by gifted_today).
+// Write-back: deduct inventory → emit inv-set (uses the same absolute-value write-back path as economy.js to land on @player.Inventory.*).
 const GIFT_PREFERRED_GAIN = 12;
 const GIFT_GENERIC_GAIN   = 3;
 const GIFT_DAILY_CAP      = 2;
@@ -402,12 +404,12 @@ function readInvFromArgs(a) {
   return inv;
 }
 function pickGiftItem(inv, preferredCsv) {
-  // preferred 命中优先
+  // preferred hits first
   const prefs = (preferredCsv || "").split(",").map(s => s.trim()).filter(s => s);
   for (const k of prefs) {
     if ((inv[k] | 0) > 0) return k;
   }
-  // 没有偏好,选第一个 >0 的
+  // no preferred; pick the first >0
   for (const k of ITEM_KINDS) {
     if ((inv[k] | 0) > 0) return k;
   }
@@ -420,14 +422,14 @@ vitric.fn("giveGiftNearby", (args, ctx) => {
   if (dist2 > 16) return;
   const pid = args.pid || "";
   if (!pid) return;
-  // 每日上限
+  // daily cap
   const got = ctx.getField(pid, "Need.gifted_today");
   const cur = (typeof got === "number" && !isNaN(got)) ? got : 0;
   if (cur >= GIFT_DAILY_CAP) {
     ctx.emit("gift-cap", { pid: pid });
     return;
   }
-  // 选物品
+  // pick item
   const inv = readInvFromArgs(args);
   const preferred = args.ppreferred || "";
   const item = pickGiftItem(inv, preferred);
@@ -437,12 +439,12 @@ vitric.fn("giveGiftNearby", (args, ctx) => {
   }
   const preferredHit = preferred.split(",").map(s => s.trim()).filter(s => s).indexOf(item) >= 0;
   const gain = preferredHit ? GIFT_PREFERRED_GAIN : GIFT_GENERIC_GAIN;
-  // 扣 1 件 + 回写
+  // deduct 1 item + write back
   inv[item] -= 1;
   const d = {};
   for (const k of ITEM_KINDS) d[k] = inv[k];
   ctx.emit("inv-set", d);
-  // +affinity + 计数 + 互动标记
+  // +affinity + count + interaction marker
   const aff = ctx.getField(pid, "Need.affinity");
   const a = (typeof aff === "number" && !isNaN(aff)) ? aff : 30;
   const na = a + gain;
@@ -453,15 +455,15 @@ vitric.fn("giveGiftNearby", (args, ctx) => {
   ctx.emit("gift-given", { pid: pid, item: item, preferred: preferredHit ? 1 : 0, gain: gain });
 });
 
-// ---- LLM 回复通用:把回复存到 Colony.last_talk_reply,
-// talk-reply-apply-* 系统每帧把它落到目标实体的 Text.content 上 ----
-// 同时给 last_talk_target 那位伙伴 / 旅人 +affinity(旅人搬到聚落后此值会被带过来)。
-// 每天每伙伴 talk 上限 3 次 → talked_today 守卫(超了不再 +affinity,但仍展示回复)。
-// fn 拿不到 ctx.getField,所以:talkNearby 把 target 句柄存到 Colony.last_talk_target,
-// 此外规则再把 target 当前的 talked_today/affinity 写到 Colony.last_talk_* 副本,
-// 本 fn 从 Colony 读这些副本,加完后再回写(setField 跨实体)。
-const TALK_AFFINITY_GAIN = 3;     // 一次对话的 +affinity
-const TALK_DAILY_CAP = 3;          // 每天每伙伴最多 +affinity 的对话次数
+// ---- Generic LLM reply: store the reply in Colony.last_talk_reply;
+// the talk-reply-apply-* systems land it on the target entity's Text.content every frame ----
+// Also give +affinity to the companion / drifter pointed to by last_talk_target (when a drifter moves into the colony this value carries over).
+// Talk cap of 3 per day per companion → guarded by talked_today (over cap: no more +affinity, but the reply is still displayed).
+// fn can't call ctx.getField, so: talkNearby stashes the target handle in Colony.last_talk_target,
+// and the rule also writes the target's current talked_today/affinity to Colony.last_talk_* copies;
+// this fn reads those copies from Colony, adds to them, then writes back (setField across entities).
+const TALK_AFFINITY_GAIN = 3;     // +affinity per conversation
+const TALK_DAILY_CAP = 3;          // max +affinity conversations per companion per day
 vitric.fn("onTalkReply", (reply, ctx) => {
   const text = reply.text || "（对方点了点头）";
   let display = text;
@@ -470,7 +472,7 @@ vitric.fn("onTalkReply", (reply, ctx) => {
     if (parsed.say) display = parsed.say;
   } catch (_) {}
   ctx.setField("colony", "Colony.last_talk_reply", display);
-  // 找目标伙伴/旅人 +affinity
+  // Find the target companion / drifter +affinity
   const target = (ctx.getField("colony", "Colony.last_talk_target") || "").toString();
   if (target) {
     const cur = ctx.getField(target, "Need.talked_today") | 0;
@@ -487,8 +489,8 @@ vitric.fn("onTalkReply", (reply, ctx) => {
   ctx.setField("colony", "Colony.last_talk_target", "");
 });
 
-// ---- 把 last_talk_reply 落到最近的旅人/伙伴 Text.content;两个 apply 系统第一个命中就消费。
-// 谁更近谁拿到回复,另一个 apply 看到 last_talk_reply 已被清空就直接 return。
+// ---- Land last_talk_reply on the nearest drifter/companion's Text.content; whichever of the two apply systems hits first consumes it.
+// Whoever is closer gets the reply; the other apply sees last_talk_reply already emptied and just returns.
 function applyReplyToNearest(c, snapshotField, ctx) {
   const reply = c.Colony.last_talk_reply || "";
   if (!reply) return;
@@ -502,7 +504,7 @@ function applyReplyToNearest(c, snapshotField, ctx) {
   }
   if (best) {
     ctx.setField(best.id, "Text.content", reply);
-    ctx.setField("colony", "Colony.last_talk_reply", ""); // 只消费一次
+    ctx.setField("colony", "Colony.last_talk_reply", ""); // consume only once
   }
 }
 
@@ -519,30 +521,30 @@ vitric.system("talk-reply-apply-companion", { query: ["Colony"], writes: [] }, (
 });
 
 // =====================================================================
-// iter2 — 伙伴关系系统(affinity / interactions / contribution / mood)
+// iter2 — companion relationship system (affinity / interactions / contribution / mood)
 // =====================================================================
 //
-// 设计:把"interact 次数 + comfort"汇总到 affinity(0..100)。
-//   1. talk(gain +3, 每天最多 +9 = 3 次)        — onTalkReply 里加
-//   2. gift(命中偏好 +12 / 普通 +3, 每天最多 +24 = 2 次) — giveGiftNearby 里加
-//   3. care:comfort 高 + 有住所 → +0.6/min,持续涨;
-//          comfort 极低 → -0.3/min,缓慢掉;
-//          长期(>3 天)无任何互动 → -0.5/day 衰减。
+// Design: aggregate "interaction count + comfort" into affinity (0..100).
+//   1. talk (gain +3, max +9/day = 3 talks)        — added in onTalkReply
+//   2. gift (preferred hit +12 / generic +3, max +24/day = 2 gifts) — added in giveGiftNearby
+//   3. care: high comfort + housing → +0.6/min, sustained rise;
+//          very low comfort → -0.3/min, slow decline;
+//          no interaction for a long time (>3 days) → -0.5/day decay.
 //
-// 然后 affinity + mood 驱动 contribution:每 12 秒一次,自动
-//   - 给最近 Plot 种熟作物 +1 stage(帮忙种田)
-//   - 给 @player 背包 +1 ore/wood/fiber(帮忙采集)
-//   - 给 Colony 食物 rate +0.5 boost(出菜多一截)
-//   三选一,按 ctx.random 派。
+// Then affinity + mood drive contribution: every 12 seconds, automatically
+//   - +1 stage to the nearest ripe crop on a Plot (help with farming)
+//   - +1 ore/wood/fiber to @player inventory (help with gathering)
+//   - +0.5 boost to Colony food rate (extra food output)
+//   Pick one of three, distributed via ctx.random.
 //
-// 心情:由 comfort + last_interact_day 距离 + 时段算出"开心/平静/低落/疲倦",
-//   写入 Mood.value,companion-mood 把这个值塞进 Persona's Text 上方浮一行小字。
-//   (复用现有 Text 字段;reply 文本会被同一 tick 覆盖,所以我们改用 Text 显示亲和力/心情)。
+// Mood: derived from comfort + distance from last_interact_day + time-of-day → "happy/calm/down/tired",
+//   written to Mood.value; companion-mood floats this as a small line above the Persona's Text.
+//   (Reuses the existing Text field; the reply text would be overwritten in the same tick, so we use Text to display affinity/mood instead.)
 
-// ---- 心情:comfort + 互动新旧 + 时段 → "开心/平静/疲倦/低落/恼火" ----
-// 优先级:恼火(<20 comfort 且 5 天没互动) > 低落(<35 comfort) > 疲倦(夜里无住所)
-//       > 开心(comfort>70 + 最近互动过) > 平静。
-// 只写 Mood.value,不碰 Text.content(reply 用 Text,不能打架)。
+// ---- Mood: comfort + interaction recency + time-of-day → "happy/calm/tired/down/angry" ----
+// Priority: angry (<20 comfort and 5 days without interaction) > down (<35 comfort) > tired (night with no housing)
+//       > happy (comfort>70 + recent interaction) > calm.
+// Only writes Mood.value; never touches Text.content (reply uses Text; can't conflict).
 vitric.system("companion-mood", { query: ["Companion", "Need", "Persona", "Mood"], writes: ["Mood"] }, (entities, ctx) => {
   const tod = compTodOf(ctx.tick);
   const day = (ctx.getField("colony", "Colony.day") | 0) || 1;
@@ -560,12 +562,12 @@ vitric.system("companion-mood", { query: ["Companion", "Need", "Persona", "Mood"
   }
 });
 
-// ---- 照顾(comfort-driven) + 长期疏远衰减:每帧 ----
-// 有 quarters + comfort > 70 → +0.6/min(0.01/s)
-// comfort < 30 且 quarters==0 → -0.3/min(-0.005/s)
-// 自上次互动 >= 3 天 → -0.5/day ≈ -0.0083/s
+// ---- Care (comfort-driven) + long-neglect decay: every frame ----
+// Has quarters + comfort > 70 → +0.6/min (0.01/s)
+// comfort < 30 and quarters==0 → -0.3/min (-0.005/s)
+// No interaction for >= 3 days → -0.5/day ≈ -0.0083/s
 const CARE_GAIN_PER_SEC = 0.01;   // +0.6/min
-const CARE_LOSS_PER_SEC = 0.005;  // -0.3/min(无住所低 comfort)
+const CARE_LOSS_PER_SEC = 0.005;  // -0.3/min (no housing, low comfort)
 const NEGLECT_PER_SEC   = 0.0083; // -0.5/day
 vitric.system("companion-affinity-care", { query: ["Companion", "Need"], writes: ["Need"] }, (entities, ctx) => {
   const day = (ctx.getField("colony", "Colony.day") | 0) || 1;
@@ -585,13 +587,13 @@ vitric.system("companion-affinity-care", { query: ["Companion", "Need"], writes:
   }
 });
 
-// ---- 每天重置 talked_today / gifted_today + 衰减照顾 ----
-// 收到 day-start 事件 → Colony.day 已 +1(由 clock 系统先跑)。
-// 做法:把 day 起点存到 Colony.day_anchor,系统每天对比一次;差异则重置每伙伴计数。
-// 这里用更简单的方式:clock 系统每 tick emit day-start;本系统 query [Companion,Need],
-// 每帧检测 "本次进系统时还在新一天(对比上次 day_anchor)" → 重置计数。
-// query 只放 [Companion,Need](注释本就写的是这个,原代码手滑塞了 Colony 致本系统从不运行)。
-// day / _day_anchor 在 colony 上,用 getField 读、setField 写跨实体。
+// ---- Reset talked_today / gifted_daily each day + decay care ----
+// On receiving the day-start event → Colony.day has already been +1 (the clock system runs first).
+// Approach: store the day start in Colony.day_anchor; the system compares once per day; on mismatch reset each companion's counts.
+// Here we take a simpler approach: the clock system emits day-start every tick; this system queries [Companion,Need],
+// every frame checks "this entry into the system is still a new day (compared to last day_anchor)" → reset counts.
+// query only contains [Companion,Need] (the comment originally said so; the old code accidentally put Colony here so the system never ran).
+// day / _day_anchor live on the colony; read via getField and write via setField across entities.
 vitric.system("companion-day-reset", { query: ["Companion", "Need"], writes: ["Need"] }, (entities, ctx) => {
   const day = ctx.getField("colony", "Colony.day") | 0;
   const last = ctx.getField("colony", "Colony._day_anchor") | 0;
@@ -603,15 +605,15 @@ vitric.system("companion-day-reset", { query: ["Companion", "Need"], writes: ["N
   }
 });
 
-// ---- 贡献:affinity>=50 + 心情 开心/平静 → 每 12 秒自动帮聚落干活 ----
-// 候选动作:
-//   (B) 给 @player 背包 +1 ore/wood/fiber(随机一种)
-//   (C) 给 Colony food_rate 加 0.5(限一次 tick 内有效,速率系统会自然衰减走)
-// 动作 (A) 帮最近 crop 加速 拆到独立系统 companion-tend-crops(query Crop,不走 ctx.world)。
+// ---- Contribution: affinity>=50 + mood happy/calm → every 12 seconds auto-help the colony ----
+// Candidate actions:
+//   (B) +1 ore/wood/fiber to @player inventory (random one)
+//   (C) +0.5 to Colony food_rate (effective for only one tick; the rate system will naturally decay it)
+// Action (A) helping the nearest crop speed up is split into a separate system companion-tend-crops (queries Crop, doesn't go through ctx.world).
 const CONTRIB_INTERVAL_SEC = 12.0;
 const CONTRIB_AFFINITY_MIN = 50;
-// query 不放 Colony:读/写 colony 走 ctx.getField/ctx.setField 跨实体;塞 Colony 进 query 会让本系统
-// 匹配 0 个实体(没有实体同时具备 Companion 和 Colony)→ 整个贡献闭环从不运行(iter2 此前的死因)。
+// query doesn't include Colony: read/write colony goes via ctx.getField/ctx.setField across entities; putting Colony in the query would make the system
+// match 0 entities (no entity has both Companion and Colony) → the entire contribution loop never runs (previous cause of death for iter2).
 vitric.system("companion-contribution", { query: ["Companion", "Need", "Mood", "Position"], writes: ["Need"] }, (entities, ctx) => {
   for (const e of entities) {
     const n = e.Need;
@@ -620,18 +622,18 @@ vitric.system("companion-contribution", { query: ["Companion", "Need", "Mood", "
     if (mood !== "开心" && mood !== "平静") continue;
     n.contribution_timer = (n.contribution_timer || 0) - ctx.dt;
     if (n.contribution_timer > 0) continue;
-    n.contribution_timer = CONTRIB_INTERVAL_SEC + ctx.random() * 4; // 12~16 秒
-    // 二选一(不再做 crop-tend,那个由独立系统按全 colony 状态统一处理)
+    n.contribution_timer = CONTRIB_INTERVAL_SEC + ctx.random() * 4; // 12~16 seconds
+    // Pick one of two (no more crop-tend; that's handled by a separate system based on whole-colony state)
     const pick = (ctx.random() * 2) | 0;
     if (pick === 0) {
-      // (B) 给 @player 背包 +1 资源
+      // (B) +1 resource to @player inventory
       const items = ["ore", "wood", "fiber"];
       const which = items[(ctx.random() * items.length) | 0];
       const cur = ctx.getField("@player", "Inventory." + which) | 0;
       ctx.setField("@player", "Inventory." + which, cur + 1);
       ctx.emit("companion-contributed", { pid: e.id, kind: which });
     } else {
-      // (C) Colony food_rate 加 0.5(持续 1 tick,后面 colony 系统会自己衰减走)
+      // (C) +0.5 to Colony food_rate (lasts 1 tick; the colony system will decay it afterwards)
       const fr = ctx.getField("colony", "Colony.food_rate");
       ctx.setField("colony", "Colony.food_rate", (typeof fr === "number" ? fr : 0) + 0.5);
       ctx.emit("companion-boost", { pid: e.id, what: "food" });
@@ -639,14 +641,14 @@ vitric.system("companion-contribution", { query: ["Companion", "Need", "Mood", "
   }
 });
 
-// ---- 帮 crop 加速:聚落里至少一名 affinity>=50 的伙伴 → 每 ~10 秒给一个未熟的 wheat +1 stage ----
-// 独立成系统是因为它需要 query Crop(伙伴系统 query 是 Companion);靠 colony.companion_happy_count
-// (companion-tally 系统已写入)作为触发条件,避免跨系统互相 query。
+// ---- Help crops speed up: at least one companion with affinity>=50 in the colony → every ~10 seconds give an unripe wheat +1 stage ----
+// Split into a separate system because it needs to query Crop (the companion system's query is Companion); uses colony.companion_happy_count
+// (written by the companion-tally system) as the trigger condition, to avoid cross-system mutual queries.
 const TEND_INTERVAL_SEC = 10.0;
 vitric.system("companion-tend-crops", { query: ["Crop", "Position"], writes: ["Crop"] }, (entities, ctx) => {
   const happy = ctx.getField("colony", "Colony.companion_happy_count") | 0;
   if (happy < 1) return;
-  // 简单做法:把所有未熟 wheat 的 entity 收集,每 tick 按概率触发一次(确定性由 ctx.random 控)
+  // Simple approach: collect all unripe wheat entities, trigger once per tick by probability (determinism controlled by ctx.random)
   const candidates = [];
   for (const e of entities) {
     if (e.Crop.kind !== "wheat") continue;
@@ -654,20 +656,20 @@ vitric.system("companion-tend-crops", { query: ["Crop", "Position"], writes: ["C
     candidates.push(e);
   }
   if (candidates.length === 0) return;
-  // 用第一只候选的 id 作为稳定 tick 计数锚(每个 crop 自己计时,均匀分布)
+  // Use the first candidate's id as a stable tick-count anchor (each crop times itself; evenly distributed)
   for (const e of candidates) {
     e.Crop._tend_t = ((e.Crop._tend_t || 0) - ctx.dt);
     if (e.Crop._tend_t > 0) continue;
-    e.Crop._tend_t = TEND_INTERVAL_SEC + ctx.random() * 3; // 10~13 秒
+    e.Crop._tend_t = TEND_INTERVAL_SEC + ctx.random() * 3; // 10~13 seconds
     const st = (e.Crop.stage | 0) + 1;
     e.Crop.stage = st > 3 ? 3 : st;
   }
 });
 
-// ---- 聚落级汇总:happy 数 + 平均 affinity — 给 win tie-in / 成群门 / 贡献触发用 ----
-// happy = affinity>=50 的伙伴数(与 companion-contribution / companion-tend-crops 的"会帮忙"线一致)。
-// 注意:query 只放 [Companion,Need] —— 写 Colony 走 ctx.setField 跨实体,不能把 Colony 塞进 query
-// (没有实体同时具备 Companion 和 Colony,塞进去会让本系统匹配 0 个实体、从不运行)。
+// ---- Colony-level tally: happy count + average affinity — for win tie-in / colony-stage gate / contribution triggers ----
+// happy = number of companions with affinity>=50 (consistent with the "will help" line in companion-contribution / companion-tend-crops).
+// Note: query only contains [Companion,Need] — writing to Colony goes via ctx.setField across entities; Colony must NOT be put in the query
+// (no entity has both Companion and Colony; putting it in would make the system match 0 entities and never run).
 vitric.system("companion-tally", { query: ["Companion", "Need"], writes: [] }, (entities, ctx) => {
   let happy = 0, total = 0, sumAff = 0;
   for (const e of entities) {
@@ -680,10 +682,10 @@ vitric.system("companion-tally", { query: ["Companion", "Need"], writes: [] }, (
   ctx.setField("colony", "Colony.companion_affinity_avg", total > 0 ? sumAff / total : 0);
 });
 
-// ---- HUD:近的伙伴时,在 HUD 下方显示一行小卡(name + 好感 + 心情) ----
-// 用现成的 Colont.text(屏幕空间):存 "近:Lio 好感 54 · 开心" 之类的串。
-// 把这个串作为 @hud_companion_lbl.UiLabel.content 写入。
-// 找最近的伙伴 → 距离 <= 5 才显示,否则空串(标签隐藏)。
+// ---- HUD: when near a companion, show a small card under the HUD (name + affinity + mood) ----
+// Reuses Colony.text (screen space): stores a string like "near: Lio affinity 54 · happy".
+// Writes this string to @hud_companion_lbl.UiLabel.content.
+// Find the nearest companion → only show when distance <= 5, otherwise empty string (label hidden).
 vitric.system("companion-hud", { query: ["Colony"], writes: [] }, (entities, ctx) => {
   const c = entities[0];
   if (!c) return;
@@ -697,7 +699,7 @@ vitric.system("companion-hud", { query: ["Colony"], writes: [] }, (entities, ctx
   }
   let label = "";
   if (best && bestD2 <= 25) {
-    // 拉该伙伴的 affinity + mood
+    // Pull this companion's affinity + mood
     const aff = ctx.getField(best.id, "Need.affinity_i") | 0;
     const mood = (ctx.getField(best.id, "Mood.value") || "").toString();
     const gifted = ctx.getField(best.id, "Need.gifted_today") | 0;

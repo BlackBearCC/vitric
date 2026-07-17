@@ -1,42 +1,43 @@
-//! 策略库——消费 Scene View、产出动作的纯逻辑。每个策略都用**独立的 Pcg32**
-//! 播种（从 playtest seed 来，不碰 sim.rng），所以同 seed 同序列、完全可复现。
+//! Strategy library — pure logic that consumes a Scene View and produces an action. Each strategy
+//! uses an **independent Pcg32** seeded from the playtest seed (never touches sim.rng), so the same
+//! seed yields the same sequence and is fully reproducible.
 
 use serde::{Deserialize, Serialize};
 use vitric_sim::{InputRecord, Pcg32};
 
 use crate::scene_view::{Action, SceneView};
 
-/// 一条定性 note（LLM 档拟人玩时吐的主观提示，设计稿二节/五节「LLM 定性 note」）。
+/// A qualitative note (subjective hint emitted by the LLM tier during human-like play, design draft section 2/5 "LLM qualitative note").
 ///
-/// 只有 LLM 策略会产 note（清晰度/连续性/选择有效性这类「人话感受」），廉价策略档不产。
-/// note 是**纯遥测**：不进录像、不进哈希、不影响确定性——它是「LLM 这局看着怎么样」的
-/// 旁观记录，和 state_trace/fired_events 同级。报告里诚实标成「LLM 主观提示，待人复核」。
+/// Only the LLM strategy produces notes (the human-language impressions like clarity/continuity/choice effectiveness); cheap strategy tiers don't.
+/// Notes are **pure telemetry**: they don't enter the recording, don't enter the hash, and don't affect determinism — they are a bystander record of
+/// "how this LLM session looked", on the same level as state_trace/fired_events. The report honestly labels them as "LLM subjective hints, pending human review".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaytestNote {
-    /// 这条 note 是在第几个决策 tick 冒出来的（LLM 看哪一刻的视图说的）。
+    /// On which decision tick this note surfaced (the view the LLM was looking at when it spoke).
     pub tick: u64,
-    /// note 类型（归一后的标签）：常见 "clarity"（看不懂该干嘛）/"continuity"（前后矛盾）/
-    /// "choice"（选项没意义）/"other"。由 LLM 自报，解析时归一到这几类。
+    /// Note type (normalized label): commonly "clarity" (don't know what to do) / "continuity" (contradicts earlier) /
+    /// "choice" (option is meaningless) / "other". Self-reported by the LLM, normalized at parse time into these categories.
     pub kind: String,
-    /// note 正文（LLM 的原话）。
+    /// Note body (the LLM's original words).
     pub text: String,
 }
 
-/// 策略接口：看一份视图，选一个动作（或本 tick 不操作）。
+/// Strategy interface: look at a view, pick an action (or do nothing this tick).
 pub trait Strategy {
-    /// None = 本 tick 什么都不按。返回的动作必须来自 `view.actions`（合法集合）。
+    /// None = press nothing this tick. The returned action must come from `view.actions` (the legal set).
     fn choose(&mut self, view: &SceneView) -> Option<Action>;
 
-    /// 取走本策略到目前为止累积的定性 note（取走即清空，避免重复收）。
-    /// 默认空实现——只有 LLM 策略会覆盖它产 note，廉价策略档（random/greedy/…）一律不产。
-    /// session 每 tick 调一次把 note 收进 SessionResult.notes（不进录像/哈希）。
+    /// Take the qualitative notes accumulated by this strategy so far (draining clears them, to avoid duplicate collection).
+    /// Default empty impl — only the LLM strategy overrides this to produce notes; cheap tiers (random/greedy/…) never produce any.
+    /// session calls it once per tick to fold notes into SessionResult.notes (not entering recording/hash).
     fn drain_notes(&mut self) -> Vec<PlaytestNote> {
         Vec::new()
     }
 }
 
-/// 随机策略：合法 actions 里均匀随机挑一个（含一定概率「不操作」）。
-/// 覆盖广、专找意外软锁（设计稿二节）。
+/// Random strategy: pick uniformly from legal actions (including some probability of "do nothing").
+/// Wide coverage, specifically looks for unexpected soft-locks (design draft section 2).
 pub struct RandomStrategy {
     rng: Pcg32,
 }
@@ -52,8 +53,8 @@ impl Strategy for RandomStrategy {
         if view.actions.is_empty() {
             return None;
         }
-        // [0, n]：n 个动作 + 1 个「不操作」槽。不操作也是合法选择
-        // （一直猛按和偶尔松手是不同的探索路径）。
+        // [0, n]: n actions + 1 "do nothing" slot. Doing nothing is also a legal choice
+        // (holding the button constantly vs occasionally releasing are different exploration paths).
         let n = view.actions.len() as i64;
         let pick = self.rng.range_i64(0, n);
         if pick == n {
@@ -64,41 +65,41 @@ impl Strategy for RandomStrategy {
     }
 }
 
-/// 贪心策略：朝目标的派生量贪心（设计稿二节、十一节第 6 条）。
+/// Greedy strategy: greedy toward a goal-derived quantity (design draft section 2, section 11 item 6).
 ///
-/// **有目标时**（playtest.json 声明了 `goal:{quantity, direction}`）：每 tick 读
-/// `view.observation.derived[quantity]`，和上一 tick 比，判这一步「往目标方向走了没」。
+/// **With a goal** (playtest.json declares `goal:{quantity, direction}`): each tick reads
+/// `view.observation.derived[quantity]` and compares to the previous tick to decide whether this step "moved toward the goal".
 ///
-/// **近似说明（第 6 阶段）**：本阶段没有「一步前瞻」基建（要 clone world + 试注入每个动作
-/// 再 step 看哪个让目标更优——那要把 sim 借进策略，破坏「策略只看 Scene View」的纯逻辑边界）。
-/// 所以退而求其次用**轻量启发**：维护「上一个动作 + 上一 tick 的目标值」，
-/// - 若上个动作让目标**朝期望方向改善**了 → 这一 tick **重复**那个动作（锁住有效方向）；
-/// - 若没改善（持平/变差）→ **换一个动作**（PCG 随机挑，跳出无效方向）。
+/// **Approximation note (stage 6)**: this stage doesn't have the "one-step lookahead" infrastructure (would require cloning world + trial-injecting each action
+/// then step to see which makes the goal better — that would borrow sim into the strategy, breaking the "strategy only sees Scene View" pure-logic boundary).
+/// So we fall back to a **lightweight heuristic**: maintain "the previous action + the previous tick's goal value",
+/// - if the previous action moved the goal in the desired direction → this tick **repeat** that action (lock the effective direction);
+/// - if no improvement (flat/worse) → **switch action** (PCG random pick, jump out of the ineffective direction).
 ///
-/// 这不是最优贪心（没真前瞻），但足以让 greedy「朝目标走」而非纯随机乱晃——持续有效时它会
-/// 锁住推进目标的那个动作连按。确定性：动作选择全由独立 Pcg32 播种，同 seed + 同目标轨迹
-/// 必出同一序列。
+/// This isn't optimal greedy (no real lookahead), but it's enough to make greedy "walk toward the goal" rather than randomly wander — when something is consistently effective it
+/// locks onto the action that advances the goal and holds it. Determinism: action selection is fully driven by an independent Pcg32, same seed + same goal trajectory
+/// always produces the same sequence.
 ///
-/// **无目标时**退化为「带 PCG 的随机」（和阶段 1~5 逐字节一致，向后兼容由测试锁）——
-/// 没有目标量时任何「启发」都是瞎猜，老实退化成可复现随机。
+/// **Without a goal** it degrades to "PCG-driven random" (byte-identical to stages 1~5, backward compatibility locked by tests) —
+/// without a goal quantity any "heuristic" is just blind guessing, so it honestly degrades to reproducible random.
 pub struct GreedyStrategy {
-    /// 动作选择用的 PCG（无目标时直接当 RandomStrategy 用；有目标时用于「换动作」）。
+    /// PCG for action selection (used directly as RandomStrategy when no goal; used for "switch action" when there is a goal).
     rng: Pcg32,
-    /// 优化目标（None=无目标，退化随机）。
+    /// Optimization goal (None=no goal, degrade to random).
     goal: Option<crate::config::GoalSpec>,
-    /// 上一 tick 选的动作（重复有效动作用）。None=还没选过。
+    /// The action chosen last tick (used to repeat an effective action). None=not chosen yet.
     last_action: Option<Action>,
-    /// 上一 tick 观测到的目标量值（比较改善方向用）。None=还没观测过。
+    /// The goal quantity value observed last tick (for comparing improvement direction). None=not observed yet.
     last_value: Option<f64>,
 }
 
 impl GreedyStrategy {
-    /// 无目标 greedy（退化为可复现随机，行为同 RandomStrategy）。
+    /// Goal-less greedy (degrades to reproducible random, behavior identical to RandomStrategy).
     pub fn new(seed: u64) -> GreedyStrategy {
         GreedyStrategy { rng: Pcg32::new(seed), goal: None, last_action: None, last_value: None }
     }
 
-    /// 带派生目标的 greedy（朝 goal.quantity 的 goal.direction 方向走）。
+    /// Greedy with a derived goal (walks in the goal.direction of goal.quantity).
     pub fn with_goal(seed: u64, goal: crate::config::GoalSpec) -> GreedyStrategy {
         GreedyStrategy {
             rng: Pcg32::new(seed),
@@ -108,7 +109,7 @@ impl GreedyStrategy {
         }
     }
 
-    /// 从 view 读目标派生量的当前值（取不到/非数 → None）。
+    /// Read the goal-derived quantity's current value from view (None if unavailable / not a number).
     fn read_goal_value(&self, view: &SceneView) -> Option<f64> {
         let goal = self.goal.as_ref()?;
         view.observation
@@ -117,8 +118,8 @@ impl GreedyStrategy {
             .and_then(|v| v.as_f64())
     }
 
-    /// 随机挑一个合法动作（含「不操作」槽）——和 RandomStrategy::choose 同口径，
-    /// 保证无目标 greedy 和 RandomStrategy 同 seed 逐项一致。
+    /// Pick a random legal action (including the "do nothing" slot) — same semantics as RandomStrategy::choose,
+    /// to guarantee that goal-less greedy matches RandomStrategy item by item under the same seed.
     fn random_pick(&mut self, view: &SceneView) -> Option<Action> {
         let n = view.actions.len() as i64;
         let pick = self.rng.range_i64(0, n);
@@ -135,29 +136,29 @@ impl Strategy for GreedyStrategy {
         if view.actions.is_empty() {
             return None;
         }
-        // 无目标：纯随机（向后兼容，行为同 RandomStrategy）
+        // no goal: pure random (backward compatible, behavior identical to RandomStrategy)
         if self.goal.is_none() {
             return self.random_pick(view);
         }
 
         let cur = self.read_goal_value(view);
-        // 判上一步有没有让目标朝期望方向改善
+        // decide whether the previous step moved the goal in the desired direction
         let improved = match (self.last_value, cur, &self.goal) {
             (Some(prev), Some(now), Some(g)) => match g.direction {
                 crate::config::GoalDirection::Min => now < prev,
                 crate::config::GoalDirection::Max => now > prev,
             },
-            _ => false, // 没有可比的前值/当前值 → 当作「没改善」，去探索
+            _ => false, // no comparable previous/current value → treat as "no improvement", go explore
         };
 
         let action = if improved {
-            // 上个动作有效：重复它（锁住推进方向）。last_action 理论上有；保险起见无则随机。
+            // previous action was effective: repeat it (lock the advancing direction). last_action should exist; defensively fall back to random if not.
             match &self.last_action {
                 Some(a) => Some(a.clone()),
                 None => self.random_pick(view),
             }
         } else {
-            // 没改善：换一个动作探索
+            // no improvement: switch action to explore
             self.random_pick(view)
         };
 
@@ -167,23 +168,23 @@ impl Strategy for GreedyStrategy {
     }
 }
 
-/// 覆盖策略：系统性轮着把动作词汇里**每个**动作至少注入一次（设计稿二节 coverage）。
-/// 专找「从没被触发过的废动作」——随机策略可能整局都没碰到某个动作，coverage 保证碰到。
+/// Coverage strategy: systematically rotates to inject **every** action in the action vocabulary at least once (design draft section 2 coverage).
+/// Specifically finds "dead actions never triggered before" — random strategy might go a whole session without touching some action, coverage guarantees it's touched.
 ///
-/// 怎么轮：维护一个轮转游标，每 tick 选 `actions[cursor]` 再前进；游标对当前动作数取模，
-/// 所以动作集变化（关卡切换后词汇变了）也不越界。起点用 PCG 从 seed 打散——不同 seed
-/// 从词汇的不同位置起轮，覆盖顺序不同但都遍历全集；同 seed 完全可复现（确定性铁律）。
-/// 故意**不**插「不操作」：coverage 的职责是把动作全试一遍，松手探索交给 random。
+/// How it rotates: maintains a rotation cursor, each tick picks `actions[cursor]` then advances; the cursor is mod the current action count,
+/// so changes to the action set (vocabulary changes after a level switch) don't go out of bounds. The starting point is scattered by PCG from the seed — different seeds
+/// start rotating from different positions in the vocabulary, different coverage orders but all traverse the full set; same seed is fully reproducible (determinism rule).
+/// Deliberately **does not** insert "do nothing": coverage's job is to try every action; releasing-exploration is left to random.
 pub struct CoverageStrategy {
-    /// 轮转游标（持续递增，用时对动作数取模）。
+    /// Rotation cursor (monotonically increasing, mod action count at use).
     cursor: usize,
-    /// PCG 播种出的起点偏移（确定可复现），与 cursor 相加再取模。
+    /// PCG-seeded start offset (deterministic and reproducible), added to cursor then mod.
     start_offset: u64,
 }
 
 impl CoverageStrategy {
     pub fn new(seed: u64) -> CoverageStrategy {
-        // 用一次性 PCG 抽一个起点偏移：同 seed 同偏移，不同 seed 从不同位置起轮
+        // use a one-shot PCG to draw a start offset: same seed same offset, different seeds start from different positions
         let mut rng = Pcg32::new(seed);
         let start_offset = rng.next_u32() as u64;
         CoverageStrategy { cursor: 0, start_offset }
@@ -196,49 +197,49 @@ impl Strategy for CoverageStrategy {
             return None;
         }
         let n = view.actions.len() as u64;
-        // (起点偏移 + 游标) 对动作数取模 = 本 tick 要试的动作下标
+        // (start offset + cursor) mod action count = index of the action to try this tick
         let idx = ((self.start_offset + self.cursor as u64) % n) as usize;
         self.cursor = self.cursor.wrapping_add(1);
         Some(view.actions[idx].clone())
     }
 }
 
-/// 经济压力策略（设计稿二节 `economy` / 六节模拟经营主力）——专为**找数值崩**：
-/// 资源**无界增长（跑飞）**或**归零卡死（崩盘）**。
+/// Economy pressure strategy (design draft section 2 `economy` / section 6 main for simulation-management) — purpose-built **to find numeric breakage**:
+/// resources **growing unboundedly (runaway)** or **hitting zero and stalling (collapse)**.
 ///
-/// 怎么找：random/coverage 把动作打散，单个动作的累积效应被稀释、跑不到极端；而经济崩是
-/// **某一个动作连按很多次**才暴露的（一直点「卖」把金币堆到溢出、一直点「买」把资源掏到 0）。
-/// 所以本策略**锁定一个动作连续重复 R 次再轮到下一个**——把每个动作的 per-action 累积效应
-/// 推到极端，让数值遥测的 max/min/monotonic 把跑飞/崩盘照出来。
+/// How it finds them: random/coverage spread actions out, so the cumulative effect of a single action is diluted and doesn't reach extremes; whereas economy breakage is
+/// exposed only by **pressing one action many times in a row** (keep clicking "sell" to pile gold to overflow, keep clicking "buy" to drain resources to 0).
+/// So this strategy **locks one action and repeats it R times before rotating to the next** — pushing each action's per-action cumulative effect
+/// to the extreme, so that numeric telemetry's max/min/monotonic flags surface runaway/collapse.
 ///
-/// R 与轮转用 PCG 播种（从 playtest seed 来，不碰 sim.rng）：同 seed 同序列，完全可复现
-/// （确定性铁律）。R 在一个区间里随机取（避免每个动作都按死同样次数过于规整）；轮转游标
-/// 顺序推进对动作数取模，所以动作集变化（关卡切换词汇变了）也不越界。起点用 PCG 打散，
-/// 不同 seed 从不同动作起压。故意**不**插「不操作」：经济压力要的就是猛按到极端。
+/// R and rotation are PCG-seeded (from the playtest seed, never touches sim.rng): same seed same sequence, fully reproducible
+/// (determinism rule). R is drawn randomly from a range (to avoid overly uniform "every action pressed the same number of times"); the rotation cursor
+/// advances and is mod the action count, so changes to the action set (vocabulary changes after a level switch) don't go out of bounds. The start point is PCG-scattered,
+/// different seeds start pressing from different actions. Deliberately **does not** insert "do nothing": economy pressure wants to press hard to the extreme.
 pub struct EconomyStrategy {
-    /// PCG（播种 R 和起点）。
+    /// PCG (seeds R and start point).
     rng: Pcg32,
-    /// 当前锁定的动作下标（对动作数取模后用）。
+    /// Currently locked action index (used after mod the action count).
     cursor: usize,
-    /// 当前动作还要重复几次（剩余次数，归 0 就换下一个动作）。
+    /// How many more times the current action should repeat (remaining count, rotate to next when it hits 0).
     remaining: u64,
 }
 
-/// 单个动作连续重复次数 R 的取值区间（闭区间）。够大才能把累积效应推到极端
-/// （翻倍类跑飞 ~30 次就到 1e9；掏空类崩盘几十次就归零），又不至于一个动作占满整局。
+/// The closed range from which the per-action repeat count R is drawn. Large enough to push cumulative effects to extremes
+/// (doubling-style runaway reaches ~1e9 in ~30 presses; draining-style collapse hits zero in a few tens of presses), but not so large that one action fills a whole session.
 const ECONOMY_REPEAT_MIN: i64 = 24;
 const ECONOMY_REPEAT_MAX: i64 = 64;
 
 impl EconomyStrategy {
     pub fn new(seed: u64) -> EconomyStrategy {
         let mut rng = Pcg32::new(seed);
-        // 起点：从词汇的哪个位置起压（不同 seed 不同），先抽出来存进 cursor 的基偏移。
-        // 这里 cursor 先记成一个大偏移，choose 时再对当前动作数取模——派生时还不知道动作数。
+        // start point: which position in the vocabulary to start pressing from (different per seed), drawn first and stored as cursor's base offset.
+        // here cursor is recorded as a large offset, mod the current action count at choose time — the action count isn't known at construction.
         let cursor = rng.next_u32() as usize;
         EconomyStrategy { rng, cursor, remaining: 0 }
     }
 
-    /// 抽一个新的重复次数 R（区间内 PCG 随机）。
+    /// Draw a new repeat count R (random in range via PCG).
     fn roll_repeat(&mut self) -> u64 {
         self.rng.range_i64(ECONOMY_REPEAT_MIN, ECONOMY_REPEAT_MAX) as u64
     }
@@ -250,54 +251,54 @@ impl Strategy for EconomyStrategy {
             return None;
         }
         let n = view.actions.len();
-        // 当前锁定动作的重复次数耗尽：轮到下一个动作，重新抽 R
+        // current locked action's repeat count exhausted: rotate to the next action, redraw R
         if self.remaining == 0 {
             self.cursor = self.cursor.wrapping_add(1);
             self.remaining = self.roll_repeat();
         }
         self.remaining -= 1;
-        // 锁定的就是 cursor 对当前动作数取模那个（每次连按同一个，直到 remaining 归 0）
+        // locked action is the one at cursor mod current action count (press the same one each tick until remaining hits 0)
         Some(view.actions[self.cursor % n].clone())
     }
 }
 
-/// 脚本策略：按一条固定的输入序列在**录制的 tick** 上注入动作，**不看 SceneView**
-/// （设计稿三节「种子式探索」的回放部分）。种子录像本身就是一段「在第 N tick 按了什么」
-/// 的脚本——把它原样喂回去就复现那一局；扰动过的脚本喂回去就是「在原解附近走一步岔路」。
+/// Scripted strategy: injects actions from a fixed input sequence at **recorded ticks**, **without looking at SceneView**
+/// (the replay part of design draft section 3 "seed-based exploration"). A seed recording is itself a "what was pressed on tick N" script —
+/// feeding it back as-is reproduces that session; feeding a perturbed script back is "take one divergent step near the original solution".
 ///
-/// 怎么追 tick：`Strategy::choose` 每 tick 被调一次（session 循环里），策略自己维护一个
-/// 计数器 `cur_tick`，每调一次 +1。当 `cur_tick` 命中脚本里某条 `InputRecord.tick` 时吐它的
-/// 动作。**同一 tick 多条输入**：种子录像允许一个 tick 注入多个动作（如 left+space 同帧），
-/// 但 `choose` 每 tick 只能返一个动作——所以本策略对「同 tick 多条」只注入第一条（按脚本序）。
-/// 这是已知局限：种子录像里同帧多输入会被截到一条。绝大多数解谜/剧情脚本是「一帧一动作」的
-/// 序列，不受影响；真要逐字节复现同帧多输入得走 `sim.replay`（那是另一条路，非策略路）。
+/// How it tracks ticks: `Strategy::choose` is called once per tick (in the session loop); the strategy maintains its own
+/// counter `cur_tick`, incrementing each call. When `cur_tick` hits some `InputRecord.tick` in the script, it emits that record's
+/// action. **Multiple inputs on the same tick**: seed recordings allow multiple actions to be injected on one tick (e.g. left+space same frame),
+/// but `choose` can only return one action per tick — so this strategy injects only the first (in script order) for "multiple on same tick".
+/// This is a known limitation: same-frame multi-input in a seed recording gets truncated to one. The vast majority of puzzle/story scripts are "one action per frame"
+/// sequences and are unaffected; to truly reproduce same-frame multi-input byte-for-byte you'd go through `sim.replay` (a different path, not the strategy path).
 ///
-/// `then_explore`：脚本放完后改用该策略继续（截断 + 发散）——种子探索的 truncate 算子靠它，
-/// 「照脚本走到第 K 步，之后交给 random 乱走」。None = 脚本放完就什么都不按（纯复现/纯前缀）。
+/// `then_explore`: after the script finishes, switch to this strategy to continue (truncation + divergence) — the seed-exploration truncate operator relies on it,
+/// "follow the script up to step K, then hand off to random to wander". None = after the script finishes, press nothing (pure replay / pure prefix).
 pub struct ScriptedStrategy {
-    /// 脚本：(tick, 动作)，按 tick 升序。choose 时 cur_tick 命中某条就吐它。
+    /// Script: (tick, action), sorted ascending by tick. When cur_tick hits an entry, emit it.
     script: Vec<(u64, Action)>,
-    /// 当前 tick（每 choose 一次 +1）——session 每 tick 调一次 choose，与 sim.tick 同步。
+    /// Current tick (incremented each choose call) — session calls choose once per tick, in sync with sim.tick.
     cur_tick: u64,
-    /// 脚本里已放到第几条（脚本按 tick 升序，游标单调前进，避免每 tick 全表扫）。
+    /// How far the script has been consumed (script is sorted by tick, cursor advances monotonically, avoiding a full scan each tick).
     cursor: usize,
-    /// 脚本放完后接力的策略（截断+发散）。None=放完就静默。
+    /// Relay strategy after the script finishes (truncation+divergence). None=silent after finish.
     then_explore: Option<Box<dyn Strategy>>,
 }
 
 impl ScriptedStrategy {
-    /// 从一串 (tick, Action) 造脚本策略。脚本会按 tick 升序稳定排序（容忍调用方乱序传入）。
-    /// `then_explore`：脚本放完后接力的策略，None=放完静默。
+    /// Build a scripted strategy from a list of (tick, Action). The script is stable-sorted by tick (tolerates caller passing unordered input).
+    /// `then_explore`: relay strategy after the script finishes, None=silent after finish.
     pub fn new(
         mut script: Vec<(u64, Action)>,
         then_explore: Option<Box<dyn Strategy>>,
     ) -> ScriptedStrategy {
-        // 稳定排序：同 tick 的多条保持原相对序（取第一条时才确定）
+        // stable sort: same-tick entries keep their original relative order (only matters when taking the first)
         script.sort_by_key(|(t, _)| *t);
         ScriptedStrategy { script, cur_tick: 0, cursor: 0, then_explore }
     }
 
-    /// 从一条录像的输入序列造脚本（种子录像→脚本）。phase 一并带上（pressed/released）。
+    /// Build a script from a recording's input sequence (seed recording → script). phase is carried along (pressed/released).
     pub fn from_inputs(
         inputs: &[InputRecord],
         then_explore: Option<Box<dyn Strategy>>,
@@ -315,28 +316,28 @@ impl Strategy for ScriptedStrategy {
         let tick = self.cur_tick;
         self.cur_tick += 1;
 
-        // 脚本游标越过当前 tick：脚本到此为止，交给接力策略（或静默）
+        // script cursor past the current tick: script is done, hand off to the relay strategy (or stay silent)
         if self.cursor >= self.script.len() {
             return match &mut self.then_explore {
-                // 接力策略仍要看 view（它是 random/coverage 这类反应式策略）
+                // the relay strategy still needs to look at view (it's a reactive strategy like random/coverage)
                 Some(s) => s.choose(view),
                 None => None,
             };
         }
-        // 脚本按 tick 升序：游标这条的 tick 就是「下一个该放的 tick」
+        // script is sorted by tick: the cursor's tick is "the next tick that should fire"
         let (script_tick, action) = &self.script[self.cursor];
         if *script_tick == tick {
             let out = action.clone();
             self.cursor += 1;
-            // 跳过同 tick 的其余条目（每 tick 只注一个动作，见类型注释的局限）
+            // skip other entries on the same tick (only inject one action per tick, see the limitation in the type doc)
             while self.cursor < self.script.len() && self.script[self.cursor].0 == tick {
                 self.cursor += 1;
             }
             Some(out)
         } else {
-            // 还没到这条的 tick（中间这些 tick 脚本没安排动作）——本 tick 不操作。
-            // 注意：不接力——脚本还没放完，中间的空 tick 就该是「按兵不动」，
-            // 不能让 then_explore 在脚本中途乱插（那会破坏脚本复现）。
+            // not yet at this entry's tick (the in-between ticks have no scheduled action) — do nothing this tick.
+            // note: don't relay — the script isn't done yet; the in-between empty ticks are meant to "hold still",
+            // and letting then_explore insert mid-script would break script reproduction.
             None
         }
     }
@@ -357,7 +358,7 @@ mod tests {
 
     #[test]
     fn non_llm_strategies_drain_no_notes() {
-        // 廉价策略档默认不产 note（drain_notes 默认空实现）——note 通道是 LLM 档专属
+        // cheap strategy tiers default to producing no notes (drain_notes default empty impl) — the note channel is LLM-tier only
         let view = view_with_actions(&["a", "b"]);
         let mut r = RandomStrategy::new(1);
         let mut c = CoverageStrategy::new(1);
@@ -416,11 +417,11 @@ mod tests {
         assert_eq!(seq_a, seq_b);
     }
 
-    // ---- 第 6 阶段：greedy 接派生目标 ----
+    // ---- stage 6: greedy with a derived goal ----
 
     use crate::config::{GoalDirection, GoalSpec};
 
-    /// 造一个带 derived[quantity]=val 的视图（模拟 SceneView 注入的派生量）。
+    /// Build a view with derived[quantity]=val (simulates the derived quantity injected by SceneView).
     fn view_with_goal(names: &[&str], quantity: &str, val: f64) -> SceneView {
         let actions = names
             .iter()
@@ -451,8 +452,8 @@ mod tests {
 
     #[test]
     fn greedy_with_goal_repeats_action_when_improving() {
-        // 目标 min：每 tick 距离都在下降（动作有效）→ greedy 应倾向重复同一个有效动作，
-        // 表现为「同一动作连续出现的最长段」明显比无目标随机长。
+        // goal min: each tick the distance decreases (action effective) → greedy should tend to repeat the same effective action,
+        // i.e. "the longest run of consecutive identical actions" is clearly longer than goal-less random.
         let goal = GoalSpec { quantity: "d".to_string(), direction: GoalDirection::Min };
         let mut g = GreedyStrategy::with_goal(7, goal);
         let mut seq: Vec<String> = Vec::new();
@@ -461,9 +462,9 @@ mod tests {
             if let Some(a) = g.choose(&view_with_goal(&["x", "y", "z"], "d", d)) {
                 seq.push(a.action);
             }
-            d -= 1.0; // 一直在改善
+            d -= 1.0; // improving all the time
         }
-        // 最长连续同动作段
+        // longest run of the same action
         let mut max_run = 1usize;
         let mut run = 1usize;
         for w in seq.windows(2) {
@@ -479,8 +480,8 @@ mod tests {
 
     #[test]
     fn greedy_with_goal_differs_from_no_goal() {
-        // 有目标 vs 无目标：在同一份「持续改善」轨迹上，两者的动作序列应不同
-        // （有目标会锁动作，无目标是均匀随机）——证明 goal 真的改变了行为。
+        // with goal vs without goal: on the same "always-improving" trajectory, the two action sequences should differ
+        // (with goal locks the action, without goal is uniform random) — proves goal really changed behavior.
         let goal = GoalSpec { quantity: "d".to_string(), direction: GoalDirection::Min };
         let mut with = GreedyStrategy::with_goal(3, goal);
         let mut without = GreedyStrategy::new(3);
@@ -512,7 +513,7 @@ mod tests {
 
     #[test]
     fn greedy_without_goal_still_random() {
-        // 无目标的 greedy 退化为随机：和 RandomStrategy 同 seed 同序列（行为不变铁律）
+        // goal-less greedy degrades to random: same seed same sequence as RandomStrategy (behavior invariance rule)
         let view = view_with_actions(&["a", "b", "c"]);
         let mut g = GreedyStrategy::new(42);
         let mut r = RandomStrategy::new(42);
@@ -525,7 +526,7 @@ mod tests {
     fn coverage_visits_every_action_within_a_full_cycle() {
         let view = view_with_actions(&["a", "b", "c", "d"]);
         let mut s = CoverageStrategy::new(7);
-        // 跑满一整轮（动作数那么多 tick）应把每个动作各试到一次
+        // running a full cycle (as many ticks as there are actions) should try each action once
         let mut hit: std::collections::HashSet<String> = std::collections::HashSet::new();
         for _ in 0..view.actions.len() {
             let a = s.choose(&view).expect("非空词汇必出动作");
@@ -546,7 +547,7 @@ mod tests {
 
     #[test]
     fn coverage_start_offset_differs_across_seeds() {
-        // 不同 seed 起点不同：至少有一对相邻 tick 的选择不一样（否则就是没打散）
+        // Different seeds start at different offsets: at least one adjacent tick pair should differ (otherwise they aren't spread out)
         let view = view_with_actions(&["a", "b", "c", "d", "e"]);
         let mut a = CoverageStrategy::new(1);
         let mut b = CoverageStrategy::new(999);
@@ -574,11 +575,11 @@ mod tests {
 
     #[test]
     fn economy_locks_one_action_for_a_run_then_rotates() {
-        // 经济策略应**连按同一个动作很多次**再换，不是每 tick 换（这是它和 coverage 的区别）
+        // economy strategy should **press the same action many times** before switching, not switch every tick (this is its distinction from coverage)
         let view = view_with_actions(&["buy", "sell", "wait"]);
         let mut s = EconomyStrategy::new(3);
         let seq: Vec<String> = (0..200).map(|_| s.choose(&view).unwrap().action).collect();
-        // 至少存在一段「同一动作连续 ≥ 20 次」（锁定重复的特征）
+        // there should exist a run of "the same action ≥ 20 times in a row" (the lock-and-repeat signature)
         let mut max_run = 1usize;
         let mut run = 1usize;
         for w in seq.windows(2) {
@@ -590,7 +591,7 @@ mod tests {
             }
         }
         assert!(max_run >= 20, "应有一段连按 ≥20 次同一动作，实际最长连段 {max_run}");
-        // 200 tick 内应轮到过不止一个动作（不是死锁在一个上）
+        // within 200 ticks it should have rotated through more than one action (not deadlocked on one)
         let distinct: std::collections::HashSet<&String> = seq.iter().collect();
         assert!(distinct.len() >= 2, "应轮转过多个动作: {distinct:?}");
     }
@@ -638,7 +639,7 @@ mod tests {
 
     #[test]
     fn scripted_injects_action_on_its_recorded_tick() {
-        // 脚本：tick 2 按 a，tick 5 按 b。其余 tick 不操作。
+        // Script: tick 2 presses a, tick 5 presses b. Other ticks do nothing.
         let script = vec![(2u64, act("a")), (5u64, act("b"))];
         let mut s = ScriptedStrategy::new(script, None);
         let view = view_with_actions(&["a", "b", "c"]);
@@ -646,7 +647,7 @@ mod tests {
         for _ in 0..8 {
             got.push(s.choose(&view).map(|a| a.action));
         }
-        // tick 0,1 无；tick2=a；tick3,4 无；tick5=b；tick6,7 无
+        // tick 0,1 none; tick2=a; tick3,4 none; tick5=b; tick6,7 none
         assert_eq!(
             got,
             vec![
@@ -664,7 +665,7 @@ mod tests {
 
     #[test]
     fn scripted_ignores_scene_view() {
-        // 脚本吐的动作即便不在 view.actions 里也照吐（脚本不受合法集合约束——它是回放）
+        // scripted strategy emits its action even if it isn't in view.actions (script isn't constrained by the legal set — it's a replay)
         let script = vec![(0u64, act("offscreen"))];
         let mut s = ScriptedStrategy::new(script, None);
         let view = view_with_actions(&["only-this"]);
@@ -673,13 +674,13 @@ mod tests {
 
     #[test]
     fn scripted_then_explore_takes_over_after_script_ends() {
-        // 脚本只到 tick 0；之后交给 random 接力（截断+发散）
+        // script only goes to tick 0; after that hand off to random relay (truncation+divergence)
         let script = vec![(0u64, act("scripted"))];
         let mut s = ScriptedStrategy::new(script, Some(Box::new(RandomStrategy::new(7))));
         let view = view_with_actions(&["x", "y", "z"]);
-        // tick0 = 脚本的 scripted
+        // tick0 = script's scripted
         assert_eq!(s.choose(&view).map(|a| a.action), Some("scripted".to_string()));
-        // tick1 起交给 random：选出的动作（若有）必须来自 view 合法集合
+        // tick1 onwards hand off to random: chosen action (if any) must come from view's legal set
         let mut saw_explore = false;
         for _ in 0..200 {
             if let Some(a) = s.choose(&view) {
@@ -696,7 +697,7 @@ mod tests {
         let mut s = ScriptedStrategy::new(script, None);
         let view = view_with_actions(&["a"]);
         assert_eq!(s.choose(&view).map(|a| a.action), Some("a".to_string()));
-        // 脚本放完、无接力：之后永远不操作
+        // script done, no relay: from here on never press anything
         for _ in 0..50 {
             assert_eq!(s.choose(&view), None);
         }
@@ -724,7 +725,7 @@ mod tests {
 
     #[test]
     fn scripted_same_tick_multiple_keeps_first_only() {
-        // 同 tick 两条：只注第一条（已知局限），第二条被跳过
+        // two entries on the same tick: only the first is injected (known limitation), the second is skipped
         let script = vec![(2u64, act("first")), (2u64, act("second"))];
         let mut s = ScriptedStrategy::new(script, None);
         let view = view_with_actions(&["first", "second"]);

@@ -1,25 +1,30 @@
-//! 运行时 LLM — 把模型回复变成「录下来的输入」。
+//! Runtime LLM — turns model replies into "recorded input".
 //!
-//! 约定事件（和 play-sound 一样是引擎层约定，模拟内核不认识 LLM）：
-//! - 规则/脚本 emit `llm-ask`，data `{"id": "关联键", "prompt": "提示词"}`；
-//!   id 由游戏逻辑自选，用来把回复对回提问方。
-//! - 引擎在每 tick 的可观测事件里捕获 llm-ask，丢给**一个**后台工作线程排队发 HTTP
-//!   （OpenAI 兼容 chat/completions）。模拟循环从不等网络。
-//! - 回复到达后经 [`vitric_sim::Sim::inject_reply`] 注入事件
-//!   `llm-reply {id, text}`；任何失败（未配置/网络/格式）注入 `llm-error {id, message}`，
-//!   显式可见，绝不静默吞掉。
+//! Conventional events (like play-sound, an engine-layer convention; the simulation core does not
+//! know about LLM):
+//! - Rules/scripts emit `llm-ask`, data `{"id": "correlation key", "prompt": "prompt text"}`;
+//!   the id is chosen by game logic, used to route the reply back to the asker.
+//! - The engine captures llm-ask from each tick's observable events and hands it to **one**
+//!   background worker thread that queues HTTP calls (OpenAI-compatible chat/completions). The
+//!   simulation loop never waits on the network.
+//! - When a reply arrives it is injected via [`vitric_sim::Sim::inject_reply`] as an event
+//!   `llm-reply {id, text}`; any failure (unconfigured / network / format) is injected as
+//!   `llm-error {id, message}`, explicitly visible, never silently swallowed.
 //!
-//! 确定性边界：inject_reply 是和按键输入同级的**录制通道**——回复内容连同到达 tick
-//! 一起进录像。`vitric replay` 重放时回复从录像注入、llm-ask 无人监听，
-//! **重放永远不碰网络**（cmd_replay 根本不构造本模块）。
+//! Determinism boundary: inject_reply is a **recording channel** on the same level as keypress
+//! input — the reply content along with the tick it arrives at go into the recording. During
+//! `vitric replay`, replies are injected from the recording and llm-ask has no listener, so
+//! **replay never touches the network** (cmd_replay does not construct this module at all).
 //!
-//! 配置只认环境变量（不进项目数据，密钥不落盘）：
-//! - `VITRIC_LLM_URL`   如 https://api.openai.com/v1/chat/completions（任何兼容端点）
-//! - `VITRIC_LLM_KEY`   Bearer 密钥
-//! - `VITRIC_LLM_MODEL` 模型名
+//! Configuration only reads environment variables (does not go into project data, keys never
+//! touch disk):
+//! - `VITRIC_LLM_URL`   e.g. https://api.openai.com/v1/chat/completions (any compatible endpoint)
+//! - `VITRIC_LLM_KEY`   Bearer secret
+//! - `VITRIC_LLM_MODEL` model name
 //!
-//! 三个缺一个 = disabled：横幅明说，llm-ask 立刻收到 llm-error 回复（也走录像通道，
-//! 所以「没配 LLM 的那局」重放同样逐位一致）。
+//! Missing any one of the three = disabled: the banner says so explicitly, and llm-ask immediately
+//! receives an llm-error reply (also via the recording channel, so "the session with no LLM
+//! configured" replays bit-for-bit identically).
 
 use std::sync::mpsc;
 
@@ -28,7 +33,7 @@ use serde_json::{json, Value};
 use vitric_rules::Event;
 use vitric_sim::Sim;
 
-/// LLM 端点配置（全部来自环境变量）。
+/// LLM endpoint configuration (all from environment variables).
 pub struct LlmConfig {
     pub url: String,
     pub key: String,
@@ -36,7 +41,7 @@ pub struct LlmConfig {
 }
 
 impl LlmConfig {
-    /// 读环境变量。缺任何一个返回 Err（拿去当横幅的 disabled 原因）。
+    /// Read environment variables. Missing any one returns Err (used as the banner's disabled reason).
     pub fn from_env() -> Result<LlmConfig, String> {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         match (get("VITRIC_LLM_URL"), get("VITRIC_LLM_KEY"), get("VITRIC_LLM_MODEL")) {
@@ -46,21 +51,22 @@ impl LlmConfig {
     }
 }
 
-/// 提交给工作线程的一次提问。
+/// One question submitted to the worker thread.
 struct Ask {
     id: String,
     prompt: String,
 }
 
-/// 工作线程交回的一次结果。
+/// One result handed back by the worker thread.
 struct Done {
     id: String,
     result: Result<String, String>,
 }
 
-/// LLM 通道。内部两种形态：
-/// - 启用 = 一个后台工作线程顺序消化请求队列（请求多了排队，不并发轰端点）；
-/// - 未启用 = 配置缺失，llm-ask 一律立刻回 llm-error。
+/// LLM channel. Two internal forms:
+/// - Enabled = one background worker thread drains the request queue in order (requests queue up,
+///   no concurrent hammering of the endpoint);
+/// - Disabled = configuration missing; llm-ask always gets an immediate llm-error reply.
 pub struct Llm(Mode);
 
 enum Mode {
@@ -75,7 +81,8 @@ enum Mode {
 }
 
 impl Llm {
-    /// 按环境变量装配：配齐了起工作线程，没配齐降级为 disabled（合法状态，横幅明说）。
+    /// Assemble from environment variables: if all are present, start the worker thread; if not,
+    /// degrade to disabled (a legal state, the banner says so explicitly).
     pub fn from_env() -> Llm {
         match LlmConfig::from_env() {
             Ok(cfg) => Llm::start(cfg),
@@ -83,30 +90,32 @@ impl Llm {
         }
     }
 
-    /// 未启用形态（reason 进横幅和 llm-error 消息）。
+    /// Disabled form (reason goes into the banner and llm-error messages).
     pub fn disabled(reason: String) -> Llm {
         Llm(Mode::Disabled { reason })
     }
 
-    /// 用给定配置起后台工作线程（测试用桩服务器配置直接从这进，不碰环境变量）。
+    /// Start a background worker thread with the given config (a stub server config for tests goes
+    /// in directly here, without touching environment variables).
     pub fn start(cfg: LlmConfig) -> Llm {
         let (ask_tx, ask_rx) = mpsc::channel::<Ask>();
         let (done_tx, done_rx) = mpsc::channel::<Done>();
         let model = cfg.model.clone();
-        // 单工作线程：请求按提交顺序串行执行；引擎侧只 try_recv，从不阻塞等它。
-        // 引擎退出 → ask_tx 析构 → for 循环结束 → 线程自然收摊，不用 join。
+        // Single worker thread: requests execute serially in submission order; the engine side
+        // only try_recv, never blocks waiting on it. Engine exit → ask_tx dropped → for loop ends
+        // → thread winds down naturally, no join needed.
         std::thread::spawn(move || {
             for ask in ask_rx {
                 let result = call_endpoint(&cfg, &ask.prompt);
                 if done_tx.send(Done { id: ask.id, result }).is_err() {
-                    break; // 引擎侧已退出，没人收了
+                    break; // the engine side has exited, no one is receiving
                 }
             }
         });
         Llm(Mode::Enabled { model, tx: ask_tx, rx: done_rx })
     }
 
-    /// 启动横幅的 llm 字段。
+    /// The llm field of the startup banner.
     pub fn banner(&self) -> String {
         match &self.0 {
             Mode::Enabled { model, .. } => format!("ok (model {model})"),
@@ -115,14 +124,15 @@ impl Llm {
     }
 }
 
-/// 从一帧的可观测事件里捕获 llm-ask：合法的提交给工作线程，
-/// 不合法/未启用的**立刻**注入 llm-error 回复（走录像通道，显式不静默）。
+/// Capture llm-ask from a frame's observable events: valid ones are submitted to the worker
+/// thread; invalid / disabled ones **immediately** inject an llm-error reply (via the recording
+/// channel, explicit, not silent).
 pub fn handle_ask_events(llm: &mut Llm, events: &[Event], sim: &mut Sim) {
     for e in events {
         if e.name != "llm-ask" {
             continue;
         }
-        // id 尽力取出来（哪怕出错也要让游戏逻辑对得上是哪次提问炸了）
+        // Best-effort extract of id (even on error, game logic must be able to tell which ask blew up)
         let id = e.data.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let prompt = e.data.get("prompt").and_then(|v| v.as_str());
         let error = |message: String| json!({"id": id, "message": message});
@@ -130,7 +140,8 @@ pub fn handle_ask_events(llm: &mut Llm, events: &[Event], sim: &mut Sim) {
             (Some(_), Some(prompt)) => match &llm.0 {
                 Mode::Enabled { tx, .. } => {
                     if tx.send(Ask { id: id.clone(), prompt: prompt.to_string() }).is_err() {
-                        // 工作线程死了（只可能是 panic）——显式报给游戏，别让提问石沉大海
+                        // Worker thread died (can only be a panic) — explicitly report to the game,
+                        // don't let the ask disappear into the void
                         sim.inject_reply("llm-error", error("LLM 工作线程已退出".to_string()));
                     }
                 }
@@ -152,8 +163,9 @@ pub fn handle_ask_events(llm: &mut Llm, events: &[Event], sim: &mut Sim) {
     }
 }
 
-/// 收割工作线程已完成的回复，注入模拟（每帧/每 tick 调一次，只 try_recv 不阻塞）。
-/// 注入即录像：回复内容连同消化它的 tick 一起被 Recording 记录。
+/// Reap replies already completed by the worker thread and inject them into the simulation
+/// (called once per frame / per tick; only try_recv, never blocks). Injection is recording: the
+/// reply content along with the tick that consumes it are recorded by Recording.
 pub fn pump_replies(llm: &mut Llm, sim: &mut Sim) {
     let Mode::Enabled { rx, .. } = &llm.0 else { return };
     while let Ok(done) = rx.try_recv() {
@@ -166,7 +178,7 @@ pub fn pump_replies(llm: &mut Llm, sim: &mut Sim) {
     }
 }
 
-/// 组装 OpenAI 兼容 chat/completions 请求体。
+/// Assemble an OpenAI-compatible chat/completions request body.
 pub fn build_request_body(model: &str, prompt: &str) -> Value {
     json!({
         "model": model,
@@ -174,8 +186,9 @@ pub fn build_request_body(model: &str, prompt: &str) -> Value {
     })
 }
 
-/// 解析 chat/completions 响应：取 choices[0].message.content。
-/// 格式不对显式报错并附上拿到的内容（截断），别让游戏拿到一个空串猜半天。
+/// Parse a chat/completions response: take choices[0].message.content. On a format mismatch,
+/// explicitly error with the received content (truncated) attached — don't hand the game an empty
+/// string to puzzle over.
 pub fn parse_completion(body: &str) -> Result<String, String> {
     let v: Value =
         serde_json::from_str(body).map_err(|e| format!("LLM 响应不是合法 JSON: {e}"))?;
@@ -186,7 +199,8 @@ pub fn parse_completion(body: &str) -> Result<String, String> {
         .and_then(|t| t.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| {
-            // 回显截断按字符不按字节，别把多字节字符切成半个
+            // Truncate the echo by character count, not byte count, so multi-byte characters are
+            // not split in half
             let shown = if body.chars().count() > 200 {
                 format!("{}…", body.chars().take(200).collect::<String>())
             } else {
@@ -199,17 +213,21 @@ pub fn parse_completion(body: &str) -> Result<String, String> {
         })
 }
 
-/// 同步问一次 LLM（直接阻塞当前线程，返回回复文本或显式错误）。
+/// Synchronously ask the LLM once (blocks the current thread directly, returns the reply text or
+/// an explicit error).
 ///
-/// 运行时的游戏循环走 [`Llm`] 的异步队列（绝不阻塞主循环）；但 **playtest 的 LLM 档**是另一
-/// 条路——它本就慢、单独限流、不在游戏帧里（设计稿九节），同步阻塞最直白，正好给
-/// playtest 的 `LlmClient` 适配器包一层。复用同一套请求/解析（build_request_body/parse_completion），
-/// 端点行为和运行时 LLM 完全一致。
+/// The runtime game loop goes through [`Llm`]'s async queue (never blocks the main loop); but
+/// **playtest's LLM profile** is a different path — it is inherently slow, rate-limited separately,
+/// and not inside a game frame (design doc section nine), so synchronous blocking is the most
+/// straightforward, and is exactly what playtest's `LlmClient` adapter wraps. It reuses the same
+/// request/parse code (build_request_body/parse_completion), so the endpoint behavior is identical
+/// to the runtime LLM.
 pub fn complete_sync(cfg: &LlmConfig, prompt: &str) -> Result<String, String> {
     call_endpoint(cfg, prompt)
 }
 
-/// 在工作线程里执行一次 HTTP 调用（同步阻塞，主循环看不见这段等待）。
+/// Execute one HTTP call inside the worker thread (synchronous blocking; the main loop never sees
+/// this wait).
 fn call_endpoint(cfg: &LlmConfig, prompt: &str) -> Result<String, String> {
     let body = build_request_body(&cfg.model, prompt);
     let mut resp = ureq::post(&cfg.url)
@@ -245,7 +263,7 @@ mod tests {
     fn parse_completion_rejects_malformed_explicitly() {
         let err = parse_completion("not json at all").unwrap_err();
         assert!(err.contains("不是合法 JSON"), "{err}");
-        // 合法 JSON 但不是 chat/completions 形状 → 指明期望格式并回显内容
+        // Valid JSON but not chat/completions shape → point out the expected format and echo the content
         let err = parse_completion(r#"{"error": {"message": "quota exceeded"}}"#).unwrap_err();
         assert!(err.contains("choices[0].message.content"), "{err}");
         assert!(err.contains("quota exceeded"), "{err}");
@@ -258,7 +276,7 @@ mod tests {
         let asks =
             vec![Event::new("llm-ask", json!({"id": "npc-1", "prompt": "hi"}))];
         handle_ask_events(&mut llm, &asks, &mut sim);
-        // 注入的 llm-error 在下一 step 以事件形式出现
+        // The injected llm-error appears as an event in the next step
         let report_events = collect_one_step(&mut sim);
         let errs: Vec<_> = report_events.iter().filter(|e| e.name == "llm-error").collect();
         assert_eq!(errs.len(), 1);
@@ -271,7 +289,7 @@ mod tests {
     fn malformed_ask_replies_with_explicit_error() {
         let mut llm = Llm::disabled("x".to_string());
         let mut sim = Sim::new(1);
-        // 缺 prompt 字段
+        // Missing the prompt field
         let asks = vec![Event::new("llm-ask", json!({"id": "npc-1"}))];
         handle_ask_events(&mut llm, &asks, &mut sim);
         let events = collect_one_step(&mut sim);
@@ -280,19 +298,19 @@ mod tests {
         assert!(msg.contains("id 和 prompt"), "{msg}");
     }
 
-    /// 推一步并收回事件（() 逻辑不消费，事件在 StepReport 里）。
+    /// Step once and collect the events (the () logic consumes nothing; events are in StepReport).
     fn collect_one_step(sim: &mut Sim) -> Vec<Event> {
         sim.step(&mut ()).unwrap().events
     }
 
     #[test]
     fn worker_round_trip_against_local_stub() {
-        // 本地桩端点：回一份 canned 的 chat/completions
+        // Local stub endpoint: return a canned chat/completions response
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1/chat/completions", server.server_addr());
         let handle = std::thread::spawn(move || {
             let mut req = server.recv().unwrap();
-            // 顺手验证请求形状：模型名 + 用户消息进了请求体
+            // Also verify the request shape: model name + user message went into the request body
             let mut body = String::new();
             req.as_reader().read_to_string(&mut body).unwrap();
             let v: Value = serde_json::from_str(&body).unwrap();
@@ -316,7 +334,7 @@ mod tests {
         let asks = vec![Event::new("llm-ask", json!({"id": "npc-1", "prompt": "说一句欢迎词"}))];
         handle_ask_events(&mut llm, &asks, &mut sim);
 
-        // 轮询收割（测试上限 5 秒，正常毫秒级到达）
+        // Poll and reap (test limit 5 seconds; normally arrives in milliseconds)
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let reply = loop {
             pump_replies(&mut llm, &mut sim);
@@ -334,7 +352,7 @@ mod tests {
 
     #[test]
     fn http_error_becomes_llm_error_reply() {
-        // 桩端点回 500：必须变成显式 llm-error，不是静默没下文
+        // Stub endpoint returns 500: must become an explicit llm-error, not silence with no follow-up
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let url = format!("http://{}/v1/chat/completions", server.server_addr());
         let handle = std::thread::spawn(move || {

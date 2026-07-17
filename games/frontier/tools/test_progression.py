@@ -54,13 +54,13 @@ try:
     inp("w"); step(3)  # interact
     click(9, 6); step(5)  # plant
 
-    # 等 12 sec 成熟
+    # wait 12 sec to mature
     big_step(720)
     click(9, 6); step(5)  # harvest
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
     check("step==3 (首收)", s == 3, f"actual={s}")
 
-    # 走到 Lio
+    # walk to Lio
     inp("right"); step(250)
     inp("right", "released"); step(5)
     inp("i"); step(10)
@@ -79,9 +79,9 @@ try:
         print(f"  Pip comfort={pipn['comfort']:.1f} quarters={pipn['quarters']} leave_timer={pipn['leave_timer']:.1f}")
     else:
         print("  Pip GONE")
-    # day>=3 + struct>=3? — 我们只有 2 structures,需要再盖
+    # day>=3 + struct>=3? — we only have 2 structures, need to build more
     if s < 5:
-        # 走回并建点结构
+        # walk back and build some structures
         inp("left"); step(250)
         inp("left", "released"); step(5)
         inp("q"); step(3)
@@ -102,7 +102,7 @@ try:
     print(f"  wheat={inv['wheat']} step={s}")
     # wheat>=5?
     if inv["wheat"] < 5:
-        # cheat: 给点 wheat
+        # cheat: give some wheat
         rpc("world/set", {"entity": "@player", "path": "Inventory.wheat", "value": 6})
         step(5)
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
@@ -144,7 +144,7 @@ try:
     check("step>=7 (成群)", s >= 7, f"actual={s}")
 
     print("\n--- 等到第 6 天 (立丰碑 → game-won) ---")
-    # cheat: 给丰碑资源
+    # cheat: give monument resources
     rpc("world/set", {"entity": "@player", "path": "Inventory.ore", "value": 5})
     rpc("world/set", {"entity": "@player", "path": "Inventory.plank", "value": 5})
     rpc("world/set", {"entity": "@player", "path": "Inventory.lamp", "value": 3})
@@ -155,7 +155,7 @@ try:
     click(11, 5); step(10)
     c = wget("@colony")["result"]["components"]["Colony"]
     print(f"  monument_built={c['monument_built']}")
-    # 推进到 day 6
+    # advance to day 6
     big_step(21600)
     c = wget("@colony")["result"]["components"]["Colony"]
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]

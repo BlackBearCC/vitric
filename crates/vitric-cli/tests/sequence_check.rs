@@ -1,12 +1,13 @@
-//! `vitric check` 对坏序列的逐项报错（端到端）：at 乱序 / 未知动作 / spawn 缺图 /
-//! sound 缺音效 / emit load-scene 指向未声明场景——每条都带路径，check 红灯。
+//! `vitric check` per-item error reporting for bad sequences (end-to-end): out-of-order at /
+//! unknown action / spawn missing image / sound missing audio / emit load-scene pointing to an
+//! undeclared scene — each carries a path, check red.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use vitric_cli::runtime;
 
-/// 最小可 check 项目：一个组件、一个空场景、可注入的序列文件。
+/// Minimal checkable project: one component, one empty scene, an injectable sequence file.
 fn make_project(tag: &str, sequence: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vitric-seqcheck-{}-{tag}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -81,7 +82,7 @@ fn spawn_missing_image_fails_then_passes_with_it() {
     let err = runtime::check(&dir).expect_err("序列 spawn 缺图 check 必须红灯");
     assert!(err.contains("ghost.png"), "报错点名贴图: {err}");
     assert!(err.contains("sequences/s.json"), "报错点名序列文件: {err}");
-    // 把图补进 assets/ 后过 check
+    // After adding the image to assets/ the check passes
     write_png(&dir.join("assets/ghost.png"));
     runtime::check(&dir).expect("图补上了 check 该过");
     fs::remove_dir_all(&dir).unwrap();
@@ -92,7 +93,7 @@ fn sound_action_missing_file_fails_check() {
     let dir = make_project("sound", r#"{"id":"s","steps":[{"at":0,"do":{"sound":"nope.wav"}}]}"#);
     let err = runtime::check(&dir).expect_err("序列 sound 缺音效 check 必须红灯");
     assert!(err.contains("nope.wav"), "报错点名音效: {err}");
-    // 放一个同名文件后过
+    // After dropping a same-named file it passes
     fs::write(dir.join("sounds/nope.wav"), b"RIFF").unwrap();
     runtime::check(&dir).expect("音效补上了 check 该过");
     fs::remove_dir_all(&dir).unwrap();

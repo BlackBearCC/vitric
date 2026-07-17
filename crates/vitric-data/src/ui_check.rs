@@ -1,19 +1,19 @@
-//! UI 控件的**值级**校验（在通用 schema 校验之上的语义约束）。
+//! **Value-level** validation of UI components (semantic constraints on top of generic schema validation).
 //!
-//! 为什么单独一条：schema 能校验字段类型/范围，但 UI 有几条跨字段的语义约束——
-//! 锚点预设名必须在合法集合里、容器类型在 {VBox,HBox,Grid}、Grid 列数 ≥ 1、对齐名
-//! 合法。这些和序列的动作名校验同性质（[`crate::sequence`]），由引擎兜底，不依赖
-//! 作者把字段声明成 enum 才生效——UI 是引擎给的通用控件，约束是引擎的。
+//! Why a separate pass: schema can validate field types/ranges, but UI has a few cross-field semantic constraints —
+//! the anchor preset name must be in the legal set, container kind is in {VBox,HBox,Grid}, Grid columns >= 1, and the alignment name
+//! is legal. These are the same nature as the sequence action-name validation ([`crate::sequence`]); the engine enforces them as a backstop, without relying on
+//! the author declaring fields as enums to take effect — UI is a generic control provided by the engine, and the constraints are the engine's.
 //!
-//! 跨文件引用（Panel.image / 字体存在性）不在这里：那要素材仓库，和 Sprite.image
-//! 一样在 `vitric check`（cli）里查。这里只看场景内的组件值。
+//! Cross-file references (Panel.image / font existence) are not here: those need the asset repository, and like Sprite.image
+//! they are checked in `vitric check` (cli). Here we only look at component values within the scene.
 
 use serde_json::Value;
 
 use crate::ValidationReport;
 
-/// 合法锚点预设名（与 vitric-render 的 ANCHOR_NAMES 同步——引擎只此一份语义，
-/// 这里复制一份纯字符串常量，避免 vitric-data 依赖 vitric-render（数据层不依赖渲染））。
+/// Legal anchor preset names (kept in sync with vitric-render's ANCHOR_NAMES — the engine has only this one set of semantics,
+/// duplicated here as pure string constants to avoid vitric-data depending on vitric-render (the data layer does not depend on rendering)).
 pub const UI_ANCHORS: &[&str] = &[
     "top-left",
     "top-center",
@@ -28,26 +28,26 @@ pub const UI_ANCHORS: &[&str] = &[
     "manual",
 ];
 
-/// 合法容器类型名。
+/// Legal container kind names.
 pub const UI_CONTAINER_KINDS: &[&str] = &["VBox", "HBox", "Grid"];
 
-/// 合法对齐名。
+/// Legal alignment names.
 pub const UI_ALIGNS: &[&str] = &["start", "center", "end"];
 
-/// 合法按钮状态名（与 vitric-render 的 ButtonState 同步——同样复制纯字符串常量，
-/// 避免 vitric-data 依赖 vitric-render）。
+/// Legal button state names (kept in sync with vitric-render's ButtonState — again duplicated as pure string constants,
+/// to avoid vitric-data depending on vitric-render).
 pub const UI_BUTTON_STATES: &[&str] = &["normal", "focused", "pressed", "disabled"];
 
-/// 校验一个实体上的 UI 组件值。`comps` 是该实体归一化后的组件 → 值映射。
-/// `epath` 是实体路径前缀（如 `scenes/main.json#/entities/2`）。
-/// 把发现的问题推进 `report`（带路径 + VDxxx 码 + 修复提示），一次报全。
+/// Validate the UI component values on an entity. `comps` is the entity's normalized component -> value map.
+/// `epath` is the entity path prefix (e.g. `scenes/main.json#/entities/2`).
+/// Pushes any problems found into `report` (with path + VDxxx code + fix hint), reporting all at once.
 pub fn validate_ui_components(
     comps: &serde_json::Map<String, Value>,
     epath: &str,
     report: &mut ValidationReport,
 ) {
     if let Some(ui) = comps.get("Ui").and_then(|v| v.as_object()) {
-        // 锚点预设名（manual 缺省也合法；给了非法名报错）
+        // Anchor preset name (manual default is also legal; an illegal name is reported)
         if let Some(anchor) = ui.get("anchor").and_then(|v| v.as_str()) {
             if !UI_ANCHORS.contains(&anchor) {
                 report.push(
@@ -60,11 +60,11 @@ pub fn validate_ui_components(
         }
     }
     if let Some(c) = comps.get("Container").and_then(|v| v.as_object()) {
-        // 容器类型
+        // Container kind
         let kind = c.get("kind").and_then(|v| v.as_str());
         match kind {
             Some(k) if UI_CONTAINER_KINDS.contains(&k) => {
-                // Grid 列数 ≥ 1
+                // Grid columns >= 1
                 if k == "Grid" {
                     let cols = c.get("columns").and_then(Value::as_f64).unwrap_or(1.0);
                     if cols < 1.0 {
@@ -90,7 +90,7 @@ pub fn validate_ui_components(
                 format!("可选: [{}]", UI_CONTAINER_KINDS.join(", ")),
             ),
         }
-        // 对齐名（main/cross，给了就要合法）
+        // Alignment names (main/cross; if given, must be legal)
         for field in ["main", "cross"] {
             if let Some(a) = c.get(field).and_then(|v| v.as_str()) {
                 if !UI_ALIGNS.contains(&a) {
@@ -104,8 +104,8 @@ pub fn validate_ui_components(
             }
         }
     }
-    // Button（1.2 交互）：状态名合法 + 激活 action 非空。
-    // theme 名是否存在要项目级主题表，归 vitric check（和 Panel.image 同口径）。
+    // Button (1.2 interaction): state name is legal + active action is non-empty.
+    // Whether the theme name exists needs the project-level theme table, handled by vitric check (same scope as Panel.image).
     if let Some(b) = comps.get("Button").and_then(|v| v.as_object()) {
         if let Some(state) = b.get("state").and_then(|v| v.as_str()) {
             if !UI_BUTTON_STATES.contains(&state) {
@@ -117,7 +117,7 @@ pub fn validate_ui_components(
                 );
             }
         }
-        // action 给了就不能是空串（空 action 的 ui-activate 没有规则能接，是死按钮）
+        // action, if given, must not be an empty string (an empty action's ui-activate has no rule to receive it; it's a dead button)
         if let Some(action) = b.get("action").and_then(|v| v.as_str()) {
             if action.is_empty() {
                 report.push(

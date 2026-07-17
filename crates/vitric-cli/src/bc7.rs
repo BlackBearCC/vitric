@@ -1,29 +1,36 @@
-//! BC7（BPTC）离线压缩——纯 Rust、确定性、零外部依赖。
+//! BC7 (BPTC) offline compression — pure Rust, deterministic, zero external dependencies.
 //!
-//! 选型理由（写进交接单）：BC7 规范有 8 个模式，全实现是大工程；现成 crate
-//! （intel_tex_2 / ctt-bc7enc）都是 ISPC/C 绑定——既不是纯 Rust，又给
-//! x86_64-pc-windows-gnu 交叉编译埋雷（要 ISPC 工具链/预编译静态库）。本工程
-//! 的硬约束是「纯 Rust 优先 + windows-gnu 交叉编译必过 + 同输入逐字节同产物」，
-//! 所以这里自己写一个**单模式（mode 6）**编码器：
+//! Rationale (in the handoff): BC7 spec has 8 modes; full implementation is a big project;
+//! existing crates (intel_tex_2 / ctt-bc7enc) are all ISPC/C bindings — neither pure Rust,
+//! nor safe for x86_64-pc-windows-gnu cross-compilation (need ISPC toolchain / prebuilt
+//! static libs). This project's hard constraints are "pure Rust first + windows-gnu
+//! cross-compile must pass + same input → byte-identical output", so we hand-roll a
+//! **single-mode (mode 6)** encoder here:
 //!
-//! - **mode 6**：1 个子集、RGBA 全通道各 7 位端点 + 1 位 P-bit、64 个索引（4 位/像素）。
-//!   一块 16 像素恒定压成 16 字节 = 8bpp，正好是 RGBA8（32bpp）的 **1/4**（4×）。
-//! - 选 mode 6 是因为它**唯一**能无损表达完整 alpha（其余模式要么无 alpha，要么
-//!   alpha 单独分区）——帧动画素材带透明边，alpha 不能丢。
-//! - 端点拟合走「通道独立的 min/max + 最近端点索引」：确定（无浮点 RNG、无并行
-//!   时序），质量对色板量化过的素材足够（assets 流水线已统一色板，色阶本就少）。
+//! - **mode 6**: 1 subset, RGBA all channels 7-bit endpoints + 1-bit P-bit, 64 indices
+//!   (4 bits/pixel). A 16-pixel block always compresses to 16 bytes = 8bpp, exactly
+//!   **1/4** (4×) of RGBA8 (32bpp).
+//! - mode 6 is chosen because it's the **only** mode that can losslessly represent full
+//!   alpha (other modes either have no alpha, or alpha is partitioned separately) — frame
+//!   animation assets have transparent edges, alpha must not be lost.
+//! - Endpoint fitting uses "channel-independent min/max + nearest endpoint index":
+//!   deterministic (no float RNG, no parallel timing), quality is sufficient for
+//!   palette-quantized assets (the assets pipeline already unifies palettes, so color
+//!   steps are few to begin with).
 //!
-//! GPU 真机上传 + 视觉验证留 Windows GPU 机；容器侧只做**离线编码 + 字节数对比**
-//! （RGBA8 raw vs BC7，断言 4× + 去重额外省）。解码（往返自检用）也在这里，纯 CPU。
+//! Real GPU upload + visual verification stays on the Windows GPU machine; the container
+//! side only does **offline encoding + byte-count comparison** (RGBA8 raw vs BC7, assert
+//! 4× + dedup saves more). Decoding (for round-trip self-check) is also here, pure CPU.
 
-/// 一块 BC7 是 4×4 像素、固定 16 字节。
+/// A BC7 block is 4×4 pixels, fixed 16 bytes.
 pub const BLOCK_BYTES: usize = 16;
 
-/// 把 RGBA8 图（width×height，行优先，每像素 4 字节）压成 BC7。
+/// Compress an RGBA8 image (width×height, row-major, 4 bytes/pixel) into BC7.
 ///
-/// 尺寸非 4 的倍数时按 BC7/GPU 惯例**向上取整到 4 的倍数**，边缘块用最近边像素
-/// 填充（clamp）——和图集打包的复制边同语义，采样不会渗进垃圾。返回
-/// `(blocks_x, blocks_y, 字节)`，字节长度恒为 `blocks_x*blocks_y*16`。
+/// When dimensions aren't multiples of 4, follow the BC7/GPU convention of **rounding up
+/// to multiples of 4**, with edge blocks padded by the nearest edge pixel (clamp) — same
+/// semantics as atlas packing's duplicate edges, so sampling won't bleed garbage. Returns
+/// `(blocks_x, blocks_y, bytes)`, with byte length always `blocks_x*blocks_y*16`.
 pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let expect = width as usize * height as usize * 4;
     if rgba.len() != expect {
@@ -37,11 +44,12 @@ pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8]) -> Result<(u32, u32, V
     let row_bytes = bx as usize * BLOCK_BYTES;
     let mut out = vec![0u8; by as usize * row_bytes];
 
-    // 编码一整块行 byi 到 dst（dst 恰是该行的 bx×16 字节）。块只读自己的 4×4 像素、
-    // 写自己固定的 16 字节，无任何共享可变状态 → 串行/并行**逐字节同结果**。
+    // Encode an entire block row byi into dst (dst is exactly that row's bx×16 bytes).
+    // Each block reads only its own 4×4 pixels, writes its own fixed 16 bytes — no shared
+    // mutable state → serial/parallel produce **byte-identical results**.
     let fill_row = |byi: u32, dst: &mut [u8]| {
         for bxi in 0..bx {
-            // 取 4×4 像素（越界 clamp 到最近边像素，和打包复制边一致）
+            // Take 4×4 pixels (out-of-bounds clamps to nearest edge pixel, same as packing duplicate edges)
             let mut block = [[0u8; 4]; 16];
             for py in 0..4u32 {
                 for px in 0..4u32 {
@@ -56,10 +64,13 @@ pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8]) -> Result<(u32, u32, V
         }
     };
 
-    // 几百上千帧的角色图集能到几十 MB，串行编码要几秒卡启动。块行间互不依赖、各写
-    // 不相交的输出切片，所以按块行均分给 CPU 核并行——`thread::scope` 借用 rgba/out，
-    // 输出 disjoint，结果与串行逐字节一致（无浮点 RNG、无顺序依赖，确定性不破）。小图
-    // （< PAR_MIN_ROWS 块行）串行省去线程开销。纯 std，不引第三方依赖。
+    // Character atlases of hundreds/thousands of frames can reach tens of MB; serial
+    // encoding stalls startup for several seconds. Block rows don't depend on each other
+    // and each writes a disjoint output slice, so split block rows across CPU cores —
+    // `thread::scope` borrows rgba/out, outputs are disjoint, result is byte-identical to
+    // serial (no float RNG, no order dependency, determinism preserved). Small images
+    // (< PAR_MIN_ROWS block rows) go serial to skip thread overhead. Pure std, no
+    // third-party deps.
     const PAR_MIN_ROWS: u32 = 64;
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     if threads <= 1 || by < PAR_MIN_ROWS {
@@ -68,7 +79,7 @@ pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8]) -> Result<(u32, u32, V
         }
     } else {
         let rows_per = (by as usize).div_ceil(threads);
-        let fill_row = &fill_row; // 各线程共享只读闭包（捕获 &rgba，Sync）
+        let fill_row = &fill_row; // each thread shares the read-only closure (captures &rgba, Sync)
         std::thread::scope(|s| {
             for (chunk_i, dst_chunk) in out.chunks_mut(rows_per * row_bytes).enumerate() {
                 let base = (chunk_i * rows_per) as u32;
@@ -83,10 +94,11 @@ pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8]) -> Result<(u32, u32, V
     Ok((bx, by, out))
 }
 
-/// 编码一块（16 个 RGBA 像素）为 mode 6 的 16 字节。
+/// Encode one block (16 RGBA pixels) into mode 6's 16 bytes.
 fn encode_block_mode6(px: &[[u8; 4]; 16]) -> [u8; BLOCK_BYTES] {
-    // 端点：每通道取块内 min / max（确定）。两端点的 P-bit 各自取被代表那侧
-    // 的最低位（端点是 8 位，mode6 存 7 位主值 + 1 位 P-bit = 复原 8 位）。
+    // Endpoints: per channel, take block min / max (deterministic). Each endpoint's P-bit
+    // takes the lowest bit of the side it represents (endpoint is 8-bit; mode6 stores 7-bit
+    // main value + 1-bit P-bit = restored 8-bit).
     let mut lo = [255u8; 4];
     let mut hi = [0u8; 4];
     for p in px {
@@ -95,31 +107,35 @@ fn encode_block_mode6(px: &[[u8; 4]; 16]) -> [u8; BLOCK_BYTES] {
             hi[c] = hi[c].max(p[c]);
         }
     }
-    // 7 位主值 + P-bit 拆分：原 8 位值 v → 主值 v>>1，P-bit v&1。
-    // 解码端复原 v' = (主值<<1)|pbit，与原 v 在 P-bit 一致时无损。
+    // 7-bit main value + P-bit split: original 8-bit value v → main value v>>1, P-bit v&1.
+    // Decoder restores v' = (main<<1)|pbit; lossless when the P-bit matches the original v.
     let p0 = endpoint_pbit(&lo);
     let p1 = endpoint_pbit(&hi);
-    let e0: [u8; 4] = std::array::from_fn(|c| lo[c] >> 1); // 7 位主值
+    let e0: [u8; 4] = std::array::from_fn(|c| lo[c] >> 1); // 7-bit main value
     let e1: [u8; 4] = std::array::from_fn(|c| hi[c] >> 1);
-    // 解码端会实际使用的两端点（复原成 8 位）——索引拟合必须对齐它，往返才准。
+    // The two endpoints the decoder will actually use (restored to 8-bit) — index fitting
+    // must align with them for the round-trip to be accurate.
     let d0: [u8; 4] = std::array::from_fn(|c| (e0[c] << 1) | p0);
     let d1: [u8; 4] = std::array::from_fn(|c| (e1[c] << 1) | p1);
 
-    // 每像素选最近的 16 档插值索引（mode6 索引 4 位）。
+    // Each pixel picks the nearest of the 16 interpolation indices (mode6 index is 4-bit).
     let mut indices = [0u8; 16];
     for (i, p) in px.iter().enumerate() {
         indices[i] = nearest_index(&d0, &d1, p);
     }
-    // mode6 约定：anchor（第 0 像素）索引最高位必须为 0，否则要交换端点。
+    // mode6 convention: the anchor (pixel 0) index's highest bit must be 0; otherwise
+    // swap endpoints.
     if indices[0] & 0b1000 != 0 {
-        // 交换端点 + 索引取反（15-idx），保持视觉不变、anchor 高位归 0
+        // Swap endpoints + invert indices (15-idx), keeping the visual unchanged and the
+        // anchor high bit at 0
         return encode_block_mode6_swapped(&e1, &e0, p1, p0, px);
     }
     pack_mode6(&e0, &e1, p0, p1, &indices)
 }
 
-/// 端点交换分支：端点对调后重算索引（15-idx 等价于端点对调，省一次拟合也行，
-/// 但重算更直白且仍确定）。
+/// Endpoint-swap branch: swap endpoints then refit indices (15-idx is equivalent to
+/// swapping endpoints; skipping the refit would work, but refitting is clearer and
+/// still deterministic).
 fn encode_block_mode6_swapped(
     e0: &[u8; 4],
     e1: &[u8; 4],
@@ -133,21 +149,23 @@ fn encode_block_mode6_swapped(
     for (i, p) in px.iter().enumerate() {
         indices[i] = nearest_index(&d0, &d1, p);
     }
-    // 交换后 anchor 高位必然为 0（端点已对调，原本 >7 的索引现在 <8）
+    // After swap, anchor high bit is guaranteed 0 (endpoints swapped; indices that were
+    // >7 are now <8)
     pack_mode6(e0, e1, p0, p1, &indices)
 }
 
-/// 端点的 P-bit：取该端点 alpha 通道最低位（任选一通道即可，约定用 alpha——
-/// 帧素材最在意 alpha 的还原）。
+/// Endpoint P-bit: take the lowest bit of the endpoint's alpha channel (any channel
+/// would do; convention is alpha — frame assets care most about alpha restoration).
 fn endpoint_pbit(v: &[u8; 4]) -> u8 {
     v[3] & 1
 }
 
-/// mode6 的 16 档权重表（规范 BC7 4 位索引插值权重，0..64）。
+/// mode6's 16-step weight table (spec BC7 4-bit index interpolation weights, 0..64).
 const W6: [u32; 16] =
     [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
 
-/// 沿 d0→d1 找最近的 16 档插值（按权重表，确定）。
+/// Find the nearest of the 16 interpolation steps along d0→d1 (by the weight table,
+/// deterministic).
 fn nearest_index(d0: &[u8; 4], d1: &[u8; 4], p: &[u8; 4]) -> u8 {
     let mut best = 0u8;
     let mut best_err = u32::MAX;
@@ -166,28 +184,29 @@ fn nearest_index(d0: &[u8; 4], d1: &[u8; 4], p: &[u8; 4]) -> u8 {
     best
 }
 
-/// BC7 端点插值（规范公式：(64-w)*a + w*b 四舍五入到 8 位）。
+/// BC7 endpoint interpolation (spec formula: (64-w)*a + w*b rounded to 8-bit).
 fn interp(a: u8, b: u8, w: u32) -> u8 {
     (((64 - w) * a as u32 + w * b as u32 + 32) >> 6) as u8
 }
 
-/// 把 mode6 字段打进 128 位块（小端字节序，LSB 在 byte0 bit0）。
-/// 位布局（BC7 mode 6，从 bit0 起，总 128 位）：
-///   7 位 mode 前缀（6 个 0 + 1 个 1，"mode n = 第 n 位是首个 1"）
-///   | R0,R1,G0,G1,B0,B1,A0,A1 各 7 位（共 56） | P0,P1 各 1 位（共 2）
-///   | 16 索引×4 位（首索引 anchor 省最高位只占 3，共 63）
-///   合计 7+56+2+63 = 128。
+/// Pack mode6 fields into a 128-bit block (little-endian byte order, LSB at byte0 bit0).
+/// Bit layout (BC7 mode 6, starting from bit0, 128 bits total):
+///   7-bit mode prefix (6 zeros + 1 one; "mode n = the nth bit is the first 1")
+///   | R0,R1,G0,G1,B0,B1,A0,A1 each 7 bits (56 total) | P0,P1 each 1 bit (2 total)
+///   | 16 indices × 4 bits (first index is the anchor, highest bit omitted, only 3 bits — 63 total)
+///   Total 7+56+2+63 = 128.
 fn pack_mode6(e0: &[u8; 4], e1: &[u8; 4], p0: u8, p1: u8, indices: &[u8; 16]) -> [u8; BLOCK_BYTES] {
     let mut bits = BitWriter::new();
-    bits.put(0b100_0000, 7); // mode 6：bit0..5 为 0，bit6 为 1
-    // 端点顺序：R0 R1 G0 G1 B0 B1 A0 A1（各 7 位）
+    bits.put(0b100_0000, 7); // mode 6: bit0..5 are 0, bit6 is 1
+    // Endpoint order: R0 R1 G0 G1 B0 B1 A0 A1 (7 bits each)
     for c in 0..4 {
         bits.put(e0[c] as u128, 7);
         bits.put(e1[c] as u128, 7);
     }
     bits.put(p0 as u128, 1);
     bits.put(p1 as u128, 1);
-    // 索引：anchor（第 0 个）只占 3 位（最高位被约定为 0 省掉），其余各 4 位
+    // Indices: anchor (the 0th) takes only 3 bits (highest bit is conventionally 0, omitted);
+    // the rest take 4 bits each
     bits.put(indices[0] as u128, 3);
     for &idx in &indices[1..] {
         bits.put(idx as u128, 4);
@@ -195,7 +214,8 @@ fn pack_mode6(e0: &[u8; 4], e1: &[u8; 4], p0: u8, p1: u8, indices: &[u8; 16]) ->
     bits.finish()
 }
 
-/// 解码一块 mode6 回 16 个 RGBA 像素（往返自检 + 字节对比用，纯 CPU）。
+/// Decode one mode6 block back into 16 RGBA pixels (for round-trip self-check and
+/// byte comparison; pure CPU).
 pub fn decode_block_mode6(block: &[u8; BLOCK_BYTES]) -> [[u8; 4]; 16] {
     let mut bits = BitReader::new(block);
     let mode = bits.get(7);
@@ -221,8 +241,9 @@ pub fn decode_block_mode6(block: &[u8; BLOCK_BYTES]) -> [[u8; 4]; 16] {
     out
 }
 
-/// 解码整张 BC7（往返自检用）。`blocks_x/blocks_y` 是块网格，`width/height` 是
-/// 裁回的真实尺寸（块网格可能向上取整过）。
+/// Decode an entire BC7 image (for round-trip self-check). `blocks_x/blocks_y` is the
+/// block grid; `width/height` is the real size to crop back to (the block grid may have
+/// been rounded up).
 pub fn decode_to_rgba8(
     blocks_x: u32,
     blocks_y: u32,
@@ -251,7 +272,7 @@ pub fn decode_to_rgba8(
     out
 }
 
-/// 小端位写入器（LSB 优先，匹配 GPU 对 BC7 块的字节解释）。
+/// Little-endian bit writer (LSB first, matching the GPU's byte interpretation of BC7 blocks).
 struct BitWriter {
     acc: u128,
     pos: u32,
@@ -271,7 +292,7 @@ impl BitWriter {
     }
 }
 
-/// 小端位读取器（与 [`BitWriter`] 对称）。
+/// Little-endian bit reader (symmetric with [`BitWriter`]).
 struct BitReader {
     acc: u128,
     pos: u32,
@@ -292,19 +313,23 @@ impl BitReader {
 mod tests {
     use super::*;
 
-    /// 并行编码逐字节 == 串行：encode_rgba8 大图走多线程块行切分，结果必须和一块块
-    /// 顺序编码完全相同（确定性是 `--frames`/`vitric check` 的硬契约，并行不许破）。
+    /// Parallel encode is byte-identical to serial: encode_rgba8 splits large images across
+    /// block rows on multiple threads; the result must be exactly the same as encoding block
+    /// by block in order (determinism is a hard contract for `--frames`/`vitric check`;
+    /// parallelism must not break it).
     #[test]
     fn parallel_encode_byte_identical_to_serial() {
-        // 320px 高 = 80 块行 > PAR_MIN_ROWS(64)，确保走并行路径；宽度非 4 倍数测取整
+        // 320px height = 80 block rows > PAR_MIN_ROWS(64), ensures the parallel path;
+        // width not a multiple of 4 tests the round-up
         let (w, h) = (70u32, 320u32);
         let mut rgba = vec![0u8; (w * h * 4) as usize];
-        // 造有梯度的内容（不是纯色，逼并行/串行在"有损块"上也一致）
+        // Build content with a gradient (not solid color, forcing parallel/serial to agree
+        // on "lossy blocks" too)
         for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
             px.copy_from_slice(&[(i % 251) as u8, (i / 7 % 253) as u8, (i / 13 % 247) as u8, 255]);
         }
         let (bx, by, par) = encode_rgba8(w, h, &rgba).unwrap();
-        // 串行参照：一块块顺序编码
+        // Serial reference: encode block by block in order
         let mut serial = Vec::with_capacity(bx as usize * by as usize * BLOCK_BYTES);
         for byi in 0..by {
             for bxi in 0..bx {
@@ -323,29 +348,31 @@ mod tests {
         assert_eq!(par, serial, "并行编码必须与串行逐字节一致");
     }
 
-    /// mode6 块恒 16 字节，4×4 像素 = 8bpp。
+    /// A mode6 block is always 16 bytes, 4×4 pixels = 8bpp.
     #[test]
     fn block_is_8bpp() {
         let block = [[10u8, 20, 30, 40]; 16];
         let bytes = encode_block_mode6(&block);
         assert_eq!(bytes.len(), 16);
-        // 16 像素 × 4 字节 RGBA = 64 字节 raw → 16 字节 BC7 = 4×
+        // 16 pixels × 4 bytes RGBA = 64 bytes raw → 16 bytes BC7 = 4×
         assert_eq!(64 / bytes.len(), 4);
     }
 
-    /// 纯色块往返：极值（全 0 / 全 255）逐字节无损，任意色误差 ≤1。
-    /// （mode 6 端点的 P-bit 全通道共享，奇偶不一致的通道有 ±1 量化——这是格式特性，
-    /// 不是 bug；assets 流水线已统一色板，色阶本就少，肉眼无感。）
+    /// Solid-color block round-trip: extremes (all 0 / all 255) are byte-lossless;
+    /// arbitrary colors have error ≤1. (mode 6 endpoint P-bit is shared across all
+    /// channels; channels with mismatched parity have ±1 quantization — this is a format
+    /// property, not a bug; the assets pipeline already unifies palettes, so color steps
+    /// are few and the error is visually imperceptible.)
     #[test]
     fn solid_block_roundtrip() {
-        // 极值无损（0 → main0 pbit0；255 → main127 pbit1）
+        // Extremes are lossless (0 → main0 pbit0; 255 → main127 pbit1)
         for color in [[0u8, 0, 0, 0], [255, 255, 255, 255]] {
             let back = decode_block_mode6(&encode_block_mode6(&[color; 16]));
             for t in back {
                 assert_eq!(t, color, "极值 {color:?} 往返应无损");
             }
         }
-        // 任意色误差 ≤1（P-bit 共享的固有量化）
+        // Arbitrary colors have error ≤1 (inherent quantization from shared P-bit)
         for color in [[123u8, 45, 200, 99], [7, 250, 13, 128]] {
             let back = decode_block_mode6(&encode_block_mode6(&[color; 16]));
             for t in back {
@@ -356,12 +383,14 @@ mod tests {
         }
     }
 
-    /// 轴对齐的两端点色块往返误差小（端点正好是块内 min/max，索引命中 0 和 15 档）。
-    /// 这是真实素材的常态：色板量化过的帧，块内多是同一渐变上的几档（共线），
-    /// 不是 R/G 反相关的病态色。端点轴对齐时 mode 6 单 subset 表达良好。
+    /// Axis-aligned two-endpoint color block round-trip with small error (endpoints are
+    /// exactly the block's min/max, indices hit steps 0 and 15). This is the norm for real
+    /// assets: palette-quantized frames usually have a few steps on the same gradient
+    /// (collinear), not pathological R/G-anticorrelated colors. With axis-aligned endpoints,
+    /// mode 6 single-subset representation is good.
     #[test]
     fn two_color_block_roundtrip() {
-        // a→b 沿同一方向（各通道同增），落在 lo→hi 直线上
+        // a→b along the same direction (all channels increase together), lying on the lo→hi line
         let a = [20u8, 40, 60, 255];
         let b = [200u8, 220, 240, 255];
         let mut block = [[0u8; 4]; 16];
@@ -378,8 +407,10 @@ mod tests {
         }
     }
 
-    /// 病态色（R/G 反相关）不崩、不 panic——mode 6 单 subset 表达力有限是已知取舍
-    /// （assets 流水线统一色板后基本不出现），但编码器必须确定地产出合法块。
+    /// Pathological colors (R/G anticorrelated) don't crash or panic — mode 6 single-subset
+    /// expressiveness is limited, a known tradeoff (essentially never happens after the
+    /// assets pipeline unifies palettes), but the encoder must deterministically produce a
+    /// valid block.
     #[test]
     fn anticorrelated_block_is_stable_not_panicking() {
         let a = [10u8, 250, 5, 255];
@@ -388,13 +419,13 @@ mod tests {
         for (i, t) in block.iter_mut().enumerate() {
             *t = if i % 2 == 0 { a } else { b };
         }
-        // 确定 + 往返不 panic（质量不保证，稳定性保证）
+        // Deterministic + round-trip doesn't panic (quality not guaranteed, stability is)
         let enc = encode_block_mode6(&block);
         assert_eq!(enc, encode_block_mode6(&block), "同输入同产物");
         let _ = decode_block_mode6(&enc);
     }
 
-    /// 同输入逐字节同产物（确定性铁律）。
+    /// Same input → byte-identical output (the iron law of determinism).
     #[test]
     fn deterministic_bytes() {
         let mut rgba = Vec::new();
@@ -406,7 +437,7 @@ mod tests {
         assert_eq!(a, b, "同输入必须逐字节同产物");
     }
 
-    /// 4× 压缩比：W×H RGBA8 raw 字节 == BC7 字节 × 4（尺寸为 4 的倍数时精确）。
+    /// 4× compression ratio: W×H RGBA8 raw bytes == BC7 bytes × 4 (exact when dimensions are multiples of 4).
     #[test]
     fn compression_ratio_is_4x() {
         let (w, h) = (16u32, 16u32);
@@ -417,7 +448,7 @@ mod tests {
         assert_eq!(raw, data.len() * 4, "BC7 必须是 RGBA8 的 1/4");
     }
 
-    /// 非 4 倍数尺寸向上取整到块网格，解码裁回原尺寸。
+    /// Non-multiple-of-4 dimensions round up to the block grid; decoding crops back to original size.
     #[test]
     fn non_multiple_of_four_rounds_up() {
         let (w, h) = (5u32, 3u32);
@@ -429,7 +460,7 @@ mod tests {
         assert_eq!(back, rgba, "纯色应无损还原到原尺寸");
     }
 
-    /// 长度不符显式报错（不静默）。
+    /// Length mismatch is an explicit error (not silent).
     #[test]
     fn wrong_length_errors() {
         let err = encode_rgba8(4, 4, &[0u8; 10]).unwrap_err();

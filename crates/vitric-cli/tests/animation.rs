@@ -1,5 +1,5 @@
-//! 声明式动画端到端：引擎独占 Sprite.image 写权、切片段从头播、
-//! 非循环片段播完发 anim-finished、全程确定性。
+//! Declarative animation end-to-end: the engine owns the Sprite.image write privilege, clip segments play from the start,
+//! non-looping segments emit anim-finished when done, fully deterministic throughout.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -35,7 +35,7 @@ fn looping_clip_cycles_frames() {
     let mut w = World::new();
     let e = anim_entity(&mut w, "spin");
     let clips = BTreeMap::from([("spin".to_string(), clip(&["a.png", "b.png"], 30, true))]);
-    // fps=30：每 2 tick 换一帧；4 tick 一轮回
+    // fps=30: one frame every 2 ticks; a full cycle every 4 ticks
     let mut seen = Vec::new();
     for _ in 0..8 {
         advance_animations(&mut w, &clips).unwrap();
@@ -52,7 +52,7 @@ fn switching_clip_restarts_and_oneshot_finishes_once() {
         ("boom".to_string(), clip(&["b0.png", "b1.png"], 60, false)),
         ("idle".to_string(), clip(&["i.png"], 1, true)),
     ]);
-    // 非循环 60fps 两帧：tick0=b0, tick1=b1, tick2 起播完保持末帧
+    // Non-looping 60fps two frames: tick0=b0, tick1=b1, from tick2 on it holds the last frame
     let mut finished = 0;
     for _ in 0..5 {
         finished += advance_animations(&mut w, &clips).unwrap().len();
@@ -60,7 +60,7 @@ fn switching_clip_restarts_and_oneshot_finishes_once() {
     assert_eq!(w.get_field(e, "Sprite.image").unwrap(), &json!("b1.png"), "停在末帧");
     assert_eq!(finished, 1, "anim-finished 只发一次");
 
-    // 切回 boom：从头重播，再发一次
+    // Switch back to boom: replays from the start, emits once more
     w.set_field(e, "Anim.clip", json!("idle")).unwrap();
     advance_animations(&mut w, &clips).unwrap();
     w.set_field(e, "Anim.clip", json!("boom")).unwrap();
@@ -79,26 +79,26 @@ fn unknown_clip_is_explicit() {
 
 #[test]
 fn coin_run_walk_cycle_via_rules() {
-    // 完整链路：input → 规则切 Anim.clip → 引擎推帧 → Sprite.image 换成走路帧
+    // Full chain: input → rule switches Anim.clip → engine advances frames → Sprite.image becomes a walk frame
     let (mut sim, mut rt) = Runtime::boot(&example_dir()).unwrap();
     let player = sim.world.entity("player").unwrap();
-    // 初始 idle
+    // Initial idle
     sim.step(&mut rt).unwrap();
     assert_eq!(sim.world.get_field(player, "Sprite.image").unwrap(), &json!("player.png"));
-    // 按右键 → walk 动画
+    // Press right → walk animation
     sim.inject_input("right", "pressed");
     for _ in 0..3 {
         sim.step(&mut rt).unwrap();
     }
     let img = sim.world.get_field(player, "Sprite.image").unwrap().as_str().unwrap().to_string();
     assert!(img.starts_with("player-walk-"), "应在播走路动画，实际 {img}");
-    // 松开 → 回 idle
+    // Release → back to idle
     sim.inject_input("right", "released");
     for _ in 0..2 {
         sim.step(&mut rt).unwrap();
     }
     assert_eq!(sim.world.get_field(player, "Sprite.image").unwrap(), &json!("player.png"));
-    // 金币也在转
+    // Coins are also spinning
     let coins = sim.world.query(&["Coin"]);
     let coin_img = sim.world.get_field(coins[0], "Sprite.image").unwrap().as_str().unwrap().to_string();
     assert!(coin_img.starts_with("coin-"), "{coin_img}");

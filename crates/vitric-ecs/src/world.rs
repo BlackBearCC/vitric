@@ -6,24 +6,24 @@ use serde_json::{json, Map, Value};
 use crate::hash::Fnv1aWriter;
 use crate::{EcsError, EntityId};
 
-/// 世界：实体 + 组件的唯一容器。
+/// World: the single container for entities + components.
 ///
-/// 组件值是 `serde_json::Value`（默认 feature 下对象键有序），所以：
-/// - `snapshot()` 输出的 JSON 就是世界的完整真相，`restore()` 能精确回到这一刻；
-/// - `state_hash()` 对同一状态永远算出同一个值，是录像回放校验的基石。
+/// Component values are `serde_json::Value` (object keys ordered under the default feature), so:
+/// - the JSON output of `snapshot()` is the complete truth of the world, and `restore()` can return to this exact moment;
+/// - `state_hash()` always yields the same value for the same state, the cornerstone of recording replay verification.
 #[derive(Debug, Default, Clone)]
 pub struct World {
-    /// 每个槽位的当前代数。实体销毁时代数 +1，旧句柄随之失效。
+    /// Current generation of each slot. When an entity is despawned, generation +1, invalidating old handles.
     generations: Vec<u32>,
-    /// 槽位是否存活。
+    /// Whether the slot is alive.
     alive: Vec<bool>,
-    /// 可复用的空闲槽位（后进先出，顺序确定）。
+    /// Reusable free slots (LIFO, deterministic order).
     free: Vec<u32>,
-    /// 组件名 -> (槽位 -> 组件值)。BTreeMap 保证遍历顺序确定。
+    /// Component name -> (slot -> component value). BTreeMap guarantees deterministic traversal order.
     components: BTreeMap<String, BTreeMap<u32, Value>>,
-    /// 实体名 -> 槽位。实体名全局唯一，给场景文件和规则引用用。
+    /// Entity name -> slot. Entity names are globally unique, for scene files and rules to reference.
     names: BTreeMap<String, u32>,
-    /// 槽位 -> 实体名（反向索引）。
+    /// Slot -> entity name (reverse index).
     slot_names: BTreeMap<u32, String>,
 }
 
@@ -32,7 +32,7 @@ impl World {
         Self::default()
     }
 
-    // ---- 实体生命周期 ----
+    // ---- Entity lifecycle ----
 
     pub fn spawn(&mut self) -> EntityId {
         let index = match self.free.pop() {
@@ -74,12 +74,12 @@ impl World {
         Ok(())
     }
 
-    /// 按槽位序销毁全部存活实体（场景切换用）。
+    /// Despawn all alive entities in slot order (for scene switching).
     ///
-    /// 约束：走的是正规 despawn 路径，不是"重置世界"——每个槽位代数 +1、
-    /// 名字注销、槽位进 free 列表。旧场景的实体句柄全部干净地失效
-    /// （is_alive = false），不存在"新场景实体顶着旧句柄复活"的混淆；
-    /// 槽位/代数痕迹保留进快照，切换前后的世界哈希因此可区分。
+    /// Constraint: this goes through the normal despawn path, not a "reset world" — each slot's generation +1,
+    /// names are deregistered, and slots go into the free list. Old scene entity handles all cleanly invalidate
+    /// (is_alive = false), avoiding the confusion of "new scene entities reviving under old handles";
+    /// slot/generation traces are preserved into the snapshot, so the world hash differs before vs after the switch.
     pub fn clear_entities(&mut self) {
         for id in self.entities() {
             self.despawn(id).expect("entities() 给出的实体必然存活");
@@ -91,7 +91,7 @@ impl World {
             && self.generations[id.index as usize] == id.generation
     }
 
-    /// 按名字找实体。
+    /// Find an entity by name.
     pub fn entity(&self, name: &str) -> Result<EntityId, EcsError> {
         let &slot = self
             .names
@@ -113,7 +113,7 @@ impl World {
         })
     }
 
-    /// 所有存活实体，按槽位序（确定性）。
+    /// All alive entities, in slot order (deterministic).
     pub fn entities(&self) -> Vec<EntityId> {
         (0..self.generations.len() as u32)
             .filter(|&i| self.alive[i as usize])
@@ -121,7 +121,7 @@ impl World {
             .collect()
     }
 
-    // ---- 组件读写 ----
+    // ---- Component read/write ----
 
     pub fn set_component(&mut self, id: EntityId, component: &str, value: Value) -> Result<(), EcsError> {
         self.check_alive(id, &format!("set_component({component})"))?;
@@ -165,7 +165,7 @@ impl World {
         Ok(())
     }
 
-    /// 实体现有的组件名列表（有序）。
+    /// List of component names currently on the entity (ordered).
     pub fn components_of(&self, id: EntityId) -> Vec<String> {
         self.components
             .iter()
@@ -174,9 +174,9 @@ impl World {
             .collect()
     }
 
-    // ---- 字段路径（"Position.x"、"Inventory.items.0.count"）----
+    // ---- Field paths ("Position.x", "Inventory.items.0.count") ----
 
-    /// 读字段。路径第一段是组件名，其余按 JSON 对象键/数组下标逐层深入。
+    /// Read a field. The first segment of the path is the component name; the rest descend by JSON object key / array index.
     pub fn get_field(&self, id: EntityId, path: &str) -> Result<&Value, EcsError> {
         let (component, rest) = split_path(id, path)?;
         let mut cur = self.get_component(id, component)?;
@@ -190,13 +190,13 @@ impl World {
         Ok(cur)
     }
 
-    /// 写字段。中间路径必须已存在（不隐式建结构——失败要显式暴露）。
+    /// Write a field. Intermediate path segments must already exist (no implicit structure creation — failures must surface explicitly).
     pub fn set_field(&mut self, id: EntityId, path: &str, value: Value) -> Result<(), EcsError> {
         let (component, rest) = split_path(id, path)?;
         if rest.is_empty() {
             return self.set_component(id, component, value);
         }
-        // 先确认组件存在（借用检查需要先取错误信息再可变借用）
+        // Confirm the component exists first (borrow checker requires taking the error info before the mutable borrow)
         if !self.has_component(id, component) {
             return Err(EcsError::NoSuchComponent {
                 id,
@@ -226,9 +226,9 @@ impl World {
         })
     }
 
-    // ---- 查询 ----
+    // ---- Query ----
 
-    /// 拥有全部指定组件的实体，按槽位序（确定性）。
+    /// Entities that have all the specified components, in slot order (deterministic).
     pub fn query(&self, required: &[&str]) -> Vec<EntityId> {
         self.entities()
             .into_iter()
@@ -236,9 +236,9 @@ impl World {
             .collect()
     }
 
-    // ---- 快照 / 哈希 ----
+    // ---- Snapshot / hash ----
 
-    /// 世界完整状态 → JSON。这就是「状态可往返」：运行中的世界和场景文件是同一种语言。
+    /// Full world state -> JSON. This is "state is round-trippable": a running world and a scene file speak the same language.
     pub fn snapshot(&self) -> Value {
         let entities: Vec<Value> = self
             .entities()
@@ -268,7 +268,7 @@ impl World {
         })
     }
 
-    /// 从快照精确恢复（覆盖当前内容）。
+    /// Restore precisely from a snapshot (overwrites current contents).
     pub fn restore(&mut self, snap: &Value) -> Result<(), EcsError> {
         let bad = |reason: &str| EcsError::BadSnapshot { reason: reason.to_string() };
         let obj = snap.as_object().ok_or_else(|| bad("顶层必须是对象"))?;
@@ -323,14 +323,15 @@ impl World {
         Ok(())
     }
 
-    /// 状态哈希：对世界的规范 JSON 字节做 FNV-1a。
-    /// 同状态必同哈希；录像回放靠它判定「一帧都没跑偏」。
+    /// State hash: FNV-1a over the world's canonical JSON bytes.
+    /// Same state -> same hash; recording replay relies on it to assert "not a single frame drifted".
     ///
-    /// **流式、零中间分配**：直接把规范序列化喂进 `Fnv1aWriter`，绕过 `snapshot()` 的
-    /// 整世界深拷 + `to_string` 的整世界字符串——两个全世界级分配都省掉。字节与
-    /// `fnv1a_64(to_string(snapshot()))` **逐位相同**（[`CanonicalWorld`] 镜像 snapshot
-    /// 的结构与键序；由 `canonical_hash_byte_identical_to_snapshot` 锁死，改一位都报红），
-    /// 所以已落盘的录像校验点不受影响。
+    /// **Streaming, zero intermediate allocation**: feeds canonical serialization directly into `Fnv1aWriter`,
+    /// bypassing `snapshot()`'s whole-world deep copy + `to_string`'s whole-world string — both world-sized
+    /// allocations are skipped. The bytes are **bit-identical** to `fnv1a_64(to_string(snapshot()))`
+    /// ([`CanonicalWorld`] mirrors the structure and key order of snapshot; locked down by
+    /// `canonical_hash_byte_identical_to_snapshot` — change one bit and it goes red),
+    /// so already-on-disk recording checkpoints are unaffected.
     pub fn state_hash(&self) -> u64 {
         let mut hasher = Fnv1aWriter::new();
         serde_json::to_writer(&mut hasher, &CanonicalWorld(self)).expect("世界必可规范序列化");
@@ -346,20 +347,20 @@ impl World {
     }
 }
 
-/// 规范序列化包装：按 [`World::snapshot`] **完全相同**的结构与键序把世界序列化出去，
-/// 但**借用**组件值（不深拷）——给 [`World::state_hash`] 流式哈希用，字节与
-/// `to_string(snapshot())` 逐位一致。
+/// Canonical serialization wrapper: serializes the world with **exactly the same** structure and key order as [`World::snapshot`],
+/// but **borrows** the component values (no deep copy) — for streaming hash in [`World::state_hash`], byte-identical to
+/// `to_string(snapshot())`.
 ///
-/// 键序对齐 serde_json 默认（无 `preserve_order`）的 `Map`＝`BTreeMap` 字典序：
-/// 顶层 `entities < free < generations < slots`，实体内 `components < id < name`，
-/// 组件按组件名排序。组件值本身是 `&Value`，由 serde_json 原样序列化（和 snapshot 里
-/// 那份 clone 出来的 Value 序列化字节相同）——这是「不深拷却逐位一致」的关键。
+/// Key order aligns with serde_json's default (no `preserve_order`) `Map` = `BTreeMap` lexicographic order:
+/// top-level `entities < free < generations < slots`, inside an entity `components < id < name`,
+/// components sorted by component name. The component value itself is a `&Value`, serialized as-is by serde_json
+/// (same bytes as the cloned Value in snapshot) — this is the key to "no deep copy yet bit-identical".
 struct CanonicalWorld<'a>(&'a World);
 
 impl Serialize for CanonicalWorld<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let w = self.0;
-        // 顶层四键，字典序：entities, free, generations, slots
+        // Top-level four keys, lexicographic: entities, free, generations, slots
         let mut m = s.serialize_map(Some(4))?;
         m.serialize_entry("entities", &EntitiesSer(w))?;
         m.serialize_entry("free", &w.free)?;
@@ -388,7 +389,7 @@ impl Serialize for EntitySer<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let (w, id) = (self.0, self.1);
         let name = w.name_of(id);
-        // 实体键字典序：components, id, name（name 可缺，和 snapshot 一致）
+        // Entity key lexicographic order: components, id, name (name may be absent, matching snapshot)
         let mut m = s.serialize_map(Some(if name.is_some() { 3 } else { 2 }))?;
         m.serialize_entry("components", &ComponentsSer(w, id))?;
         m.serialize_entry("id", &id.to_string())?;
@@ -404,8 +405,8 @@ struct ComponentsSer<'a>(&'a World, EntityId);
 impl Serialize for ComponentsSer<'_> {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let (w, id) = (self.0, self.1);
-        // components_of 源自 BTreeMap 已是字典序；这里 entry 顺序即输出顺序，和 snapshot
-        // 把它们塞进 Map(BTreeMap) 后的序列化序一致。
+        // components_of comes from BTreeMap already in lexicographic order; entry order here is the output order,
+        // matching the serialization order after snapshot stuffs them into a Map(BTreeMap).
         let names = w.components_of(id);
         let mut m = s.serialize_map(Some(names.len()))?;
         for name in &names {
@@ -415,7 +416,7 @@ impl Serialize for ComponentsSer<'_> {
     }
 }
 
-/// 把 "Comp.a.b" 切成 ("Comp", ["a","b"])。
+/// Split "Comp.a.b" into ("Comp", ["a","b"]).
 fn split_path(id: EntityId, path: &str) -> Result<(&str, Vec<&str>), EcsError> {
     let mut parts = path.split('.');
     let component = parts.next().filter(|s| !s.is_empty()).ok_or_else(|| {
@@ -525,7 +526,7 @@ fn type_name(v: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fnv1a_64; // 等价性测试比对老路径用；非测试构建里 state_hash 已不用它
+    use crate::fnv1a_64; // Used by the equivalence test to compare against the old path; non-test builds no longer use it in state_hash
 
     fn pos(x: f64, y: f64) -> Value {
         json!({"x": x, "y": y})
@@ -538,13 +539,13 @@ mod tests {
         assert!(w.is_alive(a));
         w.despawn(a).unwrap();
         assert!(!w.is_alive(a));
-        // 槽位复用，代数 +1，旧句柄失效
+        // Slot reuse, generation +1, old handle invalidated
         let b = w.spawn();
         assert_eq!(b.index, a.index);
         assert_eq!(b.generation, a.generation + 1);
         assert!(!w.is_alive(a));
         assert!(w.is_alive(b));
-        // 对死实体操作给出可读错误
+        // Operating on a dead entity produces a readable error
         let err = w.get_component(a, "Position").unwrap_err();
         assert!(matches!(err, EcsError::DeadEntity { .. }));
     }
@@ -555,12 +556,12 @@ mod tests {
         let player = w.spawn_named("player").unwrap();
         assert_eq!(w.entity("player").unwrap(), player);
         assert_eq!(w.name_of(player), Some("player"));
-        // 重名报错
+        // Duplicate name errors
         assert!(matches!(
             w.spawn_named("player"),
             Err(EcsError::NameTaken { .. })
         ));
-        // 销毁后名字释放
+        // Name released after despawn
         w.despawn(player).unwrap();
         assert!(w.entity("player").is_err());
         w.spawn_named("player").unwrap();
@@ -572,7 +573,7 @@ mod tests {
         let e = w.spawn();
         w.set_component(e, "Position", pos(1.0, 2.0)).unwrap();
         assert_eq!(w.get_component(e, "Position").unwrap(), &pos(1.0, 2.0));
-        // 不存在的组件 → 错误里列出现有组件
+        // Non-existent component -> the error lists the existing components
         let err = w.get_component(e, "Velocity").unwrap_err();
         match err {
             EcsError::NoSuchComponent { available, .. } => {
@@ -596,10 +597,10 @@ mod tests {
         assert_eq!(w.get_field(e, "Inv.gold").unwrap(), &json!(7));
         w.set_field(e, "Inv.items.0.count", json!(2)).unwrap();
         assert_eq!(w.get_field(e, "Inv.items.0.count").unwrap(), &json!(2));
-        // 不隐式建字段
+        // No implicit field creation
         let err = w.set_field(e, "Inv.diamond", json!(1)).unwrap_err();
         assert!(err.to_string().contains("不会隐式建新字段"), "{err}");
-        // 错误信息列出现有字段
+        // Error message lists existing fields
         let err = w.get_field(e, "Inv.golf").unwrap_err();
         assert!(err.to_string().contains("gold"), "{err}");
     }
@@ -626,7 +627,7 @@ mod tests {
         w.set_component(p, "Position", pos(3.0, 4.0)).unwrap();
         let tmp = w.spawn();
         w.set_component(tmp, "Position", pos(9.0, 9.0)).unwrap();
-        w.despawn(tmp).unwrap(); // 留下代数痕迹，快照必须还原它
+        w.despawn(tmp).unwrap(); // Leaves a generation trace; the snapshot must restore it
         let coin = w.spawn();
         w.set_component(coin, "Coin", json!({"value": 10})).unwrap();
 
@@ -638,7 +639,7 @@ mod tests {
         assert_eq!(w2.state_hash(), h1, "恢复后的世界必须哈希一致");
         assert_eq!(w2.entity("player").unwrap(), p);
         assert_eq!(w2.get_field(coin, "Coin.value").unwrap(), &json!(10));
-        // 槽位复用行为也必须一致：两边各 spawn 一个，结果相同
+        // Slot reuse behavior must also match: spawn one on each side, results are equal
         assert_eq!(w.spawn(), w2.spawn());
         assert_eq!(w.state_hash(), w2.state_hash());
     }
@@ -652,15 +653,15 @@ mod tests {
         w.set_component(c, "Coin", json!({"value": 1})).unwrap();
 
         w.clear_entities();
-        // 旧句柄全部干净失效（代数 +1），名字释放，世界空了
+        // All old handles cleanly invalidated (generation +1), names released, world empty
         assert!(!w.is_alive(p) && !w.is_alive(c));
         assert!(w.entity("player").is_err());
         assert!(w.entities().is_empty());
-        // 名字可立即复用；新实体拿到的代数和旧句柄不同
+        // Names are immediately reusable; the new entity gets a different generation from the old handle
         let p2 = w.spawn_named("player").unwrap();
         assert_ne!(p2, p);
         assert!(!w.is_alive(p), "新实体不许让旧句柄复活");
-        // 清空是确定性操作：同样的序列两遍，哈希一致
+        // Clear is a deterministic operation: same sequence twice, same hash
         let run = || {
             let mut w = World::new();
             w.spawn_named("a").unwrap();
@@ -682,23 +683,23 @@ mod tests {
         assert_ne!(w.state_hash(), h0);
     }
 
-    /// 流式 state_hash 必须与老路径 `fnv1a(to_string(snapshot()))` **逐位一致**——
-    /// 这是已落盘录像校验点不被打破的保证（老路径正是它们的生成者）。改一位都报红。
+    /// The streaming state_hash must be **bit-identical** to the old path `fnv1a(to_string(snapshot()))` —
+    /// this is the guarantee that already-on-disk recording checkpoints are not broken (the old path is what generated them). Change one bit and it goes red.
     #[test]
     fn canonical_hash_byte_identical_to_snapshot() {
         let old = |w: &World| fnv1a_64(serde_json::to_string(&w.snapshot()).unwrap().as_bytes());
 
-        // 形态1：空世界
+        // Form 1: empty world
         let w = World::new();
         assert_eq!(w.state_hash(), old(&w), "空世界");
 
-        // 形态2：单实体单组件
+        // Form 2: single entity, single component
         let mut w = World::new();
         let e = w.spawn();
         w.set_component(e, "Position", pos(3.0, 4.0)).unwrap();
         assert_eq!(w.state_hash(), old(&w), "单实体");
 
-        // 形态3：多实体 + 有名/无名 + 多组件 + 嵌套值 + despawn 留代数痕迹 + unicode 名 + null/bool
+        // Form 3: multiple entities + named/unnamed + multiple components + nested values + despawn generation trace + unicode name + null/bool
         let mut w = World::new();
         let p = w.spawn_named("玩家").unwrap();
         w.set_component(p, "Position", pos(1.5, -2.0)).unwrap();
@@ -712,7 +713,7 @@ mod tests {
         w.set_component(n, "Health", json!({"hp": 100, "alive": true, "tag": null})).unwrap();
         assert_eq!(w.state_hash(), old(&w), "复杂世界");
 
-        // 形态4：组件名乱序插入也等价（键序由序列化排，不靠插入序）
+        // Form 4: components inserted out of order are still equivalent (key order is set by serialization, not insertion order)
         let mut w = World::new();
         let e = w.spawn();
         w.set_component(e, "Zeta", json!({"z": 1})).unwrap();

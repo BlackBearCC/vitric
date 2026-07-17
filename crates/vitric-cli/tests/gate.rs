@@ -1,7 +1,7 @@
-//! `vitric gate` 端到端：交付门禁的全部裁决路径。
+//! `vitric gate` end-to-end: all verdict paths of the delivery gate.
 //!
-//! 立场锁定：通关录像是不可伪造的交付证书——
-//! 真通关录像放行；篡改一帧拒发；没赢的录像拒发；没录像/没门禁直接拒绝。
+//! Position lock: a clear recording is an unforgeable delivery certificate —
+//! a genuine clear recording is accepted; tampering with one frame is rejected; a recording without a win is rejected; no recording / no gate is rejected outright.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use vitric_cli::runtime::Runtime;
 use vitric_sim::Recording;
 
-/// 把 coin-run 复制一份到临时目录（测试要改清单/录像，不能动共享示例）。
+/// Copy coin-run into a temp directory (tests need to mutate the manifest/recording and must not touch the shared example).
 fn copy_example(tag: &str) -> PathBuf {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/coin-run");
     let dst = std::env::temp_dir().join(format!("vitric-gate-{}-{tag}", std::process::id()));
@@ -38,7 +38,7 @@ fn copy_example(tag: &str) -> PathBuf {
     dst
 }
 
-/// 程序化录一局：按住右键 60 tick 吃满三枚金币 → game-won（即 QA 真打通关的等价物）。
+/// Programmatically record a run: hold right arrow for 60 ticks to eat all three coins → game-won (i.e. the equivalent of QA actually beating the game).
 fn record_win(dir: &Path) -> Recording {
     let (mut sim, mut rt) = Runtime::boot(dir).unwrap();
     sim.start_recording();
@@ -49,7 +49,7 @@ fn record_win(dir: &Path) -> Recording {
     sim.stop_recording().unwrap()
 }
 
-/// 录一局没赢的：纯挂机 10 tick，没有任何输入，game-won 不可能触发。
+/// Record a run without winning: pure idle for 10 ticks, no input at all, game-won cannot trigger.
 fn record_idle(dir: &Path) -> Recording {
     let (mut sim, mut rt) = Runtime::boot(dir).unwrap();
     sim.start_recording();
@@ -63,7 +63,7 @@ fn write_recording(dir: &Path, rel: &str, rec: &Recording) {
     fs::write(dir.join(rel), serde_json::to_string(rec).unwrap()).unwrap();
 }
 
-/// 往清单里写 gates 声明（导演的动作）。
+/// Write the gates declaration into the manifest (the director's action).
 fn set_gates(dir: &Path, gates: Value) {
     let path = dir.join("vitric.json");
     let mut manifest: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -75,7 +75,7 @@ fn run_gate(dir: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_vitric")).arg("gate").arg(dir).output().unwrap()
 }
 
-/// stdout 的 JSON 报告（没有报告时 panic，带上下文好排查）。
+/// The JSON report on stdout (panic when there is no report, with context for easier debugging).
 fn report_of(out: &Output) -> Value {
     serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(
@@ -86,7 +86,7 @@ fn report_of(out: &Output) -> Value {
     })
 }
 
-/// 报告里找指定门的结果。
+/// Find the result of a named gate in the report.
 fn gate_entry<'a>(report: &'a Value, name_prefix: &str) -> &'a Value {
     report["gates"]
         .as_array()
@@ -129,7 +129,7 @@ fn tampered_checkpoint_is_rejected_as_divergence() {
     write_recording(&dir, "qa/clear.json", &rec);
     set_gates(&dir, json!({"playthroughs": [{"recording": "qa/clear.json"}]}));
 
-    // 篡改一个校验点哈希 = 伪造证书。重放必须在该校验点报跑偏。
+    // Tampering with a checkpoint hash = forging a certificate. Replay must report a divergence at that checkpoint.
     let path = dir.join("qa/clear.json");
     let mut doc: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     let h = doc["checkpoints"][1][1].as_u64().unwrap();
@@ -190,7 +190,7 @@ fn manifest_without_gates_is_rejected_not_passed() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("清单未声明 gates——无门禁项目不出证书"), "{stderr}");
 
-    // 声明了 gates 但 playthroughs 为空 = 同款后门，一样拒绝
+    // Declaring gates but with empty playthroughs = the same backdoor, also rejected
     set_gates(&dir, json!({"check": true}));
     let out = run_gate(&dir);
     assert!(!out.status.success());
@@ -204,7 +204,7 @@ fn manifest_without_gates_is_rejected_not_passed() {
 fn assertion_violated_midway_fails_with_id_and_tick() {
     let dir = copy_example("asserts");
     write_recording(&dir, "qa/clear.json", &record_win(&dir));
-    // 分数 ≤1 的断言在第二枚金币（约 tick 20）被吃时必然违反——重放中途抓现行
+    // The score ≤1 assertion is necessarily violated when the second coin (~tick 20) is eaten — caught mid-replay
     fs::write(
         dir.join("qa/asserts.json"),
         json!([{"id": "score-cap", "if": [["@player.Score.value", "<=", 1]]}]).to_string(),
@@ -222,7 +222,7 @@ fn assertion_violated_midway_fails_with_id_and_tick() {
     assert!(!out.status.success(), "重放中途违反断言不能拿证书");
     let report = report_of(&out);
     assert_eq!(report["pass"], json!(false));
-    // 录像本身仍然是逐位一致的通关局——失败的只是断言门
+    // The recording itself is still a bit-identical clear run — only the assertion gate fails
     assert_eq!(gate_entry(&report, "playthrough:")["status"], json!("pass"));
     let asserts = gate_entry(&report, "assertions");
     assert_eq!(asserts["status"], json!("fail"));
@@ -244,7 +244,7 @@ fn healthy_assertions_pass_and_recording_over_max_ticks_fails() {
         json!([{"id": "score-sane", "if": [["@player.Score.value", "<=", 3]]}]).to_string(),
     )
     .unwrap();
-    // 断言健康 + 长度合规：全绿
+    // Assertions healthy + length compliant: all green
     set_gates(
         &dir,
         json!({
@@ -258,7 +258,7 @@ fn healthy_assertions_pass_and_recording_over_max_ticks_fails() {
     assert!(out.status.success(), "{report}");
     assert_eq!(gate_entry(&report, "assertions")["status"], json!("pass"));
 
-    // 上限收紧到 30：60 tick 的录像被拒（防挂机注水证书）
+    // Tighten the cap to 30: the 60-tick recording is rejected (prevents padding certificates with idle time)
     set_gates(&dir, json!({"playthroughs": [{"recording": "qa/clear.json"}], "max_ticks": 30}));
     let out = run_gate(&dir);
     assert!(!out.status.success());
@@ -268,8 +268,8 @@ fn healthy_assertions_pass_and_recording_over_max_ticks_fails() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// playtest 门：声明 require_clearable + max_soft_locks:0 的可通关、无软锁项目（coin-run）
-/// → swarm 100% 通关、零软锁 → 该门 pass、gate 整体 pass。
+/// playtest gate: declare a clearable, no-soft-lock project (coin-run) with require_clearable + max_soft_locks:0
+/// → swarm 100% clear, zero soft-locks → that gate passes, gate passes overall.
 #[test]
 fn playtest_gate_passes_when_swarm_clears_with_no_softlock() {
     let dir = copy_example("pt-pass");
@@ -290,21 +290,21 @@ fn playtest_gate_passes_when_swarm_clears_with_no_softlock() {
         }),
     );
 
-    // 直接调库（任务要求的入口），不经子进程
+    // Call the library directly (the entry point required by the task), without spawning a subprocess
     let (report, pass) = vitric_cli::gate::run(&dir).unwrap();
     assert!(pass, "可通关无软锁项目应整体 pass: {report}");
     let pt = gate_entry(&report, "playtest");
     assert_eq!(pt["status"], json!("pass"), "playtest 门应 pass: {report}");
-    // pass 的 detail 带关键指标
+    // The pass detail carries key metrics
     assert!(pt["detail"]["win_rate"].as_f64().unwrap() > 0.0);
     assert_eq!(pt["detail"]["soft_locks"], json!(0));
 
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// playtest 门：声明同款门槛但 swarm 会撞出软锁的项目（gate-softlock fixture：按 key 通关、
-/// 按 seal 永久封死再也赢不了 → 部分局冻结成软锁）→ playthrough 仍 pass（可通关），但
-/// playtest 门 fail（软锁数超 max_soft_locks:0）→ gate 整体 fail，detail 含违反的断言名。
+/// playtest gate: declare the same threshold but on a project where the swarm hits soft-locks (gate-softlock fixture: clear by pressing key,
+/// pressing seal permanently locks it so it can never be won → some runs freeze into soft-locks) → playthrough still passes (clearable), but
+/// the playtest gate fails (soft-lock count exceeds max_soft_locks:0) → gate fails overall, detail carries the violated assertion name.
 #[test]
 fn playtest_gate_fails_on_softlock_with_violated_assertion() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -312,7 +312,7 @@ fn playtest_gate_fails_on_softlock_with_violated_assertion() {
 
     let (report, pass) = vitric_cli::gate::run(&dir).unwrap();
     assert!(!pass, "撞出软锁应整体 fail: {report}");
-    // 录像门仍 pass：游戏确实可通关，差的只是 playtest 契约
+    // The recording gate still passes: the game is indeed clearable, only the playtest contract falls short
     assert_eq!(gate_entry(&report, "playthrough:")["status"], json!("pass"), "{report}");
     let pt = gate_entry(&report, "playtest");
     assert_eq!(pt["status"], json!("fail"), "playtest 门应 fail: {report}");
@@ -320,11 +320,11 @@ fn playtest_gate_fails_on_softlock_with_violated_assertion() {
     let names: Vec<&str> =
         violations.iter().map(|v| v["assertion"].as_str().unwrap()).collect();
     assert!(names.contains(&"max_soft_locks"), "应点名违反的断言 max_soft_locks: {names:?}");
-    // 实际值带出来便于对账
+    // The actual value is carried out for reconciliation
     assert!(pt["detail"]["metrics"]["soft_locks"].as_u64().unwrap() >= 1);
 }
 
-/// 向后兼容：没声明 gates.playtest 的项目，报告里不出现 playtest 门，行为不变。
+/// Backward compatibility: projects that do not declare gates.playtest have no playtest gate in the report, behavior unchanged.
 #[test]
 fn no_playtest_gate_means_no_playtest_door() {
     let dir = copy_example("no-pt");

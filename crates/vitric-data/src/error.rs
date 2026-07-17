@@ -2,17 +2,17 @@ use std::fmt;
 
 use serde::Serialize;
 
-/// 一条校验错误：路径精确到字段，带错误码和修复提示。
-/// 序列化后直接进控制面响应——AI 拿到的就是这个结构。
+/// One validation error: path is precise down to the field, with an error code and a fix hint.
+/// After serialization it goes directly into the control-plane response — this is the structure the AI gets.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ValidationError {
-    /// 稳定错误码，如 "VD003"。文档按码索引。
+    /// Stable error code, e.g. "VD003". Documentation is indexed by code.
     pub code: &'static str,
-    /// 出错位置，如 "scenes/main.json#/entities/2/components/Sprite/image"。
+    /// Error location, e.g. "scenes/main.json#/entities/2/components/Sprite/image".
     pub path: String,
-    /// 哪里错了。
+    /// What went wrong.
     pub message: String,
-    /// 怎么修。
+    /// How to fix it.
     pub hint: String,
 }
 
@@ -22,7 +22,7 @@ impl fmt::Display for ValidationError {
     }
 }
 
-/// 一次校验的全部结果。校验不在第一个错误就停——AI 一次拿到所有问题。
+/// The full result of one validation pass. Validation does not stop at the first error — the AI gets all problems at once.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct ValidationReport {
     pub errors: Vec<ValidationError>,
@@ -52,7 +52,7 @@ impl ValidationReport {
         self.errors.extend(other.errors);
     }
 
-    /// 转成 Err；没错误则给回传入值。
+    /// Turn into Err; if there are no errors, hand back the passed-in value.
     pub fn into_result<T>(self, value: T) -> Result<T, ValidationReport> {
         if self.ok() {
             Ok(value)

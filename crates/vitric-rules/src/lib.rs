@@ -1,11 +1,11 @@
-//! vitric-rules — 「当 X 则 Y」声明式规则引擎。
+//! vitric-rules — a "when X then Y" declarative rule engine.
 //!
-//! 规则是玩法的正门：80% 的游戏逻辑应该是规则直译。
-//! 刻意**不图灵完备**：条件只有比较和与（数组即「全部成立」），
-//! 没有循环没有变量。写不动的逻辑落到脚本系统（`call` 动作），
-//! 这是设计决策不是缺陷——防止规则语言长成一门烂编程语言。
+//! Rules are the front door of gameplay: 80% of game logic should be a direct transcription of rules.
+//! Deliberately **not Turing-complete**: conditions are only comparisons and AND (an array means "all hold"),
+//! no loops, no variables. Logic that can't be expressed falls to the script system (`call` action);
+//! this is a design decision, not a defect — to prevent the rule language from growing into a bad programming language.
 //!
-//! 规则 JSON 形如：
+//! Rule JSON looks like:
 //! ```json
 //! {
 //!   "id": "collect-coin",
@@ -19,8 +19,8 @@
 //! }
 //! ```
 //!
-//! 路径语法：`self.组件.字段` / `other.…` / `@实体名.…` / `event.字段`。
-//! 字符串以 `self.`/`other.`/`@`/`event.` 开头按引用解析，否则是字面量。
+//! Path syntax: `self.component.field` / `other.…` / `@entity-name.…` / `event.field`.
+//! Strings starting with `self.` / `other.` / `@` / `event.` are parsed as references; otherwise they are literals.
 
 mod engine;
 mod model;

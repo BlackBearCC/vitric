@@ -1,10 +1,10 @@
-//! vitric check 红灯（UI 交互 1.2）：坏 Theme 引用 / 焦点引用不存在实体 / 非法状态样式
-//! / 空按钮 action。错误带路径 + VDxxx 码 + 修复提示，一次报全。
+//! vitric check red (UI interaction 1.2): bad Theme reference / focus referencing a non-existent entity / illegal state style
+//! / empty button action. Errors carry path + VDxxx code + fix hint, all reported at once.
 
 use std::path::PathBuf;
 
-/// 写一个最小 1.2 UI 项目（schema 含 Button/UiRoot.focus + 可选主题文件 + 场景）。
-/// `theme_files`: (文件名, 内容) 列表，会写进 themes/ 并挂进清单。
+/// Write a minimal 1.2 UI project (schema with Button/UiRoot.focus + optional theme files + scene).
+/// `theme_files`: list of (filename, content) written into themes/ and attached to the manifest.
 fn make_project(tag: &str, scene_entities: &str, theme_files: &[(&str, &str)]) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vitric-ui12-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -22,7 +22,7 @@ fn make_project(tag: &str, scene_entities: &str, theme_files: &[(&str, &str)]) -
         ),
     )
     .unwrap();
-    // schema：state 故意声明成 text（不靠 enum），证明引擎兜底校验按钮状态语义
+    // schema: state is deliberately declared as text (not enum) to prove the engine falls back to validating button state semantics
     std::fs::write(
         dir.join("schema.json"),
         r##"{"components":{
@@ -50,7 +50,7 @@ fn make_project(tag: &str, scene_entities: &str, theme_files: &[(&str, &str)]) -
 
 #[test]
 fn check_reports_unknown_theme_reference() {
-    // Button 引用了清单里没有的主题 → 红灯，点名缺的主题 + 已定义列表
+    // Button references a theme not in the manifest → red, naming the missing theme + the defined list
     let dir = make_project(
         "badtheme",
         r#"{"name":"ui","components":{"UiRoot":{}}},
@@ -79,7 +79,7 @@ fn check_passes_valid_theme_reference() {
 
 #[test]
 fn check_reports_illegal_button_state() {
-    // state 声明成 text、给了非法值 "hover" → 引擎兜底报 VD074
+    // state declared as text, given the illegal value "hover" → the engine falls back to reporting VD074
     let dir = make_project(
         "badstate",
         r#"{"name":"ui","components":{"UiRoot":{}}},
@@ -109,8 +109,8 @@ fn check_reports_empty_button_action() {
 
 #[test]
 fn check_reports_focus_referencing_nonexistent_entity() {
-    // UiRoot.focus 是 entity 引用类型（schema 声明），指向不存在的实体 → 红灯（VD033）。
-    // 这里把 focus 声明成 entity 类型，证明焦点引用走和别的实体引用同一道存在性校验。
+    // UiRoot.focus is an entity-reference type (schema-declared), pointing at a non-existent entity → red (VD033).
+    // Here focus is declared as entity type, proving the focus reference goes through the same existence check as any other entity reference.
     let dir = std::env::temp_dir().join(format!("vitric-ui12-focusref-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("scenes")).unwrap();
@@ -138,7 +138,7 @@ fn check_reports_focus_referencing_nonexistent_entity() {
 
 #[test]
 fn check_reports_bad_theme_color_with_path() {
-    // 主题文件里的颜色非法 → check 期红灯（Theme::parse 在 Project::load 跑）
+    // Illegal color in a theme file → red during check (Theme::parse runs in Project::load)
     let dir = make_project(
         "badcolor",
         r#"{"name":"ui","components":{"UiRoot":{}}}"#,

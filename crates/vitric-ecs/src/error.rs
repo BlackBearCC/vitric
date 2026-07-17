@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::EntityId;
 
-/// ECS 层错误。Display 输出面向 LLM：说清哪里错、为什么、怎么修。
+/// ECS-layer errors. Display output is LLM-facing: states clearly what went wrong, why, and how to fix it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EcsError {
     DeadEntity {

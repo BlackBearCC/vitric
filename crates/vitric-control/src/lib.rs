@@ -1,14 +1,14 @@
-//! vitric-control — AI 控制面：引擎进程内建的调试端口。
+//! vitric-control — AI control plane: a debug port built into the engine process.
 //!
-//! 这是 Vitric 的招牌差异化：任何 agent 通过 HTTP JSON-RPC 就能
-//! **看**（查任意实体/组件/事件）、**动**（注入输入、改状态）、
-//! **控时间**（暂停/单步/倍速）、**测**（注册断言，违反即上报）。
+//! This is Vitric's signature differentiator: any agent over HTTP JSON-RPC can
+//! **see** (inspect any entity/component/event), **act** (inject input, mutate state),
+//! **control time** (pause/step/speed), and **test** (register assertions that report on violation).
 //!
-//! 架构：HTTP 服务线程只做传输（解析请求 → 塞进通道 → 等回应）；
-//! 命令由游戏主循环在**帧边界**统一执行——控制面永远不破坏确定性。
+//! Architecture: the HTTP server thread only does transport (parse request → push into channel → wait for reply);
+//! commands are executed by the game main loop at **frame boundaries** — the control plane never breaks determinism.
 //!
-//! 协议：`POST /rpc` 单对象 `{"method": "...", "params": {...}}`，
-//! 响应 `{"ok": true, "result": ...}` 或 `{"ok": false, "error": "..."}`。
+//! Protocol: `POST /rpc` with a single object `{"method": "...", "params": {...}}`,
+//! responding with `{"ok": true, "result": ...}` or `{"ok": false, "error": "..."}`.
 
 mod dispatcher;
 pub mod saves;

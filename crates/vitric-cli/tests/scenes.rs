@@ -1,7 +1,7 @@
-//! 场景切换（load-scene 约定事件）端到端：
-//! 菜单 → 关卡 → 下一关的流程必须整个发生在确定性流水线之内——
-//! 切换由规则 emit 触发、录像重放逐位复现、快照跨切换可恢复。
-//! Persist 标记组件 = 跨场景幸存约定（玩家/分数/背包不用任何新系统）。
+//! Scene switching (the load-scene convention event) end-to-end:
+//! the menu → level → next-level flow must happen entirely inside the deterministic pipeline —
+//! the switch is triggered by a rule emit, recording replay reproduces it bit-by-bit, snapshots recover across switches.
+//! The Persist marker component = the cross-scene survival convention (player/score/inventory need no new system).
 
 use std::fs;
 use std::path::PathBuf;
@@ -10,9 +10,9 @@ use serde_json::json;
 
 use vitric_cli::runtime::{self, Runtime};
 
-/// 流程测试项目：菜单/两关/冲突场景/匿名 Persist 场景 + 一套切换规则。
-/// `hero` 挂 Persist 跨场景幸存；gold 记账验证 start 只发一次、
-/// scene-loaded 每次切换发一次（+100 vs +10 的指纹没法混淆）。
+/// Flow test project: menu/two levels/conflict scene/anonymous Persist scene + a set of switching rules.
+/// `hero` carries Persist to survive across scenes; gold bookkeeping verifies start fires only once,
+/// scene-loaded fires once per switch (+100 vs +10 fingerprints cannot be confused).
 fn write_project(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vitric-scenes-{}-{tag}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -71,14 +71,14 @@ fn write_project(tag: &str) -> PathBuf {
             .to_string(),
     )
     .unwrap();
-    // 和幸存者 hero 重名的场景：切过去必须显式报错
+    // A scene that name-collides with the survivor hero: switching to it must error explicitly
     fs::write(
         dir.join("scenes/clash.json"),
         json!({"entities": [{"name": "hero", "components": {"Tag": {"label": "clash"}}}]})
             .to_string(),
     )
     .unwrap();
-    // 带匿名 Persist 实体的场景：从它再切走必须显式报错
+    // A scene with an anonymous Persist entity: switching away from it must error explicitly
     fs::write(
         dir.join("scenes/anon.json"),
         json!({"entities": [
@@ -127,7 +127,7 @@ fn load_scene_swaps_world_and_persist_survives() {
     let (mut sim, mut rt) = Runtime::boot(&dir).unwrap();
     use vitric_sim::GameLogic;
 
-    sim.step(&mut rt).unwrap(); // tick 0: start 事件 → gold 100
+    sim.step(&mut rt).unwrap(); // tick 0: start event → gold 100
     rt.drain_observed();
     let title = sim.world.entity("title").unwrap();
     let hero_old = sim.world.entity("hero").unwrap();
@@ -137,7 +137,7 @@ fn load_scene_swaps_world_and_persist_survives() {
     }
     rt.drain_observed();
 
-    // 切换：本 step 内规则 emit load-scene → 流水线尾部换世界
+    // Switch: within this step the rule emits load-scene → the pipeline tail swaps the world
     sim.inject_input("start", "pressed");
     sim.step(&mut rt).unwrap();
     let observed = rt.drain_observed();
@@ -148,11 +148,11 @@ fn load_scene_swaps_world_and_persist_survives() {
         "切换即发 scene-loaded（下一 tick 送达规则）: {observed:?}"
     );
 
-    // 旧世界整体消失：实体没了、句柄死透、名字释放
+    // The old world disappears entirely: entities gone, handles dead, names released
     assert!(sim.world.entity("title").is_err(), "菜单实体应已销毁");
     assert!(!sim.world.is_alive(title), "旧句柄必须失效");
     assert!(!sim.world.is_alive(hero_old), "幸存者也是重建的，旧句柄同样失效");
-    // 新世界 = level1 的实体 + Persist 幸存者（状态原样）
+    // New world = level1's entities + the Persist survivor (state intact)
     let room = sim.world.entity("room1").unwrap();
     assert_eq!(sim.world.get_field(room, "Tag.label").unwrap(), &json!("level1"));
     let hero = sim.world.entity("hero").unwrap();
@@ -162,7 +162,7 @@ fn load_scene_swaps_world_and_persist_survives() {
         "gold = 100(start) + 2(earn)，切换不动幸存者状态"
     );
 
-    // 下一 tick：scene-loaded 送达规则（+10）；start 没有重发（没有再 +100）
+    // Next tick: scene-loaded reaches the rule (+10); start is not re-emitted (no second +100)
     sim.step(&mut rt).unwrap();
     assert_eq!(
         sim.world.get_field(hero, "Player.gold").unwrap(),
@@ -170,7 +170,7 @@ fn load_scene_swaps_world_and_persist_survives() {
         "scene-loaded 是每场景初始化钩子（+10）；start 只在 tick 0 发一次"
     );
 
-    // 再切一关：流程 = 菜单 → level1 → level2
+    // Switch one more level: flow = menu → level1 → level2
     sim.inject_input("next", "pressed");
     sim.step(&mut rt).unwrap();
     assert!(sim.world.entity("room1").is_err());
@@ -212,11 +212,11 @@ fn persist_name_collision_is_explicit() {
 fn anonymous_persist_entity_is_explicit_error_on_next_switch() {
     let dir = write_project("anon");
     let (mut sim, mut rt) = Runtime::boot(&dir).unwrap();
-    // 切进带匿名 Persist 实体的场景没问题……
+    // Switching into a scene with an anonymous Persist entity is fine...
     sim.inject_input("anon", "pressed");
     sim.step(&mut rt).unwrap();
     sim.world.entity("room-anon").unwrap();
-    // ……从它再切走时，匿名幸存者无法被引用 → 显式报错
+    // ...but switching away from it, the anonymous survivor cannot be referenced → explicit error
     sim.inject_input("start", "pressed");
     let err = sim.step(&mut rt).unwrap_err().to_string();
     assert!(err.contains("Persist") && err.contains("没有名字"), "{err}");
@@ -226,13 +226,13 @@ fn anonymous_persist_entity_is_explicit_error_on_next_switch() {
 #[test]
 fn multiple_or_malformed_load_scene_in_one_tick_is_explicit() {
     let dir = write_project("double");
-    // 同一 tick 两个 load-scene：去哪没有答案，显式报错
+    // Two load-scenes in the same tick: there is no answer for where to go, explicit error
     let (mut sim, mut rt) = Runtime::boot(&dir).unwrap();
     sim.inject_input("double", "pressed");
     let err = sim.step(&mut rt).unwrap_err().to_string();
     assert!(err.contains("同一 tick") && err.contains("load-scene"), "{err}");
 
-    // data 缺 scene 字段：报正确写法
+    // data missing the scene field: report the correct form
     let (mut sim, mut rt) = Runtime::boot(&dir).unwrap();
     sim.inject_input("nodata", "pressed");
     let err = sim.step(&mut rt).unwrap_err().to_string();
@@ -245,7 +245,7 @@ fn recording_with_scene_switch_replays_bit_identically() {
     let dir = write_project("replay");
     let (mut sim, mut rt) = Runtime::boot(&dir).unwrap();
     sim.start_recording();
-    // 90 tick 里两次输入触发的切换（菜单→level1→level2），跨越 tick 60 的校验点
+    // Within 90 ticks two input-triggered switches (menu→level1→level2), straddling the tick-60 checkpoint
     for t in 0..90 {
         if t == 10 {
             sim.inject_input("earn", "pressed");
@@ -262,7 +262,7 @@ fn recording_with_scene_switch_replays_bit_identically() {
     sim.world.entity("room2").unwrap();
     assert!(rec.checkpoints.iter().any(|&(t, _)| t == 60), "应有覆盖切换的校验点");
 
-    // 冷启动重放：逐校验点 + 终态哈希一致（切换完全由录下来的输入决定）
+    // Cold-boot replay: checkpoint-by-checkpoint + final-state hash match (the switch is entirely driven by recorded input)
     let (mut sim2, mut rt2) = Runtime::boot(&dir).unwrap();
     sim2.replay(&rec, &mut rt2).expect("跨场景切换的录像必须逐位重放");
     assert_eq!(sim2.world.state_hash(), rec.final_hash);
@@ -276,7 +276,7 @@ fn snapshot_after_switch_restores_identical_trajectory() {
     for _ in 0..5 {
         sim.step(&mut rt).unwrap();
     }
-    // 切换刚完成的"脏时刻"：carryover 里躺着 scene-loaded 还没送达规则
+    // The "dirty moment" right after a switch: carryover still holds scene-loaded not yet delivered to the rule
     sim.inject_input("start", "pressed");
     sim.step(&mut rt).unwrap();
     let snap = sim.snapshot(&rt);
@@ -286,14 +286,14 @@ fn snapshot_after_switch_restores_identical_trajectory() {
     }
     let h_direct = sim.world.state_hash();
 
-    // 全新进程语义：重 boot + restore，再跑 30 tick 必须逐位一致
+    // Fresh-process semantics: re-boot + restore, then run 30 more ticks must be bit-identical
     let (mut sim2, mut rt2) = Runtime::boot(&dir).unwrap();
     sim2.restore(&snap, &mut rt2).unwrap();
     for _ in 0..30 {
         sim2.step(&mut rt2).unwrap();
     }
     assert_eq!(sim2.world.state_hash(), h_direct, "跨切换快照恢复后轨迹分歧");
-    // scene-loaded 钩子在两条轨迹上各兑现一次（gold 指纹一致）
+    // The scene-loaded hook is honored once on each trajectory (gold fingerprint matches)
     let hero = sim2.world.entity("hero").unwrap();
     assert_eq!(sim2.world.get_field(hero, "Player.gold").unwrap(), &json!(110));
     fs::remove_dir_all(&dir).unwrap();
@@ -302,11 +302,11 @@ fn snapshot_after_switch_restores_identical_trajectory() {
 #[test]
 fn check_validates_every_scene_in_manifest() {
     let dir = write_project("check");
-    // 好项目：check 过，报告列出全部场景
+    // Good project: check passes, the report lists all scenes
     let report = runtime::check(&dir).expect("全部场景合法，check 该过");
     assert_eq!(report["scenes"].as_array().unwrap().len(), 5);
 
-    // 非入口场景塞一个缺图的 Sprite 引用：check 必须红灯并点名场景+图
+    // Stuff a missing-image Sprite reference into a non-entry scene: check must go red and name the scene + image
     fs::write(
         dir.join("scenes/level2.json"),
         json!({"entities": [

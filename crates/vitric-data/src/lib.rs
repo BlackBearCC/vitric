@@ -1,7 +1,7 @@
-//! vitric-data — 声明式数据层：项目格式、组件 schema、校验、场景实例化。
+//! vitric-data — declarative data layer: project format, component schema, validation, scene instantiation.
 //!
-//! 这是引擎的心脏：游戏的结构全部是强 schema 的 JSON 数据，
-//! **写入即校验**，错误信息结构化（路径 + 错误码 + 修复提示），是给 LLM 看的。
+//! This is the heart of the engine: the game's structure is entirely strongly-schema'd JSON data,
+//! **write is validation**, error messages are structured (path + error code + fix hint), meant for LLMs to read.
 
 mod error;
 mod project;

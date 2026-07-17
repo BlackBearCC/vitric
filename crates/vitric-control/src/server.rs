@@ -3,7 +3,7 @@ use std::thread::JoinHandle;
 
 use serde_json::{json, Value};
 
-/// 一条等待主循环处理的控制请求。
+/// A control request awaiting main-loop processing.
 pub struct PendingRequest {
     /// {"method": "...", "params": {...}}
     pub request: Value,
@@ -12,12 +12,13 @@ pub struct PendingRequest {
 
 impl PendingRequest {
     pub fn respond(self, response: Value) {
-        // 客户端可能已断开；发送失败不影响主循环
+        // The client may already be disconnected; a send failure does not affect the main loop.
         let _ = self.responder.send(response);
     }
 }
 
-/// HTTP 控制服务器。只做传输：请求进通道，主循环在帧边界取走处理。
+/// HTTP control server. Does transport only: requests go into a channel, the main loop
+/// drains them at frame boundaries.
 pub struct ControlServer {
     pub port: u16,
     inbox: Receiver<PendingRequest>,
@@ -25,7 +26,8 @@ pub struct ControlServer {
 }
 
 impl ControlServer {
-    /// 绑定 127.0.0.1:port（port=0 自动分配）。只听本机：控制面就是 root 权限，不上公网。
+    /// Bind 127.0.0.1:port (port=0 = auto-allocate). Listens on localhost only: the control
+    /// plane is root-level authority, never exposed to the public internet.
     pub fn start(port: u16) -> Result<ControlServer, String> {
         let server = tiny_http::Server::http(("127.0.0.1", port))
             .map_err(|e| format!("控制面端口绑定失败: {e}"))?;
@@ -57,7 +59,7 @@ impl ControlServer {
                     respond_json(http_req, 503, json!({"ok": false, "error": "引擎主循环已退出"}));
                     continue;
                 }
-                // 等主循环在帧边界处理（暂停状态下也会处理）
+                // Wait for the main loop to process at a frame boundary (also handled when paused).
                 match rrx.recv() {
                     Ok(response) => respond_json(http_req, 200, response),
                     Err(_) => respond_json(http_req, 503, json!({"ok": false, "error": "引擎主循环已退出"})),
@@ -68,7 +70,7 @@ impl ControlServer {
         Ok(ControlServer { port: actual_port, inbox: rx, _thread: thread })
     }
 
-    /// 主循环每帧调用：取走当前积压的全部请求。
+    /// Called by the main loop each frame: drains all currently pending requests.
     pub fn drain(&self) -> Vec<PendingRequest> {
         let mut out = Vec::new();
         while let Ok(req) = self.inbox.try_recv() {

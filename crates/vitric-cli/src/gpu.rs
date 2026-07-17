@@ -1,37 +1,37 @@
-//! GPU 呈现 — wgpu 上屏路径。
+//! GPU presentation — wgpu screen path.
 //!
-//! 只管"把画面送上窗口"，**不是**渲染真相源：HEADLESS 截图（render/screenshot）
-//! 永远走 vitric-render 的 CPU 光栅化，逐字节确定。这里读同一套组件约定
-//! （Position/Sprite/Text/Camera），视觉语义对齐 CPU 路径——同一世界，
-//! 人在 GPU 窗口看到的和 agent 截图看到的是同一幅画。
+//! Only cares about "getting the picture onto the window", **not** the rendering source of truth: HEADLESS screenshots (render/screenshot)
+//! always go through vitric-render's CPU rasterization, byte-exact. This reads the same set of component conventions
+//! (Position/Sprite/Text/Camera), visually aligned with the CPU path — the same world,
+//! what a human sees in the GPU window and what an agent sees in a screenshot are the same picture.
 //!
-//! 结构：启动时把全部素材 + 8x8 点阵字体 + 1x1 白块打进**一张图集**，
-//! 每帧 CPU 端按实体序攒一份顶点流（像素坐标 + 图集 UV + 染色），
-//! 一条管线、一个绑定组、一次 draw 画完。素材热重载靠代次号触发图集重建。
+//! Structure: at startup packs all assets + 8x8 bitmap font + 1x1 white tile into **one atlas**,
+//! each frame the CPU side assembles a vertex stream in entity order (pixel coordinates + atlas UV + tint),
+//! one pipeline, one bind group, one draw finishes. Asset hot reload triggers atlas rebuild via a generation number.
 //!
-//! 矢量字体（清单 `font`，见 vitric-render::FontStore）走**第二张动态字形图集**：
-//! 1024x1024 RGBA（白底 + 覆盖率当 alpha——shader 不用改，染色乘法即抗锯齿混合），
-//! 货架打包，新 (字符, 像素字号) 出现时懒栅格化 + queue.write_texture 增量上传。
-//! 同一条管线、第二个绑定组：先画精灵流（主图集），再画字形流（字形图集）。
-//! 排版/栅格化/取整全部复用 vitric-render 的 FontStore——与 CPU 路径视觉对齐，
-//! 但不承诺逐字节相同（覆盖率混合发生在 GPU 混合阶段）；截图/断言永远以 CPU 为准。
-//! 图集满了显式报错（提示减少不同字号），不静默丢字。
+//! Vector fonts (manifest `font`, see vitric-render::FontStore) go through a **second dynamic glyph atlas**:
+//! 1024x1024 RGBA (white background + coverage as alpha — shader unchanged, tint multiplication is the anti-alias blend),
+//! shelf packed, lazy rasterize + queue.write_texture incremental upload on new (character, pixel size) appearance.
+//! Same pipeline, second bind group: first draw the sprite stream (main atlas), then the glyph stream (glyph atlas).
+//! Layout/rasterization/rounding all reuse vitric-render's FontStore — visually aligned with the CPU path,
+//! but not guaranteed byte-identical (coverage blending happens in the GPU blend stage); screenshots/assertions always use CPU as truth.
+//! Atlas full = explicit error (advising fewer distinct sizes), never silently drops glyphs.
 //!
-//! 泛光（Bloom 实体存在时）把单 pass 拆成多 pass：
-//!   1. 场景 pass：同一条顶点流渲进离屏纹理（Rgba8Unorm，光照照常在这里跑）
-//!   2. 下采样+阈值 pass：场景 → 半分辨率（亮部提取）
-//!   3. 盒式模糊 ×6：半分辨率 ping-pong，水平/垂直交替 3 轮
-//!   4. 合成 pass：场景 + 泛光·strength → 表面（sRGB 反算只在这最后一步做）
+//! Bloom (when Bloom entity is present) splits the single pass into multiple passes:
+//!   1. Scene pass: same vertex stream rendered into an offscreen texture (Rgba8Unorm, lighting runs here as usual)
+//!   2. Downsample + threshold pass: scene → half resolution (bright-part extraction)
+//!   3. Box blur ×6: half-resolution ping-pong, horizontal/vertical alternating 3 rounds
+//!   4. Composite pass: scene + bloom·strength → surface (sRGB inverse only in this last step)
 //!
-//! 没有 Bloom 实体时完全走老的单 pass 直渲表面——零额外开销，字节不变。
+//! When no Bloom entity is present, fully goes through the old single-pass direct-to-surface render — zero extra cost, bytes unchanged.
 //!
-//! 与 CPU 真相源（vitric-render::apply_bloom）的已知差异（视觉一致优先，不逐字节）：
-//! - GPU 模糊在**半分辨率**跑（半径取 CPU 的一半，下限 1）——省 4 倍带宽，光晕
-//!   空间尺度一致；合成时双线性放大回全分辨率（CPU 全程全分辨率）
-//! - 下采样取最近邻单点（CPU 没有下采样这一步）
-//! - 中间结果存 8 位 Unorm（CPU 全程 f32）——每 pass 量化一次
+//! Known differences from the CPU source of truth (vitric-render::apply_bloom) (visual consistency first, not byte-exact):
+//! - GPU blur runs at **half resolution** (radius is half of CPU's, lower bound 1) — saves 4x bandwidth, halo
+//!   spatial scale consistent; composite bilinearly upscales back to full resolution (CPU runs full resolution throughout)
+//! - Downsampling takes nearest-neighbor single point (CPU has no downsample step)
+//! - Intermediate results stored in 8-bit Unorm (CPU is f32 throughout) — quantized once per pass
 //!
-//! 截图/断言永远以 CPU 路径为准，这里只负责"窗口里看起来一样"。
+//! Screenshots/assertions always use the CPU path as truth; here we only ensure "the window looks the same".
 
 use std::sync::Arc;
 
@@ -40,14 +40,14 @@ use winit::window::Window;
 use vitric_ecs::World;
 use vitric_render::Assets;
 
-/// 顶点：像素坐标（shader 里除视口尺寸转 NDC）+ 图集 UV + 染色（乘进采样色）
-/// + 法线贴图 UV + 精灵旋转。
+/// Vertex: pixel coordinates (shader divides by viewport size to convert to NDC) + atlas UV + tint (multiplied into sampled color)
+/// + normal-map UV + sprite rotation.
 ///
-/// 法线贴图与普通图同住一张图集（它们就是 assets/ 里的 PNG），所以只多一组 UV：
-/// `nuv` 跟角走（与 uv 同一角序展开），x < 0 = 哨兵 = 该图元没有法线（纯色块/
-/// 文字/没配对的贴图）——片元走原光照公式，与 CPU 路径的哨兵零向量同语义。
-/// `rotcs` = Sprite.rot 的 (cos, sin)，片元里把采样出的法线旋到屏幕空间
-/// （局部→屏幕矩阵 [[c, s], [-s, c]]，与 CPU 的 sample_normal 同一矩阵）。
+/// Normal maps live in the same atlas as regular images (they are just PNGs in assets/), so only one extra UV set:
+/// `nuv` follows corners (expanded with the same corner order as uv), x < 0 = sentinel = this primitive has no normal (solid block/
+/// text / unpaired texture) — fragment goes through the original lighting formula, same semantics as the CPU path's sentinel zero vector.
+/// `rotcs` = (cos, sin) of Sprite.rot, in the fragment the sampled normal is rotated into screen space
+/// (local→screen matrix [[c, s], [-s, c]], same matrix as CPU's sample_normal).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
@@ -58,38 +58,38 @@ struct Vertex {
     rotcs: [f32; 2],
 }
 
-/// 法线 UV 的哨兵矩形：四角全 -1（插值后仍 < 0，片元据此跳过法线路径）。
+/// Normal UV sentinel rect: all four corners -1 (still < 0 after interpolation, fragment skips the normal path based on this).
 const NO_NORMAL: UvRect = [-1.0; 4];
 
-/// 自发光图元的哨兵矩形：四角全 -2（< -1.5，片元据此**整个跳过光照**——粒子专用，
-/// 与 CPU 路径"粒子在光照之后画"的语义镜像）。-1（普通无法线）照旧被打光。
+/// Emissive primitive sentinel rect: all four corners -2 (< -1.5, fragment **skips lighting entirely** — particle-only,
+/// mirrors the CPU path's "particles drawn after lighting" semantics). -1 (regular no-normal) is still lit as usual.
 const UNLIT: UvRect = [-2.0; 4];
 
-/// uniform：viewport = [宽, 高, "表面是 sRGB"标志, "光照开启"标志]（z>0.5 时片元做
-/// sRGB→线性，保证最终字节和 CPU 路径的 sRGB 字节一致；w>0.5 时片元跑光照公式）。
-/// ambient = [环境色 rgb, 灯数]；每盏灯三条 vec4（打包布局，被单测锁死）：
-/// - lights_pos[i]   = [灯心 x_px, y_px, 半径 px, kind]，kind: 0=point / 1=spot / 2=directional
-///   （平行光不读位置/半径，前三位恒 0 占位）
-/// - lights_color[i] = [r·intensity, g·intensity, b·intensity, 0]（w 保留）
-/// - lights_dir[i]   = [朝向像素空间单位向量 x, y, 半锥角弧度, 0]；spot 用 xy+z，
-///   directional 用 xy（法线像素按它算方向，哨兵像素不读），point 恒 0
+/// uniform: viewport = [width, height, "surface is sRGB" flag, "lighting on" flag] (when z>0.5 the fragment does
+/// sRGB→linear, ensuring the final bytes match the CPU path's sRGB bytes; when w>0.5 the fragment runs the lighting formula).
+/// ambient = [ambient color rgb, light count]; each light has three vec4s (packed layout, locked by unit tests):
+/// - lights_pos[i]   = [light center x_px, y_px, radius px, kind], kind: 0=point / 1=spot / 2=directional
+///   (directional light does not read position/radius, the first three are always 0 placeholders)
+/// - lights_color[i] = [r·intensity, g·intensity, b·intensity, 0] (w reserved)
+/// - lights_dir[i]   = [toward pixel-space unit vector x, y, half-cone angle radians, 0]; spot uses xy+z,
+///   directional uses xy (normal pixels compute direction from this, sentinel pixels do not read), point is always 0
 ///
-/// 投影（Ambient.shadows）再加四块（同样被单测锁死；遮光体先合并相邻贴齐的箱子、
-/// 再按灯盘逐灯剔除——语义源头 vitric_render::build_shadow_boxes / cull_shadow_boxes，
-/// CPU 路径同一套，两步都不改可见输出）：
-/// - shadow_ranges[i] = [该灯在 occluders 里的起点, 条数, 0, 0]（投影关闭/平行光 = 全 0，
-///   shader 循环零次）
-/// - occluders[k] = 合并大箱的像素空间 AABB [x0, y0, x1, y1]，按灯排成连续区间
-///   （逐灯剔除后逐灯重复打包；预算 [`SHADOW_FLAT_BUDGET`] 条，超了显式报错）
-/// - occluder_sub_ranges[k] = [大箱的子箱起点, 子箱数, 0, 0]（与 occluders 平行；
-///   像素落在大箱内时回落到子箱——"自己所在的箱子不挡自己"按原始实体判）
-/// - occluder_subs[s] = 原始遮光体的像素空间 AABB（全局一份不逐灯重复，
-///   上限 vitric_render::MAX_OCCLUDERS = collect_occluders 的硬上限）
+/// Shadows (Ambient.shadows) add four more blocks (also locked by unit tests; occluders first merge adjacent tile-aligned boxes,
+/// then cull per-light by light disc — semantics source vitric_render::build_shadow_boxes / cull_shadow_boxes,
+/// the CPU path uses the same set; neither step changes visible output):
+/// - shadow_ranges[i] = [this light's start in occluders, count, 0, 0] (shadow off / directional light = all zeros,
+///   shader loop runs zero times)
+/// - occluders[k] = merged large-box pixel-space AABB [x0, y0, x1, y1], arranged by light as a contiguous range
+///   (packed per-light after per-light culling, repeated per light; budget [`SHADOW_FLAT_BUDGET`] entries, explicit error if exceeded)
+/// - occluder_sub_ranges[k] = [large-box sub-box start, sub-box count, 0, 0] (parallel to occluders;
+///   when a pixel falls inside a large box it falls back to sub-boxes — "the box you are in does not occlude yourself" judged by original entity)
+/// - occluder_subs[s] = original occluder pixel-space AABB (one global copy, not repeated per light,
+///   upper bound vitric_render::MAX_OCCLUDERS = collect_occluders' hard upper bound)
 ///
-/// 世界→像素的变换在 CPU 端做完（含 y 翻转：世界 dir 度数 → (cos, -sin)），shader 只算
-/// 距离和点积。vec4 数组在 WGSL uniform（std140 风格）下天然 16 字节步长，无 padding 坑。
-/// 整个 uniform ≈ 16.4KB——在默认 Limits（64KB）内（不支持 WebGL2 downlevel 的 16KB，
-/// 桌面原生目标无此约束）。
+/// World→pixel transform is done on the CPU side (including y flip: world dir degrees → (cos, -sin)), shader only computes
+/// distance and dot product. vec4 arrays in WGSL uniform (std140 style) naturally have a 16-byte stride, no padding pitfalls.
+/// The entire uniform ≈ 16.4KB — within default Limits (64KB) (not supported on WebGL2 downlevel's 16KB,
+/// desktop native targets have no such constraint).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Globals {
@@ -104,31 +104,31 @@ struct Globals {
     occluder_subs: [[f32; 4]; vitric_render::MAX_OCCLUDERS],
 }
 
-/// 全部灯合计的遮挡列表 uniform 预算（合并 + 逐灯剔除之后的条数，逐灯重复计）。
+/// Total occluder list uniform budget across all lights (count after merging + per-light culling, counted per light).
 const SHADOW_FLAT_BUDGET: usize = 256;
 
-/// 单盏灯剔除后的遮挡列表上限。超了说明灯radius盖住的独立（合并不了的）遮光体太多——
-/// 显式报错，提示减灯/减箱/合并瓦片，不静默截断。
+/// Upper bound on the culled occluder list per single light. Exceeded means too many independent (un-mergeable) occluders covered by the light radius —
+/// explicit error, advising fewer lights / fewer boxes / tile merging, never silently truncated.
 const SHADOW_PER_LIGHT: usize = 64;
 
-/// 图集里一块区域的 UV 矩形 [u0, v0, u1, v1]。
+/// UV rect [u0, v0, u1, v1] of a region in the atlas.
 type UvRect = [f32; 4];
 
-/// 图集：素材名 → UV 区域，外加白块（纯色用）和 128 个字体字形。
+/// Atlas: asset name → UV region, plus a white tile (for solid colors) and 128 font glyphs.
 struct Atlas {
     images: std::collections::BTreeMap<String, UvRect>,
-    /// 白块中心点 UV（四角同 UV → 平采样，永不渗色）。
+    /// White tile center UV (all four corners same UV → flat sampling, never bleeds).
     white: [f32; 2],
     glyphs: [UvRect; 128],
 }
 
-/// 动态字形图集的边长（像素）。1024²·RGBA = 4MB 显存，装得下几百个常用字号字形；
-/// 满了显式报错（见 [`GlyphAtlas::alloc_rect`]），不静默丢字。
+/// Dynamic glyph atlas edge length (pixels). 1024²·RGBA = 4MB VRAM, fits hundreds of common size glyphs;
+/// when full, an explicit error is raised (see [`GlyphAtlas::alloc_rect`]), never silently drops glyphs.
 const GLYPH_ATLAS_SIZE: u32 = 1024;
 
-/// 一次待执行的字形像素上传（[`GlyphAtlas`] 攒，present 里 write_texture 消化）。
-/// 像素是 RGBA：白底 + 覆盖率当 alpha——主 shader 的 `采样色 × 染色` 直接得到
-/// 与 CPU 路径同公式的覆盖率混合（抗锯齿），不需要第二条管线。
+/// One pending glyph pixel upload ([`GlyphAtlas`] accumulates, present consumes via write_texture).
+/// Pixels are RGBA: white background + coverage as alpha — the main shader's `sampled color × tint` directly yields
+/// the same coverage blend formula as the CPU path (anti-aliasing), no second pipeline needed.
 struct GlyphUpload {
     x: u32,
     y: u32,
@@ -137,16 +137,16 @@ struct GlyphUpload {
     pixels: Vec<u8>,
 }
 
-/// 动态字形图集（纯簿记，不碰 GPU——可单测）：货架打包 + (字符, 像素字号) → UV 缓存
-/// + 待上传队列。字形按需出现：栅格化一次、上传一次、之后永远命中缓存。
+/// Dynamic glyph atlas (pure bookkeeping, does not touch GPU — unit-testable): shelf packing + (character, pixel size) → UV cache
+/// + pending upload queue. Glyphs appear on demand: rasterized once, uploaded once, then forever cache hits.
 struct GlyphAtlas {
     size: u32,
-    /// 货架游标（当前行起点 x / 行顶 y / 行高）。
+    /// Shelf cursor (current row start x / row top y / row height).
     x: u32,
     y: u32,
     row_h: u32,
     map: std::collections::BTreeMap<(char, u32), UvRect>,
-    /// 白块中心点 UV（字体模式下选中描边的纯色来源——描边和字形同一个绑定组）。
+    /// White tile center UV (solid color source for selection outline in font mode — outline and glyphs share one bind group).
     white: [f32; 2],
     pending: Vec<GlyphUpload>,
 }
@@ -168,7 +168,7 @@ impl GlyphAtlas {
         a
     }
 
-    /// 货架打包一块 w×h（右/下各留 1px 空隙）。满了/单块过大都显式报错。
+    /// Shelf-pack a w×h block (1px gap on the right/bottom). Full / single-block-too-large both raise explicit errors.
     fn alloc_rect(&mut self, w: u32, h: u32) -> Result<(u32, u32), String> {
         let (bw, bh) = (w + 1, h + 1);
         if bw > self.size || bh > self.size {
@@ -195,8 +195,8 @@ impl GlyphAtlas {
         Ok(pos)
     }
 
-    /// 一个 (字符, 像素字号) 的 UV：命中缓存直接给；首次出现栅格化 + 排队上传。
-    /// 空轮廓字形（空格等）不该走到这里（调用方先看 coverage 跳过）。
+    /// UV for one (character, pixel size): cache hit returns directly; first appearance rasterizes + queues upload.
+    /// Empty-outline glyphs (spaces etc.) should not reach here (caller checks coverage first to skip).
     fn glyph_uv(
         &mut self,
         font: &vitric_render::FontStore,
@@ -225,8 +225,8 @@ impl GlyphAtlas {
     }
 }
 
-/// 字形图集的 GPU 侧：常驻纹理 + 绑定组（与主图集**同一布局、同一管线**，
-/// 只是换一张纹理）+ 纯簿记的 [`GlyphAtlas`]。
+/// GPU side of the glyph atlas: resident texture + bind group (**same layout, same pipeline** as the main atlas,
+/// just swapping one texture) + the pure-bookkeeping [`GlyphAtlas`].
 struct GlyphTexture {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
@@ -250,7 +250,7 @@ impl GlyphTexture {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm, // 非 sRGB：与主图集同一字节空间
+            format: wgpu::TextureFormat::Rgba8Unorm, // Non-sRGB: same byte space as the main atlas
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -270,7 +270,7 @@ impl GlyphTexture {
         GlyphTexture { texture, bind_group, atlas: GlyphAtlas::new(GLYPH_ATLAS_SIZE) }
     }
 
-    /// 消化本帧新出现的字形（增量上传，已有内容不动）。
+    /// Consume new glyphs appearing this frame (incremental upload, existing content untouched).
     fn flush_uploads(&mut self, queue: &wgpu::Queue) {
         for up in self.atlas.pending.drain(..) {
             queue.write_texture(
@@ -294,15 +294,15 @@ impl GlyphTexture {
 
 const WGSL: &str = r#"
 struct Globals {
-    viewport: vec4<f32>,                  // xy 视口尺寸 / z sRGB 标志 / w 光照开关
-    ambient: vec4<f32>,                   // rgb 环境色 / w 灯数
-    lights_pos: array<vec4<f32>, 64>,     // xy 灯心(像素) / z 半径(像素) / w kind(0 点/1 聚/2 平行)
-    lights_color: array<vec4<f32>, 64>,   // rgb 已乘 intensity
-    lights_dir: array<vec4<f32>, 64>,     // xy 朝向单位向量(像素空间) / z 半锥角(弧度)，spot 用
-    shadow_ranges: array<vec4<f32>, 64>,  // 每盏灯的遮挡区间 [起点, 条数, 0, 0]（关闭 = 0）
-    occluders: array<vec4<f32>, 256>,     // 合并大箱 AABB [x0, y0, x1, y1]，按灯连续
-    occluder_sub_ranges: array<vec4<f32>, 256>, // 大箱的子箱区间 [起点, 条数, 0, 0]
-    occluder_subs: array<vec4<f32>, 256>, // 原始遮光体 AABB（全局一份）
+    viewport: vec4<f32>,                  // xy viewport size / z sRGB flag / w lighting on
+    ambient: vec4<f32>,                   // rgb ambient color / w light count
+    lights_pos: array<vec4<f32>, 64>,     // xy light center (pixels) / z radius (pixels) / w kind (0 point / 1 spot / 2 directional)
+    lights_color: array<vec4<f32>, 64>,   // rgb already multiplied by intensity
+    lights_dir: array<vec4<f32>, 64>,     // xy toward unit vector (pixel space) / z half-cone angle (radians), for spot
+    shadow_ranges: array<vec4<f32>, 64>,  // per-light occluder range [start, count, 0, 0] (off = 0)
+    occluders: array<vec4<f32>, 256>,     // merged large-box AABB [x0, y0, x1, y1], contiguous per light
+    occluder_sub_ranges: array<vec4<f32>, 256>, // large-box sub-box range [start, count, 0, 0]
+    occluder_subs: array<vec4<f32>, 256>, // original occluder AABB (one global copy)
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
@@ -312,8 +312,8 @@ struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
-    @location(2) nuv: vec2<f32>,    // 法线贴图 UV；x<0 = 哨兵（没有法线）
-    @location(3) rotcs: vec2<f32>,  // Sprite.rot 的 (cos, sin)
+    @location(2) nuv: vec2<f32>,    // normal-map UV; x<0 = sentinel (no normal)
+    @location(3) rotcs: vec2<f32>,  // (cos, sin) of Sprite.rot
 };
 
 @vertex
@@ -325,7 +325,7 @@ fn vs_main(
     @location(4) rotcs: vec2<f32>,
 ) -> VsOut {
     var out: VsOut;
-    // 像素坐标（左上原点）→ NDC
+    // Pixel coordinates (top-left origin) → NDC
     let ndc = vec2<f32>(
         pos.x / globals.viewport.x * 2.0 - 1.0,
         1.0 - pos.y / globals.viewport.y * 2.0,
@@ -344,8 +344,8 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.04045));
 }
 
-// 线段 p → p+d 与 AABB b 的相交判定（slab 法，与 CPU 路径 vitric-render 的
-// segment_hits_aabb 逐句同构——轴平行分量不做除法，显式分支，两侧 inf 语义才不会漂）。
+// Segment p → p+d vs AABB b intersection test (slab method, structurally identical line-by-line to the CPU path vitric-render's
+// segment_hits_aabb — axis-aligned components do not divide, explicit branches, so inf semantics do not drift on either side).
 fn seg_hits(p: vec2<f32>, d: vec2<f32>, b: vec4<f32>) -> bool {
     var tmin = 0.0;
     var tmax = 1.0;
@@ -368,11 +368,11 @@ fn seg_hits(p: vec2<f32>, d: vec2<f32>, b: vec4<f32>) -> bool {
     return tmax >= tmin;
 }
 
-// 投影：像素 p → 灯心 l 的线段是否被第 li 盏灯的遮挡候选挡住（候选 = 合并 +
-// 逐灯剔除后的大箱区间，CPU 端打包，与 vitric-render 的 blocked 同构）。
-// 大箱外的像素只测大箱（贴齐合并保证并集 == 大箱）；大箱内的像素回落到子箱——
-// 像素自己所在的箱子跳过：箱子里的像素只被别的箱子遮挡。
-// shadow_ranges[li].y = 0（投影关闭/候选剔空）时循环零次，零成本。
+// Shadow: is the segment from pixel p to light center l blocked by the occluder candidates of the li-th light (candidates = merged +
+// per-light-culled large-box ranges, packed on the CPU side, isomorphic to vitric-render's blocked).
+// Pixels outside a large box only test the large box (tile-aligned merge guarantees the union == large box); pixels inside a large box fall back to sub-boxes —
+// the box the pixel itself is in is skipped: a pixel inside a box is only occluded by other boxes.
+// When shadow_ranges[li].y = 0 (shadow off / candidates culled empty) the loop runs zero times, zero cost.
 fn shadowed(p: vec2<f32>, l: vec2<f32>, li: u32) -> bool {
     let range = globals.shadow_ranges[li];
     let off = u32(range.x);
@@ -403,25 +403,25 @@ fn shadowed(p: vec2<f32>, l: vec2<f32>, li: u32) -> bool {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var c = textureSample(atlas_tex, atlas_samp, in.uv) * in.color;
-    // 法线贴图采样必须在 uniform control flow 里（textureSample 的硬约束）——
-    // 无条件采样：哨兵 nuv(-1,-1) 被 ClampToEdge 采到图集 (0,0) 角，结果在分支里整个丢弃
+    // Normal-map sampling must be in uniform control flow (hard constraint of textureSample) —
+    // unconditional sampling: sentinel nuv(-1,-1) is sampled by ClampToEdge to the atlas (0,0) corner, the result is discarded entirely in the branch
     let nraw = textureSample(atlas_tex, atlas_samp, in.nuv).rgb * 2.0 - 1.0;
-    // 光照——与 CPU 路径同一公式（vitric-render 模块文档）：
-    //   lit = min(ambient + Σ 各灯贡献, 1.5)；out = min(c·lit, 1)
-    //   point: color·I·(1-d/r)²；spot: 再乘角度衰减 t²，t = clamp(1 - Δθ/半锥角, 0, 1)
-    //   （刻意用 t²，不用 smoothstep 内建——CPU 侧是同一条式子）；directional: color·I 处处均匀。
-    //   法线像素（nuv.x ≥ 0）各灯贡献额外 ×= max(dot(N, L), 0)；L 的 xy 取像素指向灯的
-    //   单位方向 ×0.8、z 固定 0.6（NORMAL_LIGHT_XY/Z，语义源头在 vitric-render）。
-    // 必须在 sRGB 反算**之前**：CPU 是直接在 sRGB 字节上乘的，这里要在同一数值空间打光，
-    // 两条路径才长一个样。in.pos 是帧缓冲像素坐标（中心 +0.5），和 CPU 的像素中心一致。
-    // nuv.x < -1.5 = 自发光哨兵（粒子）：整个跳过光照——CPU 路径粒子画在光照之后，
-    // 这里同语义；nuv.x = -1（普通无法线）照旧被打光，旧内容行为不变。
+    // Lighting — same formula as the CPU path (vitric-render module docs):
+    //   lit = min(ambient + Σ each light contribution, 1.5); out = min(c·lit, 1)
+    //   point: color·I·(1-d/r)²; spot: multiplied by angular attenuation t², t = clamp(1 - Δθ/half-cone, 0, 1)
+    //   (deliberately uses t², not the built-in smoothstep — the CPU side uses the same formula); directional: color·I uniform everywhere.
+    //   Normal pixels (nuv.x ≥ 0) each light contribution additionally ×= max(dot(N, L), 0); L's xy takes the unit direction
+    //   from pixel to light ×0.8, z fixed 0.6 (NORMAL_LIGHT_XY/Z, semantics source in vitric-render).
+    // Must happen **before** sRGB inverse: CPU multiplies directly on sRGB bytes, here we light in the same numerical space,
+    // so the two paths look the same. in.pos is the framebuffer pixel coordinate (center +0.5), same as CPU's pixel center.
+    // nuv.x < -1.5 = emissive sentinel (particle): skip lighting entirely — CPU path draws particles after lighting,
+    // same semantics here; nuv.x = -1 (regular no-normal) is still lit as usual, old content behavior unchanged.
     if (globals.viewport.w > 0.5 && in.nuv.x > -1.5) {
         let has_n = in.nuv.x >= 0.0;
         var nrm = vec3<f32>(0.0, 0.0, 1.0);
         if (has_n) {
-            // 解码（与 CPU sample_normal 一字不差）：z 取绝对值，xy 按精灵旋转
-            // （局部→屏幕 [[c, s], [-s, c]]），零向量退化为平面法线
+            // Decode (identical to CPU sample_normal): z takes absolute value, xy rotated by sprite rotation
+            // (local→screen [[c, s], [-s, c]]), zero vector degenerates to plane normal
             var v = vec3<f32>(nraw.xy, abs(nraw.z));
             v = vec3<f32>(
                 in.rotcs.x * v.x + in.rotcs.y * v.y,
@@ -438,8 +438,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         for (var i = 0u; i < n; i = i + 1u) {
             let lp = globals.lights_pos[i];
             if (lp.w > 1.5) {
-                // directional：哨兵像素与距离/方向无关（老行为）；法线像素按 dir 算
-                //   L = (-行进方向单位向量·0.8, 0.6)——与 CPU 同一构造
+                // directional: sentinel pixel independent of distance/direction (old behavior); normal pixel computes by dir
+                //   L = (-travel direction unit vector·0.8, 0.6) — same construction as CPU
                 var fd = 1.0;
                 if (has_n) {
                     fd = max(dot(nrm, vec3<f32>(-globals.lights_dir[i].xy * 0.8, 0.6)), 0.0);
@@ -451,7 +451,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             if (d < lp.z) {
                 var f = (1.0 - d / lp.z) * (1.0 - d / lp.z);
                 if (lp.w > 0.5) {
-                    // spot：Δθ = acos(像素方向 · 朝向)；d=0 夹角无定义，约定锥心（t=1）
+                    // spot: Δθ = acos(pixel direction · toward); d=0 angle undefined, convention is cone center (t=1)
                     let ld = globals.lights_dir[i];
                     var cosd = 1.0;
                     if (d > 0.0) {
@@ -461,16 +461,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                     f = f * t * t;
                 }
                 if (has_n) {
-                    // L = 像素指向灯心的单位方向 ×0.8、z 固定 0.6；d=0 约定 (0,0,1)
+                    // L = unit direction from pixel to light center ×0.8, z fixed 0.6; d=0 convention (0,0,1)
                     var l = vec3<f32>(0.0, 0.0, 1.0);
                     if (d > 0.0) {
                         l = vec3<f32>((lp.xy - in.pos.xy) / d * 0.8, 0.6);
                     }
                     f = f * max(dot(nrm, l), 0.0);
                 }
-                // 贡献为零（锥外/背光面）的片元不做遮挡测试（CPU 路径同一顺序）。
-                // 投影：被遮光体挡住 = 这盏灯零贡献（硬影；只 point/spot，directional
-                // 在上面的分支里已经 continue 掉，永远走不到这里）
+                // Fragments with zero contribution (outside cone / back-lit face) skip occlusion test (same order as CPU path).
+                // Shadow: blocked by occluder = this light contributes zero (hard shadow; only point/spot, directional
+                // already continued in the branch above, never reaches here)
                 if (f > 0.0 && !shadowed(in.pos.xy, lp.xy, i)) {
                     lit = lit + globals.lights_color[i].rgb * f;
                 }
@@ -479,7 +479,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         lit = min(lit, vec3<f32>(1.5));
         c = vec4<f32>(min(c.rgb * lit, vec3<f32>(1.0)), c.a);
     }
-    // 表面是 sRGB 格式时写入值按线性解释，这里反算一次让最终字节贴齐 CPU 路径
+    // When the surface is sRGB format, the written value is interpreted as linear; here we inverse once so the final bytes match the CPU path
     if (globals.viewport.z > 0.5) {
         c = vec4<f32>(srgb_to_linear(c.rgb), c.a);
     }
@@ -487,13 +487,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// 泛光下采样/阈值/盒式模糊共用一个 shader：radius=0 + threshold≥0 + 倍率 2 = 下采样提亮部；
-/// radius>0 + threshold<0 + 倍率 1 = 单方向盒式模糊。全屏三角形顶点流，textureLoad 整数
-/// 采样 + 手动 clamp——越界取边缘像素，与 CPU 路径的 clamp-to-edge 同语义。
+/// Bloom downsample/threshold/box-blur share one shader: radius=0 + threshold≥0 + scale 2 = downsample bright-part extraction;
+/// radius>0 + threshold<0 + scale 1 = single-direction box blur. Full-screen triangle vertex stream, textureLoad integer
+/// sampling + manual clamp — out-of-bounds reads edge pixels, same semantics as the CPU path's clamp-to-edge.
 const WGSL_BLOOM: &str = r#"
 struct Post {
-    params: vec4<f32>,   // x 阈值(0..1，<0 = 不做阈值) / y 模糊半径(像素) / zw 模糊方向
-    params2: vec4<f32>,  // x 采样坐标倍率（下采样 pass 为 2，其余 1）
+    params: vec4<f32>,   // x threshold (0..1, <0 = no threshold) / y blur radius (pixels) / zw blur direction
+    params2: vec4<f32>,  // x sampling coordinate scale (downsample pass is 2, others 1)
 };
 @group(0) @binding(0) var<uniform> post: Post;
 @group(0) @binding(1) var src: texture_2d<f32>;
@@ -505,7 +505,7 @@ struct VsOut {
 
 @vertex
 fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
-    // 全屏三角形（3 个顶点盖满裁剪空间，不需要顶点缓冲）
+    // Full-screen triangle (3 vertices cover the clip space, no vertex buffer needed)
     var out: VsOut;
     let uv = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
     out.uv = uv;
@@ -525,8 +525,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let p = clamp(base + dir * k, vec2<i32>(0), dims - vec2<i32>(1));
         var c = textureLoad(src, p, 0).rgb;
         if (post.params.x >= 0.0) {
-            // 亮部提取：max(scene - threshold, 0)。纹理值 0..1，阈值直接用 0..1
-            //（CPU 在 0..255 字节域做同一减法，数值等价）
+            // Bright-part extraction: max(scene - threshold, 0). Texture values 0..1, threshold directly uses 0..1
+            // (CPU does the same subtraction in the 0..255 byte domain, numerically equivalent)
             c = max(c - vec3<f32>(post.params.x), vec3<f32>(0.0));
         }
         sum = sum + c;
@@ -535,12 +535,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// 泛光合成：场景 + 模糊亮部·strength，夹回 1。sRGB 表面的反算只在这最后一步做
-/// （场景 pass 写的是原始字节空间的离屏纹理）。泛光纹理是半分辨率，用双线性采样
-/// 放大——比最近邻平滑，光晕不出马赛克（与 CPU 的全分辨率模糊视觉对齐）。
+/// Bloom composite: scene + blurred bright-part·strength, clamped back to 1. sRGB surface inverse only in this last step
+/// (the scene pass writes to an offscreen texture in raw byte space). The bloom texture is half-resolution, bilinearly sampled
+/// to upscale — smoother than nearest-neighbor, no mosaic in the halo (visually aligned with CPU's full-resolution blur).
 const WGSL_COMPOSITE: &str = r#"
 struct Comp {
-    params: vec4<f32>,   // x strength / y "表面是 sRGB"标志
+    params: vec4<f32>,   // x strength / y "surface is sRGB" flag
 };
 @group(0) @binding(0) var<uniform> comp: Comp;
 @group(0) @binding(1) var scene_tex: texture_2d<f32>;
@@ -571,7 +571,7 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let scene = textureLoad(scene_tex, vec2<i32>(in.pos.xy), 0).rgb;
     let bloom = textureSample(bloom_tex, bloom_samp, in.uv).rgb;
-    // out = min(scene + bloom·strength, 1) —— 与 CPU 路径同一加法合成公式
+    // out = min(scene + bloom·strength, 1) — same additive composite formula as the CPU path
     var c = min(scene + bloom * comp.params.x, vec3<f32>(1.0));
     if (comp.params.y > 0.5) {
         c = srgb_to_linear(c);
@@ -580,7 +580,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// 泛光后效 pass 的 uniform（下采样/模糊/合成三种 pass 共用布局，字段含义见 WGSL 注释）。
+/// Uniform for bloom post-processing passes (downsample/blur/composite three pass types share this layout, field meanings see WGSL comments).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct PostParams {
@@ -589,44 +589,44 @@ struct PostParams {
 }
 
 pub struct GpuPresenter {
-    // surface 持有窗口句柄引用，window 放前面只是顺手；'static 因为传的是 Arc<Window>
+    // surface holds the window handle reference, window goes first just by convenience; 'static because what's passed is Arc<Window>
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
-    /// 图集纹理换了要重建绑定组，所以两者一起存。
+    /// Atlas texture changed → bind group must be rebuilt, so the two are stored together.
     bind_group: wgpu::BindGroup,
     globals_buf: wgpu::Buffer,
     sampler: wgpu::Sampler,
     atlas: Atlas,
-    /// 矢量字体的动态字形图集（纹理 + 绑定组 + 簿记）。None = 项目没挂字体。
+    /// Vector-font dynamic glyph atlas (texture + bind group + bookkeeping). None = project has no font.
     glyphs: Option<GlyphTexture>,
-    /// 已见过的素材代次——和 Dispatcher::assets_generation 比，变了就重建图集。
+    /// Asset generation seen so far — compared with Dispatcher::assets_generation, rebuild atlas on change.
     seen_generation: u64,
-    /// 本机 GPU 是否支持 BC 压缩纹理（启动期定死）——热重载重建图集时照同样口径压 BC7。
+    /// Whether the local GPU supports BC compressed textures (fixed at startup) — hot-reload atlas rebuild uses the same setting to compress BC7.
     bc_supported: bool,
-    /// 顶点缓冲按需扩容（容量字节数）。
+    /// Vertex buffer grows on demand (capacity in bytes).
     vertex_buf: wgpu::Buffer,
     vertex_cap: u64,
-    /// 背景清屏色（按表面格式换算好的线性/原始值）。
+    /// Background clear color (linear/raw value converted for the surface format).
     clear: wgpu::Color,
-    /// 主 shader 模块留着——泛光的离屏场景管线懒建时复用，不重新编译。
+    /// Main shader module kept — reused when lazily building the bloom offscreen scene pipeline, not recompiled.
     scene_shader: wgpu::ShaderModule,
-    /// 泛光管线组：第一次场上出现 Bloom 实体时懒建（不开泛光永远不建，零开销）。
+    /// Bloom pipeline set: lazily built the first time a Bloom entity appears on stage (never built if bloom is never on, zero cost).
     bloom_pipes: Option<BloomPipelines>,
-    /// 泛光离屏纹理组：窗口尺寸变了重建（管线组不动）。
+    /// Bloom offscreen texture set: rebuilt when window size changes (pipeline set unchanged).
     bloom_targets: Option<BloomTargets>,
     window: Arc<Window>,
 }
 
 impl GpuPresenter {
-    /// 初始化 wgpu 全家桶 + 首版图集。任何一步失败都返回带上下文的错误，
-    /// 由调用方决定怎么退出（项目哲学：失败要显式，不做静默回退）。
+    /// Initialize the wgpu family + first version of the atlas. Any step failing returns an error with context;
+    /// the caller decides how to exit (project philosophy: failures must be explicit, no silent fallback).
     pub fn new(window: Arc<Window>, assets: &Assets, generation: u64) -> Result<Self, String> {
-        // 不带 display handle：Vulkan/DX12/Metal 用不上它（只有 GL 需要），
-        // from_env 保留 WGPU_BACKEND 等环境变量调试口
+        // No display handle: Vulkan/DX12/Metal don't need it (only GL does),
+        // from_env keeps WGPU_BACKEND and other env-var debug knobs
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance
@@ -638,10 +638,10 @@ impl GpuPresenter {
             force_fallback_adapter: false,
         }))
         .map_err(|e| format!("找不到可用的 GPU 适配器: {e}"))?;
-        // BC7（压缩纹理）：适配器**支持**就请求 TEXTURE_COMPRESSION_BC，build_atlas 据此
-        // 把**整张运行时图集**压成 BC7 上传（几百帧角色几十 MB 显存 vs RGBA8 全驻留的 8.5G）。
-        // 适配器不支持就不请求，build_atlas 退普通 RGBA8 路径，但启动期**明说**未压缩
-        // （不硬失败整局——白块/字形/UI 也在这张图集里；也不静默膨胀，让用户知道）。
+        // BC7 (compressed textures): if the adapter **supports** it, request TEXTURE_COMPRESSION_BC; build_atlas then
+        // compresses the **entire runtime atlas** to BC7 for upload (hundreds of frames of characters = tens of MB VRAM vs RGBA8 fully resident 8.5G).
+        // If the adapter does not support it, do not request; build_atlas falls back to the normal RGBA8 path, but at startup **explicitly states** uncompressed
+        // (does not hard-fail the whole session — white tile / glyphs / UI are also in this atlas; does not silently bloat either, letting the user know).
         let bc_supported = adapter.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("vitric"),
@@ -654,8 +654,8 @@ impl GpuPresenter {
         }))
         .map_err(|e| format!("创建 GPU 设备失败: {e}"))?;
 
-        // 表面格式：优先非 sRGB（写入字节即所见，和 CPU 路径同一字节空间）；
-        // 只有 sRGB 可选时走 shader 反算（见 WGSL 注释）
+        // Surface format: prefer non-sRGB (written bytes are what you see, same byte space as the CPU path);
+        // only when sRGB is the only option, go through shader inverse (see WGSL comments)
         let caps = surface.get_capabilities(&adapter);
         let format = caps
             .formats
@@ -670,7 +670,7 @@ impl GpuPresenter {
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::Fifo, // 垂直同步，全后端可用
+            present_mode: wgpu::PresentMode::Fifo, // VSync, available on all backends
             alpha_mode: caps
                 .alpha_modes
                 .first()
@@ -681,7 +681,7 @@ impl GpuPresenter {
         };
         surface.configure(&device, &config);
 
-        // 背景色与 CPU 路径同字节（vitric_render::BACKGROUND）；sRGB 表面的清屏色按线性解释，要先反算
+        // Background color same bytes as CPU path (vitric_render::BACKGROUND); sRGB surface clear color is interpreted as linear, must inverse first
         let [bg_r, bg_g, bg_b, _] = vitric_render::BACKGROUND;
         let bg = [bg_r as f64 / 255.0, bg_g as f64 / 255.0, bg_b as f64 / 255.0];
         let to_linear = |c: f64| {
@@ -727,7 +727,7 @@ impl GpuPresenter {
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    // 最近邻采样不过滤——像素风贴图放大不糊，和 CPU 最近邻一致
+                    // Nearest-neighbor sampling without filtering — pixel-art textures stay crisp when upscaled, consistent with CPU nearest-neighbor
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
@@ -752,7 +752,7 @@ impl GpuPresenter {
         });
         let (atlas, bind_group) =
             build_atlas(&device, &queue, &bind_layout, &globals_buf, &sampler, assets, bc_supported)?;
-        // 项目挂了矢量字体才建字形图集（没挂 = 零开销，点阵字形已在主图集里）
+        // Only build the glyph atlas if the project has a vector font (none = zero cost, bitmap glyphs already in the main atlas)
         let glyphs = assets
             .font()
             .is_some()
@@ -790,8 +790,8 @@ impl GpuPresenter {
         })
     }
 
-    /// 呈现一帧。素材代次变了先重建图集（热重载素材后第一帧生效）。
-    /// `tick` 喂给屏幕抖动取景（vitric_render::camera_of）——和 CPU 路径抖得一致。
+    /// Present one frame. If asset generation changed, rebuild the atlas first (takes effect on the first frame after hot-reloading assets).
+    /// `tick` feeds screen-shake camera framing (vitric_render::camera_of) — shakes consistently with the CPU path.
     pub fn present(
         &mut self,
         world: &World,
@@ -812,7 +812,7 @@ impl GpuPresenter {
             )?;
             self.atlas = atlas;
             self.bind_group = bind_group;
-            // 字体可能也被热重载换了/挂上/摘掉：字形图集整个重建（按新字体重新栅格化）
+            // Font may also have been hot-reloaded / added / removed: rebuild the glyph atlas entirely (re-rasterize with the new font)
             self.glyphs = assets.font().is_some().then(|| {
                 GlyphTexture::new(&self.device, &self.bind_layout, &self.globals_buf, &self.sampler)
             });
@@ -821,7 +821,7 @@ impl GpuPresenter {
 
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
-            return Ok(()); // 最小化等零尺寸状态，跳帧
+            return Ok(()); // Minimized etc. zero-size state, skip frame
         }
         if size.width != self.config.width || size.height != self.config.height {
             self.config.width = size.width;
@@ -830,10 +830,10 @@ impl GpuPresenter {
         }
         let (w, h) = (size.width, size.height);
 
-        // 顶点流：没挂字体 = 老的单流单 draw；挂了字体 = 精灵流（主图集）+
-        // 字形流（字形图集，含选中描边——它用字形图集的白块），按 glyph_from 切两段
-        // UI 屏幕空间叠加：布局在真实窗口分辨率上解算（与 CPU 路径同一份纯函数，
-        // 不经相机），UI 节点锚定视口自然随窗口缩放。空 UI = 空 layout，零成本。
+        // Vertex stream: no font = old single-stream single draw; with font = sprite stream (main atlas) +
+        // glyph stream (glyph atlas, including selection outline — it uses the glyph atlas's white tile), split into two segments by glyph_from
+        // UI screen-space overlay: layout solved on the real window resolution (same pure function as the CPU path,
+        // without going through the camera), UI nodes anchor to the viewport and scale naturally with the window. Empty UI = empty layout, zero cost.
         let ui_layout = if vitric_render::has_ui(world) {
             vitric_render::solve_layout(world, w, h)?
         } else {
@@ -844,15 +844,15 @@ impl GpuPresenter {
                 "内部不一致：素材仓库挂了字体但字形图集未建（素材代次没推进？）",
             )?;
             let mut verts = build_scene_vertices(world, w, h, &self.atlas, tick)?;
-            // UI Panel（主图集）在 split 之前——画在世界之上、文字之下（同一管线，主图集绑定）
+            // UI Panel (main atlas) before the split — drawn above the world, below text (same pipeline, main atlas binding)
             push_ui_panels(&mut verts, world, &ui_layout, &self.atlas)?;
             let split = verts.len();
             let cam = vitric_render::camera_of(world, tick, h)?;
             push_ttf_texts(&mut verts, world, w, h, font, &mut gt.atlas, cam)?;
-            // 粒子在文字之后、描边之前（同 build_vertices）；split 之后的顶点绑
-            // 字形图集，所以白块用字形图集那份（同一布局同一管线，只是换纹理）
+            // Particles after text, before outline (same as build_vertices); vertices after the split bind
+            // the glyph atlas, so the white tile uses the glyph atlas copy (same layout same pipeline, just swapping texture)
             push_emitter_particles(&mut verts, world, w, h, gt.atlas.white, cam, tick)?;
-            // UI 矢量 label（字形图集，split 之后）——画在最上层（HUD）
+            // UI vector label (glyph atlas, after split) — drawn on the topmost layer (HUD)
             push_ui_ttf_labels(&mut verts, world, &ui_layout, font, &mut gt.atlas)?;
             if let Some(id) = selection {
                 push_selection_outline(&mut verts, world, w, h, gt.atlas.white, id, cam);
@@ -860,13 +860,13 @@ impl GpuPresenter {
             (verts, split)
         } else {
             let mut verts = build_vertices(world, w, h, &self.atlas, selection, tick)?;
-            // 没挂字体：UI Panel + UI 点阵 label 全在主图集（单流），画在世界之后
+            // No font: UI Panel + UI bitmap label all in the main atlas (single stream), drawn after the world
             push_ui_panels(&mut verts, world, &ui_layout, &self.atlas)?;
             push_ui_bitmap_labels(&mut verts, world, &ui_layout, &self.atlas)?;
             let split = verts.len();
             (verts, split)
         };
-        // 本帧新字形增量上传（write_texture 在 submit 前排队，draw 时必然就绪）
+        // Incremental upload of new glyphs this frame (write_texture queued before submit, guaranteed ready at draw time)
         if let Some(gt) = self.glyphs.as_mut() {
             gt.flush_uploads(&self.queue);
         }
@@ -874,9 +874,9 @@ impl GpuPresenter {
         use wgpu::CurrentSurfaceTexture as Cst;
         let frame = match self.surface.get_current_texture() {
             Cst::Success(f) | Cst::Suboptimal(f) => f,
-            Cst::Timeout | Cst::Occluded => return Ok(()), // 偶发/被遮挡，跳一帧
+            Cst::Timeout | Cst::Occluded => return Ok(()), // Transient / occluded, skip a frame
             Cst::Outdated | Cst::Lost => {
-                // 窗口刚变化/表面失效：重配再试一次，还不行就是真故障
+                // Window just changed / surface lost: reconfigure and try once more, real failure if still bad
                 self.surface.configure(&self.device, &self.config);
                 match self.surface.get_current_texture() {
                     Cst::Success(f) | Cst::Suboptimal(f) => f,
@@ -899,8 +899,8 @@ impl GpuPresenter {
         if !bytes.is_empty() {
             self.queue.write_buffer(&self.vertex_buf, 0, bytes);
         }
-        // 泛光开关 = 场上有没有 Bloom 实体（语义源头在 vitric-render，参数校验也在那边）。
-        // 开了泛光时场景 pass 渲进非 sRGB 的离屏纹理，sRGB 反算挪到合成 pass 做
+        // Bloom switch = whether a Bloom entity is on stage (semantics source in vitric-render, parameter validation also there).
+        // When bloom is on, the scene pass renders into a non-sRGB offscreen texture, and sRGB inverse moves to the composite pass
         let bloom = vitric_render::bloom_of(world)?;
         let surface_srgb = self.config.format.is_srgb();
         let globals =
@@ -912,7 +912,7 @@ impl GpuPresenter {
             self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         match &bloom {
             None => {
-                // 老路径原样保留：单 pass 直渲表面，没有任何额外纹理/pass 开销
+                // Old path preserved as-is: single pass direct-to-surface render, no extra texture / pass cost
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("vitric-frame"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -936,7 +936,7 @@ impl GpuPresenter {
                 }
             }
             Some(b) => {
-                // 多 pass 结构见模块文档。管线组懒建一次；纹理组随窗口尺寸重建
+                // Multi-pass structure see module docs. Pipeline set lazily built once; texture set rebuilt with window size
                 if self.bloom_pipes.is_none() {
                     self.bloom_pipes = Some(BloomPipelines::new(
                         &self.device,
@@ -951,7 +951,7 @@ impl GpuPresenter {
                 }
                 let targets = self.bloom_targets.as_ref().expect("上面刚建过");
 
-                // 每帧写小 uniform（参数可能被规则/脚本改，纹理绑定不变）
+                // Write small uniforms per frame (parameters may be changed by rules/scripts, texture bindings unchanged)
                 for (buf, p) in
                     targets.post_bufs.iter().zip(bloom_pass_params(h, b.threshold))
                 {
@@ -963,7 +963,7 @@ impl GpuPresenter {
                 };
                 self.queue.write_buffer(&targets.composite_buf, 0, bytemuck::bytes_of(&comp));
 
-                // 场景 pass → 离屏（清屏色用原始字节值：离屏纹理永远是非 sRGB 格式）
+                // Scene pass → offscreen (clear color uses raw byte values: offscreen texture is always non-sRGB format)
                 {
                     let [r, g, bl, _] = vitric_render::BACKGROUND;
                     let clear_raw = wgpu::Color {
@@ -994,7 +994,7 @@ impl GpuPresenter {
                         draw_split(&mut pass, &self.bind_group, self.glyphs.as_ref(), verts.len(), glyph_from);
                     }
                 }
-                // 下采样+阈值 + 模糊 ×6（全屏三角形，目标在 post_views 里排好了）
+                // Downsample+threshold + blur ×6 (full-screen triangle, targets already arranged in post_views)
                 for (i, (bind, dst)) in
                     targets.post_binds.iter().zip(&targets.post_views).enumerate()
                 {
@@ -1018,7 +1018,7 @@ impl GpuPresenter {
                     pass.set_bind_group(0, bind, &[]);
                     pass.draw(0..3, 0..1);
                 }
-                // 合成 pass → 表面（sRGB 反算在这里做，全屏三角形盖满，清屏色无所谓）
+                // Composite pass → surface (sRGB inverse happens here, full-screen triangle covers everything, clear color does not matter)
                 {
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("vitric-bloom-composite"),
@@ -1048,17 +1048,17 @@ impl GpuPresenter {
     }
 }
 
-/// 场景 pass 要不要在 shader 里做 sRGB 反算：泛光开启时不做（场景写进非 sRGB 离屏纹理，
-/// 反算挪到合成 pass）；关闭时维持老行为（直渲表面，表面是 sRGB 才反算）。
-/// 拆成纯函数：pass 选择逻辑无 GPU 也可单测。
+/// Whether the scene pass should do sRGB inverse in the shader: not done when bloom is on (scene writes to non-sRGB offscreen texture,
+/// inverse moves to the composite pass); when off, keeps the old behavior (direct-to-surface, only inverse if surface is sRGB).
+/// Split into a pure function: pass-selection logic is unit-testable without a GPU.
 fn scene_pass_srgb(surface_srgb: bool, bloom_active: bool) -> bool {
     surface_srgb && !bloom_active
 }
 
-/// 泛光 7 个后效 pass 的参数（纯函数无 GPU，被单测锁住）：
-/// [0] 下采样+阈值（radius 0、采样倍率 2——半分辨率像素映射回全分辨率场景），
-/// [1..=6] 盒式模糊 H/V 交替 3 轮，半径 = CPU 半径的一半（下限 1，因为在半分辨率上跑，
-/// 空间尺度与 CPU 全分辨率模糊一致），threshold 置 -1 表示不再做阈值。
+/// Parameters for bloom's 7 post-processing passes (pure function without GPU, locked by unit tests):
+/// [0] downsample+threshold (radius 0, sampling scale 2 — half-resolution pixel maps back to full-resolution scene),
+/// [1..=6] box blur H/V alternating 3 rounds, radius = half of CPU's radius (lower bound 1, because it runs at half resolution,
+/// spatial scale consistent with CPU's full-resolution blur), threshold set to -1 means no more thresholding.
 fn bloom_pass_params(viewport_h: u32, threshold: f64) -> [PostParams; 7] {
     let r_half = (vitric_render::bloom_radius_px(viewport_h) / 2).max(1) as f32;
     let mut out = [PostParams { params: [0.0; 4], params2: [0.0; 4] }; 7];
@@ -1067,7 +1067,7 @@ fn bloom_pass_params(viewport_h: u32, threshold: f64) -> [PostParams; 7] {
         params2: [2.0, 0.0, 0.0, 0.0],
     };
     for i in 0..6 {
-        // 偶数下标水平、奇数垂直（从 0 数）：H→V 为一轮完整可分离模糊
+        // Even index horizontal, odd vertical (counting from 0): H→V is one round of complete separable blur
         let dir = if i % 2 == 0 { [1.0, 0.0] } else { [0.0, 1.0] };
         out[i + 1] = PostParams {
             params: [-1.0, r_half, dir[0], dir[1]],
@@ -1077,20 +1077,20 @@ fn bloom_pass_params(viewport_h: u32, threshold: f64) -> [PostParams; 7] {
     out
 }
 
-/// 泛光中间纹理的半分辨率尺寸（下限 1，极小窗口不归零）。
+/// Half-resolution size of bloom intermediate textures (lower bound 1, tiny windows do not go to zero).
 fn half_dims(w: u32, h: u32) -> (u32, u32) {
     ((w / 2).max(1), (h / 2).max(1))
 }
 
-/// 泛光管线组：与窗口尺寸无关的部分，懒建一次后常驻。
+/// Bloom pipeline set: the parts independent of window size, lazily built once and resident.
 struct BloomPipelines {
-    /// 主 shader 渲进离屏 Rgba8Unorm 的变体（直渲表面那条管线照旧在 GpuPresenter.pipeline）。
+    /// Variant of the main shader rendering into offscreen Rgba8Unorm (the direct-to-surface pipeline is still in GpuPresenter.pipeline).
     scene_pipeline: wgpu::RenderPipeline,
     post_layout: wgpu::BindGroupLayout,
     post_pipeline: wgpu::RenderPipeline,
     composite_layout: wgpu::BindGroupLayout,
     composite_pipeline: wgpu::RenderPipeline,
-    /// 双线性采样器：合成时把半分辨率泛光纹理平滑放大（见 WGSL_COMPOSITE 注释）。
+    /// Bilinear sampler: smoothly upscales the half-resolution bloom texture at composite time (see WGSL_COMPOSITE comments).
     linear_sampler: wgpu::Sampler,
 }
 
@@ -1183,11 +1183,11 @@ impl BloomPipelines {
     }
 }
 
-/// 泛光离屏纹理组：随窗口尺寸重建（present 里比对 size 触发）。
+/// Bloom offscreen texture set: rebuilt with window size (triggered by size comparison in present).
 struct BloomTargets {
     size: (u32, u32),
     scene_view: wgpu::TextureView,
-    /// 7 个后效 pass 的 uniform / 绑定组 / 目标视图（下标对齐 bloom_pass_params）。
+    /// Uniforms / bind groups / target views for the 7 post-processing passes (index aligned with bloom_pass_params).
     post_bufs: Vec<wgpu::Buffer>,
     post_binds: Vec<wgpu::BindGroup>,
     post_views: Vec<wgpu::TextureView>,
@@ -1225,8 +1225,8 @@ impl BloomTargets {
             })
         };
 
-        // pass 链：下采样(scene→ping)，然后 H/V 交替（ping→pong→ping…），3 轮后落在 ping。
-        // 源/目标视图的排布必须与 bloom_pass_params 的方向序一致
+        // Pass chain: downsample (scene→ping), then H/V alternating (ping→pong→ping…), 3 rounds land on ping.
+        // The source/target view arrangement must match the direction order of bloom_pass_params
         let mut post_bufs = Vec::with_capacity(7);
         let mut post_binds = Vec::with_capacity(7);
         let mut post_views = Vec::with_capacity(7);
@@ -1264,7 +1264,7 @@ impl BloomTargets {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    // 模糊链 3 轮 H/V 后的最终结果在 ping（见上面 pass 链注释）
+                    // Final result of the 3-round H/V blur chain is in ping (see pass chain comment above)
                     resource: wgpu::BindingResource::TextureView(&ping_view),
                 },
                 wgpu::BindGroupEntry {
@@ -1286,12 +1286,12 @@ impl BloomTargets {
     }
 }
 
-/// 泛光全部离屏纹理的格式：非 sRGB——所有中间计算都在原始字节空间，
-/// 和 CPU 路径同一数值域（sRGB 反算只在最后的合成 pass 做一次）。
+/// Format of all bloom offscreen textures: non-sRGB — all intermediate calculations are in raw byte space,
+/// same numerical domain as the CPU path (sRGB inverse only happens once in the final composite pass).
 const BLOOM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// 主 2D 管线（顶点流 + 图集 + 光照 shader）。直渲表面和泛光的离屏场景 pass
-/// 用同一个 shader、同一套顶点布局，只有目标格式不同——抽出来建两次。
+/// Main 2D pipeline (vertex stream + atlas + lighting shader). Direct-to-surface and bloom's offscreen scene pass
+/// use the same shader, same vertex layout, only the target format differs — factored out and built twice.
 fn create_scene_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -1322,20 +1322,20 @@ fn create_scene_pipeline(
             compilation_options: Default::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                // 标准 src-alpha 混合，对齐 CPU 路径的逐像素 alpha 混合
+                // Standard src-alpha blending, aligned with the CPU path's per-pixel alpha blending
                 blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
         primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None, // 画家算法：按实体序后画盖前画，不要深度
+        depth_stencil: None, // Painter's algorithm: later draws over earlier by entity order, no depth needed
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
     })
 }
 
-/// 后效管线（泛光模糊/合成共用骨架）：全屏三角形、无顶点缓冲、无混合（直接覆盖）。
+/// Post-processing pipeline (shared skeleton for bloom blur/composite): full-screen triangle, no vertex buffer, no blending (direct overwrite).
 fn create_fullscreen_pipeline(
     device: &wgpu::Device,
     shader: &wgpu::ShaderModule,
@@ -1376,16 +1376,16 @@ fn create_fullscreen_pipeline(
 }
 
 // ---------------------------------------------------------------------------
-// 图集构建：白块 + 128 字形 + 全部素材，一次性打进一张纹理
+// Atlas building: white tile + 128 glyphs + all assets, packed into one texture at once
 // ---------------------------------------------------------------------------
 
-/// 图集固定宽度：单图上限 2048（Assets 导入时拦的）+ 两侧 1px 复制边。
+/// Atlas fixed width: single-image upper bound 2048 (enforced at Assets import) + 1px copy border on both sides.
 const ATLAS_W: u32 = 2050;
 
-/// 图集纹理的**真实尺寸**：BC7 按 4×4 块编码，宽高各向上取整到 4 的倍数（块网格），
-/// RGBA8 原样。UV 归一化分母必须用这个尺寸——否则 BC7 的取整 padding 会让整张采样
-/// 整体偏移（内容仍在 (0..逻辑宽, 0..逻辑高) 子区，分母用取整后尺寸 UV 才精确指进内容）。
-/// 纯函数，容器无 GPU 也能单测锁住「分母=纹理真实尺寸」这条不变量。
+/// **Real size** of the atlas texture: BC7 encodes in 4×4 blocks, width/height each rounded up to a multiple of 4 (block grid),
+/// RGBA8 as-is. The UV normalization denominator must use this size — otherwise BC7's rounding padding makes the whole sampling
+/// shift overall (content is still in the (0..logical_width, 0..logical_height) sub-region, denominator uses the rounded size so UVs point precisely into content).
+/// Pure function, the container can unit-test lock the "denominator = real texture size" invariant without a GPU.
 fn atlas_tex_dims(bc7: bool, w: u32, h: u32) -> (u32, u32) {
     if bc7 {
         (w.div_ceil(4) * 4, h.div_ceil(4) * 4)
@@ -1394,14 +1394,14 @@ fn atlas_tex_dims(bc7: bool, w: u32, h: u32) -> (u32, u32) {
     }
 }
 
-/// `vitric gpu-probe [rgba8|bc7]`：**无头**真机诊断（不开窗，SSH/Session 0 可跑）——在本机
-/// 真实 GPU 上验证「整张图集压 BC7 真省显存」这条容器测不了的事。
+/// `vitric gpu-probe [rgba8|bc7]`: **headless** real-machine diagnostic (no window, SSH/Session 0 can run) — verifies "compressing the entire atlas to BC7 really saves VRAM" on the local
+/// real GPU, something the container cannot test.
 ///
-/// **单格式、干净基线**：一次只分配一种格式的大纹理，从本进程基线量到分配后的 nvidia-smi
-/// 增量。两种格式分两次进程跑——各自全新基线，避开「先占大块、后者落进已预留堆」导致
-/// 增量被驱动堆预留吃掉的假象。默认 bc7。
+/// **Single format, clean baseline**: only allocates large textures of one format at a time, measuring from this process's baseline to the post-allocation nvidia-smi
+/// delta. The two formats run in two separate processes — each with a fresh baseline, avoiding the illusion that "the first one occupies a big chunk, the latter falls into the already-reserved heap" causing
+/// the delta to be eaten by the driver heap reservation. Defaults to bc7.
 pub fn gpu_probe(args: &[String]) -> Result<(), String> {
-    // 量到清晰信号的图集尺寸：2048×8192，RGBA8=64MB / BC7=16MB
+    // Atlas size that yields a clear signal: 2048×8192, RGBA8=64MB / BC7=16MB
     const W: u32 = 2048;
     const H: u32 = 8192;
     let want_bc7 = !matches!(args.first().map(|s| s.as_str()), Some("rgba8"));
@@ -1409,7 +1409,7 @@ pub fn gpu_probe(args: &[String]) -> Result<(), String> {
 
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    // 无头：不要 surface（compatible_surface=None），所以不需要桌面窗口
+    // Headless: no surface (compatible_surface=None), so no desktop window needed
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
@@ -1436,8 +1436,8 @@ pub fn gpu_probe(args: &[String]) -> Result<(), String> {
     }))
     .map_err(|e| format!("创建 GPU 设备失败: {e}"))?;
 
-    // wgpu 建 device 自带一大块预留显存池，小分配落进池里 nvidia-smi 看不出增量。
-    // 一次分配 count 张同格式，总量远超预留池，真实占用差（4×）才在 nvidia-smi 现出来。
+    // wgpu creating a device comes with a large reserved VRAM pool, small allocations fall into the pool and nvidia-smi sees no delta.
+    // Allocating count textures of the same format at once, the total far exceeds the reserved pool, the real usage difference (4×) shows up in nvidia-smi.
     let rgba = vec![128u8; (W as usize) * (H as usize) * 4];
     let base = vram_used_mb();
     let mut keep: Vec<wgpu::Texture> = Vec::with_capacity(count);
@@ -1473,8 +1473,8 @@ pub fn gpu_probe(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// 探针纹理上传：建纹理 + 写数据 + 提交 + 等 GPU 完成（确保显存真分配下去再量）。
-/// `bc7_blocks_per_row`=Some(每行块数) 走 BC7 块布局，None 走 RGBA8 行布局。
+/// Probe texture upload: create texture + write data + submit + wait for GPU completion (ensure VRAM is really allocated before measuring).
+/// `bc7_blocks_per_row`=Some(blocks per row) uses BC7 block layout, None uses RGBA8 row layout.
 fn upload_probe_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1495,11 +1495,11 @@ fn upload_probe_texture(
         view_formats: &[],
     });
     let bytes_per_row = match bc7_blocks_per_row {
-        Some(bx) => bx * vitric_cli::bc7::BLOCK_BYTES as u32, // BC7: 每行块数 × 16
-        None => w * 4,                                        // RGBA8: 宽 × 4
+        Some(bx) => bx * vitric_cli::bc7::BLOCK_BYTES as u32, // BC7: blocks per row × 16
+        None => w * 4,                                        // RGBA8: width × 4
     };
     let rows = match bc7_blocks_per_row {
-        Some(_) => h / 4, // BC7 行数 = 像素高 / 4（块网格）
+        Some(_) => h / 4, // BC7 row count = pixel height / 4 (block grid)
         None => h,
     };
     queue.write_texture(
@@ -1518,13 +1518,13 @@ fn upload_probe_texture(
         wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
     );
     queue.submit([]);
-    let _ = device.poll(wgpu::PollType::wait_indefinitely()); // 等写入落地，显存才真占上
-    std::thread::sleep(std::time::Duration::from_millis(800)); // 给驱动/nvidia-smi 结算时间
+    let _ = device.poll(wgpu::PollType::wait_indefinitely()); // Wait for the write to land, only then is VRAM really occupied
+    std::thread::sleep(std::time::Duration::from_millis(800)); // Give the driver / nvidia-smi time to settle
     texture
 }
 
-/// 读 nvidia-smi 报的**全卡**已用显存（MB）。探针是唯一大分配者，增量即纹理占用。
-/// nvidia-smi 不在 PATH（非 N 卡/没装）则 None，探针退化为只报字节倍率。
+/// Read nvidia-smi's **whole-card** used VRAM (MB). The probe is the only large allocator, the delta is the texture footprint.
+/// If nvidia-smi is not on PATH (non-N card / not installed) returns None, the probe degrades to reporting only the byte ratio.
 fn vram_used_mb() -> Option<u64> {
     let out = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
@@ -1542,7 +1542,7 @@ fn build_atlas(
     assets: &Assets,
     bc_supported: bool,
 ) -> Result<(Atlas, wgpu::BindGroup), String> {
-    // 待打包项：(键, 宽, 高, RGBA 像素)。顺序固定：白块、字形、素材（BTreeMap 已排序）
+    // Items to pack: (key, width, height, RGBA pixels). Fixed order: white tile, glyphs, assets (BTreeMap already sorted)
     let mut items: Vec<(String, u32, u32, Vec<u8>)> = Vec::new();
     items.push(("\u{0}white".into(), 2, 2, vec![255u8; 2 * 2 * 4]));
     for (i, glyph) in font8x8::legacy::BASIC_LEGACY.iter().enumerate() {
@@ -1562,8 +1562,8 @@ fn build_atlas(
         items.push((name.to_string(), img.width, img.height, img.rgba.clone()));
     }
 
-    // 货架打包：每项四周留 1px 复制边（最近邻采样在区域边缘的浮点抖动不会渗到邻图）
-    let mut placements: Vec<(u32, u32)> = Vec::with_capacity(items.len()); // 内容区左上角
+    // Shelf packing: each item leaves a 1px replicated border on all sides (nearest-neighbor sampling's floating-point jitter at region edges won't bleed into neighboring images)
+    let mut placements: Vec<(u32, u32)> = Vec::with_capacity(items.len()); // top-left of content region
     let (mut x, mut y, mut row_h) = (0u32, 0u32, 0u32);
     for (_, w, h, _) in &items {
         let (bw, bh) = (w + 2, h + 2);
@@ -1585,7 +1585,7 @@ fn build_atlas(
         ));
     }
 
-    // 铺像素：内容区直拷，复制边取最近内容像素（等效 clamp）
+    // Lay pixels: content region direct copy, replicated border takes nearest content pixel (equivalent to clamp)
     let mut pixels = vec![0u8; (ATLAS_W * atlas_h * 4) as usize];
     for ((_, w, h, src), (ox, oy)) in items.iter().zip(&placements) {
         for ty in -1..=(*h as i64) {
@@ -1601,11 +1601,11 @@ fn build_atlas(
         }
     }
 
-    // 格式选择：设备支持 BC 就把**整张运行时图集**压成 BC7（显存 1/4，正面攻 8.5G 那种
-    // RGBA8 全驻留的根）。白块/点阵字形/任何纯色区在本编码器的 min/max 端点下**无损**——
-    // 白=通道最大、透明黑=最小，都精确落在端点上；只有精灵美术的平滑渐变块有损，那正是
-    // BC7 设计来扛、也是合同里选 BC7 时已接受的取舍。不支持 BC 的设备不硬失败整局（白块/
-    // 字形/UI 也在这张图集里），保持 RGBA8——但启动期**明说**，不让显存悄悄膨胀回 4 倍。
+    // Format selection: if the device supports BC, the **entire runtime atlas** is compressed to BC7 (1/4 VRAM, directly addressing the root cause of 8.5G
+    // RGBA8 fully-resident cases). White tile / bitmap glyphs / any solid-color region are **lossless** under this encoder's min/max endpoints —
+    // white = max channel value, transparent black = min, both land exactly on endpoints; only sprite art's smooth gradient blocks are lossy, which is exactly
+    // what BC7 was designed to handle and is the accepted trade-off when the contract chooses BC7. Devices without BC support don't hard-fail the whole run (white tile /
+    // glyphs / UI also live in this atlas), keep RGBA8 — but the startup phase **explicitly says so**, preventing VRAM from silently ballooning back to 4x.
     let mb = |w: u32, h: u32| w as u64 * h as u64 * 4 / 1_048_576;
     let bc7 = bc_supported.then(|| vitric_cli::bc7::encode_rgba8(ATLAS_W, atlas_h, &pixels)).transpose()?;
     let (tex_w, tex_h) = atlas_tex_dims(bc7.is_some(), ATLAS_W, atlas_h);
@@ -1628,7 +1628,7 @@ fn build_atlas(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        // 两路都非 sRGB：采样回原始字节空间，染色乘法在字节空间（和 CPU 路径同口径）
+        // Both paths are non-sRGB: sampling returns to raw byte space, tint multiplication happens in byte space (same convention as CPU path)
         format: match &bc7 {
             Some(_) => wgpu::TextureFormat::Bc7RgbaUnorm,
             None => wgpu::TextureFormat::Rgba8Unorm,
@@ -1637,7 +1637,7 @@ fn build_atlas(
         view_formats: &[],
     });
     match &bc7 {
-        // BC7：一块 4×4=16 字节，bytes_per_row=每行块数×16，拷贝范围按块网格的取整尺寸
+        // BC7: one block is 4×4=16 bytes, bytes_per_row = blocks per row × 16, copy range uses the block-grid rounded dimensions
         Some((bx, by, blocks)) => queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -1670,9 +1670,9 @@ fn build_atlas(
         ),
     }
 
-    // UV 索引表：按**纹理真实尺寸** tex_w/tex_h 归一化（见 atlas_tex_dims——BC7 取整后
-    // 分母更大，内容子区的 UV 精确指进内容，padding 行列永不被采样）。RGBA8 路径
-    // tex_w/tex_h == ATLAS_W/atlas_h，UV 与改动前逐位相同（零回退）。
+    // UV index table: normalized by **texture real dimensions** tex_w/tex_h (see atlas_tex_dims — after BC7 rounding the
+    // denominator is larger, the content sub-region's UV precisely points into the content, padding rows/columns are never sampled). RGBA8 path
+    // tex_w/tex_h == ATLAS_W/atlas_h, UV is bit-for-bit identical to before the change (zero regression).
     let uv = |ox: u32, oy: u32, w: u32, h: u32| -> UvRect {
         [
             ox as f32 / tex_w as f32,
@@ -1686,7 +1686,7 @@ fn build_atlas(
     let mut glyphs = [[0.0f32; 4]; 128];
     for ((key, w, h, _), (ox, oy)) in items.iter().zip(&placements) {
         if key == "\u{0}white" {
-            // 白块取中心点（2x2 的正中），四角同 UV 平采样；分母同 uv 闭包用纹理真实尺寸
+            // White tile takes the center point (center of the 2x2), all four corners sample the same UV; denominator uses texture real dimensions same as the uv closure
             white = [(*ox as f32 + 1.0) / tex_w as f32, (*oy as f32 + 1.0) / tex_h as f32];
         } else if let Some(i) = key.strip_prefix('\u{0}').and_then(|k| k.strip_prefix("glyph")) {
             glyphs[i.parse::<usize>().expect("字形键自己拼的")] = uv(*ox, *oy, *w, *h);
@@ -1709,12 +1709,12 @@ fn build_atlas(
 }
 
 // ---------------------------------------------------------------------------
-// 每帧顶点流：镜像 vitric-render 的视觉语义（同一套组件约定、同一坐标变换）
+// Per-frame vertex stream: mirrors vitric-render's visual semantics (same component conventions, same coordinate transforms)
 // ---------------------------------------------------------------------------
 
-/// 攒一帧的 uniform（纯函数不碰 GPU，光照打包布局被单测锁住）。
-/// 灯参数在这里从世界坐标变换到像素空间（取景含 Shake 抖动——光跟着画面走，
-/// 和 CPU 路径的 apply_lighting 同一套变换）；shader 内循环只算距离。
+/// Accumulate one frame's uniform (pure function, no GPU access; lighting pack layout is locked by unit tests).
+/// Light parameters are transformed from world coordinates to pixel space here (the view includes Shake jitter — light follows the frame,
+/// same transform set as the CPU path's apply_lighting); the shader's inner loop only computes distance.
 fn build_globals(
     world: &World,
     width: u32,
@@ -1726,14 +1726,14 @@ fn build_globals(
         viewport: [width as f32, height as f32, if srgb { 1.0 } else { 0.0 }, 0.0],
         ..bytemuck::Zeroable::zeroed()
     };
-    // 光照总开关 = 场上有没有 Ambient 实体（语义源头在 vitric-render）
+    // Lighting master switch = whether an Ambient entity exists in the world (semantic source is in vitric-render)
     if let Some((ambient, _)) = vitric_render::ambient_of(world)? {
         let lights = vitric_render::collect_lights(world)?;
         let (cam_x, cam_y, scale) = vitric_render::camera_of(world, tick, height)?;
         g.viewport[3] = 1.0;
         g.ambient = [ambient[0] as f32, ambient[1] as f32, ambient[2] as f32, lights.len() as f32];
         for (i, l) in lights.iter().enumerate() {
-            // 打包布局见 Globals 文档：pos.w = kind，dir = [朝向像素空间单位向量, 半锥角弧度, 0]
+            // Pack layout see Globals docs: pos.w = kind, dir = [facing pixel-space unit vector, half-cone angle in radians, 0]
             let (kind, dir_deg, half_rad) = match l.kind {
                 vitric_render::LightKind::Point => (0.0, None, 0.0),
                 vitric_render::LightKind::Spot { angle, dir } => {
@@ -1741,8 +1741,8 @@ fn build_globals(
                 }
                 vitric_render::LightKind::Directional { dir } => (2.0, Some(dir), 0.0),
             };
-            // 平行光不过世界→像素变换（占位 0 喂进变换会得到屏幕中心，污染槽位语义）——
-            // 位置/半径直接打 0，shader 在 kind 分支里根本不碰它们
+            // Directional lights skip the world→pixel transform (feeding placeholder 0 into the transform yields screen center, polluting slot semantics) —
+            // position/radius are packed as 0 directly, the shader never touches them in the kind branch
             g.lights_pos[i] = if matches!(l.kind, vitric_render::LightKind::Directional { .. }) {
                 [0.0, 0.0, 0.0, kind]
             } else {
@@ -1760,15 +1760,15 @@ fn build_globals(
                 0.0,
             ];
             if let Some(dir) = dir_deg {
-                // 世界角度（度，0=+x 逆时针正）→ 像素空间单位向量：y 翻转 → (cos, -sin)，
-                // 和 CPU 路径 apply_lighting 的预计算一字不差
+                // World angle (degrees, 0=+x counterclockwise positive) → pixel-space unit vector: y flip → (cos, -sin),
+                // bit-for-bit identical to the CPU path's apply_lighting precomputation
                 let rad = dir.to_radians();
                 g.lights_dir[i] = [rad.cos() as f32, (-rad.sin()) as f32, half_rad as f32, 0.0];
             }
         }
-        // 投影：遮光体合并成大箱（像素空间，与灯同一套取景变换，含 Shake 抖动）、
-        // 按灯盘逐灯剔除后打成连续区间。开关/收集/上限/合并/剔除的语义源头全在
-        // vitric-render；关闭 = shadow_ranges 全零，shader 的遮挡循环零次执行
+        // Projection: occluders are merged into large boxes (pixel space, same view transform as lights, including Shake jitter),
+        // then culled per-light by light disc and packed into contiguous ranges. The semantic source for switch/collect/limit/merge/cull all lives in
+        // vitric-render; off = shadow_ranges all zero, the shader's occlusion loop executes zero times
         if vitric_render::shadows_of(world)? {
             let occs = vitric_render::collect_occluders(world)?;
             let grid = vitric_render::build_shadow_boxes(&occs, width, height, (cam_x, cam_y, scale));
@@ -1777,11 +1777,11 @@ fn build_globals(
             }
             let mut cursor = 0usize;
             for (i, l) in lights.iter().enumerate() {
-                // 平行光不投影（v1）：区间留全零，shader 循环零次
+                // Directional lights don't project shadows (v1): range left all zero, shader loop zero iterations
                 if matches!(l.kind, vitric_render::LightKind::Directional { .. }) {
                     continue;
                 }
-                // 与 CPU 路径同一套 f64 像素空间灯参数做剔除（f32 打包只发生在最后）
+                // Cull using the same f64 pixel-space light parameters as the CPU path (f32 packing happens only at the end)
                 let lx = (width as f64) / 2.0 + (l.x - cam_x) * scale;
                 let ly = (height as f64) / 2.0 - (l.y - cam_y) * scale;
                 let kept = vitric_render::cull_shadow_boxes(&grid, lx, ly, l.radius * scale);
@@ -1822,8 +1822,8 @@ fn build_globals(
     Ok(g)
 }
 
-/// 一段顶点流按 glyph_from 切两个 draw：前段绑主图集，后段绑字形图集
-/// （没挂字体时 glyph_from == len，第二段为空，行为与单 draw 完全一致）。
+/// Split one vertex stream into two draws at glyph_from: the first segment binds the main atlas, the second binds the glyph atlas
+/// (when no font is attached, glyph_from == len, the second segment is empty, behavior is fully identical to a single draw).
 fn draw_split(
     pass: &mut wgpu::RenderPass<'_>,
     main_bind: &wgpu::BindGroup,
@@ -1842,7 +1842,7 @@ fn draw_split(
     }
 }
 
-/// 老的单流路径（没挂字体）：背景/精灵/点阵文字/描边全在主图集一段流里。
+/// Legacy single-stream path (no font attached): background/sprites/bitmap text/outline all in one stream of the main atlas.
 fn build_vertices(
     world: &World,
     width: u32,
@@ -1854,18 +1854,18 @@ fn build_vertices(
     let (cam_x, cam_y, scale) = vitric_render::camera_of(world, tick, height)?;
     let mut verts = build_scene_vertices(world, width, height, atlas, tick)?;
     push_bitmap_texts(&mut verts, world, width, height, atlas, (cam_x, cam_y, scale))?;
-    // 粒子在文字之后（CPU 路径粒子画在光照之后 = 盖在精灵/文字上，画家序同语义）
+    // Particles come after text (CPU path draws particles after lighting = on top of sprites/text, same painter's-order semantics)
     push_emitter_particles(&mut verts, world, width, height, atlas.white, (cam_x, cam_y, scale), tick)?;
-    // 选中描边：青色 2px，画在最上层（几何对齐 vitric_render::draw_selection_outline）。
-    // 已知小偏差：光照开启时描边在 GPU 窗口会被一起打光（同一条管线），CPU 窗口路径
-    // 是渲完再描所以不被打光——检查器调试装饰，不进截图/断言，不值得为它开第二条管线
+    // Selection outline: teal 2px, drawn on top (geometry aligns with vitric_render::draw_selection_outline).
+    // Known minor discrepancy: when lighting is on, the outline in the GPU window gets lit too (same pipeline), the CPU window path
+    // draws the outline after rendering so it isn't lit — this is inspector debug decoration, doesn't enter screenshots/asserts, not worth opening a second pipeline for it
     if let Some(id) = selection {
         push_selection_outline(&mut verts, world, width, height, atlas.white, id, (cam_x, cam_y, scale));
     }
     Ok(verts)
 }
 
-/// 背景（光照开启时）+ 精灵流（主图集）。文字/描边由调用方按路径拼接。
+/// Background (when lighting is on) + sprite stream (main atlas). Text/outline are stitched by the caller per path.
 fn build_scene_vertices(
     world: &World,
     width: u32,
@@ -1873,31 +1873,31 @@ fn build_scene_vertices(
     atlas: &Atlas,
     tick: u64,
 ) -> Result<Vec<Vertex>, String> {
-    // 取景（含 Shake 抖动偏移）直接用 vitric-render 的实现——两条路径抖得逐位一致
+    // The view (including Shake jitter offset) uses vitric-render's implementation directly — both paths jitter bit-for-bit identically
     let (cam_x, cam_y, scale) = vitric_render::camera_of(world, tick, height)?;
     let mut verts: Vec<Vertex> = Vec::new();
 
-    // 光照开启时背景也要被照（CPU 路径是整张 buf 过公式）：清屏色没法逐像素变，
-    // 所以先铺一个全屏背景方块，让 shader 把背景和实体一起打光
+    // When lighting is on the background must also be lit (CPU path runs the whole buf through the formula): clear color can't vary per-pixel,
+    // so first lay a full-screen background quad, letting the shader light background and entities together
     if vitric_render::ambient_of(world)?.is_some() {
         push_solid(&mut verts, atlas.white, 0.0, 0.0, width as f32, height as f32, vitric_render::BACKGROUND);
     }
 
-    // 精灵：按实体序（画家算法，后画盖前画）
+    // Sprites: in entity order (painter's algorithm, later draws cover earlier ones)
     for id in world.query(&["Position", "Sprite"]) {
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;
         let sw = num(world, id, "Sprite.w")?;
         let sh = num(world, id, "Sprite.h")?;
         let rot = vitric_render::rot_of(world, id)?;
-        // 世界 → 屏幕像素（y 翻转，相机居中）——与 CPU 路径同一公式
+        // World → screen pixel (y flip, camera centered) — same formula as the CPU path
         let cx = (width as f64) / 2.0 + (px - cam_x) * scale;
         let cy = (height as f64) / 2.0 - (py - cam_y) * scale;
         let half_w = sw * scale / 2.0;
         let half_h = sh * scale / 2.0;
-        // 四角（顺序固定：未旋转时的 左上/右上/右下/左下，UV 跟角走）。
-        // rot != 0 时绕中心旋转——与 CPU 路径同一角度约定（vitric_render::rot_of）：
-        // 度数、世界逆时针为正；屏幕 y 翻转 → 屏幕系正向矩阵 [[c, s], [-s, c]]
+        // Four corners (fixed order: top-left/top-right/bottom-right/bottom-left when unrotated, UV follows the corner).
+        // When rot != 0 rotate around center — same angle convention as the CPU path (vitric_render::rot_of):
+        // degrees, world counterclockwise positive; screen y flip → screen-system positive matrix [[c, s], [-s, c]]
         let corners: [[f32; 2]; 4] = if rot == 0.0 {
             let (x0, y0) = ((cx - half_w) as f32, (cy - half_h) as f32);
             let (x1, y1) = ((cx + half_w) as f32, (cy + half_h) as f32);
@@ -1925,7 +1925,7 @@ fn build_scene_vertices(
             let [u, v] = atlas.white;
             push_quad_corners(&mut verts, corners, [u, v, u, v], tint(rgba));
         } else {
-            // 图不存在直接报错（不画占位符）——错误文案对齐 CPU 路径
+            // Missing image is a hard error (no placeholder drawn) — error message aligns with the CPU path
             let uv = atlas.images.get(&image_name).ok_or_else(|| {
                 format!(
                     "实体 {id} 的 Sprite.image {image_name:?} 不在素材仓库里。\
@@ -1933,13 +1933,13 @@ fn build_scene_vertices(
                     atlas.images.keys().cloned().collect::<Vec<_>>().join(", ")
                 )
             })?;
-            // 法线贴图按命名配对（语义源头 vitric_render::normal_map_name）——它就是
-            // assets/ 里的普通 PNG，必然已在同一张图集里；没配对 = 哨兵 = 老光照路径
+            // Normal maps are paired by name (semantics sourced from vitric_render::normal_map_name) — it's
+            // just a regular PNG in assets/, already baked into the same atlas; no pair = sentinel = legacy lighting path
             let nuv = vitric_render::normal_map_name(&image_name)
                 .and_then(|n| atlas.images.get(&n))
                 .copied()
                 .unwrap_or(NO_NORMAL);
-            // rot 的 (cos, sin)：片元用它把法线旋到屏幕空间（rot=0 → (1,0) 恒等）
+            // (cos, sin) of rot: the fragment uses it to rotate normals into screen space (rot=0 → (1,0) identity)
             let rotcs = if rot == 0.0 {
                 [1.0, 0.0]
             } else {
@@ -1952,8 +1952,8 @@ fn build_scene_vertices(
     Ok(verts)
 }
 
-/// 点阵文字流（没挂字体的老路径）：每字符一个主图集字形方块，整串居中于 Position，
-/// 画在精灵之上。永远直立——Sprite.rot 只转精灵，不转文字（与 CPU 路径同语义）。
+/// Bitmap text stream (legacy path with no font attached): one main-atlas glyph quad per character, the whole string centered on Position,
+/// drawn above the sprite. Always upright — Sprite.rot only rotates the sprite, not the text (same semantics as the CPU path).
 fn push_bitmap_texts(
     verts: &mut Vec<Vertex>,
     world: &World,
@@ -1981,7 +1981,7 @@ fn push_bitmap_texts(
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "#ffffff".to_string());
         let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Text.color: {e}"))?;
-        // reveal：与 CPU 点阵路径同一口径——截到前 visible 个字符、按 visible 居中
+        // reveal: same convention as the CPU bitmap path — truncate to the first visible characters, center on the visible count
         let reveal = world
             .get_field(id, "Text.reveal")
             .ok()
@@ -1993,7 +1993,7 @@ fn push_bitmap_texts(
         }
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;
-        // screen=true: HUD 锚定——与 CPU 路径同语义,坐标相对屏幕中心,不随相机走
+        // screen=true: HUD anchoring — same semantics as the CPU path, coordinates are relative to screen center, independent of camera
         let screen_anchored = world
             .get_field(id, "Text.screen")
             .ok()
@@ -2017,7 +2017,7 @@ fn push_bitmap_texts(
             if cp < 128 {
                 push_quad(verts, x0, y0, x1, y1, atlas.glyphs[cp], tint(rgba));
             } else {
-                // 非 ASCII：实心方块占位，同 CPU 路径
+                // Non-ASCII: solid square placeholder, same as the CPU path
                 push_solid(verts, atlas.white, x0, y0, x1, y1, rgba);
             }
         }
@@ -2025,9 +2025,9 @@ fn push_bitmap_texts(
     Ok(())
 }
 
-/// 矢量文字流（挂了字体）：排版/栅格化/取整全走 vitric_render::FontStore——
-/// 与 CPU 路径（draw_text_vector）同一套几何，每字形一个字形图集方块。
-/// 新 (字符, 像素字号) 在这里懒分配 + 排进上传队列；图集满了显式报错。
+/// Vector text stream (font attached): layout/rasterization/rounding all go through vitric_render::FontStore —
+/// same geometry as the CPU path (draw_text_vector), one glyph-atlas quad per glyph.
+/// New (character, pixel size) pairs are lazily allocated here and queued for upload; atlas-full is an explicit error.
 fn push_ttf_texts(
     verts: &mut Vec<Vertex>,
     world: &World,
@@ -2057,7 +2057,7 @@ fn push_ttf_texts(
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "#ffffff".to_string());
         let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Text.color: {e}"))?;
-        // reveal（与 CPU 路径同一口径）：可见字数 = 纯函数；缺省 1.0=全显
+        // reveal (same convention as the CPU path): visible char count = pure function; default 1.0 = show all
         let reveal = world
             .get_field(id, "Text.reveal")
             .ok()
@@ -2081,7 +2081,7 @@ fn push_ttf_texts(
         };
 
         let px_size = FontStore::px_size(size, scale);
-        // 缓存版排版 + 只画前 visible 个字形：与 CPU 路径同一份数据、同一个可见字数
+        // Cached layout + draw only the first visible glyphs: same data and same visible count as the CPU path
         let laid = font.layout_cached(&content, px_size);
         let (placements, total_w) = (&laid.0, laid.1);
         let left = cx - total_w as f64 / 2.0;
@@ -2089,7 +2089,7 @@ fn push_ttf_texts(
         for p in placements.iter().take(visible) {
             let g = font.raster(p.ch, px_size);
             if g.coverage.is_empty() {
-                continue; // 空轮廓（空格等）只占 advance，不进图集
+                continue; // Empty outline (space, etc.) only takes advance, never enters the atlas
             }
             let uv = glyph_atlas.glyph_uv(font, p.ch, px_size)?;
             let x0 = ((left + p.x as f64).round() + g.left as f64) as f32;
@@ -2100,10 +2100,10 @@ fn push_ttf_texts(
     Ok(())
 }
 
-/// UI Panel 流（屏幕空间，主图集）：背景框，纯色或精灵贴图。布局由
-/// vitric_render::solve_layout 给出（与 CPU 路径同一份纯函数，不经相机）。
-/// 全部用 [`UNLIT`] 哨兵——UI 是叠加层，CPU 路径画在光照/泛光之后不被打光，同语义。
-/// 屏幕空间 = 直接用解算出的屏幕像素矩形落顶点，无离屏 target、复用同一顶点流。
+/// UI Panel stream (screen space, main atlas): background frame, solid color or sprite texture. Layout comes from
+/// vitric_render::solve_layout (the same pure function as the CPU path, no camera involved).
+/// All use the [`UNLIT`] sentinel — UI is an overlay layer, the CPU path draws it after lighting/bloom so it isn't lit, same semantics.
+/// Screen space = place vertices directly from the solved screen-pixel rectangle, no off-screen target, reusing the same vertex stream.
 fn push_ui_panels(
     verts: &mut Vec<Vertex>,
     world: &World,
@@ -2112,7 +2112,7 @@ fn push_ui_panels(
 ) -> Result<(), String> {
     for id in world.query(&["Ui", "Panel"]) {
         let Some(base) = layout.get(&id) else { continue };
-        // 按下反馈：CPU/GPU 共用 ui_press_feedback（绕中心缩 + 提亮），公式逐句同构。
+        // Press feedback: CPU/GPU share ui_press_feedback (scale around center + brighten), the formulas are structurally identical line by line.
         let (r, modulate) = vitric_render::ui_press_feedback(world, id, *base);
         let (x0, y0) = (r.x as f32, r.y as f32);
         let (x1, y1) = ((r.x + r.w) as f32, (r.y + r.h) as f32);
@@ -2145,8 +2145,8 @@ fn push_ui_panels(
     Ok(())
 }
 
-/// UI Label 点阵文字流（没挂字体，主图集）：每字符一个字形方块，按 align 在节点框内
-/// 水平对齐、竖向居中。与 CPU draw_ui_label 点阵路径同一套几何。全部 [`UNLIT`]。
+/// UI Label bitmap text stream (no font attached, main atlas): one glyph quad per character, aligned horizontally by align within the node frame
+/// and vertically centered. Same geometry as the CPU draw_ui_label bitmap path. All [`UNLIT`].
 fn push_ui_bitmap_labels(
     verts: &mut Vec<Vertex>,
     world: &World,
@@ -2177,8 +2177,8 @@ fn push_ui_bitmap_labels(
     Ok(())
 }
 
-/// UI Label 矢量文字流（挂了字体，字形图集）：与 CPU draw_ui_label 矢量路径同一套
-/// 排版/栅格化/取整（vitric_render::FontStore），字号 = 屏幕像素（scale=1）。全部 [`UNLIT`]。
+/// UI Label vector text stream (font attached, glyph atlas): same
+/// layout/rasterization/rounding as the CPU draw_ui_label vector path (vitric_render::FontStore), font size = screen pixels (scale=1). All [`UNLIT`].
 fn push_ui_ttf_labels(
     verts: &mut Vec<Vertex>,
     world: &World,
@@ -2218,8 +2218,8 @@ fn push_ui_ttf_labels(
     Ok(())
 }
 
-/// 读 UiLabel 的可见字符（已按 reveal 截断）+ 字号 + 颜色 + 对齐。
-/// 空/全隐/零字号 = None（调用方 continue）。两条 GPU 文字路径共用。
+/// Read UiLabel's visible characters (already truncated by reveal) + size + color + align.
+/// Empty / fully hidden / zero size = None (caller continues). Shared by both GPU text paths.
 #[allow(clippy::type_complexity)]
 fn read_ui_label(
     world: &World,
@@ -2260,7 +2260,7 @@ fn read_ui_label(
     Ok(Some((content.chars().take(visible).collect(), size, rgba, align)))
 }
 
-/// 文字在节点框内的水平起点（按 align）。与 CPU draw_ui_label 同口径。
+/// Horizontal start of the text within the node frame (by align). Same convention as CPU draw_ui_label.
 fn ui_label_left(
     world: &World,
     id: vitric_ecs::EntityId,
@@ -2279,9 +2279,9 @@ fn ui_label_left(
     })
 }
 
-/// 粒子流：发射器按纯函数展开（语义源头 vitric_render::emitter_particles——
-/// 位置/数量/颜色与 CPU 路径同一份数据），每个粒子一个白块方块 + 染色。
-/// nuv 用 [`UNLIT`] 哨兵：片元跳过光照（自发光，CPU 路径粒子画在光照之后，同语义）。
+/// Particle stream: emitters expand via a pure function (semantics sourced from vitric_render::emitter_particles —
+/// position/count/color are the same data as the CPU path), one white-quad per particle + tint.
+/// nuv uses the [`UNLIT`] sentinel: the fragment skips lighting (self-emissive, the CPU path draws particles after lighting, same semantics).
 fn push_emitter_particles(
     verts: &mut Vec<Vertex>,
     world: &World,
@@ -2296,7 +2296,7 @@ fn push_emitter_particles(
             if p.rgba[3] == 0 {
                 continue;
             }
-            // 与 CPU 光栅化同一条世界→像素变换（方点中心 + 半边长）
+            // Same world→pixel transform as the CPU rasterizer (dot center + half extent)
             let cx = (width as f64) / 2.0 + (p.x - cam_x) * scale;
             let cy = (height as f64) / 2.0 - (p.y - cam_y) * scale;
             let half = p.size * scale / 2.0;
@@ -2321,13 +2321,13 @@ fn push_selection_outline(
     world: &World,
     width: u32,
     height: u32,
-    // 白块中心点 UV：点阵路径给主图集的，字体路径给字形图集的（描边跟字形同一绑定组）
+    // White-quad center UV: the bitmap path uses the main atlas, the font path uses the glyph atlas (the outline shares the glyph's bind group)
     white: [f32; 2],
     id: vitric_ecs::EntityId,
     (cam_x, cam_y, scale): (f64, f64, f64),
 ) {
     if !world.is_alive(id) || !world.has_component(id, "Sprite") {
-        return; // 选中的实体没了/不可见，静默跳过（同 CPU 路径）
+        return; // Selected entity is gone/invisible, skip silently (same as the CPU path)
     }
     let field = |path: &str| num(world, id, path).ok();
     let (Some(x), Some(y), Some(w), Some(h)) = (
@@ -2336,9 +2336,9 @@ fn push_selection_outline(
         field("Sprite.w"),
         field("Sprite.h"),
     ) else {
-        return; // 字段坏了不阻塞呈现（CPU 路径里调用方也是 let _ = 忽略）
+        return; // Broken field doesn't block presentation (the CPU path's caller also ignores it via let _ =)
     };
-    // rot != 0 时取旋转后形状的轴对齐包围盒——与 CPU 路径同一选择（高亮不需要贴边精确）
+    // When rot != 0 take the axis-aligned bounding box of the rotated shape — same choice as the CPU path (highlights don't need edge-exact fit)
     let rot = vitric_render::rot_of(world, id).unwrap_or(0.0);
     let (ew, eh) = if rot == 0.0 {
         (w, h)
@@ -2350,7 +2350,7 @@ fn push_selection_outline(
     let cy = (height as f64) / 2.0 - (y - cam_y) * scale;
     let half_w = ew * scale / 2.0 + 2.0;
     let half_h = eh * scale / 2.0 + 2.0;
-    // 与 CPU 路径同样先夹到屏幕内再画框（出屏的边贴着屏幕缘显示）
+    // Same as the CPU path: clamp to the screen first, then draw the frame (off-screen edges hug the screen border)
     let x0 = (cx - half_w).floor().max(0.0) as f32;
     let x1 = ((cx + half_w).ceil().min(width as f64) - 1.0) as f32;
     let y0 = (cy - half_h).floor().max(0.0) as f32;
@@ -2359,32 +2359,32 @@ fn push_selection_outline(
         return;
     }
     const TEAL: [u8; 4] = [39, 192, 168, 255];
-    // 四条 2px 边（覆盖范围 = CPU 双圈 put 的并集）
-    push_solid(verts, white, x0, y0, x1 + 1.0, y0 + 2.0, TEAL); // 上
-    push_solid(verts, white, x0, y1 - 1.0, x1 + 1.0, y1 + 1.0, TEAL); // 下
-    push_solid(verts, white, x0, y0, x0 + 2.0, y1 + 1.0, TEAL); // 左
-    push_solid(verts, white, x1 - 1.0, y0, x1 + 1.0, y1 + 1.0, TEAL); // 右
+    // Four 2px edges (coverage = union of the CPU's double-ring puts)
+    push_solid(verts, white, x0, y0, x1 + 1.0, y0 + 2.0, TEAL); // top
+    push_solid(verts, white, x0, y1 - 1.0, x1 + 1.0, y1 + 1.0, TEAL); // bottom
+    push_solid(verts, white, x0, y0, x0 + 2.0, y1 + 1.0, TEAL); // left
+    push_solid(verts, white, x1 - 1.0, y0, x1 + 1.0, y1 + 1.0, TEAL); // right
 }
 
-/// 纯色矩形：采样白块中心点（四角同 UV），颜色全靠染色。
+/// Solid rectangle: samples the white-quad center (all four corners share the same UV), color comes entirely from the tint.
 fn push_solid(verts: &mut Vec<Vertex>, white: [f32; 2], x0: f32, y0: f32, x1: f32, y1: f32, rgba: [u8; 4]) {
     let [u, v] = white;
     push_quad(verts, x0, y0, x1, y1, [u, v, u, v], tint(rgba));
 }
 
-/// 两个三角形拼一个矩形（不用索引缓冲，顶点流够小不值得）。
+/// Two triangles form one rectangle (no index buffer; the vertex stream is small enough not to be worth it).
 fn push_quad(verts: &mut Vec<Vertex>, x0: f32, y0: f32, x1: f32, y1: f32, uv: UvRect, color: [f32; 4]) {
     push_quad_corners(verts, [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], uv, color);
 }
 
-/// 任意四角的四边形（精灵旋转用）。角序 = 未旋转时的 左上/右上/右下/左下，
-/// UV 矩形按同样的角序展开跟角走——贴图随四角一起转，不会错位。
-/// 没有法线贴图的图元（纯色/文字/字形）一律走这个：nuv 哨兵、rotcs 恒等占位。
+/// Quad with arbitrary corners (used for sprite rotation). Corner order = unrotated top-left/top-right/bottom-right/bottom-left,
+/// the UV rectangle expands in the same corner order and follows the corners — the texture rotates with the corners, no misalignment.
+/// Primitives without a normal map (solid/text/glyph) all go through this: nuv sentinel, rotcs identity placeholder.
 fn push_quad_corners(verts: &mut Vec<Vertex>, p: [[f32; 2]; 4], uv: UvRect, color: [f32; 4]) {
     push_quad_corners_n(verts, p, uv, NO_NORMAL, [1.0, 0.0], color);
 }
 
-/// 带法线贴图区域的四边形：nuv 与 uv 同一角序展开（法线随贴图一起转）。
+/// Quad with a normal-map region: nuv expands in the same corner order as uv (the normal rotates with the texture).
 fn push_quad_corners_n(
     verts: &mut Vec<Vertex>,
     p: [[f32; 2]; 4],
@@ -2410,7 +2410,7 @@ fn tint(rgba: [u8; 4]) -> [f32; 4] {
     ]
 }
 
-// ---- 以下两个小工具镜像 vitric-render 的私有实现（组件约定的语义源头在那边）----
+// ---- The two small helpers below mirror vitric-render's private implementation (the semantic source for component conventions lives there) ----
 
 fn num(world: &World, id: vitric_ecs::EntityId, path: &str) -> Result<f64, String> {
     let v = world.get_field(id, path).map_err(|e| e.to_string())?;
@@ -2428,8 +2428,8 @@ fn parse_color(s: &str) -> Result<[u8; 4], String> {
     Ok([p(0), p(2), p(4), 255])
 }
 
-/// 颜色解析（带可选 alpha）：`#rrggbb` 或 `#rrggbbaa`。UI Panel 背景常要半透明遮罩。
-/// 与 CPU 路径 vitric_render 的 parse_color_a 同口径（视觉对齐）。
+/// Color parsing (with optional alpha): `#rrggbb` or `#rrggbbaa`. UI Panel backgrounds often need a semi-transparent mask.
+/// Same convention as the CPU path's vitric_render parse_color_a (visual alignment).
 fn parse_color_a(s: &str) -> Result<[u8; 4], String> {
     let hex = s
         .strip_prefix('#')
@@ -2448,43 +2448,43 @@ mod tests {
 
     use super::*;
 
-    /// RGBA8 路径：纹理真实尺寸 == 逻辑尺寸（UV 分母不变，改动前后逐位相同）。
+    /// RGBA8 path: the texture's real size == logical size (UV denominator unchanged, bit-for-bit identical before and after).
     #[test]
     fn atlas_tex_dims_rgba8_unchanged() {
         assert_eq!(atlas_tex_dims(false, ATLAS_W, 100), (ATLAS_W, 100));
         assert_eq!(atlas_tex_dims(false, ATLAS_W, 101), (ATLAS_W, 101));
     }
 
-    /// BC7 路径：宽高各向上取整到 4 的倍数（块网格），分母必须用取整后尺寸。
+    /// BC7 path: width and height are each rounded up to a multiple of 4 (block grid), the denominator must use the rounded size.
     #[test]
     fn atlas_tex_dims_bc7_rounds_up_to_block_grid() {
-        // 2050 不是 4 的倍数 → 2052；高 100 已是 4 的倍数 → 不变
+        // 2050 is not a multiple of 4 → 2052; height 100 is already a multiple of 4 → unchanged
         assert_eq!(atlas_tex_dims(true, ATLAS_W, 100), (2052, 100));
-        // 高 101 → 104
+        // Height 101 → 104
         assert_eq!(atlas_tex_dims(true, ATLAS_W, 101), (2052, 104));
-        // 取整后必是 4 的倍数（GPU 块拷贝的硬要求）
+        // After rounding it must be a multiple of 4 (a hard requirement of GPU block copies)
         for h in [1u32, 3, 4, 7, 99, 2048] {
             let (tw, th) = atlas_tex_dims(true, ATLAS_W, h);
             assert_eq!((tw % 4, th % 4), (0, 0), "BC7 纹理尺寸必须 4 对齐");
         }
     }
 
-    /// 关键不变量：BC7 取整后，内容子区右下角的 UV 仍 < 1.0（精确指进真实内容，
-    /// 不越界到 padding 行列）——这是「分母用纹理真实尺寸」防采样整体偏移的核心。
+    /// Key invariant: after BC7 rounding, the UV at the bottom-right corner of the content sub-region is still < 1.0 (it points precisely into the real content,
+    /// never bleeding into padding rows/columns) — this is the core of "denominator uses the texture's real size" preventing overall sampling drift.
     #[test]
     fn bc7_content_uv_stays_inside_real_content() {
         let (logical_w, logical_h) = (ATLAS_W, 101u32);
         let (tex_w, tex_h) = atlas_tex_dims(true, logical_w, logical_h);
-        // 内容最右下一像素的右/下边界 UV（uv 闭包同款公式）
+        // Right/bottom boundary UV of the bottom-right content pixel (same formula as the uv closure)
         let u1 = logical_w as f32 / tex_w as f32;
         let v1 = logical_h as f32 / tex_h as f32;
         assert!(u1 < 1.0 && v1 < 1.0, "内容边界 UV 必须 < 1（padding 在外侧不被采样）");
-        // 反算回像素：UV×纹理尺寸 落回逻辑内容尺寸（不偏移）
+        // Reverse to pixels: UV × texture size falls back onto the logical content size (no drift)
         assert_eq!((u1 * tex_w as f32).round() as u32, logical_w);
         assert_eq!((v1 * tex_h as f32).round() as u32, logical_h);
     }
 
-    /// 不碰 GPU 的假图集：白点 + 测试图（hero 带法线配对，gem 没有）+ 全空字形。
+    /// GPU-free fake atlas: white dot + test images (hero has a normal pair, gem doesn't) + all-empty glyphs.
     fn fake_atlas() -> Atlas {
         let mut images = std::collections::BTreeMap::new();
         images.insert("hero.png".to_string(), [0.25, 0.25, 0.5, 0.5]);
@@ -2501,14 +2501,14 @@ mod tests {
         w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000"})).unwrap();
         let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
         assert_eq!(verts.len(), 6, "一个矩形 = 两个三角形");
-        // 默认相机 scale=8：2x2 精灵 → 屏幕中心 16x16 像素（24..40）
+        // Default camera scale=8: a 2x2 sprite → 16x16 pixels at screen center (24..40)
         let xs: Vec<f32> = verts.iter().map(|v| v.pos[0]).collect();
         let ys: Vec<f32> = verts.iter().map(|v| v.pos[1]).collect();
         assert_eq!(xs.iter().cloned().fold(f32::MAX, f32::min), 24.0);
         assert_eq!(xs.iter().cloned().fold(f32::MIN, f32::max), 40.0);
         assert_eq!(ys.iter().cloned().fold(f32::MAX, f32::min), 24.0);
         assert_eq!(ys.iter().cloned().fold(f32::MIN, f32::max), 40.0);
-        // 纯色：白点 UV + 红染色
+        // Solid: white-dot UV + red tint
         assert_eq!(verts[0].uv, [0.1, 0.1]);
         assert_eq!(verts[0].color, [1.0, 0.0, 0.0, 1.0]);
     }
@@ -2520,15 +2520,15 @@ mod tests {
         w.set_component(e, "Position", json!({"x": 0.0, "y": 2.0})).unwrap();
         w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ffffff"})).unwrap();
         let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
-        // 世界 y=+2、scale 8 → 屏幕 y 上移 16 像素（y 向上 → 像素行更小）
+        // World y=+2, scale 8 → screen y moves up 16 pixels (y up → smaller pixel row)
         let y_min = verts.iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
         assert_eq!(y_min, 24.0 - 16.0);
     }
 
     #[test]
     fn ui_panel_quad_is_screen_space_unlit_matching_layout() {
-        // GPU 镜像：UI Panel 顶点落在 solve_layout 算出的屏幕像素矩形上（不经相机），
-        // 且用 UNLIT 哨兵（UI 叠加层不被打光，对齐 CPU 路径"画在光照之后"）。
+        // GPU mirror: UI Panel vertices land on the screen-pixel rectangle solved by solve_layout (no camera involved),
+        // and use the UNLIT sentinel (the UI overlay isn't lit, aligning with the CPU path's "drawn after lighting").
         let mut w = World::new();
         let root = w.spawn_named("ui").unwrap();
         w.set_component(root, "UiRoot", json!({})).unwrap();
@@ -2542,7 +2542,7 @@ mod tests {
         .unwrap();
         w.set_component(panel, "Panel", json!({"color": "#ff0000", "image": ""})).unwrap();
 
-        // 在 200x100 视口上解算：居中 40x20 → x∈[80,120], y∈[40,60]
+        // Solve on a 200x100 viewport: centered 40x20 → x∈[80,120], y∈[40,60]
         let layout = vitric_render::solve_layout(&w, 200, 100).unwrap();
         let mut verts = Vec::new();
         push_ui_panels(&mut verts, &w, &layout, &fake_atlas()).unwrap();
@@ -2553,7 +2553,7 @@ mod tests {
         assert_eq!(xs.iter().cloned().fold(f32::MIN, f32::max), 120.0);
         assert_eq!(ys.iter().cloned().fold(f32::MAX, f32::min), 40.0);
         assert_eq!(ys.iter().cloned().fold(f32::MIN, f32::max), 60.0);
-        // UNLIT 哨兵：nuv = [-2,-2,-2,-2]（片元据此跳过光照）
+        // UNLIT sentinel: nuv = [-2,-2,-2,-2] (the fragment skips lighting based on this)
         assert_eq!(verts[0].nuv, [-2.0, -2.0], "UI 用 UNLIT 哨兵不被打光");
         assert_eq!(verts[0].color, [1.0, 0.0, 0.0, 1.0], "纯色 Panel 染红");
     }
@@ -2584,10 +2584,10 @@ mod tests {
         w.set_component(t, "Text", json!({"content": "HI", "size": 2.0, "color": "#00ff00"}))
             .unwrap();
         let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
-        // 精灵 6 + 两字符 12，且文字顶点在精灵之后（画家算法：后画在上）
+        // Sprite 6 + two chars 12, and the text vertices come after the sprite (painter's algorithm: later draws on top)
         assert_eq!(verts.len(), 6 + 12);
         assert_eq!(verts[6].color, [0.0, 1.0, 0.0, 1.0]);
-        // 两字符 size=2、scale=8 → 整串宽 32px 居中：x 从 16 到 48
+        // Two chars size=2, scale=8 → the whole string is 32px wide centered: x from 16 to 48
         let xs: Vec<f32> = verts[6..].iter().map(|v| v.pos[0]).collect();
         assert_eq!(xs.iter().cloned().fold(f32::MAX, f32::min), 16.0);
         assert_eq!(xs.iter().cloned().fold(f32::MIN, f32::max), 48.0);
@@ -2602,8 +2602,8 @@ mod tests {
             .unwrap();
         let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
         assert_eq!(verts.len(), 6, "旋转不增加顶点：仍是两个三角形");
-        // 未旋转四角 (16,24)(48,24)(48,40)(16,40) 绕中心 (32,32) 逆时针转 90°：
-        // 横条变竖条。世界逆时针 = 画面逆时针——原右上角转到左上
+        // Unrotated corners (16,24)(48,24)(48,40)(16,40) rotate 90° counter-clockwise around center (32,32):
+        // horizontal bar becomes vertical bar. World counter-clockwise = screen counter-clockwise — the original top-right corner goes to top-left
         assert_eq!(verts[0].pos, [24.0, 48.0], "左上角 → 左下");
         assert_eq!(verts[1].pos, [24.0, 16.0], "右上角 → 左上");
         assert_eq!(verts[2].pos, [40.0, 16.0], "右下角 → 右上");
@@ -2611,7 +2611,7 @@ mod tests {
         assert_eq!(verts[4].pos, [40.0, 16.0]);
         assert_eq!(verts[5].pos, [40.0, 48.0], "左下角 → 右下");
         assert_eq!(verts[0].color, [1.0, 0.0, 0.0, 1.0], "染色不受旋转影响");
-        // 显式 rot=0 与无字段同一几何（快路径）
+        // Explicit rot=0 gives the same geometry as the missing field (fast path)
         w.set_field(e, "Sprite.rot", json!(0.0)).unwrap();
         let v0 = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
         assert_eq!(v0[0].pos, [16.0, 24.0]);
@@ -2620,8 +2620,8 @@ mod tests {
 
     #[test]
     fn rotated_texture_uv_follows_corners() {
-        // 贴图随四角一起转：UV 角序不变（左上角的 UV 永远是图集区域起点），
-        // 位置变了 UV 不变 = 贴图内容跟着精灵转
+        // The texture rotates with the corners: UV corner order is unchanged (the top-left corner's UV is always the atlas region's origin),
+        // position changes but UV doesn't = the texture content follows the sprite's rotation
         let mut w = World::new();
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
@@ -2635,7 +2635,7 @@ mod tests {
 
     #[test]
     fn normal_paired_sprite_carries_normal_uv_and_rotation() {
-        // hero.png 在图集里有 hero_n.png 配对：顶点带法线区域 UV + rot 的 (cos, sin)
+        // hero.png is paired with hero_n.png in the atlas: vertices carry the normal-region UV + rot's (cos, sin)
         let mut w = World::new();
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
@@ -2644,7 +2644,7 @@ mod tests {
         assert_eq!(verts[0].nuv, [0.5, 0.5], "角 0 = 法线区域左上");
         assert_eq!(verts[2].nuv, [0.75, 0.75], "角 2 = 法线区域右下");
         assert_eq!(verts[0].rotcs, [1.0, 0.0], "rot=0 → 恒等旋转");
-        // rot=90：rotcs = (cos, sin)，nuv 角序不变（法线贴图跟着四角转）
+        // rot=90: rotcs = (cos, sin), nuv corner order unchanged (the normal map follows the corners)
         w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "image": "hero.png", "rot": 90.0}))
             .unwrap();
         let verts = build_vertices(&w, 64, 64, &fake_atlas(), None, 0).unwrap();
@@ -2654,7 +2654,7 @@ mod tests {
 
     #[test]
     fn unpaired_quads_carry_normal_sentinel() {
-        // 没配对的贴图 / 纯色块 / 文字：nuv 全是哨兵（x<0），片元走原光照公式
+        // Unpaired textures / solid blocks / text: nuv is all sentinel (x<0), the fragment takes the original lighting formula
         let mut w = World::new();
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
@@ -2676,7 +2676,7 @@ mod tests {
 
     #[test]
     fn selection_outline_uses_rotated_bbox() {
-        // 4x2 转 90° → 包围盒约 2x4：描边几何取旋转后的包围盒（与 CPU 路径同一选择）
+        // 4x2 rotated 90° → bounding box ~2x4: the outline geometry takes the rotated bounding box (same choice as the CPU path)
         let mut w = World::new();
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
@@ -2684,17 +2684,17 @@ mod tests {
             .unwrap();
         let verts = build_vertices(&w, 64, 64, &fake_atlas(), Some(e), 0).unwrap();
         assert_eq!(verts.len(), 6 + 24);
-        // 旋转后半高 2 单位 = 16px + 2px 外扩 → 上缘 y=14（此轴无浮点边界问题，可精确断言）
+        // After rotation the half-height is 2 units = 16px + 2px outset → top edge y=14 (this axis has no floating-point boundary issue, can assert exactly)
         let y_min = verts[6..].iter().map(|v| v.pos[1]).fold(f32::MAX, f32::min);
         assert_eq!(y_min, 14.0, "描边上缘随旋转后包围盒抬高");
-        // 横轴只断言范围：cos(90°) 的浮点尾数会让 floor 在 21/22 之间摆，不锁具体值
+        // The horizontal axis only asserts a range: the floating-point tail of cos(90°) makes floor waver between 21/22, don't pin a specific value
         let x_min = verts[6..].iter().map(|v| v.pos[0]).fold(f32::MAX, f32::min);
         assert!((21.0..=22.0).contains(&x_min), "描边左缘应收窄到竖条附近: {x_min}");
     }
 
     #[test]
     fn wgsl_parses_and_validates_offline() {
-        // 无 GPU 环境锁住 shader：解析 + 验证都过，uniform 布局错/语法错在 CI 就炸
+        // Lock the shader in GPU-less environments: parsing + validation pass, uniform-layout errors / syntax errors blow up in CI
         for (name, src) in [("scene", WGSL), ("bloom", WGSL_BLOOM), ("composite", WGSL_COMPOSITE)] {
             let module = naga::front::wgsl::parse_str(src)
                 .unwrap_or_else(|e| panic!("WGSL({name}) 解析失败: {e}"));
@@ -2708,10 +2708,10 @@ mod tests {
     fn bloom_pass_params_pack_downsample_then_alternating_blur() {
         let p = bloom_pass_params(720, 0.6);
         assert_eq!(p.len(), 7, "1 下采样 + 3 轮 H/V");
-        // [0] 下采样+阈值：radius 0、采样倍率 2、阈值原样
+        // [0] downsample + threshold: radius 0, sample scale 2, threshold unchanged
         assert_eq!(p[0].params, [0.6, 0.0, 0.0, 0.0]);
         assert_eq!(p[0].params2[0], 2.0);
-        // 模糊 pass：阈值关（-1）、半径 = CPU 半径(720/90=8) 的一半 = 4、倍率 1、方向 H/V 交替
+        // Blur pass: threshold off (-1), radius = half of the CPU radius (720/90=8) = 4, scale 1, direction alternates H/V
         for (i, pp) in p[1..].iter().enumerate() {
             assert_eq!(pp.params[0], -1.0, "pass {i} 不再做阈值");
             assert_eq!(pp.params[1], 4.0, "半分辨率半径减半");
@@ -2719,7 +2719,7 @@ mod tests {
             let expect_dir = if i % 2 == 0 { [1.0, 0.0] } else { [0.0, 1.0] };
             assert_eq!([pp.params[2], pp.params[3]], expect_dir, "pass {i} 方向交替");
         }
-        // 小视口：CPU 半径踩下限 2 → GPU 半分辨率半径 1（下限）
+        // Small viewport: the CPU radius hits the floor of 2 → GPU half-resolution radius 1 (the floor)
         assert_eq!(bloom_pass_params(64, 0.5)[1].params[1], 1.0);
     }
 
@@ -2727,7 +2727,7 @@ mod tests {
     fn bloom_half_dims_and_scene_pass_srgb_selection() {
         assert_eq!(half_dims(1280, 720), (640, 360));
         assert_eq!(half_dims(1, 1), (1, 1), "极小窗口不归零");
-        // 泛光开启时场景 pass 永不做 sRGB 反算（反算挪到合成 pass）
+        // When bloom is on the scene pass never does sRGB inverse-conversion (the inverse-conversion moves to the composite pass)
         assert!(scene_pass_srgb(true, false), "无泛光 + sRGB 表面 = 老行为");
         assert!(!scene_pass_srgb(true, true));
         assert!(!scene_pass_srgb(false, false));
@@ -2745,19 +2745,19 @@ mod tests {
             .unwrap();
         let g = build_globals(&w, 64, 64, false, 0).unwrap();
         assert_eq!(g.viewport, [64.0, 64.0, 0.0, 1.0], "w 位是光照开关");
-        // ambient.rgb = #202838 / 255，.w = 灯数
+        // ambient.rgb = #202838 / 255, .w = light count
         assert_eq!(g.ambient[3], 1.0);
         assert!((g.ambient[0] - 0x20 as f32 / 255.0).abs() < 1e-6);
         assert!((g.ambient[2] - 0x38 as f32 / 255.0).abs() < 1e-6);
-        // 默认相机 scale=8：世界 (2,1) → 像素 (32+16, 32-8)，半径 4*8=32px
+        // Default camera scale=8: world (2,1) → pixels (32+16, 32-8), radius 4*8=32px
         assert_eq!(g.lights_pos[0], [48.0, 24.0, 32.0, 0.0]);
-        // 颜色已乘 intensity=2
+        // Color is already multiplied by intensity=2
         assert_eq!(g.lights_color[0][0], 2.0);
         assert!((g.lights_color[0][1] - 2.0 * 0x80 as f32 / 255.0).abs() < 1e-6);
         assert_eq!(g.lights_color[0][2], 0.0);
-        // sRGB 标志独立于光照
+        // The sRGB flag is independent of lighting
         assert_eq!(build_globals(&w, 64, 64, true, 0).unwrap().viewport[2], 1.0);
-        // 点光源（不写 kind）：kind 槽位 = 0，朝向数组整条为 0
+        // Point light (kind not written): kind slot = 0, the entire direction array is 0
         assert_eq!(g.lights_dir[0], [0.0; 4]);
     }
 
@@ -2774,20 +2774,20 @@ mod tests {
             json!({"radius": 4.0, "kind": "spot", "angle": 60.0, "dir": 90.0, "intensity": 2.0}),
         )
         .unwrap();
-        let sun = w.spawn(); // 平行光不需要 Position
+        let sun = w.spawn(); // Directional lights don't need Position
         w.set_component(sun, "Light", json!({"kind": "directional", "dir": 180.0, "intensity": 0.5}))
             .unwrap();
         let g = build_globals(&w, 64, 64, false, 0).unwrap();
         assert_eq!(g.ambient[3], 2.0, "平行光也计入灯数");
-        // 聚光灯：位置/半径同点光源（scale=8 → 像素 (48,24)、半径 32px），kind 槽位 = 1
+        // Spot light: position/radius same as point light (scale=8 → pixels (48,24), radius 32px), kind slot = 1
         assert_eq!(g.lights_pos[0], [48.0, 24.0, 32.0, 1.0]);
         assert_eq!(g.lights_color[0], [2.0, 2.0, 2.0, 0.0]);
-        // 朝向 dir=90°（世界 +y）→ 像素空间 (cos90, -sin90) = (0,-1)；半锥角 30° 弧度
+        // Direction dir=90° (world +y) → pixel space (cos90, -sin90) = (0,-1); half-cone angle 30° in radians
         assert!(g.lights_dir[0][0].abs() < 1e-6, "{:?}", g.lights_dir[0]);
         assert_eq!(g.lights_dir[0][1], -1.0);
         assert!((g.lights_dir[0][2] - (30f32).to_radians()).abs() < 1e-6);
-        // 平行光：位置/半径占位 0，kind 槽位 = 2，颜色已乘 intensity，朝向也打包
-        // （法线像素的片元按它算 max(dot(N,L),0)，哨兵像素不读）
+        // Directional light: position/radius are placeholder 0, kind slot = 2, color already multiplied by intensity, direction also packed
+        // (the fragment of a normal-bearing pixel uses it to compute max(dot(N,L),0); sentinel pixels don't read it)
         assert_eq!(g.lights_pos[1], [0.0, 0.0, 0.0, 2.0]);
         assert_eq!(g.lights_color[1], [0.5, 0.5, 0.5, 0.0]);
         assert_eq!(g.lights_dir[1][0], -1.0, "dir=180° → 像素空间 (-1, 0)");
@@ -2795,7 +2795,7 @@ mod tests {
         assert_eq!(g.lights_dir[1][2], 0.0, "半锥角只属于 spot");
     }
 
-    /// 在 (x,y) 放一面 cw×ch 的遮光墙（Solid+Position+Collider）。
+    /// Place a cw×ch occluder wall at (x,y) (Solid+Position+Collider).
     fn add_wall(w: &mut World, x: f64, y: f64, cw: f64, ch: f64) {
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": x, "y": y})).unwrap();
@@ -2818,15 +2818,15 @@ mod tests {
         let (mut w, amb) = world_shadow_lamp(6.0);
         add_wall(&mut w, 2.0, 1.0, 1.0, 2.0);
         let g = build_globals(&w, 64, 64, false, 0).unwrap();
-        // 灯 0 的遮挡区间：起点 0、1 条
+        // Light 0's occluder range: start 0, count 1
         assert_eq!(g.shadow_ranges[0], [0.0, 1.0, 0.0, 0.0], "[起点, 条数]");
-        // 默认相机 scale=8：中心 (2,1) → 像素 (48,24)，半宽 4px / 半高 8px
+        // Default camera scale=8: center (2,1) → pixels (48,24), half-width 4px / half-height 8px
         assert_eq!(g.occluders[0], [44.0, 16.0, 52.0, 32.0], "[x0, y0, x1, y1] 像素空间");
         assert_eq!(g.occluders[1], [0.0; 4], "没占用的槽位保持零");
-        // 单箱成组：子箱区间 [0,1]，子箱 = 同一个 AABB
+        // Single box forms a group: sub-box range [0,1], sub-box = the same AABB
         assert_eq!(g.occluder_sub_ranges[0], [0.0, 1.0, 0.0, 0.0]);
         assert_eq!(g.occluder_subs[0], [44.0, 16.0, 52.0, 32.0]);
-        // shadows 关（字段缺省）：墙还在，但区间全零 → shader 循环零次
+        // shadows off (field defaulted): the wall is still there, but the ranges are all zero → the shader loop runs zero times
         w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
         let g = build_globals(&w, 64, 64, false, 0).unwrap();
         assert_eq!(g.shadow_ranges[0], [0.0; 4]);
@@ -2835,21 +2835,21 @@ mod tests {
 
     #[test]
     fn globals_merge_flush_tiles_and_cull_per_light() {
-        // 三块贴齐的瓦片合并成一条（1 个大箱、3 个子箱）；灯盘外的孤箱被剔除
+        // Three flush tiles merge into one strip (1 big box, 3 sub-boxes); the lone box outside the light disc is culled
         let (mut w, _) = world_shadow_lamp(3.0);
         for i in 0..3 {
             add_wall(&mut w, i as f64, 1.0, 1.0, 1.0);
         }
-        add_wall(&mut w, 40.0, 0.0, 1.0, 1.0); // 远在灯盘（3*8=24px）外
+        add_wall(&mut w, 40.0, 0.0, 1.0, 1.0); // far outside the light disc (3*8=24px)
         let g = build_globals(&w, 64, 64, false, 0).unwrap();
         assert_eq!(g.shadow_ranges[0], [0.0, 1.0, 0.0, 0.0], "合并后只剩 1 条、孤箱被剔除");
-        // 行：世界 x ∈ [-0.5, 2.5]、y ∈ [0.5, 1.5] → 像素 [28, 20, 52, 28]
+        // Row: world x ∈ [-0.5, 2.5], y ∈ [0.5, 1.5] → pixels [28, 20, 52, 28]
         assert_eq!(g.occluders[0], [28.0, 20.0, 52.0, 28.0]);
         assert_eq!(g.occluder_sub_ranges[0], [0.0, 3.0, 0.0, 0.0], "3 个子箱");
         assert_eq!(g.occluder_subs[0], [28.0, 20.0, 36.0, 28.0], "子箱按原始瓦片");
         assert_eq!(g.occluder_subs[2], [44.0, 20.0, 52.0, 28.0]);
 
-        // 两盏灯各剔各的：远灯只看得到自己旁边的箱子，区间在 flat 数组里前后排
+        // Each of the two lights culls its own: the far light only sees the box next to it, the ranges are laid out front-to-back in the flat array
         let mut w = World::new();
         let amb = w.spawn();
         w.set_component(amb, "Ambient", json!({"color": "#000000", "shadows": true})).unwrap();
@@ -2869,7 +2869,7 @@ mod tests {
 
     #[test]
     fn shadow_uniform_budgets_are_explicit_errors() {
-        // 单灯上限：65 个互不贴齐（留缝）的箱子全部落进一盏大灯的灯盘
+        // Per-light cap: 65 non-flush (gapped) boxes all fall inside one large light's disc
         let (mut w, _) = world_shadow_lamp(80.0);
         for i in 0..(SHADOW_PER_LIGHT + 1) {
             add_wall(&mut w, i as f64 * 2.0 - 64.0, 0.0, 1.0, 1.0);
@@ -2877,7 +2877,7 @@ mod tests {
         let err = build_globals(&w, 64, 64, false, 0).err().expect("超单灯上限必须报错");
         assert!(err.contains("65") && err.contains("64") && err.contains("提示"), "{err}");
 
-        // 合计预算：5 盏灯 × 60 箱 = 300 > 256
+        // Total budget: 5 lights × 60 boxes = 300 > 256
         let mut w = World::new();
         let amb = w.spawn();
         w.set_component(amb, "Ambient", json!({"color": "#000000", "shadows": true})).unwrap();
@@ -2907,7 +2907,7 @@ mod tests {
 
     #[test]
     fn lighting_adds_fullscreen_background_quad() {
-        // 光照开启时第一个方块是全屏背景（清屏色没法被 shader 打光）
+        // When lighting is on the first quad is the fullscreen background (the clear color can't be lit by the shader)
         let mut w = World::new();
         let amb = w.spawn();
         w.set_component(amb, "Ambient", json!({"color": "#202838"})).unwrap();
@@ -2919,7 +2919,7 @@ mod tests {
         assert_eq!(xs.iter().cloned().fold(f32::MIN, f32::max), 64.0);
         assert_eq!(ys.iter().cloned().fold(f32::MIN, f32::max), 48.0);
         assert_eq!(verts[0].color, tint(vitric_render::BACKGROUND));
-        // 没 Ambient：不铺背景方块（旧行为）
+        // No Ambient: no background quad is laid down (legacy behavior)
         assert!(build_vertices(&World::new(), 64, 48, &fake_atlas(), None, 0).unwrap().is_empty());
     }
 
@@ -2933,17 +2933,17 @@ mod tests {
 
     #[test]
     fn glyph_atlas_shelf_packs_rows_and_reports_full_explicitly() {
-        // 16x16 小图集：白块(2x2+1px 空隙)在 (0,0)，row_h=3
+        // 16x16 small atlas: white block (2x2 + 1px gap) at (0,0), row_h=3
         let mut a = GlyphAtlas::new(16);
         assert_eq!(a.pending.len(), 1, "白块在待上传队列里");
         assert_eq!(a.alloc_rect(8, 8).unwrap(), (3, 0), "同行白块右侧");
-        // 放不下第二个 8x8（x=12+9>16）→ 换行到 y=9，但 9+9>16 → 显式报满
+        // Can't fit a second 8x8 (x=12+9>16) → wrap to y=9, but 9+9>16 → explicit atlas-full error
         let err = a.alloc_rect(8, 8).unwrap_err();
         assert!(err.contains("已满") && err.contains("字号"), "{err}");
-        // 单块超边长：另一种显式错误（不是包装成"满"）
+        // Single block exceeds the edge: another explicit error (not wrapped up as "full")
         let err = a.alloc_rect(20, 4).unwrap_err();
         assert!(err.contains("超过"), "{err}");
-        // 换行确实发生过：下一块小的落在第二行
+        // A wrap really did happen: the next smaller block lands on the second row
         assert_eq!(a.alloc_rect(2, 2).unwrap(), (0, 9));
     }
 
@@ -2951,21 +2951,21 @@ mod tests {
     fn glyph_uv_is_uploaded_once_then_cached() {
         let font = test_font();
         let mut a = GlyphAtlas::new(1024);
-        let base = a.pending.len(); // 白块
+        let base = a.pending.len(); // white block
         let uv1 = a.glyph_uv(&font, 'A', 24).unwrap();
         assert_eq!(a.pending.len(), base + 1, "首次出现 → 一次上传");
         let up = a.pending.last().unwrap();
         assert_eq!(up.pixels.len(), (up.w * up.h * 4) as usize, "RGBA 像素量对得上");
         assert!(up.pixels.chunks_exact(4).all(|p| p[..3] == [255, 255, 255]), "白底+覆盖率 alpha");
-        // 同键再来：命中缓存，不再上传
+        // Same key again: cache hit, no further upload
         let uv2 = a.glyph_uv(&font, 'A', 24).unwrap();
         assert_eq!(uv1, uv2);
         assert_eq!(a.pending.len(), base + 1, "缓存命中不产生新上传");
-        // 同字符不同字号是另一个字形
+        // Same character with a different size is a different glyph
         let uv3 = a.glyph_uv(&font, 'A', 32).unwrap();
         assert_ne!(uv1, uv3);
         assert_eq!(a.pending.len(), base + 2);
-        // CJK：DejaVu 没有的字形落到 .notdef 豆腐块——也得占位可见，不静默丢
+        // CJK: glyphs missing from DejaVu fall back to the .notdef tofu block — they still need a visible placeholder, not silently dropped
         a.glyph_uv(&font, '中', 24).unwrap();
         assert_eq!(a.pending.len(), base + 3);
     }
@@ -2983,14 +2983,14 @@ mod tests {
         push_ttf_texts(&mut verts, &w, 64, 64, &font, &mut a, (0.0, 0.0, 8.0)).unwrap();
         assert_eq!(verts.len(), 12, "两个非空字形 = 两个方块");
         assert_eq!(verts[0].color, [0.0, 1.0, 0.0, 1.0]);
-        // 与 CPU 路径同一套排版：总宽来自 layout(px=16)，整串横向居中于屏幕中心 32
+        // Same layout as the CPU path: total width comes from layout(px=16), the whole string is centered horizontally on screen center 32
         let (_, total_w) = font.layout("Hi", 16);
         let left = 32.0 - total_w / 2.0;
         let xs: Vec<f32> = verts.iter().map(|v| v.pos[0]).collect();
         let x_min = xs.iter().cloned().fold(f32::MAX, f32::min);
         let x_max = xs.iter().cloned().fold(f32::MIN, f32::max);
         assert!(x_min >= left - 1.5 && x_max <= left + total_w + 1.5, "字形落在排版包络内: {x_min}..{x_max} vs {left}+{total_w}");
-        // 空格只占 advance 不出方块
+        // A space only takes advance, it doesn't emit a quad
         w.set_field(t, "Text.content", json!(" ")).unwrap();
         let mut sp = Vec::new();
         push_ttf_texts(&mut sp, &w, 64, 64, &font, &mut a, (0.0, 0.0, 8.0)).unwrap();
@@ -2999,7 +2999,7 @@ mod tests {
 
     #[test]
     fn particle_quads_match_cpu_dots_and_are_unlit() {
-        // GPU 粒子方块必须与 CPU 真相源（emitter_particles）的位置/数量/颜色一致
+        // GPU particle quads must match the CPU source of truth (emitter_particles) on position/count/color
         let mut w = World::new();
         let e = w.spawn_named("sparks").unwrap();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
@@ -3018,7 +3018,7 @@ mod tests {
         assert_eq!(verts.len(), dots.len() * 6, "每个粒子一个方块（两个三角形）");
         for (i, p) in dots.iter().enumerate() {
             let quad = &verts[i * 6..i * 6 + 6];
-            // 与 CPU 同一条变换：中心 = 屏幕中心 + 世界偏移·scale（默认相机 scale=8）
+            // Same transform as the CPU: center = screen center + world offset · scale (default camera scale=8)
             let cx = 32.0 + p.x * 8.0;
             let cy = 32.0 - p.y * 8.0;
             let half = p.size * 8.0 / 2.0;
@@ -3027,10 +3027,10 @@ mod tests {
             assert!((x_min as f64 - (cx - half)).abs() < 1e-4, "粒子 {i} 位置对齐 CPU");
             assert!((y_min as f64 - (cy - half)).abs() < 1e-4);
             assert_eq!(quad[0].color, tint(p.rgba), "颜色（含淡出 alpha）一致");
-            // 自发光哨兵：nuv < -1.5，片元跳过光照
+            // Self-emissive sentinel: nuv < -1.5, the fragment skips lighting
             assert!(quad.iter().all(|v| v.nuv[0] < -1.5 && v.nuv[1] < -1.5), "UNLIT 哨兵");
         }
-        // 未触发的 burst（burst < 0）一个顶点都不出
+        // An untriggered burst (burst < 0) emits zero vertices
         w.set_component(
             e,
             "Emitter",
@@ -3042,7 +3042,7 @@ mod tests {
 
     #[test]
     fn particle_tick_rate_constant_matches_sim() {
-        // 粒子时间换算常量必须与模拟频率同值（render 不依赖 sim，跨 crate 在这里锁死）
+        // The particle time-conversion constant must equal the simulation frequency (render doesn't depend on sim; it's locked here across crates)
         assert_eq!(
             vitric_render::PARTICLE_TICKS_PER_SECOND,
             vitric_sim::TICKS_PER_SECOND as f64
@@ -3056,14 +3056,14 @@ mod tests {
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000"})).unwrap();
         let verts = build_vertices(&w, 64, 64, &fake_atlas(), Some(e), 0).unwrap();
-        // 精灵 6 + 描边四条边 24
+        // Sprite 6 + outline four edges 24
         assert_eq!(verts.len(), 6 + 24);
         let teal = [39.0 / 255.0, 192.0 / 255.0, 168.0 / 255.0, 1.0];
         assert_eq!(verts[6].color, teal);
-        // 半宽 8px + 2px 外扩 → 描边左缘在 32-10=22（与 CPU 路径同一几何）
+        // Half-width 8px + 2px outset → outline left edge at 32-10=22 (same geometry as the CPU path)
         let x_min = verts[6..].iter().map(|v| v.pos[0]).fold(f32::MAX, f32::min);
         assert_eq!(x_min, 22.0);
-        // 选中实体没了 → 静默跳过，不报错
+        // Selected entity is gone → skip silently, no error
         let dead = {
             let mut w2 = World::new();
             let d = w2.spawn();

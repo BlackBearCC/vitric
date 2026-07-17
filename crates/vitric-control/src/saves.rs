@@ -1,17 +1,21 @@
-//! 玩家存档 — "存档随时续玩"，建立在 `Sim::snapshot` / `Sim::restore` 之上。
+//! Player saves — "save anytime, resume anytime", built on `Sim::snapshot` / `Sim::restore`.
 //!
-//! 谁住在确定性边界的哪一侧（这是本模块全部设计的出发点）：
-//! - **存档（save-game / save/write）是纯输出副作用**，和 play-sound 一个待遇：
-//!   在模拟之外执行，写不写文件都不回流进世界，确定性回放不受影响。
-//! - **读档（load-game / save/load / --load）会改写模拟**，等价 sim/restore：
-//!   时间线断裂，正在录的录像必然不可重放——录像期间一律显式拒绝（守卫在
-//!   Dispatcher，那里能同时看到 sim 和录像状态）。
-//! - **槽名是文件名的一部分**：[a-z0-9-]{1,32} 之外全拒，路径穿越在这里堵死。
+//! Who lives on which side of the determinism boundary (this is the starting point for the
+//! entire design of this module):
+//! - **Saving (save-game / save/write) is a pure output side effect**, treated the same as
+//!   play-sound: executed outside the simulation, and whether the file is written or not does
+//!   not flow back into the world, so deterministic replay is unaffected.
+//! - **Loading (load-game / save/load / --load) rewrites the simulation**, equivalent to
+//!   sim/restore: the timeline breaks, and any recording in progress becomes unreplayable —
+//!   so during recording it is always explicitly rejected (the guard lives in the Dispatcher,
+//!   which can see both sim and recording state).
+//! - **The slot name is part of the file name**: anything outside `[a-z0-9-]{1,32}` is rejected,
+//!   and path traversal is closed off here.
 //!
-//! 存档文件格式（`<项目>/saves/<slot>.json`）：
-//! `{"engine_version", "project", "slot", "snapshot"}`——snapshot 就是
-//! `Sim::snapshot` 的原样输出（世界/tick/随机数/未消化输入与回复/逻辑层暂存事件）。
-//! 版本不匹配读档显式报错，不做静默兼容尝试。
+//! Save file format (`<project>/saves/<slot>.json`):
+//! `{"engine_version", "project", "slot", "snapshot"}` — snapshot is the raw output of
+//! `Sim::snapshot` (world / tick / RNG / undigested input and replies / logic-layer buffered events).
+//! Version mismatch on load is an explicit error; no silent compatibility attempt is made.
 
 use std::path::{Path, PathBuf};
 
@@ -19,11 +23,13 @@ use serde_json::{json, Value};
 
 use vitric_sim::{GameLogic, Sim};
 
-/// 写进存档文件的引擎版本。读档时不匹配 = 显式报错（快照格式跨版本不保证兼容，
-/// 静默尝试要么悄悄成功掩盖问题、要么在恢复中途炸出难懂的字段错误）。
+/// Engine version written into save files. A mismatch on load = an explicit error (the snapshot
+/// format is not guaranteed to be compatible across versions; a silent attempt either quietly
+/// succeeds and hides the problem, or blows up mid-restore with an incomprehensible field error).
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// 槽名校验：`[a-z0-9-]{1,32}`。槽名直接拼进文件路径，这条规则同时堵死路径穿越。
+/// Slot name validation: `[a-z0-9-]{1,32}`. The slot name is concatenated directly into the file
+/// path, so this rule also closes off path traversal.
 pub fn validate_slot(slot: &str) -> Result<(), String> {
     let chars_ok =
         slot.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
@@ -36,11 +42,13 @@ pub fn validate_slot(slot: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 一个项目的存档仓库：`<项目根>/saves/` 目录的全部读写都从这里走——
-/// 约定事件（save-game/load-game）、控制面 RPC（save/*）、CLI（--load）共用同一条代码路径。
+/// A project's save store: all reads and writes for the `<project root>/saves/` directory go
+/// through here — convention events (save-game/load-game), control plane RPCs (save/*), and the
+/// CLI (--load) share the same code path.
 pub struct SaveStore {
     dir: PathBuf,
-    /// 清单里的项目名，写进存档文件（人看文件能知道这是谁的存档）。
+    /// Project name from the manifest, written into save files (a human reading the file can
+    /// tell whose save it is).
     project: String,
 }
 
@@ -49,7 +57,7 @@ impl SaveStore {
         SaveStore { dir: project_root.join("saves"), project: project.to_string() }
     }
 
-    /// 写一个槽位（saves/ 目录自动创建）。返回 `{"slot", "path", "tick"}`。
+    /// Write a slot (the saves/ directory is auto-created). Returns `{"slot", "path", "tick"}`.
     pub fn write(&self, slot: &str, sim: &Sim, logic: &dyn GameLogic) -> Result<Value, String> {
         validate_slot(slot)?;
         std::fs::create_dir_all(&self.dir)
@@ -61,7 +69,8 @@ impl SaveStore {
             "slot": slot,
             "snapshot": sim.snapshot(logic),
         });
-        // 先写临时文件再原子改名：写一半崩溃/断电不会留下半截 JSON 顶替旧存档
+        // Write to a temp file then atomically rename: a half-written crash / power loss cannot
+        // leave a half-baked JSON that overwrites the old save.
         let tmp = self.dir.join(format!(".{slot}.json.tmp"));
         std::fs::write(&tmp, serde_json::to_string(&file).expect("存档可序列化"))
             .map_err(|e| format!("写存档 {} 失败: {e}", path.display()))?;
@@ -70,8 +79,9 @@ impl SaveStore {
         Ok(json!({"slot": slot, "path": path.display().to_string(), "tick": sim.tick}))
     }
 
-    /// 读一个槽位，返回可直接交给 `Sim::restore` 的快照。
-    /// 缺文件/坏 JSON/版本不符全部显式报错（缺文件时列出现有存档）。
+    /// Read a slot, returning a snapshot that can be handed directly to `Sim::restore`.
+    /// Missing file / bad JSON / version mismatch all explicitly error (a missing file lists
+    /// existing saves).
     pub fn read(&self, slot: &str) -> Result<Value, String> {
         validate_slot(slot)?;
         let path = self.slot_path(slot);
@@ -109,8 +119,9 @@ impl SaveStore {
         })
     }
 
-    /// 列出全部存档槽名（字典序）。saves/ 目录不存在 = 还没存过 = 空列表（合法状态）；
-    /// 槽名规则之外的文件（README、临时文件）不算存档，跳过。
+    /// List all save slot names (lexicographic). A missing saves/ directory = nothing saved yet =
+    /// an empty list (a legal state); files outside the slot-name rules (README, temp files) do
+    /// not count as saves and are skipped.
     pub fn list(&self) -> Result<Vec<String>, String> {
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(e) => e,
@@ -155,19 +166,19 @@ mod tests {
 
     #[test]
     fn slot_validation_blocks_traversal_and_bad_names() {
-        // 路径穿越是头号要堵的口子
+        // Path traversal is the number-one hole to plug.
         assert!(validate_slot("../x").is_err());
         assert!(validate_slot("a/b").is_err());
         assert!(validate_slot("a\\b").is_err());
-        // 大写/空/超长也不合法
+        // Uppercase / empty / over-length are also illegal.
         assert!(validate_slot("Slot1").is_err());
         assert!(validate_slot("").is_err());
         assert!(validate_slot(&"a".repeat(33)).is_err());
-        // 合法形态
+        // Legal forms.
         assert!(validate_slot("slot1").is_ok());
         assert!(validate_slot("auto-save-3").is_ok());
         assert!(validate_slot(&"a".repeat(32)).is_ok());
-        // 错误信息要讲清规则和动机
+        // The error message must explain the rule and the motivation.
         let e = validate_slot("../x").unwrap_err();
         assert!(e.contains("a-z0-9-") && e.contains("路径穿越"), "{e}");
     }
@@ -185,12 +196,12 @@ mod tests {
         assert_eq!(result["tick"], json!(5));
         let path = root.join("saves/slot1.json");
         assert!(path.exists(), "存档文件应落在 saves/slot1.json");
-        // 文件头部字段齐全
+        // File header fields are all present.
         let file: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(file["engine_version"], json!(ENGINE_VERSION));
         assert_eq!(file["project"], json!("test-game"));
-        // 读回来的就是 Sim::snapshot 的原样输出
+        // What comes back is the raw output of Sim::snapshot.
         assert_eq!(store(&root).read("slot1").unwrap(), sim.snapshot(&()));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -200,10 +211,10 @@ mod tests {
         let root = temp_root("missing");
         let sim = Sim::new(1);
         let s = store(&root);
-        // 目录都还没有：明说"还没有任何存档"
+        // Directory does not even exist yet: explicitly say "no saves yet".
         let e = s.read("ghost").unwrap_err();
         assert!(e.contains("ghost") && e.contains("还没有任何存档"), "{e}");
-        // 有别的存档：列出来给玩家/agent 选
+        // Other saves exist: list them for the player/agent to choose.
         s.write("alpha", &sim, &()).unwrap();
         s.write("beta", &sim, &()).unwrap();
         let e = s.read("ghost").unwrap_err();
@@ -217,7 +228,7 @@ mod tests {
         let sim = Sim::new(1);
         let s = store(&root);
         s.write("slot1", &sim, &()).unwrap();
-        // 手改版本号模拟旧引擎写的存档
+        // Hand-edit the version to simulate a save written by an older engine.
         let path = root.join("saves/slot1.json");
         let mut file: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -249,7 +260,7 @@ mod tests {
         assert_eq!(s.list().unwrap(), Vec::<String>::new(), "没存过 = 空列表");
         s.write("beta", &sim, &()).unwrap();
         s.write("alpha", &sim, &()).unwrap();
-        // 槽名规则之外的文件不算存档
+        // Files outside the slot-name rules do not count as saves.
         std::fs::write(root.join("saves/README.txt"), "x").unwrap();
         std::fs::write(root.join("saves/Bad_Name.json"), "{}").unwrap();
         assert_eq!(s.list().unwrap(), vec!["alpha".to_string(), "beta".to_string()]);

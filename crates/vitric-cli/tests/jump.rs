@@ -1,4 +1,4 @@
-//! jump 示例端到端：平台物理（重力/落地/起跳）+ 文字反馈，纯规则零脚本。
+//! jump example end-to-end: platform physics (gravity/landing/jumping) + text feedback, pure rules zero scripts.
 
 use std::path::PathBuf;
 
@@ -16,7 +16,7 @@ fn hero_falls_lands_jumps_and_wins() {
     let (mut sim, mut rt) = Runtime::boot(&example_dir()).unwrap();
     let hero = sim.world.entity("hero").unwrap();
 
-    // 出生在空中 → 重力拉到地面，站稳
+    // Spawns in the air → gravity pulls to the ground, stands firmly
     for _ in 0..90 {
         sim.step(&mut rt).unwrap();
     }
@@ -24,7 +24,7 @@ fn hero_falls_lands_jumps_and_wins() {
     let ground_y = sim.world.get_field(hero, "Position.y").unwrap().as_f64().unwrap();
     assert!((ground_y - 1.0).abs() < 1e-9, "站在地面顶面，实际 {ground_y}");
 
-    // 起跳规则：grounded 才生效
+    // Jump rule: only effective when grounded
     sim.inject_input("space", "pressed");
     for _ in 0..10 {
         sim.step(&mut rt).unwrap();
@@ -32,14 +32,14 @@ fn hero_falls_lands_jumps_and_wins() {
     let air_y = sim.world.get_field(hero, "Position.y").unwrap().as_f64().unwrap();
     assert!(air_y > ground_y + 0.5, "应该跳起来了，实际 {air_y}");
     assert_eq!(sim.world.get_field(hero, "Body.grounded").unwrap(), &json!(false));
-    // 空中再按跳无效（没 grounded）
+    // Pressing jump again in the air does nothing (not grounded)
     let vy_before = sim.world.get_field(hero, "Velocity.y").unwrap().as_f64().unwrap();
     sim.inject_input("space", "pressed");
     sim.step(&mut rt).unwrap();
     let vy_after = sim.world.get_field(hero, "Velocity.y").unwrap().as_f64().unwrap();
     assert!(vy_after < vy_before, "空中二段跳必须无效（速度只随重力降）");
 
-    // 落回地面后，把英雄挪到旗子边验证终局规则
+    // After landing back on the ground, move the hero next to the flag to verify the end-game rule
     for _ in 0..120 {
         sim.step(&mut rt).unwrap();
     }

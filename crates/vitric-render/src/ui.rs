@@ -1,40 +1,52 @@
-//! UI 控件布局 — 屏幕空间叠加层的**确定性纯计算**地基（CPU/GPU 两路读同一份）。
+//! UI control layout — the **deterministic pure-computation** foundation of the screen-space
+//! overlay (the CPU and GPU paths read the same one).
 //!
-//! 定位（为什么长这样）：UI 也是实体 + 组件，进世界状态/哈希/存档/录像。和精灵/
-//! 粒子相反，UI 锚定**视口（屏幕）**、不经相机变换——镜头移动/缩放/抖动 UI 不飘
-//! （像 HUD）。布局是 `(UI 树, 视口尺寸)` 的纯函数：无墙钟、无随机、无跨平台分歧，
-//! snapshot/restore 往返一致。
+//! Positioning (why it looks like this): UI is also entities + components, entering world state /
+//! hash / saves / recordings. Unlike sprites/particles, UI is anchored to the **viewport (screen)**
+//! and bypasses the camera transform — when the camera moves/scales/shakes, the UI does not drift
+//! (like a HUD). Layout is a pure function of `(UI tree, viewport size)`: no wall clock, no RNG,
+//! no cross-platform divergence; snapshot/restore round-trips are consistent.
 //!
-//! 组件约定（引擎认名字，字段由用户 schema 定义，缺字段显式报错——和 Sprite/Light 同款）：
-//! - `UiRoot {}` — 标记一棵 UI 树的根。布局从挂了 UiRoot 的实体起，对着视口解算。
-//!   场上**没有** UiRoot 实体 = 完全没有 UI = 布局/渲染每 tick 零成本 early-return
-//!   （旧行为字节不变、零分配零遍历）。`layout_hash` 字段（可选）缓存上次布局输入的
-//!   结构哈希——没变就跳过重算（"静止 UI 连播 N tick，布局重算 0 次"的落点）。
-//! - `Ui {anchor, ax, ay, ox, oy, w, h, parent, weight, rx, ry, rw, rh}` — 每个 UI 节点。
-//!   * `anchor`：锚点预设名（见 [`Anchor`]），决定 (ax,ay) 取哪个预设——给了预设就用
-//!     预设的归一化锚点，`"manual"` 时用显式 ax/ay（0..1，父框内比例）。
-//!   * `ox/oy`：像素偏移；`w/h`：尺寸（像素，`stretch` 锚点/容器拉伸时被覆盖）。
-//!   * `parent`：父 UI 节点的实体引用（空 = 直接锚到视口/根框）。
-//!   * `weight`：容器主轴拉伸权重（0 = 用自身 w/h；>0 = 按权重瓜分剩余空间）。
-//!   * `rx/ry/rw/rh`：**布局输出**——解算后的屏幕像素矩形（左上原点）。solver 写、
-//!     渲染读，进组件 = 进哈希进存档（快照/录像安全）。
-//! - `Container {kind, gap, pad, columns, main, cross}` — 挂了它，子节点（parent 指向本
-//!   实体的 Ui 节点）由容器自动排版，子节点不自摆坐标（rx/ry/rw/rh 被容器算出覆盖）。
-//!   `kind` ∈ {VBox, HBox, Grid}；Grid 需 `columns ≥ 1`。
-//! - `Panel {color | image}` — 背景框（纯色或精灵）。渲染读它，布局不关心。
-//! - `UiLabel {content, size, color, reveal, align}` — 文字控件，复用 font.rs 版面缓存 +
-//!   Text.reveal（逐字显示已落地）。渲染读它，布局只用它的 Ui 框定位。
+//! Component conventions (the engine recognizes names; fields are user-schema-defined; missing
+//! fields are explicit errors — same as Sprite/Light):
+//! - `UiRoot {}` — marks the root of a UI tree. Layout starts at the entity with UiRoot and solves
+//!   against the viewport. **No** UiRoot entity in the scene = no UI at all = layout/render early-
+//!   returns at zero cost every tick (byte-identical to the old behavior; zero allocation, zero
+//!   traversal). The `layout_hash` field (optional) caches the structural hash of the previous
+//!   layout input — skip recomputation when unchanged (the landing point of "static UI played for
+//!   N ticks recomputes layout 0 times").
+//! - `Ui {anchor, ax, ay, ox, oy, w, h, parent, weight, rx, ry, rw, rh}` — each UI node.
+//!   * `anchor`: anchor-preset name (see [`Anchor`]), decides which preset (ax,ay) uses — a preset
+//!     is used as the normalized anchor, while `"manual"` uses explicit ax/ay (0..1, ratio within
+//!     the parent frame).
+//!   * `ox/oy`: pixel offset; `w/h`: size (pixels; overridden by `stretch` anchor / container stretching).
+//!   * `parent`: entity reference to the parent UI node (empty = anchor directly to viewport/root frame).
+//!   * `weight`: container main-axis stretch weight (0 = use own w/h; >0 = split remaining space by weight).
+//!   * `rx/ry/rw/rh`: **layout output** — the solved screen-pixel rect (top-left origin). The solver
+//!     writes it, rendering reads it; going into the component = into the hash and saves (snapshot /
+//!     recording safe).
+//! - `Container {kind, gap, pad, columns, main, cross}` — when attached, child nodes (Ui nodes whose
+//!   parent points to this entity) are auto-laid-out by the container; children do not place their own
+//!   coordinates (rx/ry/rw/rh are overwritten by the container's computation). `kind` ∈ {VBox, HBox,
+//!   Grid}; Grid requires `columns ≥ 1`.
+//! - `Panel {color | image}` — a background frame (solid color or sprite). Rendering reads it; layout
+//!   does not care.
+//! - `UiLabel {content, size, color, reveal, align}` — a text control, reusing the font.rs layout
+//!   cache + Text.reveal (per-character reveal is already implemented). Rendering reads it; layout
+//!   only uses its Ui frame for positioning.
 //!
-//! 范围（1.1）：布局地基 + 静态控件 + 屏幕空间渲染，灰盒不可交互。Button 状态机/
-//! 焦点导航/点击激活/主题属于 1.2。
+//! Scope (1.1): the layout foundation + static controls + screen-space rendering; a gray box that
+//! is not interactive. Button state machine / focus navigation / click activation / theming belong
+//! to 1.2.
 
 use serde_json::Value;
 
 use vitric_ecs::{EntityId, World};
 
-/// 锚点预设：UI 节点贴父框（或视口）的哪个点。归一化坐标 (0,0)=左上、(1,1)=右下。
-/// `Stretch` 是特例——拉伸填满父框（忽略自身 w/h，按 padding/offset 收边）。
-/// `Manual` 用节点自己的 ax/ay（0..1 比例）当锚点，覆盖最灵活的 HUD 摆位。
+/// Anchor preset: which point of the parent frame (or viewport) the UI node attaches to. Normalized
+/// coordinates (0,0)=top-left, (1,1)=bottom-right. `Stretch` is a special case — it stretches to
+/// fill the parent frame (ignoring its own w/h, inset by padding/offset). `Manual` uses the node's
+/// own ax/ay (0..1 ratio) as the anchor, covering the most flexible HUD placement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Anchor {
     TopLeft,
@@ -46,13 +58,13 @@ pub enum Anchor {
     BottomLeft,
     BottomCenter,
     BottomRight,
-    /// 拉伸填满父框（ox/oy 当四边内缩，w/h 被忽略）。
+    /// Stretch to fill the parent frame (ox/oy are inset on all four sides; w/h ignored).
     Stretch,
-    /// 用节点自己的 ax/ay（父框内 0..1 比例）。
+    /// Use the node's own ax/ay (0..1 ratio within the parent frame).
     Manual,
 }
 
-/// 全部合法的锚点预设名（check 校验 + 错误提示用，和 [`Anchor::parse`] 一一对应）。
+/// All legal anchor-preset names (for check validation + error messages; one-to-one with [`Anchor::parse`]).
 pub const ANCHOR_NAMES: &[&str] = &[
     "top-left",
     "top-center",
@@ -68,7 +80,7 @@ pub const ANCHOR_NAMES: &[&str] = &[
 ];
 
 impl Anchor {
-    /// 预设名 → 锚点。未知名返回 `None`（调用方报错带合法名清单）。
+    /// Preset name → anchor. Unknown names return `None` (the caller errors with the legal-name list).
     pub fn parse(s: &str) -> Option<Anchor> {
         Some(match s {
             "top-left" => Anchor::TopLeft,
@@ -86,7 +98,8 @@ impl Anchor {
         })
     }
 
-    /// 预设对应的父框内归一化锚点 (0..1, 0..1)。Stretch/Manual 不走这条（特判）。
+    /// Normalized anchor (0..1, 0..1) within the parent frame for this preset. Stretch/Manual do
+    /// not go through this (special-cased).
     fn norm(self) -> (f64, f64) {
         match self {
             Anchor::TopLeft => (0.0, 0.0),
@@ -98,25 +111,25 @@ impl Anchor {
             Anchor::BottomLeft => (0.0, 1.0),
             Anchor::BottomCenter => (0.5, 1.0),
             Anchor::BottomRight => (1.0, 1.0),
-            // 下面两个特判，不该走到（保留全枚举一致性）
+            // The next two are special-cased and should not be reached here (kept for full-enum consistency).
             Anchor::Stretch => (0.0, 0.0),
             Anchor::Manual => (0.0, 0.0),
         }
     }
 }
 
-/// 容器类型（自动排版子节点）。
+/// Container kind (auto-lays-out child nodes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContainerKind {
-    /// 竖排：子节点沿 y 顺序排。
+    /// Vertical: children are arranged along y in order.
     VBox,
-    /// 横排：子节点沿 x 顺序排。
+    /// Horizontal: children are arranged along x in order.
     HBox,
-    /// 网格：固定列数，行高列宽等分。
+    /// Grid: fixed column count, with row height and column width evenly split.
     Grid,
 }
 
-/// 全部合法的容器类型名（check 校验 + 错误提示用）。
+/// All legal container-kind names (for check validation + error messages).
 pub const CONTAINER_KINDS: &[&str] = &["VBox", "HBox", "Grid"];
 
 impl ContainerKind {
@@ -130,7 +143,8 @@ impl ContainerKind {
     }
 }
 
-/// 主轴/交叉轴对齐。容器把子节点排进主轴方向，cross 决定垂直于主轴那边怎么贴。
+/// Main-axis / cross-axis alignment. The container arranges children along the main axis; `cross`
+/// decides how they attach on the axis perpendicular to the main one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Align {
     Start,
@@ -147,7 +161,7 @@ impl Align {
             _ => return None,
         })
     }
-    /// 在 `free` 像素的剩余空间里，按对齐方式给出起点偏移。
+    /// Returns the start offset within `free` pixels of remaining space, according to the alignment.
     fn offset(self, free: f64) -> f64 {
         match self {
             Align::Start => 0.0,
@@ -157,10 +171,10 @@ impl Align {
     }
 }
 
-/// 全部合法对齐名（check 校验用）。
+/// All legal alignment names (for check validation).
 pub const ALIGN_NAMES: &[&str] = &["start", "center", "end"];
 
-/// 一个已解算的屏幕像素矩形（左上原点，和渲染 buf 同坐标系）。
+/// A solved screen-pixel rect (top-left origin, same coordinate system as the render buf).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiRect {
     pub x: f64,
@@ -169,25 +183,30 @@ pub struct UiRect {
     pub h: f64,
 }
 
-/// 布局算法真正执行过的次数（全局原子计数，测试专用）。
-/// 学 font.rs 的 `layout_runs`：断言"静止 UI 连播 N tick，布局只算一次"。
-/// 不进任何渲染输出，纯可观测。
+/// Number of times the layout algorithm actually ran (a global atomic counter; test-only). Modelled
+/// on font.rs's `layout_runs`: asserts "static UI played for N ticks lays out exactly once". Does
+/// not enter any render output; pure observability.
 static LAYOUT_RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// 布局算法执行总次数（进程级累计）。测试里先读基线、跑若干 tick 再读差值。
+/// Total number of layout-algorithm executions (process-wide cumulative). In tests, read a baseline
+/// first, run some ticks, then read the delta.
 pub fn layout_runs() -> u64 {
     LAYOUT_RUNS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// 场上是否有任何 UI（挂 UiRoot 的实体）。没有 = 整条 UI 路径零成本跳过。
+/// Whether the scene has any UI at all (an entity with UiRoot). If not, the entire UI path is skipped
+/// at zero cost.
 pub fn has_ui(world: &World) -> bool {
     !world.query(&["UiRoot"]).is_empty()
 }
 
-/// 屏幕点 (px,py)（与渲染同坐标系——参照分辨率像素）是否压在任何"挡手"的 UI 元素上
-/// （带 Panel 或 Button 的可见节点）。窗口据此在光标压住菜单/面板时挡掉**世界点击**和
-/// **建造落点预览**，避免点穿到下面的地图（之前菜单上点击会穿透、还在菜单底下显绿格子）。
-/// 挪到屏外（ox=-6000）隐藏的元素 rect 在屏外，自然不命中。
+/// Whether the screen point (px,py) (same coordinate system as render -- reference
+/// resolution pixels) is over any "blocking" UI element (a visible node with a Panel or
+/// Button). The window uses this to block **world clicks** and **build placement preview**
+/// when the cursor is over a menu/panel, to avoid clicking through to the map below
+/// (previously clicks on a menu would pass through and show green tiles under the menu).
+/// Elements hidden by being moved off-screen (ox=-6000) have an off-screen rect and
+/// naturally don't hit.
 pub fn point_over_ui(world: &World, width: u32, height: u32, px: f64, py: f64) -> bool {
     if !has_ui(world) {
         return false;
@@ -209,7 +228,8 @@ pub fn point_over_ui(world: &World, width: u32, height: u32, px: f64, py: f64) -
     false
 }
 
-/// 一个 UI 节点的静态输入（解算前从组件读出来；rx/ry/rw/rh 是输出不读）。
+/// Static input for one UI node (read from components before solving; rx/ry/rw/rh are outputs and
+/// not read).
 struct Node {
     id: EntityId,
     anchor: Anchor,
@@ -234,8 +254,9 @@ struct ContainerSpec {
     cross: Align,
 }
 
-/// 解析 UI 节点引用：先按名字、再按句柄（e<i>v<g>）查活实体。和 runtime 的
-/// resolve_entity 同口径——场景实例化把 entity 字段的名字换成句柄，运行时读到的是句柄。
+/// Parse a UI node reference: first by name, then by handle (e<i>v<g>) for a live entity. Same
+/// approach as the runtime's resolve_entity — scene instantiation swaps the name in an entity field
+/// for a handle, so the runtime reads a handle.
 fn resolve_ui_ref(world: &World, s: &str) -> Option<EntityId> {
     let name = s.strip_prefix('@').unwrap_or(s);
     if let Ok(id) = world.entity(name) {
@@ -249,7 +270,7 @@ fn resolve_ui_ref(world: &World, s: &str) -> Option<EntityId> {
     None
 }
 
-/// 读一个 number 字段（缺/非数字显式报错，带实体 + 路径）。
+/// Read one number field (missing / non-numeric explicitly errors, with the entity + path).
 fn numf(world: &World, id: EntityId, path: &str) -> Result<f64, String> {
     world
         .get_field(id, path)
@@ -258,7 +279,7 @@ fn numf(world: &World, id: EntityId, path: &str) -> Result<f64, String> {
         .ok_or_else(|| format!("实体 {id} 的 {path} 不是数字（UI 布局字段）"))
 }
 
-/// 读一个可选 text 字段（缺 = None，给了非文本报错）。
+/// Read one optional text field (missing = None; non-text when present errors).
 fn opt_text(world: &World, id: EntityId, path: &str) -> Result<Option<String>, String> {
     match world.get_field(id, path) {
         Err(_) => Ok(None),
@@ -273,7 +294,8 @@ fn opt_text(world: &World, id: EntityId, path: &str) -> Result<Option<String>, S
     }
 }
 
-/// 把 Ui 节点解析成 [`Node`]（含容器规格）。字段全在这里校验，解算热路径只剩算术。
+/// Parse a Ui node into a [`Node`] (including its container spec). All field validation happens
+/// here; the solving hot path is then pure arithmetic.
 fn read_node(world: &World, id: EntityId) -> Result<Node, String> {
     let anchor_name = opt_text(world, id, "Ui.anchor")?.unwrap_or_else(|| "manual".to_string());
     let anchor = Anchor::parse(&anchor_name).ok_or_else(|| {
@@ -289,8 +311,9 @@ fn read_node(world: &World, id: EntityId) -> Result<Node, String> {
     let w = numf(world, id, "Ui.w").unwrap_or(0.0);
     let h = numf(world, id, "Ui.h").unwrap_or(0.0);
     let weight = numf(world, id, "Ui.weight").unwrap_or(0.0);
-    // parent：实体引用。空串/null = 无父（锚到视口/根框）。引用可以是运行时句柄
-    // （e<i>v<g>，场景实例化已把名字换成句柄）或直接的实体名——和 resolve_entity 同口径。
+    // parent: an entity reference. Empty string / null = no parent (anchor to viewport/root frame).
+    // The reference may be a runtime handle (e<i>v<g>; scene instantiation has already swapped the
+    // name for a handle) or a direct entity name — same approach as resolve_entity.
     let parent = match opt_text(world, id, "Ui.parent")? {
         None => None,
         Some(s) if s.is_empty() => None,
@@ -351,12 +374,13 @@ fn read_node(world: &World, id: EntityId) -> Result<Node, String> {
     })
 }
 
-/// 把节点的锚点 + 偏移 + 尺寸解算成父框（px,py,pw,ph，屏幕像素）里的矩形。
-/// 锚点几何：节点的 (ax,ay) 锚点对齐到父框的同名归一化点，再加像素偏移。
+/// Solve the node's anchor + offset + size into a rect within the parent frame (px,py,pw,ph in
+/// screen pixels). Anchor geometry: the node's (ax,ay) anchor aligns to the same-named normalized
+/// point of the parent frame, then the pixel offset is added.
 fn solve_anchor(node: &Node, parent: UiRect) -> UiRect {
     match node.anchor {
         Anchor::Stretch => {
-            // 拉伸填满父框，ox/oy 当四边内缩（对称），忽略 w/h
+            // Stretch to fill the parent frame; ox/oy are inset on all four sides (symmetric); w/h ignored.
             UiRect {
                 x: parent.x + node.ox,
                 y: parent.y + node.oy,
@@ -370,8 +394,9 @@ fn solve_anchor(node: &Node, parent: UiRect) -> UiRect {
             } else {
                 other.norm()
             };
-            // 父框内锚点（像素）+ 偏移；节点自身锚点也按同一归一化点对齐
-            // （贴右上角 = 节点右上角对齐父框右上角），自然覆盖四角/四边/居中
+            // Anchor point inside the parent frame (pixels) + offset; the node's own anchor aligns to
+            // the same normalized point (top-right = node's top-right aligns to parent frame's top-right),
+            // naturally covering all four corners / four edges / center.
             let anchor_px = parent.x + nx * parent.w + node.ox;
             let anchor_py = parent.y + ny * parent.h + node.oy;
             UiRect {
@@ -384,10 +409,10 @@ fn solve_anchor(node: &Node, parent: UiRect) -> UiRect {
     }
 }
 
-/// 容器排版：给定容器自己的框，算出每个子节点的矩形（覆盖 anchor 结果）。
-/// 子节点顺序 = `children` 给定的顺序（世界槽位序，确定性）。
+/// Container layout: given the container's own frame, compute each child's rect (overriding the
+/// anchor result). Child order = the order given by `children` (the world slot order; deterministic).
 fn solve_container(spec: ContainerSpec, frame: UiRect, children: &[&Node]) -> Vec<(EntityId, UiRect)> {
-    // 内容区 = 框去掉四边 padding
+    // Content area = the frame minus four-sided padding.
     let inner = UiRect {
         x: frame.x + spec.pad,
         y: frame.y + spec.pad,
@@ -401,9 +426,10 @@ fn solve_container(spec: ContainerSpec, frame: UiRect, children: &[&Node]) -> Ve
     }
 }
 
-/// VBox/HBox 共用：`horizontal=true` 主轴为 x（横排），否则 y（竖排）。
-/// 主轴：按子节点声明尺寸顺序排，gap 间隔；有 weight 的瓜分剩余主轴空间。
-/// 交叉轴：按 cross 对齐，weight>0 的子节点交叉轴方向拉满内容区。
+/// Shared VBox/HBox: `horizontal=true` makes the main axis x (horizontal); otherwise y (vertical).
+/// Main axis: arrange children in order by their declared sizes, with `gap` between; children with
+/// weight split the remaining main-axis space.
+/// Cross axis: align by `cross`; children with weight>0 fill the content area on the cross axis.
 fn solve_box(spec: ContainerSpec, inner: UiRect, children: &[&Node], horizontal: bool) -> Vec<(EntityId, UiRect)> {
     let n = children.len();
     if n == 0 {
@@ -411,7 +437,7 @@ fn solve_box(spec: ContainerSpec, inner: UiRect, children: &[&Node], horizontal:
     }
     let total_gap = spec.gap * (n.saturating_sub(1)) as f64;
     let main_extent = if horizontal { inner.w } else { inner.h };
-    // 固定子节点（weight=0）占的主轴尺寸 + 总权重
+    // Main-axis size taken by fixed children (weight=0) + total weight.
     let mut fixed_main = 0.0;
     let mut total_weight = 0.0;
     for c in children {
@@ -422,7 +448,7 @@ fn solve_box(spec: ContainerSpec, inner: UiRect, children: &[&Node], horizontal:
         }
     }
     let free = (main_extent - total_gap - fixed_main).max(0.0);
-    // 没有权重子节点：整组按 main 对齐放进剩余空间
+    // No weighted children: align the whole group into the remaining space by `main`.
     let group_offset = if total_weight == 0.0 {
         spec.main.offset(free)
     } else {
@@ -438,7 +464,7 @@ fn solve_box(spec: ContainerSpec, inner: UiRect, children: &[&Node], horizontal:
         } else {
             c.h
         };
-        // 交叉轴尺寸：weight>0 拉满，否则用自身尺寸
+        // Cross-axis size: weight>0 fills; otherwise the node's own size.
         let cross_extent = if horizontal { inner.h } else { inner.w };
         let cross_size = if c.weight > 0.0 {
             cross_extent
@@ -459,7 +485,8 @@ fn solve_box(spec: ContainerSpec, inner: UiRect, children: &[&Node], horizontal:
     out
 }
 
-/// Grid：固定列数，行高列宽等分内容区。子节点按行优先填格，整格分配（忽略自身 w/h）。
+/// Grid: fixed column count, with row height and column width evenly split across the content area.
+/// Children fill cells in row-major order; each cell is allocated as a whole (own w/h ignored).
 fn solve_grid(spec: ContainerSpec, inner: UiRect, children: &[&Node]) -> Vec<(EntityId, UiRect)> {
     let n = children.len();
     if n == 0 {
@@ -486,17 +513,20 @@ fn solve_grid(spec: ContainerSpec, inner: UiRect, children: &[&Node]) -> Vec<(En
     out
 }
 
-/// 解算结果（id → 屏幕像素矩形）。渲染按这个画，check/describe 也读它。
+/// Solve result (id → screen-pixel rect). Rendering draws by this; check/describe also read it.
 pub type Layout = std::collections::BTreeMap<EntityId, UiRect>;
 
-/// 解算整棵（多棵）UI 树 → 每个 Ui 节点的屏幕像素矩形。**纯函数**：
-/// 输入 = (世界里的 UI 组件, 视口 w/h)，无墙钟无随机。深度优先一趟树遍历，
-/// O(UI 节点数)。每次真解算给全局 `LAYOUT_RUNS` +1（测试可观测）。
+/// Solve the whole (one or more) UI tree(s) → the screen-pixel rect of each Ui node. **Pure
+/// function**: input = (UI components in the world, viewport w/h), no wall clock, no RNG. A single
+/// depth-first tree traversal, O(number of UI nodes). Each real solve increments the global
+/// `LAYOUT_RUNS` by 1 (test-observable).
 ///
-/// 父子关系由 `Ui.parent` 实体引用建立；无 parent 的节点锚到视口框 (0,0,w,h)。
-/// 容器节点用自己解算出的框给子节点排版（覆盖子节点的 anchor 结果）。
-/// 环引用（parent 指回祖先）按"已访问集合"截断——不会死循环，多余引用静默忽略
-/// （静态 check 不强制无环，但解算永远终止）。
+/// Parent-child relationships are established by the `Ui.parent` entity reference; nodes without a
+/// parent anchor to the viewport frame (0,0,w,h). Container nodes use their own solved frame to
+/// lay out their children (overriding the children's anchor results). Cyclic references (parent
+/// pointing back to an ancestor) are cut off by a "visited set" — no infinite loop, and extra
+/// references are silently ignored (static check does not enforce acyclicity, but solving always
+/// terminates).
 pub fn solve_layout(world: &World, width: u32, height: u32) -> Result<Layout, String> {
     let ids = world.query(&["Ui"]);
     if ids.is_empty() {
@@ -504,15 +534,15 @@ pub fn solve_layout(world: &World, width: u32, height: u32) -> Result<Layout, St
     }
     LAYOUT_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    // 读全部节点（字段校验一次做掉）
+    // Read all nodes (field validation is done once here).
     let mut nodes: Vec<Node> = Vec::with_capacity(ids.len());
     for id in &ids {
         nodes.push(read_node(world, *id)?);
     }
-    // id → 在 nodes 里的下标（快速取子节点）
+    // id → index in nodes (for quick child lookup).
     let index: std::collections::BTreeMap<EntityId, usize> =
         nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
-    // 父 → 子下标列表（按 nodes 顺序 = 槽位序，确定性）
+    // parent → list of child indices (in nodes order = slot order; deterministic).
     let mut children_of: std::collections::BTreeMap<EntityId, Vec<usize>> = std::collections::BTreeMap::new();
     let mut roots: Vec<usize> = Vec::new();
     for (i, n) in nodes.iter().enumerate() {
@@ -526,12 +556,12 @@ pub fn solve_layout(world: &World, width: u32, height: u32) -> Result<Layout, St
     let mut layout = Layout::new();
     let mut visited = std::collections::BTreeSet::new();
 
-    // 显式栈深度优先（避免递归爆栈；顺序：根按槽位序，子按 children_of 顺序）
-    // 栈元素 = (节点下标, 父框)。
+    // Explicit-stack depth-first (avoids recursion blowups; order: roots in slot order, children in
+    // children_of order). Stack element = (node index, parent frame).
     let mut stack: Vec<(usize, UiRect)> = roots.iter().rev().map(|&i| (i, viewport)).collect();
     while let Some((i, parent_frame)) = stack.pop() {
         if !visited.insert(nodes[i].id) {
-            continue; // 环/重复引用：截断（解算永远终止）
+            continue; // Cycle / duplicate reference: cut off (solving always terminates).
         }
         let node = &nodes[i];
         let rect = solve_anchor(node, parent_frame);
@@ -542,26 +572,28 @@ pub fn solve_layout(world: &World, width: u32, height: u32) -> Result<Layout, St
             continue;
         }
         if let Some(spec) = node.container {
-            // 容器：子节点位置由容器算出（覆盖各自 anchor），交给渲染前先落进 layout
+            // Container: child positions are computed by the container (overriding each anchor);
+            // commit them to layout before handing off to rendering.
             let kid_nodes: Vec<&Node> = kids.iter().map(|&k| &nodes[k]).collect();
             let placed = solve_container(spec, rect, &kid_nodes);
-            // 容器排版只定位**直接子节点**；子节点若还是容器/有自己的子，继续入栈
-            // （它们的子用各自被排好的框当父框）
+            // Container layout only positions **direct children**; if a child is itself a container /
+            // has its own children, keep pushing onto the stack (their children use the child's laid-
+            // out frame as the parent frame).
             let placed_map: std::collections::BTreeMap<EntityId, UiRect> = placed.into_iter().collect();
             for &k in kids.iter().rev() {
                 let kid_id = nodes[k].id;
                 let kframe = placed_map.get(&kid_id).copied().unwrap_or(rect);
-                // 直接落定子节点矩形（容器算的就是最终矩形，不再走 anchor）
+                // Commit the child rect directly (what the container computed is the final rect; anchor is not re-run).
                 layout.insert(kid_id, kframe);
                 visited.insert(kid_id);
-                // 子节点的孙子用子节点的框当父框
+                // Grandchildren use the child's frame as their parent frame.
                 let grandkids = children_of.get(&kid_id).cloned().unwrap_or_default();
                 for &gk in grandkids.iter().rev() {
                     stack.push((gk, kframe));
                 }
             }
         } else {
-            // 非容器：子节点各自按 anchor 对本节点框解算
+            // Non-container: each child is solved by its own anchor against this node's frame.
             for &k in kids.iter().rev() {
                 stack.push((k, rect));
             }
@@ -570,12 +602,14 @@ pub fn solve_layout(world: &World, width: u32, height: u32) -> Result<Layout, St
     Ok(layout)
 }
 
-/// 布局输入的结构哈希：所有影响布局的字段（每个 Ui 节点的 anchor/ax/ay/ox/oy/w/h/
-/// parent/weight + Container 全字段）+ 视口尺寸的确定性散列。**不含** rx/ry/rw/rh
-/// 输出本身——否则写回输出会改哈希、永远"脏"。用于脏标记：和 UiRoot.layout_hash
-/// 比对，相等就跳过重算（静止 UI 零重算）。
+/// Structural hash of the layout input: a deterministic hash of all layout-affecting fields (each
+/// Ui node's anchor/ax/ay/ox/oy/w/h/parent/weight + all Container fields) + the viewport size. Does
+/// **not** include the rx/ry/rw/rh output itself — otherwise writing the output back would change
+/// the hash and stay "dirty" forever. Used as a dirty flag: compared against UiRoot.layout_hash; if
+/// equal, recomputation is skipped (static UI = zero recomputation).
 ///
-/// 顺序确定（query 槽位序），数值走 f64 位串——同输入同哈希，跨 tick 稳定。
+/// Deterministic order (query slot order); numbers go through f64 bit patterns — same input → same
+/// hash, stable across ticks.
 pub fn layout_input_hash(world: &World, width: u32, height: u32) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -583,7 +617,7 @@ pub fn layout_input_hash(world: &World, width: u32, height: u32) -> u64 {
     height.hash(&mut h);
     for id in world.query(&["Ui"]) {
         id.to_string().hash(&mut h);
-        // 影响布局的 Ui 字段（缺省按 read_node 的缺省值散列，保持一致）
+        // Ui fields that affect layout (missing values hash as the read_node defaults, for consistency).
         for path in ["Ui.anchor", "Ui.parent"] {
             if let Ok(v) = world.get_field(id, path) {
                 if let Some(s) = v.as_str() {
@@ -617,8 +651,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// 造一个挂 UiRoot 的根 + 若干 Ui 节点的世界。返回 World，节点用 spawn_named 命名
-    /// 方便 parent 引用。
+    /// Build a world with a UiRoot root + several Ui nodes. Returns World, nodes named via spawn_named
+    /// for easy parent references.
     fn ui_world() -> World {
         let mut w = World::new();
         let root = w.spawn_named("ui-root").unwrap();
@@ -626,7 +660,7 @@ mod tests {
         w
     }
 
-    /// 给实体挂一个 Ui 组件（全字段，缺省给 0 / manual / 空 parent）。
+    /// Attach a Ui component to an entity (all fields, defaults to 0 / manual / empty parent).
     #[allow(clippy::too_many_arguments)]
     fn set_ui(
         w: &mut World,
@@ -660,7 +694,7 @@ mod tests {
 
     #[test]
     fn anchor_corners_and_center_resolve_to_exact_pixels() {
-        // 视口 200x100。各预设贴角/居中，逐值断言位置尺寸。
+        // Viewport 200x100. Each preset hugs corner/center, assert position and size per case.
         let mut w = ui_world();
         let tl = w.spawn_named("tl").unwrap();
         set_ui(&mut w, tl, "top-left", 0.0, 0.0, 0.0, 0.0, 40.0, 20.0, "", 0.0);
@@ -672,42 +706,42 @@ mod tests {
         set_ui(&mut w, tc, "top-center", 0.0, 0.0, 0.0, 0.0, 40.0, 20.0, "", 0.0);
 
         let l = solve_layout(&w, 200, 100).unwrap();
-        // 左上角：节点左上贴 (0,0)
+        // top-left: node's top-left hugs (0,0)
         assert_eq!(rect(&l, &w, "tl"), UiRect { x: 0.0, y: 0.0, w: 40.0, h: 20.0 });
-        // 右下角：节点右下贴 (200,100) → x=160, y=80
+        // bottom-right: node's bottom-right hugs (200,100) → x=160, y=80
         assert_eq!(rect(&l, &w, "br"), UiRect { x: 160.0, y: 80.0, w: 40.0, h: 20.0 });
-        // 居中：节点中心贴 (100,50) → x=80, y=40
+        // center: node's center hugs (100,50) → x=80, y=40
         assert_eq!(rect(&l, &w, "c"), UiRect { x: 80.0, y: 40.0, w: 40.0, h: 20.0 });
-        // 上中：节点中上贴 (100,0) → x=80, y=0
+        // top-center: node's top-middle hugs (100,0) → x=80, y=0
         assert_eq!(rect(&l, &w, "tc"), UiRect { x: 80.0, y: 0.0, w: 40.0, h: 20.0 });
     }
 
     #[test]
     fn anchor_offset_and_manual_and_stretch() {
         let mut w = ui_world();
-        // 贴右上角 + 像素偏移：往左下推 (ox=-10, oy=5)
+        // Hug top-right corner + pixel offset: push toward bottom-left (ox=-10, oy=5)
         let e = w.spawn_named("corner").unwrap();
         set_ui(&mut w, e, "top-right", 0.0, 0.0, -10.0, 5.0, 30.0, 10.0, "", 0.0);
-        // manual：ax/ay = 0.25/0.75 父框内比例
+        // manual: ax/ay = 0.25/0.75 proportion within parent frame
         let m = w.spawn_named("man").unwrap();
         set_ui(&mut w, m, "manual", 0.25, 0.75, 0.0, 0.0, 20.0, 20.0, "", 0.0);
-        // stretch：填满父框，ox/oy=8 当四边内缩
+        // stretch: fill parent frame, ox/oy=8 acts as four-side inset
         let s = w.spawn_named("str").unwrap();
         set_ui(&mut w, s, "stretch", 0.0, 0.0, 8.0, 8.0, 0.0, 0.0, "", 0.0);
 
         let l = solve_layout(&w, 200, 100).unwrap();
-        // 右上角锚点 (200,0) + 偏移 (-10,5) = (190,5)，节点右上对齐 → x=160, y=5
+        // top-right anchor (200,0) + offset (-10,5) = (190,5), node's top-right aligned → x=160, y=5
         assert_eq!(rect(&l, &w, "corner"), UiRect { x: 160.0, y: 5.0, w: 30.0, h: 10.0 });
-        // manual 锚点 (0.25*200, 0.75*100)=(50,75)，节点同名锚点对齐 → x=50-0.25*20=45, y=75-0.75*20=60
+        // manual anchor (0.25*200, 0.75*100)=(50,75), node's same-named anchor aligned → x=50-0.25*20=45, y=75-0.75*20=60
         assert_eq!(rect(&l, &w, "man"), UiRect { x: 45.0, y: 60.0, w: 20.0, h: 20.0 });
-        // stretch：(8,8) 起，宽高各减 16 → 184x84
+        // stretch: starts at (8,8), width and height each minus 16 → 184x84
         assert_eq!(rect(&l, &w, "str"), UiRect { x: 8.0, y: 8.0, w: 184.0, h: 84.0 });
     }
 
     #[test]
     fn point_over_ui_hits_panels_and_buttons_not_bare_nodes() {
-        // 视口 200x100。面板贴左上 (0,0)-(40,20)，按钮贴右上 (160,0)-(200,20)，
-        // 一个只有 Ui 的裸节点居中 (80,40)-(120,60)。
+        // Viewport 200x100. Panel at top-left (0,0)-(40,20), button at top-right (160,0)-(200,20),
+        // a bare Ui-only node centered at (80,40)-(120,60).
         let mut w = ui_world();
         let p = w.spawn_named("panel").unwrap();
         set_ui(&mut w, p, "top-left", 0.0, 0.0, 0.0, 0.0, 40.0, 20.0, "", 0.0);
@@ -718,18 +752,18 @@ mod tests {
         let bare = w.spawn_named("bare").unwrap();
         set_ui(&mut w, bare, "center", 0.0, 0.0, 0.0, 0.0, 40.0, 20.0, "", 0.0);
 
-        // 面板内 / 按钮内 → 命中（挡掉世界点击）
+        // Inside panel / inside button -> hit (blocks world click)
         assert!(point_over_ui(&w, 200, 100, 10.0, 10.0), "面板内应命中");
         assert!(point_over_ui(&w, 200, 100, 180.0, 10.0), "按钮内应命中");
-        // 裸 Ui 节点（无 Panel/Button）不挡手——其覆盖区仍放行世界点击
+        // Bare Ui node (no Panel/Button) doesn't block -- its covered area still lets world clicks through
         assert!(!point_over_ui(&w, 200, 100, 100.0, 50.0), "裸 Ui 节点不该挡手");
-        // 空白地图区 / 面板按钮之外 → 不命中
+        // Blank map area / outside panel and button -> no hit
         assert!(!point_over_ui(&w, 200, 100, 50.0, 10.0), "面板外不该命中");
     }
 
     #[test]
     fn vbox_stacks_children_with_gap_and_padding() {
-        // 容器框 100 宽 × 200 高，pad=10，gap=5，三个 30 高的子节点竖排，main=start
+        // Container frame 100 wide × 200 tall, pad=10, gap=5, three 30-tall children stacked vertically, main=start
         let mut w = ui_world();
         let box_id = w.spawn_named("vbox").unwrap();
         set_ui(&mut w, box_id, "top-left", 0.0, 0.0, 0.0, 0.0, 100.0, 200.0, "", 0.0);
@@ -742,8 +776,8 @@ mod tests {
             set_ui(&mut w, c, "top-left", 0.0, 0.0, 0.0, 0.0, 40.0, 30.0, &parent_handle, 0.0);
         }
         let l = solve_layout(&w, 300, 300).unwrap();
-        // 内容区从 (10,10) 起。第 0 个 y=10，第 1 个 y=10+30+5=45，第 2 个 y=80。
-        // cross=start：x 贴内容区左 = 10。子节点保留自身宽 40。
+        // Content area starts at (10,10). 0th y=10, 1st y=10+30+5=45, 2nd y=80.
+        // cross=start: x hugs content area's left = 10. Child nodes keep their own width 40.
         assert_eq!(rect(&l, &w, "v0"), UiRect { x: 10.0, y: 10.0, w: 40.0, h: 30.0 });
         assert_eq!(rect(&l, &w, "v1"), UiRect { x: 10.0, y: 45.0, w: 40.0, h: 30.0 });
         assert_eq!(rect(&l, &w, "v2"), UiRect { x: 10.0, y: 80.0, w: 40.0, h: 30.0 });
@@ -751,7 +785,7 @@ mod tests {
 
     #[test]
     fn hbox_main_center_and_cross_center() {
-        // 横排，框 200 宽 × 60 高，无 pad，gap=10，两个 40 宽×20 高，main=center,cross=center
+        // Horizontal, frame 200 wide × 60 tall, no pad, gap=10, two 40 wide×20 tall, main=center,cross=center
         let mut w = ui_world();
         let box_id = w.spawn_named("hbox").unwrap();
         set_ui(&mut w, box_id, "top-left", 0.0, 0.0, 0.0, 0.0, 200.0, 60.0, "", 0.0);
@@ -764,16 +798,16 @@ mod tests {
             set_ui(&mut w, c, "top-left", 0.0, 0.0, 0.0, 0.0, 40.0, 20.0, &ph, 0.0);
         }
         let l = solve_layout(&w, 300, 300).unwrap();
-        // 主轴占用 = 40+10+40 = 90，剩余 200-90=110，main=center → 起点偏移 55
-        // 第 0 个 x=55，第 1 个 x=55+40+10=105。cross=center：y=(60-20)/2=20
+        // Main axis usage = 40+10+40 = 90, remaining 200-90=110, main=center → start offset 55
+        // 0th x=55, 1st x=55+40+10=105. cross=center: y=(60-20)/2=20
         assert_eq!(rect(&l, &w, "h0"), UiRect { x: 55.0, y: 20.0, w: 40.0, h: 20.0 });
         assert_eq!(rect(&l, &w, "h1"), UiRect { x: 105.0, y: 20.0, w: 40.0, h: 20.0 });
     }
 
     #[test]
     fn vbox_weight_splits_remaining_space() {
-        // 框高 100，无 pad/gap。三个子节点：固定 20 高、weight=1、weight=3。
-        // 剩余 = 100-20 = 80，按 1:3 分 → 20 和 60。
+        // Frame height 100, no pad/gap. Three children: fixed 20 tall, weight=1, weight=3.
+        // Remaining = 100-20 = 80, split 1:3 → 20 and 60.
         let mut w = ui_world();
         let box_id = w.spawn_named("wbox").unwrap();
         set_ui(&mut w, box_id, "top-left", 0.0, 0.0, 0.0, 0.0, 50.0, 100.0, "", 0.0);
@@ -798,7 +832,7 @@ mod tests {
 
     #[test]
     fn grid_fixed_columns_equal_cells() {
-        // 5 个格子，3 列 → 2 行（最后一行 2 格）。框 100x100，gap=10。
+        // 5 cells, 3 columns → 2 rows (last row 2 cells). Frame 100x100, gap=10.
         // cell_w = (100 - 10*2)/3 = 80/3；cell_h = (100 - 10*1)/2 = 45。
         let mut w = ui_world();
         let g = w.spawn_named("grid").unwrap();
@@ -813,7 +847,7 @@ mod tests {
         }
         let l = solve_layout(&w, 300, 300).unwrap();
         let cell_w = 80.0 / 3.0;
-        // g0 = (0,0)，g1 = (cell_w+10, 0)，g3 = (0, 55)（第二行第一个：cell_h 45 + gap 10）
+        // g0 = (0,0), g1 = (cell_w+10, 0), g3 = (0, 55) (first in second row: cell_h 45 + gap 10)
         assert_eq!(rect(&l, &w, "g0"), UiRect { x: 0.0, y: 0.0, w: cell_w, h: 45.0 });
         assert!((rect(&l, &w, "g1").x - (cell_w + 10.0)).abs() < 1e-9);
         assert_eq!(rect(&l, &w, "g3").y, 55.0);
@@ -822,9 +856,9 @@ mod tests {
 
     #[test]
     fn empty_ui_is_zero_cost() {
-        // 没有任何 Ui 节点：has_ui=false、solve 返回空 layout、early-return 不解算。
-        // （layout_runs 是进程级全局计数，并行测试会互相增，零成本的"不重算"断言放在
-        //  runtime 的串行系统测试里——见 vitric-cli/tests/ui.rs。这里只锁"空场返回空"。）
+        // No Ui nodes at all: has_ui=false, solve returns empty layout, early-return without solving.
+        // (layout_runs is a process-global counter; parallel tests would add to each other, so the
+        //  zero-cost "no recompute" assertion lives in runtime's serial system tests — see vitric-cli/tests/ui.rs. Here we only lock "empty scene returns empty".)
         let w = World::new();
         assert!(!has_ui(&w), "无 UiRoot = 无 UI");
         assert!(solve_layout(&w, 100, 100).unwrap().is_empty(), "空场布局为空");
@@ -832,7 +866,7 @@ mod tests {
 
     #[test]
     fn solve_increments_run_counter_when_ui_present() {
-        // 有 Ui 节点时 solve 真跑一次算法（counter +1）；这条单独验"非空才计数"。
+        // With Ui nodes present solve actually runs the algorithm once (counter +1); this case alone verifies "non-empty increments".
         let mut w = ui_world();
         let e = w.spawn_named("a").unwrap();
         set_ui(&mut w, e, "center", 0.0, 0.0, 0.0, 0.0, 10.0, 10.0, "", 0.0);
@@ -861,7 +895,7 @@ mod tests {
         let err = solve_layout(&w, 100, 100).unwrap_err();
         assert!(err.contains("Flex") && err.contains("VBox"), "{err}");
 
-        // Grid 列数 0
+        // Grid columns 0
         let mut w2 = ui_world();
         let g2 = w2.spawn_named("g2").unwrap();
         set_ui(&mut w2, g2, "top-left", 0.0, 0.0, 0.0, 0.0, 10.0, 10.0, "", 0.0);
@@ -880,16 +914,16 @@ mod tests {
         let h1 = layout_input_hash(&w, 200, 100);
         let h2 = layout_input_hash(&w, 200, 100);
         assert_eq!(h1, h2, "同一棵树同视口哈希必须稳定");
-        // 改 w 字段 → 哈希变（脏）
+        // Change w field → hash changes (dirty)
         w.set_field(e, "Ui.w", json!(60.0)).unwrap();
         assert_ne!(h1, layout_input_hash(&w, 200, 100), "改尺寸要让哈希变（标脏）");
-        // 改视口 → 哈希变
+        // Change viewport → hash changes
         assert_ne!(h1, layout_input_hash(&w, 300, 100), "改视口要让哈希变");
     }
 
     #[test]
     fn writing_rect_outputs_does_not_change_input_hash() {
-        // rx/ry/rw/rh 是布局输出——写回它们绝不能改输入哈希（否则永远脏）。
+        // rx/ry/rw/rh are layout outputs — writing them back must not change the input hash (otherwise always dirty).
         let mut w = ui_world();
         let e = w.spawn_named("a").unwrap();
         set_ui(&mut w, e, "center", 0.0, 0.0, 0.0, 0.0, 40.0, 20.0, "", 0.0);
@@ -903,8 +937,8 @@ mod tests {
 
     #[test]
     fn nested_container_inside_anchored_panel() {
-        // 根 Panel 居中 100x100，里面一个 VBox 拉伸填满，VBox 里两个子节点。
-        // 验证多层：anchor → 容器框 → 子节点排版。
+        // Root Panel centered 100x100, a VBox inside stretched to fill, two child nodes inside the VBox.
+        // Verify multiple layers: anchor → container frame → child layout.
         let mut w = ui_world();
         let panel = w.spawn_named("panel").unwrap();
         set_ui(&mut w, panel, "center", 0.0, 0.0, 0.0, 0.0, 100.0, 100.0, "", 0.0);
@@ -920,10 +954,10 @@ mod tests {
             set_ui(&mut w, c, "top-left", 0.0, 0.0, 0.0, 0.0, 10.0, 30.0, &vh, 0.0);
         }
         let l = solve_layout(&w, 200, 200).unwrap();
-        // panel 居中 100x100 → x=50,y=50。vbox stretch 填满 → 也是 (50,50,100,100)。
+        // panel centered 100x100 → x=50,y=50. vbox stretch fills → also (50,50,100,100).
         assert_eq!(rect(&l, &w, "panel"), UiRect { x: 50.0, y: 50.0, w: 100.0, h: 100.0 });
         assert_eq!(rect(&l, &w, "vbox"), UiRect { x: 50.0, y: 50.0, w: 100.0, h: 100.0 });
-        // 两个子节点从 vbox 内容区 (50,50) 起竖排
+        // Two children stack vertically starting from vbox content area (50,50)
         assert_eq!(rect(&l, &w, "n0").y, 50.0);
         assert_eq!(rect(&l, &w, "n1").y, 80.0);
     }

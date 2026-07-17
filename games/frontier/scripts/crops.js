@@ -1,11 +1,11 @@
-// 作物生长:种植台(plot)建出来就带一个 Crop 组件(空地 kind=""),互动点击种下后 kind="wheat"。
-// 作物就长在种植台这块地上(同一实体的 Crop 组件),靠引擎的 ctx.setField 原地写。
+// Crop growth: when a plot is built it carries an empty Crop component (kind=""); after the interaction click plants, kind="wheat".
+// The crop grows on the plot entity itself (its Crop component), written in place via the engine's ctx.setField.
 //
-// 节奏:3 段 ×各 4 秒(共 12 秒);夜里 timer 暂停 — 一茬一天(白天生长 = 12/60 = 20% 日长,
-// 实际"几小时工作量")。stage 0/1/2 生长中,stage 3 熟(可收)。
-// 每帧 timer += dt(夜里不动);满 4 秒进下一段、timer 清零;到 stage 3 停住等收。
+// Pacing: 3 stages × 4s each (12s total); at night the timer pauses — one cycle per day (12/60 = 20% of a day length of growth,
+// "a few hours of work"). stage 0/1/2 growing, stage 3 ripe (harvestable).
+// Each frame timer += dt (frozen at night); at 4s it advances a stage and resets timer; at stage 3 it stops and waits for harvest.
 //
-// 时段由 ctx.tick 推(与 clock.js 的 DAY_SEC 同源,二者必须同步)。
+// Time of day is derived from ctx.tick (same source as DAY_SEC in clock.js; the two must stay in sync).
 
 const STAGE_SECONDS = 4.0;
 const RIPE_STAGE = 3;
@@ -31,7 +31,7 @@ vitric.system("crop-grow", { query: ["Crop", "Sprite"], writes: ["Crop", "Sprite
       if (e.Sprite.color !== PLOT_COLOR) e.Sprite.color = PLOT_COLOR;
       continue;
     }
-    if (isNight) continue; // 夜里作物休眠:timer 不推,颜色保留
+    if (isNight) continue; // night: crop dormant, timer frozen, color preserved
     if (c.stage < RIPE_STAGE) {
       c.timer += ctx.dt;
       if (c.timer >= STAGE_SECONDS) {

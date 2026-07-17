@@ -1,12 +1,12 @@
-// cave-gen 的配方生成器：把 Recipe 数字变成一个关卡。
-// 全程用 ctx.random()（引擎的种子随机流）——同种子永远生成同一张图，
-// 改 vitric.json 的 seed 或场景里的 Recipe 数字，关卡就完全换一张。
+// cave-gen recipe generator: turns Recipe numbers into a level.
+// Uses ctx.random() throughout (the engine's seeded random stream) — same seed always generates the same map;
+// change the seed in vitric.json or the Recipe numbers in the scene and the level is entirely regenerated.
 
 vitric.fn("generate", (args, ctx) => {
   const halfW = args.width / 2;
   const halfH = args.height / 2;
 
-  // 出生点周围留安全区，随机点落在里面就往外推
+  // Keep a safe zone around the spawn; if a random point falls inside, push it outward
   function place() {
     let x = (ctx.random() * 2 - 1) * (halfW - 1);
     let y = (ctx.random() * 2 - 1) * (halfH - 1);

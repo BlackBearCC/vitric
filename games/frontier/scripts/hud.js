@@ -1,12 +1,12 @@
-// HUD 装饰元素 — 食物进度条。
-// Colony.food_i 是 0..100 的当前食物量,每帧算一个 10 格的 bar 串,
-// 写入 Colony.food_bar,然后 @hud_food_lbl.UiLabel.content 走规则/hud.json 直接拉这个串。
-// 用 Unicode 半块字符(█ 实心 / ░ 浅色)代替裸数字,直观看出食物水位。
+// HUD decoration — food progress bar.
+// Colony.food_i is the current food amount (0..100); every frame we compute a 10-cell bar string,
+// write it to Colony.food_bar, and the rule in rules/hud.json pulls this string straight into @hud_food_lbl.UiLabel.content.
+// Unicode half-block characters (█ filled / ░ light) replace bare digits, so the food level is visible at a glance.
 //
-// 系统:
-//   food-bar     Colony → Colony.food_bar(纯字符串,无副作用,确定性)
+// Systems:
+//   food-bar     Colony → Colony.food_bar (pure string, no side effects, deterministic)
 
-const FOOD_BAR_CELLS = 10;     // bar 总格数
+const FOOD_BAR_CELLS = 10;     // total bar cells
 const FOOD_BAR_FILLED = "\u2588"; // █
 const FOOD_BAR_EMPTY  = "\u2591"; // ░
 

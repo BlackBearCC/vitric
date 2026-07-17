@@ -1,68 +1,69 @@
-//! vitric assets --frames — AI 出的一堆序列图一键变优化过的动画素材。
+//! vitric assets --frames — turn a batch of AI-generated sequence images into optimized animation assets in one click.
 //!
-//! 现实路径：AI 生成视频/序列图 → 切帧（骨骼绑定是 AI 最不擅长的活），所以把
-//! 「帧进口 + 极致内存」做到位比追骨骼动画更对个人开发者胃口。前车之鉴：桌宠
-//! 2400 帧不压缩 RGBA8 全驻留 → 8.5G 显存。
+//! Reality path: AI generates video/sequence → cut frames (skeletal binding is what AI is worst at), so doing
+//! "frame import + minimal memory" right suits individual developers better than chasing skeletal animation. Lesson learned: a
+//! desktop pet with 2400 uncompressed RGBA8 frames fully resident → 8.5G VRAM.
 //!
-//! 流水线（全部确定性，同输入逐字节同产物）：
-//!   1. 相邻帧去重：逐像素近乎相同的相邻帧只留一张，记「停留多少帧」（AI 动画常有静止段）。
-//!   2. 裁空白边 trim：每帧裁透明边，记偏移（播放按偏移摆回原位，视觉不变）。
-//!   3. 打包图集 atlas：所有帧拼一张大图（减 GPU 纹理切换），记每帧 uv 矩形。
-//!   4. 统一色板：复用 median_cut，整组一套（assets_cmd::quantize_with）。
-//!   5. 写动画配置：
-//!      - `animations.json` 标准 clip（去重后的帧名，停留=重复帧名）——喂 advance_animations
-//!        确定播放，render 核心一字不改（仍是 Sprite.image=完整帧名）。
-//!      - `<clip>-atlas.png` + `<clip>-atlas.json`（uv/trim/anchor/停留/fps/loop）——
-//!        极致内存路径的产物，GPU BC7 上传读它（gpu.rs），check 校验它。
+//! Pipeline (fully deterministic, same input → byte-identical output):
+//!   1. Adjacent frame dedup: keep only one frame among pixel-wise nearly-identical adjacent frames, recording "stay for N frames" (AI animation often has static segments).
+//!   2. Trim transparent edges: crop transparent edges per frame, record offset (playback repositions by offset, visual unchanged).
+//!   3. Pack atlas: stitch all frames into one large image (fewer GPU texture switches), record per-frame uv rectangle.
+//!   4. Unified palette: reuse median_cut, one palette for the whole set (assets_cmd::quantize_with).
+//!   5. Write animation config:
+//!      - `animations.json` standard clip (deduped frame names, stay = repeated frame names) — fed to advance_animations
+//!        for deterministic playback, render core unchanged (still Sprite.image = full frame name).
+//!      - `<clip>-atlas.png` + `<clip>-atlas.json` (uv/trim/anchor/stay/fps/loop) —
+//!        products of the minimal-memory path, GPU BC7 upload reads it (gpu.rs), check verifies it.
 //!
-//! 视频不内置解码器（依赖最小、不写 fallback）：检测系统有 ffmpeg 才可选调用转帧，
-//! 没有就明确提示用户先转，不静默失败。
+//! No built-in video decoder (minimal dependencies, no fallback): only optionally invoke ffmpeg for frame conversion when detected on the system;
+//! if missing, explicitly prompt the user to convert first, never silently fail.
 
 use std::path::{Path, PathBuf};
 
 use crate::assets_cmd::{load_png, save_png, Img};
 
-/// VBC7 产物头字节数：magic(4) + width(4) + height(4) + blocks_x(4) + blocks_y(4)。
+/// VBC7 product header byte count: magic(4) + width(4) + height(4) + blocks_x(4) + blocks_y(4).
 pub const BC7_HEADER_BYTES: usize = 20;
 
-/// 相邻帧去重的逐像素差阈值：两帧对应像素**每通道**差都 ≤ 此值，且差异像素占比
-/// ≤ [`DEDUP_PIXEL_RATIO`] 才算「近乎相同」。0 = 仅去重逐字节完全相同的帧。
+/// Per-pixel difference threshold for adjacent frame dedup: two frames are "nearly identical" only when the
+/// **per-channel** difference of corresponding pixels is ≤ this value AND the ratio of differing pixels is
+/// ≤ [`DEDUP_PIXEL_RATIO`]. 0 = dedup only byte-identical frames.
 const DEDUP_CHANNEL_TOL: u8 = 2;
 
-/// 允许有差异的像素占比上界（千分比）。AI 帧常有零星抖动噪点，全等太严。
+/// Upper bound on the ratio of differing pixels (per mille). AI frames often have sporadic jitter noise; exact equality is too strict.
 const DEDUP_PIXEL_RATIO_PERMILLE: u64 = 2;
 
-/// 一帧在动画配置里的记录（uv + 停留 + trim 偏移 + 锚点）。
+/// A frame's record in the animation config (uv + stay + trim offset + anchor).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameRec {
-    /// 去重后这张图在 assets/ 里的相对名（advance_animations 的 Sprite.image）。
+    /// Relative name of this image in assets/ after dedup (Sprite.image of advance_animations).
     pub image: String,
-    /// 在图集里的像素矩形（x, y, w, h），左上原点。
+    /// Pixel rectangle (x, y, w, h) in the atlas, top-left origin.
     pub atlas_rect: (u32, u32, u32, u32),
-    /// trim 偏移：裁掉的左/上空白像素数（播放摆回原位用）。
+    /// trim offset: number of left/top blank pixels cropped (used to reposition during playback).
     pub trim_offset: (u32, u32),
-    /// 这张去重帧代表的原始帧数（停留多少帧）。
+    /// Number of original frames this deduped frame represents (stay for N frames).
     pub stay: u32,
 }
 
-/// `--frames` 的产物清单（写盘后供报告/测试断言）。
+/// `--frames` product manifest (after writing to disk, for reports/test assertions).
 #[derive(Debug)]
 pub struct FramesReport {
-    /// 片段名（取自输入目录名）。
+    /// Clip name (taken from input directory name).
     pub clip: String,
-    /// 输入序列图张数。
+    /// Number of input sequence images.
     pub input_frames: usize,
-    /// 去重后剩余的独立帧数。
+    /// Number of independent frames remaining after dedup.
     pub kept_frames: usize,
-    /// 每帧记录（去重 + trim + atlas 之后）。
+    /// Per-frame records (after dedup + trim + atlas).
     pub records: Vec<FrameRec>,
-    /// 图集尺寸（像素）。
+    /// Atlas size in pixels.
     pub atlas_size: (u32, u32),
-    /// 图集 RGBA8 raw 字节数（= w*h*4，未压缩显存基线）。
+    /// Atlas RGBA8 raw byte count (= w*h*4, uncompressed VRAM baseline).
     pub atlas_raw_bytes: u64,
-    /// BC7 压缩字节数（None = 未压缩/编码受阻）。
+    /// BC7 compressed byte count (None = uncompressed/encoding blocked).
     pub bc7_bytes: Option<u64>,
-    /// 写出的产物文件相对路径（项目根起算）。
+    /// Relative paths of the produced files (relative to project root).
     pub products: Vec<String>,
 }
 
@@ -85,11 +86,11 @@ impl FramesReport {
     }
 }
 
-/// `--frames` 选项。
+/// `--frames` options.
 pub struct FramesOptions {
-    /// 色板颜色数（复用 assets median_cut）。0 = 不做统一色板（保留原色）。
+    /// Number of palette colors (reuses assets median_cut). 0 = no unified palette (keep original colors).
     pub colors: usize,
-    /// 是否离线压 BC7（产物多一个 `<clip>-atlas.bc7`）。
+    /// Whether to offline-compress BC7 (product gains a `<clip>-atlas.bc7`).
     pub compress: bool,
 }
 
@@ -99,10 +100,10 @@ impl Default for FramesOptions {
     }
 }
 
-/// CLI 入口：`vitric assets <项目目录> --frames <序列图目录> [--colors N] [--no-compress]`。
+/// CLI entry: `vitric assets <project_dir> --frames <sequence_dir> [--colors N] [--no-compress]`.
 ///
-/// `<序列图目录>` 可以是项目内或项目外的 png 序列目录；产物写进项目的 assets/ 和
-/// 清单旁。片段名取序列图目录的目录名。
+/// `<sequence_dir>` can be a PNG sequence directory inside or outside the project; products are written into the project's assets/ and
+/// alongside the manifest. Clip name is taken from the sequence directory's name.
 pub fn run(project_dir: &Path, frames_dir: &Path, opts: &FramesOptions) -> Result<FramesReport, String> {
     let assets_dir = project_dir.join("assets");
     if !assets_dir.is_dir() {
@@ -111,7 +112,7 @@ pub fn run(project_dir: &Path, frames_dir: &Path, opts: &FramesOptions) -> Resul
             assets_dir.display()
         ));
     }
-    // 片段名 = 序列图目录名（确定性、好引用）
+    // Clip name = sequence directory name (deterministic, easy to reference)
     let clip = frames_dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -119,7 +120,7 @@ pub fn run(project_dir: &Path, frames_dir: &Path, opts: &FramesOptions) -> Resul
         .ok_or_else(|| format!("[VD091] 无法从 {} 取片段名（目录名为空？）", frames_dir.display()))?
         .to_string();
 
-    // 1. 收序列图（自然排序），检测视频文件给明确提示（不内置解码器）
+    // 1. Collect sequence images (natural sort), detect video files and give explicit prompts (no built-in decoder)
     let paths = collect_sequence(frames_dir)?;
     if paths.is_empty() {
         return Err(format!(
@@ -147,10 +148,10 @@ pub fn run(project_dir: &Path, frames_dir: &Path, opts: &FramesOptions) -> Resul
         imgs.push(img);
     }
 
-    // 2. 相邻帧去重：留下独立帧 + 每张的停留数
+    // 2. Adjacent frame dedup: keep independent frames + stay count per frame
     let (kept, stays) = dedup_adjacent(&imgs);
 
-    // 3. 统一色板（整组一套，复用 median_cut）。colors=0 跳过。
+    // 3. Unified palette (one set for the whole group, reuses median_cut). colors=0 skips.
     let kept_imgs: Vec<Img> = if opts.colors >= 2 {
         let palette = crate::assets_cmd::extract_palette(kept.iter().map(|&i| &imgs[i]), opts.colors)?;
         kept.iter().map(|&i| crate::assets_cmd::quantize_with(&imgs[i], &palette)).collect()
@@ -158,16 +159,16 @@ pub fn run(project_dir: &Path, frames_dir: &Path, opts: &FramesOptions) -> Resul
         kept.iter().map(|&i| imgs[i].clone()).collect()
     };
 
-    // 4. trim：裁每张的透明边，记偏移
+    // 4. trim: crop transparent edges per frame, record offset
     let trimmed: Vec<(Img, (u32, u32))> = kept_imgs.iter().map(trim_transparent).collect();
 
-    // 5. 打包图集：货架装箱（确定，输入序），记每帧 uv 矩形
+    // 5. Pack atlas: shelf bin-packing (deterministic, input order), record per-frame uv rectangle
     let (atlas, rects) = pack_atlas(&trimmed.iter().map(|(im, _)| im).collect::<Vec<_>>());
 
-    // 6. 写产物
+    // 6. Write products
     let mut products = Vec::new();
     let mut records = Vec::new();
-    // 6a. 去重帧写进 assets/<clip>/frameNNN.png（advance_animations 引用的真名）
+    // 6a. Deduped frames written to assets/<clip>/frameNNN.png (real names referenced by advance_animations)
     let clip_dir = assets_dir.join(&clip);
     std::fs::create_dir_all(&clip_dir)
         .map_err(|e| format!("[VD095] 建帧目录 {} 失败: {e}", clip_dir.display()))?;
@@ -184,8 +185,8 @@ pub fn run(project_dir: &Path, frames_dir: &Path, opts: &FramesOptions) -> Resul
         });
         products.push(format!("assets/{rel}"));
     }
-    // 6b. animations.json 标准 clip：停留 = 在 frames 列表里重复帧名（advance_animations
-    //     按 fps 逐帧推进，重复 N 次 = 停留 N 帧，render 核心零改、确定播放）
+    // 6b. animations.json standard clip: stay = repeat frame name in frames list (advance_animations
+    //     advances per-frame by fps, repeating N times = stay N frames, render core unchanged, deterministic playback)
     let mut expanded: Vec<&String> = Vec::new();
     for (name, stay) in frame_names.iter().zip(&stays) {
         for _ in 0..(*stay).max(1) {
@@ -196,25 +197,25 @@ pub fn run(project_dir: &Path, frames_dir: &Path, opts: &FramesOptions) -> Resul
     merge_clip_into_animations(&anim_path, &clip, &expanded)?;
     products.push("animations.json".to_string());
 
-    // 6c. 图集 png + sidecar json（极致内存路径产物，gpu.rs/check 读它）
+    // 6c. Atlas png + sidecar json (products of the minimal-memory path, read by gpu.rs/check)
     let atlas_png = format!("{clip}-atlas.png");
     save_png(&assets_dir.join(&atlas_png), &atlas)
         .map_err(|e| format!("[VD097] 写图集 {atlas_png}: {e}"))?;
     products.push(format!("assets/{atlas_png}"));
     let atlas_raw_bytes = atlas.width as u64 * atlas.height as u64 * 4;
 
-    // 6d. BC7 离线压缩（可选）。容器无 GPU：只编码 + 落盘 + 字节对比，不上传。
+    // 6d. BC7 offline compression (optional). Container has no GPU: only encode + persist + byte compare, no upload.
     let bc7_bytes = if opts.compress {
         let (bx, by, data) = crate::bc7::encode_rgba8(atlas.width, atlas.height, &atlas.rgba)?;
         let bc7_rel = format!("{clip}-atlas.bc7");
         write_bc7(&assets_dir.join(&bc7_rel), atlas.width, atlas.height, bx, by, &data)?;
         products.push(format!("assets/{bc7_rel}"));
-        Some(BC7_HEADER_BYTES as u64 + data.len() as u64) // 文件真实大小 = 头 + 块数据
+        Some(BC7_HEADER_BYTES as u64 + data.len() as u64) // Real file size = header + block data
     } else {
         None
     };
 
-    // 6e. atlas sidecar json（帧表：uv + 停留 + trim 偏移 + 锚点 + fps/loop）
+    // 6e. atlas sidecar json (frame table: uv + stay + trim offset + anchor + fps/loop)
     let sidecar = atlas_sidecar_json(&clip, atlas.width, atlas.height, &records, bc7_bytes.is_some());
     let sidecar_rel = format!("{clip}-atlas.json");
     std::fs::write(
@@ -236,8 +237,8 @@ pub fn run(project_dir: &Path, frames_dir: &Path, opts: &FramesOptions) -> Resul
     })
 }
 
-/// 收集序列图目录里的 PNG，按文件名自然排序（frame2 < frame10）。
-/// 顺带检测常见视频扩展名，命中就明确提示先转（不内置解码器、不静默失败）。
+/// Collect PNGs from the sequence directory, sorted by filename natural order (frame2 < frame10).
+/// Also detects common video extensions and prompts explicitly to convert first (no built-in decoder, no silent failure).
 pub fn collect_sequence(dir: &Path) -> Result<Vec<PathBuf>, String> {
     if !dir.is_dir() {
         return Err(format!("[VD099] 序列图目录 {} 不存在", dir.display()));
@@ -274,7 +275,7 @@ pub fn collect_sequence(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(pngs)
 }
 
-/// 自然排序比较：把连续数字段当整数比（frame2 < frame10），其余按字节。
+/// Natural-order comparison: treat consecutive digit runs as integers (frame2 < frame10), otherwise byte-wise.
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     let (mut ai, mut bi) = (a.bytes().peekable(), b.bytes().peekable());
     loop {
@@ -283,7 +284,7 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
             (None, Some(_)) => return std::cmp::Ordering::Less,
             (Some(_), None) => return std::cmp::Ordering::Greater,
             (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
-                // 读两侧的整段数字（跳过前导 0 的影响：先比有效长度再比字节）
+                // Read digit runs on both sides (skip leading zeros: compare effective length then bytes)
                 let xs = take_digits(&mut ai);
                 let ys = take_digits(&mut bi);
                 let xt = xs.trim_start_matches('0');
@@ -318,8 +319,8 @@ fn take_digits(it: &mut std::iter::Peekable<std::str::Bytes>) -> String {
     s
 }
 
-/// 相邻帧去重：返回（保留帧在原序列里的下标, 每个保留帧的停留数）。
-/// 停留数 = 这张帧 + 紧随其后被判定为「近乎相同」的帧数。
+/// Adjacent frame dedup: returns (kept frame indices in original sequence, stay count per kept frame).
+/// Stay count = this frame + the number of subsequent frames judged "nearly identical".
 pub(crate) fn dedup_adjacent(imgs: &[Img]) -> (Vec<usize>, Vec<u32>) {
     let mut kept: Vec<usize> = Vec::new();
     let mut stays: Vec<u32> = Vec::new();
@@ -336,7 +337,7 @@ pub(crate) fn dedup_adjacent(imgs: &[Img]) -> (Vec<usize>, Vec<u32>) {
     (kept, stays)
 }
 
-/// 两帧是否「近乎相同」：尺寸相同 + 差异像素占比 ≤ 阈值 + 每个差异像素每通道差 ≤ 容差。
+/// Whether two frames are "nearly identical": same size + ratio of differing pixels ≤ threshold + per-channel diff of each differing pixel ≤ tolerance.
 fn nearly_same(a: &Img, b: &Img) -> bool {
     if a.width != b.width || a.height != b.height {
         return false;
@@ -359,8 +360,8 @@ fn nearly_same(a: &Img, b: &Img) -> bool {
     true
 }
 
-/// 裁掉一帧的透明边（alpha=0 的外圈），返回（裁后图, (左偏移, 上偏移)）。
-/// 全透明帧裁成 1×1 透明（避免 0 尺寸），偏移 (0,0)。
+/// Crop a frame's transparent edges (alpha=0 outer ring), returns (cropped image, (left offset, top offset)).
+/// Fully transparent frame is cropped to 1×1 transparent (avoid zero size), offset (0,0).
 pub(crate) fn trim_transparent(img: &Img) -> (Img, (u32, u32)) {
     let (w, h) = (img.width, img.height);
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
@@ -390,13 +391,13 @@ pub(crate) fn trim_transparent(img: &Img) -> (Img, (u32, u32)) {
     (Img { width: nw, height: nh, rgba }, (min_x, min_y))
 }
 
-/// 货架装箱打包图集：所有帧拼一张大图，返回（图集图, 每帧 (x,y,w,h) 矩形）。
-/// 顺序 = 输入序（确定）；行宽上限 [`ATLAS_MAX_W`]，超了换行。
+/// Shelf bin-packing atlas: stitch all frames into one large image, returns (atlas image, per-frame (x,y,w,h) rectangle).
+/// Order = input order (deterministic); row width upper bound [`ATLAS_MAX_W`], wrap to new row when exceeded.
 pub(crate) fn pack_atlas(frames: &[&Img]) -> (Img, Vec<(u32, u32, u32, u32)>) {
     const ATLAS_MAX_W: u32 = 2048;
     let max_frame_w = frames.iter().map(|f| f.width).max().unwrap_or(1);
     let row_w = ATLAS_MAX_W.max(max_frame_w);
-    // 装箱：左到右、撞墙换行，记每帧左上角
+    // Bin-packing: left to right, wrap on wall hit, record per-frame top-left corner
     let mut rects = Vec::with_capacity(frames.len());
     let (mut x, mut y, mut row_h, mut used_w) = (0u32, 0u32, 0u32, 0u32);
     for f in frames {
@@ -423,8 +424,8 @@ pub(crate) fn pack_atlas(frames: &[&Img]) -> (Img, Vec<(u32, u32, u32, u32)>) {
     (Img { width: atlas_w, height: atlas_h, rgba }, rects)
 }
 
-/// atlas sidecar 的 JSON（帧表 = uv 归一化矩形 + 像素矩形 + trim 偏移 + 停留 + 锚点）。
-/// 锚点约定：裁后帧的中心 + trim 偏移 = 原帧中心，播放摆回原位视觉不变。
+/// JSON of the atlas sidecar (frame table = normalized uv rectangle + pixel rectangle + trim offset + stay + anchor).
+/// Anchor convention: center of cropped frame + trim offset = original frame center, playback repositions to original, visual unchanged.
 fn atlas_sidecar_json(
     clip: &str,
     aw: u32,
@@ -459,9 +460,9 @@ fn atlas_sidecar_json(
     })
 }
 
-/// BC7 产物文件格式（自描述头 + 块数据），gpu.rs 上传时读它：
-///   magic "VBC7"(4) | width u32 | height u32 | blocks_x u32 | blocks_y u32 | 块数据
-/// 全小端。头让 GPU 端知道纹理真实尺寸（块网格可能向上取整过）。
+/// BC7 product file format (self-describing header + block data), read by gpu.rs on upload:
+///   magic "VBC7"(4) | width u32 | height u32 | blocks_x u32 | blocks_y u32 | block data
+/// All little-endian. Header lets the GPU side know the real texture size (block grid may have been rounded up).
 fn write_bc7(
     path: &Path,
     width: u32,
@@ -480,8 +481,8 @@ fn write_bc7(
     std::fs::write(path, out).map_err(|e| format!("[VD09A] 写 BC7 {} 失败: {e}", path.display()))
 }
 
-/// 解析 BC7 产物头（gpu.rs 上传 / check 校验共用）。
-/// 返回 (width, height, blocks_x, blocks_y, 块数据起点)。
+/// Parse the BC7 product header (shared by gpu.rs upload / check verification).
+/// Returns (width, height, blocks_x, blocks_y, block data start offset).
 pub fn parse_bc7_header(bytes: &[u8]) -> Result<(u32, u32, u32, u32, usize), String> {
     if bytes.len() < BC7_HEADER_BYTES || &bytes[0..4] != b"VBC7" {
         return Err("[VD09B] 不是合法的 VBC7 文件（魔数/长度不符）".to_string());
@@ -498,7 +499,7 @@ pub fn parse_bc7_header(bytes: &[u8]) -> Result<(u32, u32, u32, u32, usize), Str
     Ok((w, h, bx, by, BC7_HEADER_BYTES))
 }
 
-/// 把一个 clip 合并进 animations.json（保留已有 clip，同名覆盖）。文件不存在则新建。
+/// Merge a clip into animations.json (preserving existing clips, same-name overwrite). Creates the file if missing.
 fn merge_clip_into_animations(path: &Path, clip: &str, frames: &[&String]) -> Result<(), String> {
     let mut doc: serde_json::Value = if path.exists() {
         let text = std::fs::read_to_string(path)
@@ -512,8 +513,8 @@ fn merge_clip_into_animations(path: &Path, clip: &str, frames: &[&String]) -> Re
         .get_mut("clips")
         .and_then(|c| c.as_object_mut())
         .ok_or_else(|| format!("[VD09F] {} 缺 clips 对象", path.display()))?;
-    // fps 固定 60（每 tick 一帧）：停留已经在帧序列里展开成重复帧，所以播放速率
-    // 取每 tick 推一帧最直观（advance_animations: t*fps/60 → fps=60 时 idx=t）。
+    // fps fixed at 60 (one frame per tick): stay is already expanded as repeated frames in the frame sequence, so playback rate
+    // at one frame per tick is most intuitive (advance_animations: t*fps/60 → when fps=60, idx=t).
     clips.insert(
         clip.to_string(),
         serde_json::json!({
@@ -527,8 +528,8 @@ fn merge_clip_into_animations(path: &Path, clip: &str, frames: &[&String]) -> Re
     Ok(())
 }
 
-/// 系统是否有 ffmpeg（PATH 上找得到）。`--frames` 检测到视频时用它判断能否自动转。
-/// 目前只检测、不自动调用——保持「不内置、提示用户」的最小依赖姿态。
+/// Whether ffmpeg is available on the system (found on PATH). Used by `--frames` to decide whether to auto-convert when video is detected.
+/// Currently only detects, does not auto-invoke — keeps the "no built-in, prompt user" minimal-dependency stance.
 pub fn ffmpeg_available() -> bool {
     std::process::Command::new("ffmpeg")
         .arg("-version")
@@ -539,9 +540,9 @@ pub fn ffmpeg_available() -> bool {
         .unwrap_or(false)
 }
 
-/// 校验一个 clip 的 atlas 产物是否齐全合法（vitric check 调用）：
-/// 图集 png 存在、sidecar 帧表合法、uv 在 [0,1] 且回指图集内、引用的帧图都在。
-/// 错误带路径 + VDxxx 码，一次报全。
+/// Verify that a clip's atlas products are complete and valid (called by vitric check):
+/// atlas png exists, sidecar frame table is valid, uv is in [0,1] and points back inside the atlas, and referenced frame images all exist.
+/// Errors carry path + VDxxx code, all reported at once.
 pub fn check_atlas_products(
     project_dir: &Path,
     sidecar_rel: &str,
@@ -563,7 +564,7 @@ pub fn check_atlas_products(
             return;
         }
     };
-    // 图集 png 存在
+    // Atlas png exists
     let atlas_name = doc.get("atlas").and_then(|v| v.as_str());
     match atlas_name {
         Some(name) if assets_dir.join(name).exists() => {}
@@ -573,7 +574,7 @@ pub fn check_atlas_products(
         )),
         None => problems.push(format!("[VD0A4] 图集 {} 缺 atlas 字段", path.display())),
     }
-    // 图集尺寸
+    // Atlas size
     let size = doc.get("atlas_size").and_then(|v| v.as_array());
     let (aw, ah) = match size.and_then(|a| Some((a.first()?.as_u64()?, a.get(1)?.as_u64()?))) {
         Some((w, h)) if w > 0 && h > 0 => (w, h),
@@ -582,7 +583,7 @@ pub fn check_atlas_products(
             return;
         }
     };
-    // 帧表合法 + uv 不越界 + 帧图引用都在
+    // Frame table valid + uv in bounds + frame image references all present
     let Some(frames) = doc.get("frames").and_then(|v| v.as_array()) else {
         problems.push(format!("[VD0A6] 图集 {} 缺 frames 数组", path.display()));
         return;
@@ -619,7 +620,7 @@ pub fn check_atlas_products(
             problems.push(format!("[VD0AB] 图集 {} 第 {i} 帧缺 image 字段", path.display()));
         }
     }
-    // 压缩产物（声明了就必须在）
+    // Compressed product (if declared, must be present)
     if let Some(bc7) = doc.get("compressed").and_then(|v| v.as_str()) {
         let bp = assets_dir.join(bc7);
         match std::fs::read(&bp) {
@@ -640,12 +641,12 @@ pub fn check_atlas_products(
 mod tests {
     use super::*;
 
-    /// 造一张纯色（或纯透明）图。
+    /// Build a solid-color (or fully transparent) image.
     fn solid(w: u32, h: u32, c: [u8; 4]) -> Img {
         Img { width: w, height: h, rgba: c.to_vec().repeat((w * h) as usize) }
     }
 
-    /// 相邻重复帧去重：3 张相同 → 留 1 张、停留 3。
+    /// Adjacent duplicate frame dedup: 3 identical → keep 1, stay 3.
     #[test]
     fn dedup_collapses_identical_runs() {
         let a = solid(4, 4, [10, 20, 30, 255]);
@@ -656,12 +657,12 @@ mod tests {
         assert_eq!(stays, vec![3, 1, 1], "前三帧停留计数 3");
     }
 
-    /// 容差内的轻微抖动算「近乎相同」被去重。
+    /// Light jitter within tolerance counts as "nearly identical" and gets deduped.
     #[test]
     fn dedup_tolerates_small_jitter() {
         let mut a = solid(10, 10, [100, 100, 100, 255]);
         let mut b = a.clone();
-        // 改一个像素 1 个灰阶（在容差内、占比远低于阈值）
+        // Change one pixel by 1 gray level (within tolerance, ratio far below threshold)
         b.rgba[0] = 101;
         a.rgba[0] = 100;
         let (kept, stays) = dedup_adjacent(&[a, b]);
@@ -669,10 +670,10 @@ mod tests {
         assert_eq!(stays, vec![2]);
     }
 
-    /// trim 裁掉透明边并记偏移；裁后内容回摆 = 原位（视觉不变）。
+    /// trim crops transparent edges and records offset; cropped content repositioned = original (visual unchanged).
     #[test]
     fn trim_crops_and_records_offset() {
-        // 8x8 全透明，中间 (2,3) 放一个 2x2 不透明块
+        // 8x8 fully transparent, with a 2x2 opaque block at (2,3)
         let mut img = solid(8, 8, [0, 0, 0, 0]);
         for y in 3..5u32 {
             for x in 2..4u32 {
@@ -683,20 +684,20 @@ mod tests {
         let (trimmed, off) = trim_transparent(&img);
         assert_eq!((trimmed.width, trimmed.height), (2, 2), "裁到内容外接框");
         assert_eq!(off, (2, 3), "偏移 = 内容左上角");
-        // 裁后每个像素都是那个不透明色
+        // Every pixel after cropping is that opaque color
         for px in trimmed.rgba.chunks_exact(4) {
             assert_eq!(px, &[9, 8, 7, 255]);
         }
     }
 
-    /// 全透明帧裁成 1x1 透明，不炸 0 尺寸。
+    /// Fully transparent frame cropped to 1x1 transparent, no zero-size blowup.
     #[test]
     fn trim_all_transparent_is_1x1() {
         let (t, off) = trim_transparent(&solid(5, 5, [0, 0, 0, 0]));
         assert_eq!((t.width, t.height, off), (1, 1, (0, 0)));
     }
 
-    /// atlas 打包：每帧矩形不越界、能从图集还原每帧像素。
+    /// atlas packing: per-frame rectangles are in bounds and can reconstruct each frame's pixels from the atlas.
     #[test]
     fn atlas_rects_reconstruct_frames() {
         let f0 = solid(3, 2, [1, 2, 3, 255]);
@@ -707,7 +708,7 @@ mod tests {
         for (f, &(x, y, w, h)) in frames.iter().zip(&rects) {
             assert_eq!((w, h), (f.width, f.height), "矩形尺寸 = 帧尺寸");
             assert!(x + w <= atlas.width && y + h <= atlas.height, "矩形不越界");
-            // 逐像素还原
+            // Per-pixel reconstruction
             for fy in 0..h {
                 for fx in 0..w {
                     let a = (((y + fy) * atlas.width + x + fx) * 4) as usize;
@@ -718,7 +719,7 @@ mod tests {
         }
     }
 
-    /// 自然排序：frame2 排在 frame10 前面（不是字典序）。
+    /// Natural sort: frame2 comes before frame10 (not lexicographic).
     #[test]
     fn natural_sort_orders_numbers() {
         let mut v = vec!["frame10.png", "frame2.png", "frame1.png"];
@@ -726,7 +727,7 @@ mod tests {
         assert_eq!(v, vec!["frame1.png", "frame2.png", "frame10.png"]);
     }
 
-    /// VBC7 头往返：write_bc7 写出的字节用 parse_bc7_header 能读回原尺寸 + 块网格。
+    /// VBC7 header roundtrip: bytes written by write_bc7 can be read back by parse_bc7_header to original size + block grid.
     #[test]
     fn vbc7_header_roundtrip() {
         let (w, h) = (12u32, 8u32);
@@ -742,18 +743,18 @@ mod tests {
         assert_eq!(&bytes[off..], &data[..], "块数据应在头之后原样");
     }
 
-    /// 坏 VBC7（魔数错 / 长度不符）显式报错。
+    /// Bad VBC7 (wrong magic / mismatched length) reports explicit error.
     #[test]
     fn vbc7_header_rejects_garbage() {
         assert!(parse_bc7_header(b"NOPE0000000000000000").is_err(), "魔数错应报错");
-        // 头对但块数据长度对不上
+        // Header OK but block data length doesn't match
         let mut bad = Vec::new();
         bad.extend_from_slice(b"VBC7");
         bad.extend_from_slice(&4u32.to_le_bytes()); // w
         bad.extend_from_slice(&4u32.to_le_bytes()); // h
         bad.extend_from_slice(&1u32.to_le_bytes()); // bx
-        bad.extend_from_slice(&1u32.to_le_bytes()); // by → 期望 16 字节块数据
-        bad.extend_from_slice(&[0u8; 8]); // 只给 8 字节
+        bad.extend_from_slice(&1u32.to_le_bytes()); // by → expects 16 bytes of block data
+        bad.extend_from_slice(&[0u8; 8]); // only give 8 bytes
         let err = parse_bc7_header(&bad).unwrap_err();
         assert!(err.contains("VD09C"), "长度不符错误码: {err}");
     }

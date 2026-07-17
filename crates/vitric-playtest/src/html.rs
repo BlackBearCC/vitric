@@ -1,14 +1,12 @@
-//! 把 [`Report`] 渲染成一页**给人看、能当 demo 秀**的自包含 HTML（设计稿十一节「报告打磨」）。
+//! Renders a [`Report`] into a self-contained HTML page **meant for humans to read and to demo** (design draft section 11 "report polish").
 //!
-//! 裸 JSON 地板报告是给机器和工程师对账用的；这一层把它翻成一页非程序员也读得懂的网页：
-//! - **自包含**：CSS 全内联，不引任何外部 CDN/JS 库，离线能开、确定性（同一份 Report 必出同一页）；
-//! - **图表手画内联 SVG**（柱状/直方），不引图表库；
-//! - **说人话**：开头先讲清几个术语，正文行话全用中文直白说法，英文/字段名只在和 JSON/代码
-//!   对照处首次括号备注一次；
-//! - **诚实标注**：启发式候选（软锁/惰性动作/数值崩/LLM note）一律标「候选，待人复核」，
-//!   不说得像铁定结论。
+//! The bare JSON floor report is for machines and engineers to reconcile against; this layer turns it into a webpage non-programmers can also read:
+//! - **Self-contained**: CSS is fully inlined, no external CDN/JS library, opens offline + deterministic (same Report → same page);
+//! - **Hand-drawn inline SVG charts** (bars/histograms), no chart library pulled in;
+//! - **Plain language**: starts by clarifying a few terms, the body uses plain Chinese throughout, English/field names are parenthesized once at the first mention alongside the JSON/code reference;
+//! - **Honest labeling**: heuristic candidates (soft-locks/inert actions/numeric breakage/LLM notes) are all marked "candidate, pending human review", not stated as firm conclusions.
 //!
-//! 代表录像仍由 `externalize_recordings` 落进 report-dir，本页只挂相对链接（`RecordingRef.path`）。
+//! Representative recordings are still written to the report-dir by `externalize_recordings`; this page only attaches relative links (`RecordingRef.path`).
 
 use crate::report::{
     DominantStrategy, EndingCoverage, NumericBreakage, OutcomeDistribution, Pacing,
@@ -16,7 +14,7 @@ use crate::report::{
 };
 use crate::scene_view::Outcome;
 
-/// 把一份报告渲染成一整页自包含 HTML 字符串。`project_name` 只用于标题展示。
+/// Renders a report into a single self-contained HTML string. `project_name` is only used for the title display.
 pub fn report_to_html(report: &Report, project_name: &str) -> String {
     let mut body = String::new();
 
@@ -36,7 +34,7 @@ pub fn report_to_html(report: &Report, project_name: &str) -> String {
     wrap_page(project_name, &body)
 }
 
-/// HTML 转义：防字段名/note 文本里的尖括号引号破坏页面结构。
+/// HTML escaping: prevents angle brackets / quotes in field names / note text from breaking the page structure.
 fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -52,7 +50,7 @@ fn esc(s: &str) -> String {
     out
 }
 
-/// 结局的中文直白说法。
+/// Plain-Chinese label for an outcome.
 fn outcome_zh(o: Outcome) -> &'static str {
     match o {
         Outcome::Win => "通关",
@@ -61,7 +59,7 @@ fn outcome_zh(o: Outcome) -> &'static str {
     }
 }
 
-/// 整页骨架（含全部内联 CSS）。
+/// Page skeleton (with all inline CSS).
 fn wrap_page(project_name: &str, body: &str) -> String {
     format!(
         "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n\
@@ -75,7 +73,7 @@ fn wrap_page(project_name: &str, body: &str) -> String {
     )
 }
 
-/// 全部内联样式——无外部依赖。
+/// All inline styles — no external dependencies.
 const CSS: &str = r#"
 * { box-sizing: border-box; }
 body { margin: 0; background: #0f1115; color: #e6e9ef;
@@ -110,7 +108,7 @@ a { color: #6fb0ff; }
 svg { display: block; }
 "#;
 
-/// 画一条横向 SVG 柱（手画，不引图表库）。`frac` 是 0..1 的填充比例。
+/// Draw a horizontal SVG bar (hand-drawn, no chart library). `frac` is the fill ratio in 0..1.
 fn svg_bar(frac: f64, color: &str) -> String {
     let w = 360.0_f64;
     let fill = (frac.clamp(0.0, 1.0) * w).round();
@@ -121,7 +119,7 @@ fn svg_bar(frac: f64, color: &str) -> String {
     )
 }
 
-/// 顶部大字报：通关率 + 跑了几局/几种策略。
+/// Top headline: clear rate + how many sessions / how many strategies ran.
 fn render_header(dist: &OutcomeDistribution, sessions: usize, project_name: &str) -> String {
     format!(
         "<div class=\"hero\">\n<h1>{} · swarm 自动试玩</h1>\n\
@@ -136,7 +134,7 @@ fn render_header(dist: &OutcomeDistribution, sessions: usize, project_name: &str
     )
 }
 
-/// 「先讲清楚几个词」——每个术语一句大白话定义，后文直接用。
+/// "First clarify a few words" — one plain-language definition per term, used directly in the rest of the page.
 fn render_glossary() -> String {
     let terms: &[(&str, &str)] = &[
         ("swarm（集群试玩）", "让一批自动玩家用不同策略、不同随机种子把这游戏反复玩很多局，看会玩出什么毛病。"),
@@ -161,7 +159,7 @@ fn render_glossary() -> String {
     dl
 }
 
-/// 人话摘要原样展示（聚合器已经写成人话）。
+/// Display the plain-language summary as-is (the aggregator already wrote it in plain language).
 fn render_summary(summary: &str) -> String {
     format!(
         "<section>\n<h2>一句话总结</h2>\n<p class=\"summary\">{}</p>\n</section>\n",
@@ -169,7 +167,7 @@ fn render_summary(summary: &str) -> String {
     )
 }
 
-/// 通关情况：Win/Lose/超时三条 SVG 柱。
+/// Outcome breakdown: Win/Lose/Timeout as three SVG bars.
 fn render_outcomes(dist: &OutcomeDistribution) -> String {
     let total = dist.total.max(1) as f64;
     let row = |lbl: &str, n: usize, color: &str| {
@@ -186,7 +184,7 @@ fn render_outcomes(dist: &OutcomeDistribution) -> String {
     )
 }
 
-/// 可达性提示：swarm 一局都没通关时的强信号。
+/// Reachability hint: a strong signal when no swarm session cleared the game.
 fn render_reachability(reach: &Reachability, _ending: Option<&EndingCoverage>) -> String {
     let mut s = String::from("<section>\n<h2>能不能赢</h2>\n");
     if reach.unbeatable_by_swarm {
@@ -210,7 +208,7 @@ fn render_reachability(reach: &Reachability, _ending: Option<&EndingCoverage>) -
     s
 }
 
-/// 一条代表录像链接（落盘后 path 有值才挂链接）。
+/// One representative-recording link (only attached when path is set after being written to disk).
 fn recording_link(r: &RecordingRef) -> String {
     let label = format!("回放（{} tick · {}）", r.ticks, outcome_zh(r.outcome));
     match &r.path {
@@ -219,7 +217,7 @@ fn recording_link(r: &RecordingRef) -> String {
     }
 }
 
-/// 卡死的地方：软锁簇 + 命中局数 + 录像链接。
+/// Where it gets stuck: soft-lock clusters + hit count + recording link.
 fn render_stuck(clusters: &[StuckCluster]) -> String {
     let mut s = String::from(
         "<section>\n<h2>卡死的地方（软锁候选）</h2>\n\
@@ -245,7 +243,7 @@ fn render_stuck(clusters: &[StuckCluster]) -> String {
     s
 }
 
-/// 到不了的结局。
+/// Unreachable endings.
 fn render_endings(ending: Option<&EndingCoverage>) -> String {
     let mut s = String::from(
         "<section>\n<h2>到不了的结局（不可达）</h2>\n\
@@ -281,7 +279,7 @@ fn render_endings(ending: Option<&EndingCoverage>) -> String {
     s
 }
 
-/// 没用的道具/动作（惰性动作）。
+/// Useless items/actions (inert actions).
 fn render_inert(inert: &[String]) -> String {
     let mut s = String::from(
         "<section>\n<h2>没用的动作（惰性候选）</h2>\n\
@@ -298,7 +296,7 @@ fn render_inert(inert: &[String]) -> String {
     s
 }
 
-/// 节奏：到终止的 tick 直方图（手画 SVG 柱）。
+/// Pacing: tick histogram up to termination (hand-drawn SVG bars).
 fn render_pacing(p: &Pacing) -> String {
     let mut s = String::from(
         "<section>\n<h2>节奏（玩多久）</h2>\n\
@@ -331,7 +329,7 @@ fn render_pacing(p: &Pacing) -> String {
     s
 }
 
-/// 数值问题：跑飞/崩盘/溢出三类候选。
+/// Numeric problems: runaway/collapse/overflow — three kinds of candidates.
 fn render_numeric(n: &NumericBreakage) -> String {
     let mut s = String::from(
         "<section>\n<h2>数值问题（跑飞 / 崩盘 / 溢出）</h2>\n\
@@ -386,7 +384,7 @@ fn render_numeric(n: &NumericBreakage) -> String {
     s
 }
 
-/// 一招鲜：各策略表现 + 碾压标记 + 主导动作。
+/// One-trick: per-strategy performance + dominant flag + dominant action.
 fn render_dominant(d: &DominantStrategy) -> String {
     let mut s = String::from(
         "<section>\n<h2>一招鲜（碾压性策略/动作）</h2>\n\
@@ -429,7 +427,7 @@ fn render_dominant(d: &DominantStrategy) -> String {
     s
 }
 
-/// LLM 的主观提示，按 kind 分组。
+/// LLM subjective notes, grouped by kind.
 fn render_notes(notes: &QualitativeNotes) -> String {
     let kind_zh = |k: &str| match k {
         "clarity" => "看不看得懂（clarity）",
@@ -471,7 +469,7 @@ mod tests {
     use crate::report::HistogramBucket;
     use vitric_sim::Recording;
 
-    /// 造一条落盘后的代表录像引用（path 有值，链接挂得上）。
+    /// Build a representative-recording reference after being written to disk (path is set, link can be attached).
     fn rec_ref(path: &str, ticks: u64, outcome: Outcome) -> RecordingRef {
         RecordingRef {
             path: Some(path.to_string()),
@@ -482,7 +480,7 @@ mod tests {
         }
     }
 
-    /// 造一份「啥毛病都有」的报告，用来验各分区都渲得出。
+    /// Build a "everything is wrong" report, used to verify all sections render.
     fn full_report() -> Report {
         Report {
             sessions: 8,
@@ -574,7 +572,7 @@ mod tests {
         }
     }
 
-    /// 造一份「啥毛病都没有」的空报告，验空维度显示「无」。
+    /// Build a "nothing is wrong" empty report, used to verify empty dimensions show "none".
     fn empty_report() -> Report {
         Report {
             sessions: 4,
@@ -621,7 +619,7 @@ mod tests {
         assert!(h.contains("<html"), "缺 <html>");
         assert!(h.contains("</html>"), "缺 </html>");
         assert!(h.contains("<style>"), "CSS 必须内联");
-        // 自包含：不引任何外部 CDN/JS 库
+        // Self-contained: no external CDN/JS library pulled in
         assert!(!h.contains("http://"), "不应引外部 http 资源");
         assert!(!h.contains("https://"), "不应引外部 https 资源");
         assert!(!h.contains("<script"), "不应引 JS");
@@ -631,7 +629,7 @@ mod tests {
     #[test]
     fn html_has_win_rate_number() {
         let h = report_to_html(&full_report(), "echo");
-        // 63% 通关率（0.625 四舍五入到整数百分比）
+        // 63% clear rate (0.625 rounded to integer percent)
         assert!(h.contains("63%"), "缺通关率数字: 应含 63%");
     }
 
@@ -665,7 +663,7 @@ mod tests {
     fn html_has_stuck_and_recording_link() {
         let h = report_to_html(&full_report(), "echo");
         assert!(h.contains("0x00000000000003e7"), "缺软锁死态哈希");
-        // 录像相对链接挂上
+        // Recording relative link attached
         assert!(h.contains("href=\"stuck-x.json\""), "缺软锁代表录像链接");
         assert!(h.contains("href=\"runaway-gold.json\""), "缺跑飞代表录像链接");
     }
@@ -680,16 +678,16 @@ mod tests {
     #[test]
     fn html_honest_candidate_marking() {
         let h = report_to_html(&full_report(), "echo");
-        // 启发式候选都标「候选，待人复核」
+        // Heuristic candidates all marked "candidate, pending human review"
         assert!(h.contains("候选，待人复核"), "缺诚实候选标注");
     }
 
     #[test]
     fn html_empty_dimensions_show_wu() {
         let h = report_to_html(&empty_report(), "clean");
-        // 空维度显示「无」，不留空白
+        // Empty dimensions show "none", no blank space left
         assert!(h.contains(">无"), "空维度应显示「无」: {}", &h[..200]);
-        // 没卡死/没惰性动作/没数值问题/没 LLM note 都应有「无」字样
+        // No stuck / no inert actions / no numeric problems / no LLM notes — all should have a "none" mention
         let wu_count = h.matches('无').count();
         assert!(wu_count >= 4, "空维度「无」太少: {wu_count}");
     }

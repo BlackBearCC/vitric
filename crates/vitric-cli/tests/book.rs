@@ -1,4 +1,4 @@
-//! book 示例:2D 仿 3D 翻页——折叠/过脊/揭示/落定全链路 + 不可重入。
+//! book example: 2D pseudo-3D page flip — fold/spine-cross/reveal/land full chain + non-reentrant.
 
 use std::path::PathBuf;
 
@@ -20,13 +20,13 @@ fn flip_reveals_next_spread_and_lands() {
     sim.inject_input("right", "pressed");
     sim.step(&mut rt).unwrap();
     assert_eq!(sim.world.get_field(leaf, "Leaf.flipping").unwrap(), &json!(true));
-    // 折叠中:旧文字藏起,翻页中再按无效(不可重入)
+    // Mid-fold: old text hidden, pressing again during the flip does nothing (non-reentrant)
     assert_eq!(sim.world.get_field(tr, "Text.content").unwrap(), &json!(""));
     sim.inject_input("right", "pressed");
     for _ in 0..40 {
         sim.step(&mut rt).unwrap();
     }
-    // 落定:活页收起,左右页都是新内容,页码推进到下一跨页
+    // Landed: the leaf folds away, both pages show new content, the page number advances to the next spread
     assert_eq!(sim.world.get_field(leaf, "Leaf.flipping").unwrap(), &json!(false));
     assert_eq!(sim.world.get_field(leaf, "Leaf.page").unwrap(), &json!(4));
     assert_eq!(sim.world.get_field(tr, "Text.content").unwrap(), &json!("PAGE 4"));

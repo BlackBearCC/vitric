@@ -8,32 +8,32 @@ use vitric_ecs::{EntityId, World};
 
 use crate::model::{Event, Rule, RuleSet, Trigger};
 
-/// 规则要求脚本层执行的函数调用（`call` 动作的产物）。
+/// A function call the rule system asks the script layer to perform (the product of the `call` action).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScriptCall {
     pub function: String,
     pub args: Value,
-    /// 触发时绑定的 self 实体（如果有）。
+    /// The self entity bound at trigger time (if any).
     pub self_entity: Option<EntityId>,
 }
 
-/// 一个 tick 内规则执行的产出。
+/// The output of rule execution within a single tick.
 #[derive(Debug, Default)]
 pub struct TickOutput {
-    /// 待脚本层执行的调用。
+    /// Calls pending script-layer execution.
     pub calls: Vec<ScriptCall>,
-    /// 本 tick 触发过的规则 id（含触发次数顺序），调试/录像用。
+    /// Rule ids fired during this tick (with trigger-count order); for debugging / replays.
     pub fired: Vec<String>,
-    /// 规则 emit 过的事件副本——控制面事件日志靠它，AI 才看得见因果链。
+    /// Copies of events emitted by rules — the control plane's event log depends on it, so AI can see the causal chain.
     pub emitted: Vec<Event>,
 }
 
-/// 规则运行时错误。规则系统不写 fallback：错了就停下来把话说清楚。
+/// Rule runtime error. The rule system writes no fallback: on error it stops and explains.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuleError {
-    /// 事件级联超深（规则 emit 事件又触发规则……）。
+    /// Event cascade too deep (rule emits event that triggers rule...).
     CascadeOverflow { depth: usize, chain: Vec<String> },
-    /// 某条规则的某个动作/条件执行失败。
+    /// A rule's action / condition execution failed.
     Exec { rule: String, at: String, message: String },
 }
 
@@ -58,17 +58,17 @@ impl std::error::Error for RuleError {}
 
 const MAX_CASCADE_DEPTH: usize = 8;
 
-/// 规则引擎。无内部状态：每 tick 拿事件进来、改世界、吐输出。
-/// 可 Clone（rules/schema 都是装配期不可变副本）：playtest 派生场景视图要读规则，
-/// 而它被 Runtime 这个 GameLogic 装配体私有持有——同时可变借 logic + 不可变借 engine
-/// 借用检查器不允许，复制一份只读副本最干净，引擎本身无状态、复制零语义负担。
+/// The rule engine. Stateless internally: each tick takes events in, mutates the world, returns output.
+/// Clone-able (rules/schema are immutable copies fixed at assembly time): playtest derives a scene view that needs to read rules,
+/// and the engine is privately held by the Runtime GameLogic assembly — the borrow checker forbids simultaneously borrowing logic mutably and engine immutably,
+/// so copying a read-only snapshot is the cleanest approach; the engine itself is stateless, so copying carries no semantic burden.
 #[derive(Clone)]
 pub struct Engine {
     pub rules: RuleSet,
     pub schema: Schema,
 }
 
-/// 规则触发时的绑定上下文。
+/// Binding context active while a rule fires.
 #[derive(Clone, Copy, Default)]
 struct Ctx<'a> {
     self_e: Option<EntityId>,
@@ -81,8 +81,8 @@ impl Engine {
         Engine { rules, schema }
     }
 
-    /// 独立求值一组条件（无事件上下文）。断言系统用它：
-    /// 条件全部成立返回 true。路径写法同规则（@实体名 / e3v1 句柄）。
+    /// Evaluate a set of conditions standalone (no event context). The assertion system uses it:
+    /// returns true when all conditions hold. Path syntax matches rules (@entity-name / e3v1 handle).
     pub fn check(
         &self,
         world: &World,
@@ -90,15 +90,15 @@ impl Engine {
     ) -> Result<bool, RuleError> {
         for (i, (left, op, right)) in conditions.iter().enumerate() {
             let at = format!("check/{i}");
-            if !self.eval_condition(world, Ctx::default(), left, op, right, "<断言>", &at)? {
+            if !self.eval_condition(world, Ctx::default(), left, op, right, "<assertion>", &at)? {
                 return Ok(false);
             }
         }
         Ok(true)
     }
 
-    /// 跑一个 tick：先跑 tick 规则，再按 FIFO 消化事件（含级联）。
-    /// `inbox`：本 tick 外部产生的事件（输入、碰撞等）。
+    /// Run one tick: first run tick rules, then drain events FIFO (including cascades).
+    /// `inbox`: events produced externally this tick (input, collisions, etc.).
     pub fn process_tick(
         &self,
         world: &mut World,
@@ -108,14 +108,14 @@ impl Engine {
         let mut queue: VecDeque<(Event, usize, Vec<String>)> =
             inbox.into_iter().map(|e| (e, 0, Vec::new())).collect();
 
-        // tick 触发的规则（每 tick 一轮，规则按文件顺序）
+        // tick-triggered rules (one round per tick, rules in file order)
         for rule in &self.rules.rules {
             if matches!(rule.trigger, Trigger::Tick) {
                 self.run_rule_bound(rule, world, Ctx::default(), &mut out, &mut queue, 0, &[])?;
             }
         }
 
-        // 事件队列（FIFO，级联深度受限）
+        // Event queue (FIFO, cascade depth limited)
         while let Some((event, depth, chain)) = queue.pop_front() {
             if depth > MAX_CASCADE_DEPTH {
                 return Err(RuleError::CascadeOverflow { depth: MAX_CASCADE_DEPTH, chain });
@@ -134,7 +134,7 @@ impl Engine {
                             ctx.self_e = Some(s);
                             ctx.other = Some(o);
                         }
-                        None => continue, // 碰撞双方不满足组件要求，规则不适用
+                        None => continue, // collision parties don't satisfy the component requirements, rule doesn't apply
                     }
                 }
                 self.run_rule_bound(rule, world, ctx, &mut out, &mut queue, depth, &chain)?;
@@ -143,8 +143,8 @@ impl Engine {
         Ok(out)
     }
 
-    /// 处理 each 展开后逐实体执行。
-    /// 参数是级联执行线程过来的全套上下文（输出/事件队列/深度/调用链），拆开反而藏语义。
+    /// Handle `each` expansion then execute per entity.
+    /// The parameters are the full context threaded down by the cascade execution (output/event queue/depth/call chain); splitting them would hide intent.
     #[allow(clippy::too_many_arguments)]
     fn run_rule_bound(
         &self,
@@ -161,7 +161,7 @@ impl Engine {
                 let required: Vec<&str> = comps.iter().map(|s| s.as_str()).collect();
                 for id in world.query(&required) {
                     if !world.is_alive(id) {
-                        continue; // 前一个实体的动作可能销毁了它
+                        continue; // a prior entity's action may have despawned it
                     }
                     let bound = Ctx { self_e: Some(id), ..ctx };
                     self.run_rule_once(rule, world, bound, out, queue, depth, chain)?;
@@ -183,7 +183,7 @@ impl Engine {
         depth: usize,
         chain: &[String],
     ) -> Result<(), RuleError> {
-        // 条件全部成立才执行
+        // execute only when all conditions hold
         for (i, (left, op, right)) in rule.conditions.iter().enumerate() {
             let at = format!("if/{i}");
             if !self.eval_condition(world, ctx, left, op, right, &rule.id, &at)? {
@@ -262,7 +262,7 @@ impl Engine {
             at: at.to_string(),
             message,
         };
-        let obj = action.as_object().expect("解析层已校验动作是对象");
+        let obj = action.as_object().expect("parse layer validated action is an object");
 
         if let Some(target) = obj.get("set").and_then(|v| v.as_str()) {
             let to = obj
@@ -280,7 +280,7 @@ impl Engine {
             let (id, path) = self.entity_field(world, ctx, target).map_err(&err)?;
             let cur = world.get_field(id, &path).map_err(|e| err(e.to_string()))?.clone();
             let sum = match (cur.as_i64(), delta.as_i64()) {
-                // 显式 checked：debug panic / release 回绕会让同一录像在两种构建下分歧
+                // explicit checked: debug panic / release wraparound would make the same replay diverge across two build modes
                 (Some(a), Some(b)) => json!(a.checked_add(b).ok_or_else(|| err(format!(
                     "add 整数溢出：{a} + {b} 超出 i64 范围"
                 )))?),
@@ -354,11 +354,11 @@ impl Engine {
             return Ok(());
         }
 
-        Err(err("动作不属于任何已知类型（解析层应已拦截）".into()))
+        Err(err("action is not any known kind (parse layer should have rejected it)".into()))
     }
 
-    /// 递归解析值：字符串若是引用（self./other./@/event.）换成实际值，
-    /// 对象/数组逐项处理，其余原样。单独的 "self"/"other" 解析为实体句柄字符串。
+    /// Recursively resolve a value: a string that is a reference (self./other./@/event.) is replaced with the actual value,
+    /// objects/arrays are processed item by item, everything else is returned as-is. A standalone "self"/"other" resolves to an entity handle string.
     fn resolve(&self, world: &World, ctx: Ctx, value: &Value) -> Result<Value, String> {
         match value {
             Value::String(s) => match self.try_ref(world, ctx, s)? {
@@ -371,8 +371,8 @@ impl Engine {
                 .collect::<Result<Vec<_>, _>>()
                 .map(Value::Array),
             Value::Object(map) => {
-                // 字符串模板 {"format": "SCORE {}", "args": [路径...]}——
-                // 数字状态转屏上文字（Text.content）的正路，规则里别无他法
+                // string template {"format": "SCORE {}", "args": [paths...]} —
+                // the canonical way to turn numeric state into on-screen text (Text.content); there is no other way in rules
                 if let Some(fmt) = map.get("format").and_then(|v| v.as_str()) {
                     if map.len() == 1 || (map.len() == 2 && map.contains_key("args")) {
                         return self.format_template(world, ctx, fmt, map.get("args"));
@@ -388,7 +388,7 @@ impl Engine {
         }
     }
 
-    /// `{}` 逐个换成 resolve 后的 args；个数必须严格对上。
+    /// Replace each `{}` with the resolved args; the count must match exactly.
     fn format_template(
         &self,
         world: &World,
@@ -423,9 +423,9 @@ impl Engine {
         Ok(Value::String(out))
     }
 
-    /// 字符串是引用则求值；不是引用返回 None（按字面量处理）。
+    /// If the string is a reference, evaluate it; otherwise return None (treat as a literal).
     fn try_ref(&self, world: &World, ctx: Ctx, s: &str) -> Result<Option<Value>, String> {
-        // 实体绑定本身 → 句柄字符串
+        // the entity binding itself → a handle string
         if s == "self" || s == "other" {
             let id = self.entity_ref(world, ctx, s)?;
             return Ok(Some(json!(id.to_string())));
@@ -469,18 +469,18 @@ impl Engine {
         Ok(None)
     }
 
-    /// exists 检查：组件或字段是否存在。exists 的本职就是问「在不在」，
-    /// 所以实体缺席的所有形态——@名字查无此人（despawn 会注销名字）、句柄代数过期、
-    /// self/other 未绑定——都回答 false，不报错。约束只对 exists/!exists 放宽：
-    /// 其他操作符引用缺失实体仍然报错（拿不存在的字段去比较是规则真写错了）。
-    /// 引用语法本身不合法（既不是 self/other/@名字也不是句柄）照常报错。
+    /// exists check: whether a component or field is present. exists is fundamentally about "is it there",
+    /// so every form of entity absence — @name with no such entity (despawn unregisters the name), a stale handle whose generation has moved on,
+    /// unbound self/other — answers false instead of erroring. The relaxation applies only to exists/!exists:
+    /// other operators still error when referencing a missing entity (comparing against a non-existent field is a genuine rule bug).
+    /// A reference whose syntax itself is invalid (neither self/other/@name nor a handle) still errors.
     fn ref_exists(&self, world: &World, ctx: Ctx, path: &str) -> Result<bool, String> {
         let (ent_part, rest) = match path.split_once('.') {
             Some((e, r)) => (e, Some(r)),
             None => (path, None),
         };
-        // @名字单独处理：entity_ref_opt 对查无此名是报错（其他操作符要的就是这个），
-        // 但对 exists 来说「名字不在了」恰恰是要检测的合法答案
+        // @name handled specially: entity_ref_opt errors on unknown names (which is what other operators want),
+        // but for exists "the name is gone" is exactly the legitimate answer being probed
         let id = if let Some(name) = ent_part.strip_prefix('@') {
             match world.entity(name) {
                 Ok(id) => id,
@@ -504,7 +504,7 @@ impl Engine {
         }
     }
 
-    /// 解析「实体.字段路径」目标，如 "self.Score.value"。
+    /// Parse an "entity.field-path" target, e.g. "self.Score.value".
     fn entity_field(&self, world: &World, ctx: Ctx, target: &str) -> Result<(EntityId, String), String> {
         let (ent_part, path) = target.split_once('.').ok_or_else(|| {
             format!(
@@ -515,7 +515,7 @@ impl Engine {
         Ok((id, path.to_string()))
     }
 
-    /// 解析实体引用："self" / "other" / "@名字" / "e3v1"。
+    /// Parse an entity reference: "self" / "other" / "@name" / "e3v1".
     fn entity_ref(&self, world: &World, ctx: Ctx, s: &str) -> Result<EntityId, String> {
         self.entity_ref_opt(world, ctx, s)?.ok_or_else(|| {
             format!(
@@ -546,12 +546,12 @@ impl Engine {
     }
 }
 
-/// 事件 data 等值过滤。
+/// Equality filter on event data.
 fn filter_matches(filter: &Map<String, Value>, data: &Map<String, Value>) -> bool {
     filter.iter().all(|(k, v)| data.get(k) == Some(v))
 }
 
-/// between 绑定：碰撞事件 data 里的 a/b 实体，谁有 comp_a 谁当 self。
+/// between binding: of the a/b entities in the collision event data, the one that has comp_a becomes self.
 fn bind_between(
     world: &World,
     event: &Event,
@@ -650,7 +650,7 @@ mod tests {
             ]
         }]}));
         let (mut w, p, c) = world_with_player_and_coin();
-        // a/b 顺序反着也要能绑定
+        // a/b order reversed: binding should still work
         let out = eng
             .process_tick(
                 &mut w,
@@ -700,10 +700,10 @@ mod tests {
             "do": [{"set": "@player.Score.value", "to": 0}]
         }]}));
         let (mut w, p, _) = world_with_player_and_coin();
-        // 分数不够：不触发
+        // score too low: doesn't fire
         let out = eng.process_tick(&mut w, vec![]).unwrap();
         assert!(out.fired.is_empty());
-        // 分数够：rich 级联触发 on-rich 清零
+        // score high enough: rich cascades to fire on-rich, which zeroes it
         w.set_field(p, "Score.value", json!(10)).unwrap();
         let out = eng.process_tick(&mut w, vec![]).unwrap();
         assert_eq!(out.fired, vec!["low-hp-warning", "on-rich"]);
@@ -761,9 +761,9 @@ mod tests {
         assert!(msg.contains("bad") && msg.contains("self"), "错误要带规则 id 和原因: {msg}");
     }
 
-    /// 回归（exists 报错 bug）：实体被 despawn 后名字注销，
-    /// `["@名字", "exists"]` 必须求值为 false 而不是报「没有名为 X 的实体」——
-    /// 否则所有「检测某东西被摧毁后做事」的规则在它真被摧毁那刻把模拟干停。
+    /// Regression (exists-erroring bug): once an entity is despawned its name is unregistered,
+    /// `["@name", "exists"]` must evaluate to false rather than error with "no entity named X" —
+    /// otherwise every "do something after detecting X was destroyed" rule halts the simulation exactly when X is destroyed.
     #[test]
     fn exists_on_despawned_named_entity_is_false_not_error() {
         let eng = engine(json!({"rules": [
@@ -784,22 +784,22 @@ mod tests {
         let door = w.spawn_named("door").unwrap();
         w.set_component(door, "Coin", json!({"value": 1})).unwrap();
 
-        // 门还在：exists 命中
+        // door still present: exists hits
         let out = eng.process_tick(&mut w, vec![Event::new("check", json!({}))]).unwrap();
         assert_eq!(out.fired, vec!["door-still-there"]);
         assert_eq!(w.get_field(p, "Score.value").unwrap(), &json!(1));
 
-        // 门没了：不报错，!exists 命中，模拟继续跑
+        // door gone: no error, !exists hits, simulation continues
         w.despawn(door).unwrap();
         let out = eng.process_tick(&mut w, vec![Event::new("check", json!({}))]).unwrap();
         assert_eq!(out.fired, vec!["door-destroyed"]);
         assert_eq!(w.get_field(p, "Score.value").unwrap(), &json!(2));
-        // 再跑一轮也照样平稳（不是只豁免一次）
+        // another round stays smooth (not a one-time exemption)
         eng.process_tick(&mut w, vec![Event::new("check", json!({}))]).unwrap();
     }
 
-    /// exists 的实体缺席各形态：带字段路径的引用、过期句柄、未绑定的 self/other，
-    /// 全部回答 false 不报错。
+    /// All forms of entity absence for exists: references with field paths, stale handles, unbound self/other,
+    /// all answer false without erroring.
     #[test]
     fn exists_handles_all_missing_entity_forms() {
         let eng = engine(json!({"rules": []}));
@@ -810,22 +810,22 @@ mod tests {
         w.despawn(door).unwrap();
 
         let f = json!(false);
-        // @名字 + 组件路径 / 字段路径：实体不在 → false
+        // @name + component path / field path: entity absent → false
         assert!(eng.check(&w, &[("@door".into(), "!exists".into(), f.clone())]).unwrap());
         assert!(!eng.check(&w, &[("@door.Coin".into(), "exists".into(), f.clone())]).unwrap());
         assert!(!eng.check(&w, &[("@door.Coin.value".into(), "exists".into(), f.clone())]).unwrap());
-        // 过期句柄（代数已翻篇）→ false
+        // stale handle (generation has moved on) → false
         assert!(!eng.check(&w, &[(handle, "exists".into(), f.clone())]).unwrap());
-        // self/other 在无绑定上下文里 → false
+        // self/other in an unbound context → false
         assert!(!eng.check(&w, &[("self".into(), "exists".into(), f.clone())]).unwrap());
         assert!(!eng.check(&w, &[("other.Coin".into(), "exists".into(), f.clone())]).unwrap());
-        // 活实体上缺组件/缺字段仍是 false（原有语义不变）
+        // missing component/field on a live entity is still false (existing semantics unchanged)
         assert!(!eng.check(&w, &[("@player.Coin".into(), "exists".into(), f.clone())]).unwrap());
         assert!(eng.check(&w, &[("@player.Score".into(), "exists".into(), f)]).unwrap());
     }
 
-    /// 缺席豁免只给 exists/!exists：其他操作符读缺失实体仍然显式报错——
-    /// 那是规则真写错了，静默放过会把 bug 藏起来。
+    /// Absence exemption is only for exists/!exists: other operators reading a missing entity still error explicitly —
+    /// that's a real rule bug, and silently passing would hide it.
     #[test]
     fn non_exists_operators_still_error_on_missing_entity() {
         let eng = engine(json!({"rules": [{
@@ -840,7 +840,7 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("door"), "错误要点名缺失的实体: {msg}");
-        // 引用语法本身不合法也照常报错（exists 也不豁免语法错误）
+        // a reference whose syntax itself is invalid also errors (exists does not exempt syntax errors)
         let err = eng
             .check(&w, &[("door".into(), "exists".into(), json!(false))])
             .unwrap_err();

@@ -22,7 +22,7 @@ def ground(name, base, speckle=None, n=14):
     d = ImageDraw.Draw(img)
     d.rectangle([0, 0, S - 1, S - 1], outline=dark(base))
     if speckle:
-        # 确定性散点(伪随机用线性同余,不依赖 random)
+        # Deterministic scatter (pseudo-random uses linear congruential, does not depend on random)
         s = 12345
         for _ in range(n):
             s = (s * 1103515245 + 12345) & 0x7fffffff
@@ -37,10 +37,10 @@ def figure(name, body, n=12):
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     d.ellipse([6, 6, S - 7, S - 7], fill=body, outline=dark(body, 0.5))
-    d.ellipse([11, 9, S - 12, 18], fill=lite(body))  # 高光/头
+    d.ellipse([11, 9, S - 12, 18], fill=lite(body))  # highlight/head
     return img
 
-# --- 室外地表 ---
+# --- Outdoor ground ---
 save("regolith", ground("regolith", (107, 99, 88, 255), dark((107, 99, 88, 255), 0.8)))
 img = ground("rock", (74, 71, 66, 255)); ImageDraw.Draw(img).ellipse([8, 9, 24, 23], fill=lite((74,71,66,255),1.2), outline=dark((74,71,66,255))); save("rock", img)
 img = ground("ore", (90, 82, 100, 255))
@@ -50,7 +50,7 @@ for (x, y) in [(10, 12), (18, 9), (14, 20), (21, 18)]:
 save("ore", img)
 save("ice", ground("ice", (159, 184, 196, 255), lite((159, 184, 196, 255))))
 
-# --- 起始结构 / 室内(P1+ 用) ---
+# --- Starting structure / interior (P1+ use) ---
 img = Image.new("RGBA", (S, S), (154, 160, 168, 255))
 dd = ImageDraw.Draw(img); dd.rectangle([0, 0, S - 1, S - 1], outline=(60, 64, 70, 255))
 dd.line([0, 16, S, 16], fill=(60, 64, 70, 255)); dd.line([16, 0, 16, S], fill=(60, 64, 70, 255))
@@ -60,14 +60,14 @@ save("lander", img)
 save("floor", ground("floor", (138, 122, 100, 255)))
 img = Image.new("RGBA", (S, S), (58, 54, 64, 255)); ImageDraw.Draw(img).rectangle([0, 0, S - 1, S - 1], outline=lite((58, 54, 64, 255))); save("wall", img)
 img = ground("conduit", (138, 122, 100, 255)); ImageDraw.Draw(img).line([0, 16, S, 16], fill=(194, 162, 74, 255), width=3); save("conduit", img)
-# quarters:地板上一张床(伙伴的住所,满足舒适需求)
+# quarters: a bed on the floor (companion's dwelling, satisfies comfort need)
 img = ground("quarters", (138, 122, 100, 255))
 dd = ImageDraw.Draw(img)
-dd.rectangle([7, 9, 25, 24], fill=(120, 96, 132, 255), outline=dark((120, 96, 132, 255)))  # 床
-dd.rectangle([9, 11, 23, 15], fill=(208, 196, 220, 255))  # 枕头/被
+dd.rectangle([7, 9, 25, 24], fill=(120, 96, 132, 255), outline=dark((120, 96, 132, 255)))  # bed
+dd.rectangle([9, 11, 23, 15], fill=(208, 196, 220, 255))  # pillow/quilt
 save("quarters", img)
 
-# --- 种养 ---
+# --- Planting/growing ---
 img = ground("plot", (90, 70, 50, 255))
 dd = ImageDraw.Draw(img)
 for y in (10, 16, 22):
@@ -82,7 +82,7 @@ img = Image.new("RGBA", (S, S), (74, 122, 160, 255)); dd = ImageDraw.Draw(img)
 dd.rectangle([0, 0, S - 1, S - 1], outline=dark((74, 122, 160, 255))); dd.ellipse([6, 5, S - 7, 16], fill=lite((74, 122, 160, 255)))
 save("tank", img)
 
-# --- 角色 ---
+# --- Characters ---
 save("player", figure("player", (255, 210, 122, 255)))
 save("companion", figure("companion", (230, 138, 106, 255)))
 

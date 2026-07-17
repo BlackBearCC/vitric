@@ -4,10 +4,11 @@ use std::str::FromStr;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// 实体句柄：index 定位、generation 防悬挂（旧句柄指向已回收的槽位时失效）。
+/// Entity handle: index for location, generation to prevent dangling (old handles pointing to
+/// recycled slots are invalidated).
 ///
-/// JSON 表示是字符串 `"e<index>v<generation>"`（如 `"e12v3"`），
-/// 让实体引用在场景文件、控制面响应、日志里都是同一种人类可读写法。
+/// JSON representation is the string `"e<index>v<generation>"` (e.g. `"e12v3"`),
+/// so entity references use the same human-readable notation in scene files, control-plane responses, and logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityId {
     pub index: u32,

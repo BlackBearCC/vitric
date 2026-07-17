@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// 解码后的图片（RGBA8）。
+/// A decoded image (RGBA8).
 #[derive(Debug, Clone)]
 pub struct Image {
     pub width: u32,
@@ -9,12 +9,13 @@ pub struct Image {
     pub rgba: Vec<u8>,
 }
 
-/// 单张图片的边长上限。超了不是警告是错误——显存膨胀这类事故要在导入时拦死。
+/// Side-length limit for a single image. Exceeding it is an error, not a warning — VRAM bloat
+/// like this must be stopped at import time.
 const MAX_DIMENSION: u32 = 2048;
 
-/// 法线贴图命名配对（零配置约定）：`hero.png` 的法线贴图就是 `hero_n.png`。
-/// 返回 `name` 对应的法线贴图名；`name` 本身已是 `_n` 贴图时返回 `None`
-/// （法线贴图没有自己的法线贴图，配对不递归）。
+/// Normal-map name pairing (a zero-config convention): the normal map for `hero.png` is
+/// `hero_n.png`. Returns the normal-map name for `name`; if `name` is itself a `_n` map, returns
+/// `None` (normal maps do not have their own normal maps; pairing does not recurse).
 pub fn normal_map_name(name: &str) -> Option<String> {
     if is_normal_map_name(name) {
         return None;
@@ -23,9 +24,9 @@ pub fn normal_map_name(name: &str) -> Option<String> {
     Some(format!("{stem}_n.{ext}"))
 }
 
-/// `name` 是不是法线贴图（文件名主干以 `_n` 结尾）。
-/// 素材和谐化（vitric assets）用它把 `_n` 文件挡在量化之外——法线编码的是向量
-/// 不是颜色，吸附到色板上等于毁掉数据。
+/// Whether `name` is a normal map (file-name stem ends with `_n`). Asset harmonization
+/// (`vitric assets`) uses this to keep `_n` files out of quantization — normals encode vectors,
+/// not colors; snapping them to a palette would destroy the data.
 pub fn is_normal_map_name(name: &str) -> bool {
     let last = name.rsplit('/').next().unwrap_or(name);
     match last.rsplit_once('.') {
@@ -34,26 +35,27 @@ pub fn is_normal_map_name(name: &str) -> bool {
     }
 }
 
-/// 素材仓库：项目 `assets/` 目录下的全部 PNG，键是相对路径（正斜杠）；
-/// 外加可选的 TTF 字体（清单 `font` 字段，见 [`crate::FontStore`]）。
+/// Asset store: all PNGs under the project's `assets/` directory, keyed by relative path
+/// (forward slashes); plus an optional TTF font (the manifest `font` field, see [`crate::FontStore`]).
 ///
-/// 加载即校验：解码失败、超尺寸预算、字体损坏都在 `vitric check` / 启动时暴露，
-/// 不存在"游戏跑起来图突然不见了"。
+/// Load-time validation: decode failures, over-budget sizes, and corrupt fonts are all surfaced
+/// during `vitric check` / startup — there is no "the game starts up and an image suddenly vanishes".
 #[derive(Debug, Default)]
 pub struct Assets {
     root: Option<PathBuf>,
     images: BTreeMap<String, Image>,
-    /// 矢量字体（None = 用内嵌 8x8 点阵，旧行为字节不变）。
+    /// Vector font (None = use the built-in 8x8 bitmap, byte-identical to the old behavior).
     font: Option<crate::FontStore>,
 }
 
 impl Assets {
-    /// 空仓库（纯色块项目 / 测试用）。
+    /// An empty store (solid-color projects / tests).
     pub fn empty() -> Assets {
         Assets::default()
     }
 
-    /// 从项目 assets 目录加载全部 PNG（递归）。目录不存在 = 空仓库（合法：纯色块游戏）。
+    /// Load all PNGs from the project assets directory (recursive). A missing directory = an empty
+    /// store (legal: a solid-color game).
     pub fn load_dir(dir: &Path) -> Result<Assets, String> {
         let mut assets =
             Assets { root: Some(dir.to_path_buf()), images: BTreeMap::new(), font: None };
@@ -64,7 +66,7 @@ impl Assets {
         while let Some(d) = stack.pop() {
             let entries = std::fs::read_dir(&d)
                 .map_err(|e| format!("读素材目录 {} 失败: {e}", d.display()))?;
-            // 排序保证加载顺序确定（报错顺序也确定）
+            // Sort so the load order (and the error order) is deterministic.
             let mut paths: Vec<PathBuf> = entries
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .collect();
@@ -87,8 +89,9 @@ impl Assets {
         Ok(assets)
     }
 
-    /// 重新从磁盘加载（热重载素材）。失败保持旧内容。
-    /// 字体跟着图一起重读（路径不变）——字体文件被换了也是热重载的一部分。
+    /// Reload from disk (hot-reload assets). On failure the old contents are kept.
+    /// The font is re-read together with the images (path unchanged) — a swapped font file is
+    /// part of hot reload too.
     pub fn reload(&mut self) -> Result<(), String> {
         let root = self.root.clone().ok_or("素材仓库没有目录，无法重载")?;
         let mut fresh = Assets::load_dir(&root)?;
@@ -99,14 +102,15 @@ impl Assets {
         Ok(())
     }
 
-    /// 挂载 TTF 字体（清单 `font` 字段）。缺失/损坏显式报错并点名路径。
-    /// 挂上之后所有 Text 组件改走矢量路径（见 lib.rs 模块文档的 Text 约定）。
+    /// Mount a TTF font (manifest `font` field). Missing/corrupt explicitly errors and names the path.
+    /// Once mounted, all Text components go through the vector path (see the Text convention in the
+    /// lib.rs module docs).
     pub fn load_font(&mut self, path: &Path) -> Result<(), String> {
         self.font = Some(crate::FontStore::load(path)?);
         Ok(())
     }
 
-    /// 矢量字体（None = 点阵旧行为）。CPU 光栅化和 GPU 字形图集共用这一份。
+    /// Vector font (None = legacy bitmap). Shared by the CPU rasterizer and the GPU glyph atlas.
     pub fn font(&self) -> Option<&crate::FontStore> {
         self.font.as_ref()
     }
@@ -115,15 +119,16 @@ impl Assets {
         self.images.get(name)
     }
 
-    /// `name` 的法线贴图（命名配对约定见 [`normal_map_name`]）。
-    /// `None` = 没配对 = 该精灵不走法线光照（合法常态，不是错误）。
+    /// The normal map for `name` (naming-pairing convention, see [`normal_map_name`]).
+    /// `None` = no pairing = this sprite skips normal-map lighting (a legal state, not an error).
     pub fn normal_of(&self, name: &str) -> Option<&Image> {
         self.images.get(&normal_map_name(name)?)
     }
 
-    /// 素材仓库里有没有任何法线贴图（`*_n.png` 命名配对）。没有 = 渲染器整帧
-    /// 跳过法线缓冲（分配/清写/合成读全省掉）——输出与"有缓冲但全哨兵"逐位相同
-    /// （哨兵语义见 lib.rs 模块文档，向后兼容由测试锁死）。
+    /// Whether the asset store contains any normal maps (`*_n.png` pairing). If not, the renderer
+    /// skips the normal buffer for the whole frame (allocation / clear / compositing read all saved)
+    /// — the output is bit-identical to "having a buffer but all sentinels" (sentinel semantics are
+    /// in the lib.rs module docs; backward compatibility is locked down by tests).
     pub fn has_normal_maps(&self) -> bool {
         self.images.keys().any(|k| is_normal_map_name(k))
     }
@@ -136,7 +141,7 @@ impl Assets {
         self.images.len()
     }
 
-    /// 全部图片解码后占用的内存（字节）——预算观测用。
+    /// Memory used by all decoded images (bytes) — for budget observability.
     pub fn total_bytes(&self) -> usize {
         self.images.values().map(|i| i.rgba.len()).sum()
     }
@@ -154,7 +159,7 @@ fn load_png(path: &Path) -> Result<Image, String> {
             info.width, info.height
         ));
     }
-    // 统一成 RGBA8
+    // Unify to RGBA8.
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
         png::ColorType::Rgb => {
@@ -205,15 +210,15 @@ mod tests {
     fn normal_map_naming_pairs_and_excludes_n_files() {
         assert_eq!(normal_map_name("hero.png").as_deref(), Some("hero_n.png"));
         assert_eq!(normal_map_name("ui/icon.png").as_deref(), Some("ui/icon_n.png"));
-        // _n 文件自己没有法线贴图（配对不递归）
+        // _n files have no normal map of their own (pairing does not recurse).
         assert_eq!(normal_map_name("hero_n.png"), None);
-        // 无扩展名：配不出来（素材都是 .png，这里只是不 panic）
+        // No extension: cannot pair (assets are all .png; this just doesn't panic).
         assert_eq!(normal_map_name("noext"), None);
         assert!(is_normal_map_name("hero_n.png"));
         assert!(is_normal_map_name("ui/icon_n.png"));
         assert!(!is_normal_map_name("hero.png"));
         assert!(!is_normal_map_name("ui/icon.png"));
-        // 主干本来就含 n 的不误判
+        // A stem that merely contains an n is not misclassified.
         assert!(!is_normal_map_name("lantern.png"));
     }
 

@@ -1,6 +1,7 @@
-//! 粒子发射器端到端确定性：粒子是渲染层纯函数（不进模拟状态），所以
-//! 录像重放/快照回退后**画面**也必须逐字节回到同一条轨迹——这里在
-//! sim + render 两层拼起来锁死这个不变量（单元测试各自只看一层）。
+//! Particle emitter end-to-end determinism: particles are a render-layer pure function (do not
+//! enter simulation state), so after recording replay / snapshot rollback the **frame** must also
+//! return bit-by-bit to the same trajectory — here we lock this invariant by composing the sim
+//! and render layers (unit tests only look at one layer each).
 
 use serde_json::json;
 
@@ -8,7 +9,7 @@ use vitric_ecs::fnv1a_64;
 use vitric_render::Assets;
 use vitric_sim::{GameLogic, Pcg32, Sim};
 
-/// 测试场：一个移动实体（让状态真的在演化）+ 一个 stream 火花 + 一个待触发的 burst。
+/// Test arena: a moving entity (so state really evolves) + a stream spark + a burst to trigger.
 fn particle_world(sim: &mut Sim) {
     let mover = sim.world.spawn_named("mover").unwrap();
     sim.world.set_component(mover, "Position", json!({"x": -4.0, "y": 0.0})).unwrap();
@@ -36,7 +37,8 @@ fn particle_world(sim: &mut Sim) {
         .unwrap();
 }
 
-/// 在 tick 60 触发 burst 的确定性逻辑（模拟"规则往 burst 字段写当前 tick"）。
+/// Deterministic logic that triggers the burst at tick 60 (simulates "rule writes the current
+/// tick into the burst field").
 struct BurstAt60;
 impl GameLogic for BurstAt60 {
     fn on_tick(
@@ -61,29 +63,31 @@ fn frame_hash(sim: &Sim) -> u64 {
 
 #[test]
 fn recording_replay_reproduces_particle_frames_bit_exact() {
-    // 录一局：每 tick 记一帧画面哈希
+    // Record one run: capture one frame hash per tick
     let mut sim = Sim::new(11);
     particle_world(&mut sim);
     sim.start_recording();
     let mut frames = Vec::new();
     for t in 0..180 {
         if t == 30 {
-            sim.inject_input("nudge", "pressed"); // 录像里掺一条输入（走完整录制通道）
+            sim.inject_input("nudge", "pressed"); // mix an input into the recording (full record channel)
         }
         sim.step(&mut BurstAt60).unwrap();
         frames.push(frame_hash(&sim));
     }
     let rec = sim.stop_recording().unwrap();
 
-    // burst 在 tick 60 写入：61 帧起画面必须与前一帧不同（爆发可见）、
-    // 寿命 30 tick 过后那一帧爆发粒子已消失（与寿命期内任一帧都不同源——
-    // 用"未触发的同 tick 平行世界"对照画面级生灭）
+    // burst is written at tick 60: from frame 61 the frame must differ from the previous one
+    // (burst visible); after the 30-tick lifetime the burst particles are gone on that frame
+    // (different from any frame during the lifetime — use a "parallel world at the same tick
+    // without trigger" to compare frame-level birth/death)
     let mut probe = Sim::new(11);
     particle_world(&mut probe);
     for _ in 0..180 {
-        probe.step(&mut ()).unwrap(); // 不触发 burst 的平行世界
+        probe.step(&mut ()).unwrap(); // parallel world without triggering the burst
     }
-    // 重放：必须逐校验点通过，且每帧画面哈希与首次运行逐位一致
+    // Replay: must pass every checkpoint, and each frame hash must be bit-identical to the first
+    // run
     let mut sim2 = Sim::new(11);
     particle_world(&mut sim2);
     let mut replay_frames = Vec::new();
@@ -110,10 +114,14 @@ fn burst_is_visible_for_its_lifetime_in_rendered_frames() {
         }
         frame_hash(&sim)
     };
-    // 触发前两个世界画面一致；爆发期内不同；寿命（30 tick）耗尽后重新一致——
-    // 除 burst 字段外两个世界状态相同，画面差异只能来自爆发粒子本身。
-    // 注意：burst 字段本身不画进画面，但寿命到期后值仍不同——画面一致恰好证明
-    // "粒子消失"是字段值的纯函数推演，不靠渲染层记历史
+    // Before trigger the two worlds' frames are identical; during the burst they differ; after
+    // the lifetime (30 ticks) they are identical again — except for the burst field the two
+    // worlds' state is the same, the frame difference can only come from the burst particles
+    // themselves.
+    // Note: the burst field itself is not drawn into the frame, but its value still differs
+    // after the lifetime expires — the identical frames exactly prove "particle disappearance" is
+    // a pure-function inference of the field value, not relying on the render layer remembering
+    // history
     assert_eq!(run_to(true, 60), run_to(false, 60), "触发 tick 之前画面一致");
     assert_ne!(run_to(true, 61), run_to(false, 61), "爆发期画面必须可见地不同");
     assert_ne!(run_to(true, 89), run_to(false, 89), "寿命最后一刻（age 29）还在");
@@ -126,7 +134,7 @@ fn snapshot_restore_resumes_identical_particle_frames() {
     particle_world(&mut sim);
     let mut logic = BurstAt60;
     for _ in 0..70 {
-        sim.step(&mut logic).unwrap(); // 在爆发进行中打快照（最刁钻的时刻）
+        sim.step(&mut logic).unwrap(); // snapshot mid-burst (the trickiest moment)
     }
     let snap = sim.snapshot(&logic);
 
@@ -135,7 +143,8 @@ fn snapshot_restore_resumes_identical_particle_frames() {
     }
     let direct = frame_hash(&sim);
 
-    // restore 进新 sim 再跑同样的 tick 数：状态哈希和**画面**都必须一致
+    // restore into a new sim and run the same number of ticks: state hash and **frame** must
+    // both match
     let mut sim2 = Sim::new(0);
     let mut logic2 = BurstAt60;
     sim2.restore(&snap, &mut logic2).unwrap();

@@ -1,49 +1,49 @@
-//! vitric — 命令行入口。
+//! vitric — CLI entry point.
 //!
-//! 子命令：
-//! - `vitric check <项目目录>`            校验项目（schema/场景/规则/脚本），出报告
-//! - `vitric run <项目目录> [选项]`        无头运行 + AI 控制面
-//! - `vitric replay <项目目录> <录像.json>` 重放录像并校验确定性
-//! - `vitric playtest <项目目录> [选项]`     进程内自动试玩：单局出可重放录像（默认），--sessions N 并行跑批聚合地板报告，--seed-recording 种子式探索（扰动证书录像逮不可达结局/顺序软锁）
-//! - `vitric balance <项目目录> [选项]`      自动配平：调一个数值旋钮（--knob 文件#json-pointer），用 agent 集群试玩反复跑，二分搜索到让通关率落进 --target-clear-rate 的旋钮值（非单调退化线扫兜底）。绝不改用户文件（临时副本里改完即删）
-//! - `vitric gate <项目目录>`              交付门禁：check + 通关录像重放 + 断言集 + 可选 playtest 门（清单声明 gates.playtest 才跑：真跑 swarm 断言达标），全过才出证书
-//! - `vitric bundle <项目目录> [选项]`      发行打包：gate PASS 后把项目附进引擎副本，出自包含单文件（无证书不发行）
-//! - `vitric assets <项目目录> [选项]`      全项目 PNG 统一色板（AI 出图规整成一个调）
-//! - `vitric team <项目目录>`              多 agent 班子协同黑板：各角色交付物健康度 + 门禁/合同状态（只读，永远退出 0）
-//! - `vitric turf <项目目录> --role <角色> <改动文件...>`  地盘执法：改动文件越出角色地盘即退出 1
+//! Subcommands:
+//! - `vitric check <project-dir>`            verify project (schema/scene/rule/script), produce report
+//! - `vitric run <project-dir> [options]`    headless run + AI control plane
+//! - `vitric replay <project-dir> <recording.json>` replay recording and verify determinism
+//! - `vitric playtest <project-dir> [options]` in-process automatic playtest: single session produces a replayable recording (default), --sessions N runs a parallel batch and aggregates a floor report, --seed-recording seed-style exploration (perturb a certificate recording to catch unreachable endings / sequence soft-locks)
+//! - `vitric balance <project-dir> [options]` auto balance: tune one numeric knob (--knob file#json-pointer), use an agent cluster to playtest repeatedly, binary search to a knob value that puts the clear rate within --target-clear-rate (non-monotonic degraded linear scan fallback). Never modifies user files (changes happen in a temporary copy that is deleted afterward)
+//! - `vitric gate <project-dir>`             delivery gate: check + clear recording replay + assertion set + optional playtest gate (only runs when manifest declares gates.playtest: actually runs swarm and asserts passing), certificate issued only when all pass
+//! - `vitric bundle <project-dir> [options]` release bundle: after gate PASS, attach the project into an engine copy and produce a self-contained single file (no release without certificate)
+//! - `vitric assets <project-dir> [options]` unify palette for all project PNGs (regularize AI-generated images into one tone)
+//! - `vitric team <project-dir>`             multi-agent team coordination blackboard: per-role deliverable health + gate/contract status (read-only, always exits 0)
+//! - `vitric turf <project-dir> --role <role> <changed-files...>`  turf enforcement: changed files exceeding the role's turf means exit 1
 //!
-//! assets 选项：
-//!   --colors <N>     色板颜色数（默认 32）
-//!   --height <H>     高于 H 的图先最近邻缩到高 H（保持宽高比）
-//!   --palette-lock   跳过提取，按项目已有 palette.json 量化（新素材入伙老色板）
-//!   --normals        给没有 _n 配对的 PNG 生成法线贴图（程序化，确定性；与色板选项互斥）
-//!   --normals-ai     法线生成改走豆包 Ark Seedream 图生图（需要环境变量 ARK_API_KEY；
-//!                    模型 VITRIC_NORMALS_MODEL，默认 doubao-seedream-5-0-260128）
-//!   --frames <目录>   帧进口流水线：把一组序列图（png，自然排序）一键变优化过的动画
-//!                    素材——相邻帧去重（记停留）+ 裁透明边（记偏移）+ 打包图集 +
-//!                    统一色板 + 写 animations.json + BC7 压缩图集。片段名取目录名。
-//!                    视频先用 ffmpeg 转序列图（不内置解码器）。与色板/法线互斥；
-//!                    自己接受 --colors（整组色板数）和 --no-compress（不压 BC7）。
-//!   --no-compress    （仅 --frames）不离线压 BC7，只出未压缩 RGBA8 图集
+//! assets options:
+//!   --colors <N>     palette color count (default 32)
+//!   --height <H>     images taller than H are first nearest-neighbor scaled down to height H (preserving aspect ratio)
+//!   --palette-lock   skip extraction, quantize against the project's existing palette.json (new assets join the old palette)
+//!   --normals        generate normal maps for PNGs without _n pairing (procedural, deterministic; mutually exclusive with palette options)
+//!   --normals-ai     normal generation goes through Doubao Ark Seedream image-to-image (requires env var ARK_API_KEY;
+//!                    model VITRIC_NORMALS_MODEL, default doubao-seedream-5-0-260128)
+//!   --frames <dir>   frame import pipeline: turns a set of sequence images (png, natural sort) into optimized animation
+//!                    assets — adjacent frame dedup (record dwell) + transparent-edge crop (record offset) + atlas packing +
+//!                    unify palette + write animations.json + BC7 compress atlas. Clip name taken from directory name.
+//!                    Convert video to sequence images with ffmpeg first (no built-in decoder). Mutually exclusive with palette/normals;
+//!                    accepts --colors (palette count for the whole set) and --no-compress (skip BC7 compression).
+//!   --no-compress    (--frames only) skip offline BC7 compression, only produce uncompressed RGBA8 atlas
 //!
-//! run 选项：
-//!   --port <N>       控制面端口（默认 6173，0=自动分配）
-//!   --speed <X>      初始倍速（默认 1.0）
-//!   --ticks <N>      跑满 N tick 后自动退出（CI/脚本用，全速不限速）
-//!   --record <文件>   退出时把录像写到文件
-//!   --load <槽名>     启动后立刻从 <项目>/saves/<槽名>.json 恢复续玩（与 --record 互斥）
-//!   --renderer <gpu|cpu> 窗口呈现路径（默认 cpu=softbuffer；gpu=wgpu，自带开窗）
+//! run options:
+//!   --port <N>       control plane port (default 6173, 0=auto-assign)
+//!   --speed <X>      initial speed multiplier (default 1.0)
+//!   --ticks <N>      auto-exit after running N ticks (for CI/scripts, full speed no throttling)
+//!   --record <file>  write recording to file on exit
+//!   --load <slot>    immediately restore from <project>/saves/<slot>.json on startup to continue playing (mutually exclusive with --record)
+//!   --renderer <gpu|cpu> window presentation path (default cpu=softbuffer; gpu=wgpu, opens its own window)
 //!
-//! bundle 选项：
-//!   --out <文件>     输出路径（默认 <项目名>-<平台>[.exe]）
-//!   --engine <exe>   附加到指定引擎二进制（跨平台出包：linux 上给 windows 出包就指交叉产物）
+//! bundle options:
+//!   --out <file>     output path (default <project-name>-<platform>[.exe])
+//!   --engine <exe>   attach to the specified engine binary (cross-platform bundling: e.g. on Linux, point at a cross-compiled Windows artifact for a Windows bundle)
 //!
-//! 发行包（exe 尾部有内嵌项目，见 src/bundle.rs）的启动行为：
-//!   无参数            玩家双击：解包后开窗运行（CPU 渲染）
-//!   run-embedded …    运行内嵌项目，run 同款选项透传（--ticks 5 无头冒烟 / --renderer gpu）
-//!   其他参数          正常 CLI（发行包同时也是完整引擎）
+//! Release bundle (exe tail contains an embedded project, see src/bundle.rs) startup behavior:
+//!   no args          player double-click: unpack and run in a window (CPU rendering)
+//!   run-embedded …   run the embedded project, same options as run are passed through (--ticks 5 headless smoke / --renderer gpu)
+//!   other args       normal CLI (release bundle is also a complete engine)
 //!
-//! 运行时 LLM 经环境变量启用：VITRIC_LLM_URL / VITRIC_LLM_KEY / VITRIC_LLM_MODEL（见 src/llm.rs）。
+//! Runtime LLM is enabled via env vars: VITRIC_LLM_URL / VITRIC_LLM_KEY / VITRIC_LLM_MODEL (see src/llm.rs).
 
 mod audio;
 mod gpu;
@@ -80,7 +80,7 @@ fn main() {
         }
     };
     if let Err(message) = result {
-        // 错误走 stderr 且保持结构化前缀，AI 和人都好解析
+        // Errors go to stderr with a structured prefix, easy for both AI and humans to parse
         eprintln!("vitric 错误: {message}");
         std::process::exit(1);
     }
@@ -91,8 +91,8 @@ fn usage_and_exit() -> ! {
     std::process::exit(2);
 }
 
-/// 无参数启动。发行包（exe 尾部有内嵌项目）= 玩家双击：解包后开窗运行内嵌项目
-/// （CPU 渲染，处处能跑；要 GPU 走 `run-embedded --renderer gpu`）；普通引擎 = 打用法。
+/// No-arg startup. Release bundle (exe tail contains an embedded project) = player double-click: unpack and run the embedded project in a window
+/// (CPU rendering, runs anywhere; for GPU use `run-embedded --renderer gpu`); normal engine = print usage.
 fn cmd_default() -> Result<(), String> {
     if let Some(dir) = vitric_cli::bundle::extract_self()? {
         return cmd_run(&[dir.display().to_string(), "--window".to_string()]);
@@ -100,8 +100,8 @@ fn cmd_default() -> Result<(), String> {
     usage_and_exit();
 }
 
-/// `run-embedded [run 选项]`：发行包专用——解出内嵌项目再走 cmd_run，选项原样透传
-/// （无头冒烟 `--ticks 5`、玩家要 GPU `--renderer gpu` 都从这进）。
+/// `run-embedded [run options]`: release bundle only — extract the embedded project and pass to cmd_run, options passed through as-is
+/// (headless smoke `--ticks 5`, player GPU `--renderer gpu` both come in here).
 fn cmd_run_embedded(args: &[String]) -> Result<(), String> {
     let Some(dir) = vitric_cli::bundle::extract_self()? else {
         return Err(
@@ -129,8 +129,8 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
         std::fs::read_to_string(rec_path).map_err(|e| format!("读取录像 {rec_path} 失败: {e}"))?;
     let rec: Recording =
         serde_json::from_str(&rec_text).map_err(|e| format!("录像解析失败: {e}"))?;
-    // 重放模式不装配 LLM：llm-ask 事件无人监听，llm-reply/llm-error 全部来自
-    // 录像的 replies 通道——重放永远不碰网络，离线逐位复现带 LLM 内容的那一局
+    // Replay mode does not assemble LLM: llm-ask events have no listener, llm-reply/llm-error all come from
+    // the recording's replies channel — replay never touches the network, reproduces the LLM-bearing session bit-for-bit offline
     let (mut sim, mut rt) = Runtime::boot(&PathBuf::from(dir))?;
     sim.replay(&rec, &mut rt).map_err(|e| e.to_string())?;
     println!(
@@ -144,52 +144,52 @@ fn cmd_replay(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `vitric playtest`：进程内自动试玩一局。boot 项目 → 派生场景视图喂策略 →
-/// 循环步进直到通关/死亡/超时 → 出一份可重放录像。这是 agent 集群试玩的地基
-/// （设计稿第 1 阶段）：装配住在本 crate（Runtime::boot），循环/视图/策略住在
-/// vitric-playtest，这里把两边接起来。
+/// `vitric playtest`: in-process automatic single-session playtest. boot project → derive a scene view for the strategy →
+/// loop stepping until clear/death/timeout → produce a replayable recording. This is the foundation for agent cluster playtesting
+/// (design draft phase 1): assembly lives in this crate (Runtime::boot), loop/view/strategy live in
+/// vitric-playtest, this file wires the two sides together.
 ///
-/// 选项：
-///   --strategy <random|greedy|economy|lookahead>  策略（默认 random；仅单局 N=1 用）。
-///                                lookahead=束搜索滚动规划器（技巧类游戏专用，慢但聪明，能解多 tick
-///                                组合/连续机动；不进 swarm 默认轮换）
-///   --horizon <K>                lookahead 束搜索的**深度**（往前规划几帧；默认 8，K=1 退化为单步前瞻）。
-///                                仅 --strategy lookahead 用
-///   --beam <W>                   lookahead 束搜索的**束宽**（每层保留 W 个最优节点；默认 4）。
-///                                仅 --strategy lookahead 用
-///   --seed <N>                   策略 PCG 播种（默认 0；swarm 模式从此起递增）
-///   --max-ticks <N>              超时上限（默认 600）
-///   --sessions <N>               跑 N 局 swarm 聚合出报告（默认 1=单局旧行为）
-///   --llm <N>                    额外跑 N 局 LLM 拟人玩（吐定性 note 进报告 qualitative_notes）；
-///                                需 VITRIC_LLM_URL/KEY/MODEL 配齐，没配齐报明确错误（不静默跳过）
-///   --seed-recording <录像.json> 种子式探索：拿这条录像当种子，扰动它的输入序列跑 N 局
-///   --out <路径>                 N=1 写录像；N>1 / 种子探索 / --llm 写完整报告 JSON
-///   --report-dir <目录>          代表录像落盘目录（默认 <项目>/playtest-report/）；报告主体只挂相对路径
-///   --html <路径>                把报告渲成一页给人看的自包含 HTML 写到该路径（内联 CSS/SVG，无外部依赖）；
-///                                代表录像仍按 --report-dir 落盘，HTML 里挂相对链接。单局（N=1）不出 HTML
-///                                （它只出一条录像，没有可聚合的报告）
+/// Options:
+///   --strategy <random|greedy|economy|lookahead>  strategy (default random; only for single-session N=1).
+///                                lookahead=beam-search rolling planner (specialized for skill-based games, slow but smart, can solve multi-tick
+///                                combinations / continuous maneuvers; not in swarm default rotation)
+///   --horizon <K>                lookahead beam search **depth** (how many frames to plan ahead; default 8, K=1 degrades to single-step lookahead).
+///                                only used with --strategy lookahead
+///   --beam <W>                   lookahead beam search **beam width** (W best nodes retained per layer; default 4).
+///                                only used with --strategy lookahead
+///   --seed <N>                   strategy PCG seed (default 0; in swarm mode increments from this)
+///   --max-ticks <N>              timeout upper bound (default 600)
+///   --sessions <N>               run N sessions as a swarm and aggregate a report (default 1=single-session legacy behavior)
+///   --llm <N>                    additionally run N LLM humanoid sessions (qualitative notes go into report qualitative_notes);
+///                                requires VITRIC_LLM_URL/KEY/MODEL all set; if not all set, report a clear error (do not silently skip)
+///   --seed-recording <recording.json> seed-style exploration: take this recording as a seed, perturb its input sequence and run N sessions
+///   --out <path>                 N=1 writes a recording; N>1 / seed exploration / --llm writes a full report JSON
+///   --report-dir <dir>           representative recording drop directory (default <project>/playtest-report/); report body only references relative paths
+///   --html <path>                render the report as a single-page human-readable self-contained HTML at this path (inline CSS/SVG, no external deps);
+///                                representative recording still drops to --report-dir, HTML references it via a relative link. Single-session (N=1) does not emit HTML
+///                                (it only produces one recording, no aggregatable report)
 ///
-/// **每游戏视图覆盖**（设计稿一节、十一节第 6 条）：自动加载项目根 `playtest.json`（存在即用，
-/// 否则默认 config=自动推视图、行为不变）——可挑组件/重命名/声明派生量（距离/别名/计数）/给
-/// greedy 指目标（朝某派生量 min/max 走）/覆盖终止事件名。报告里 stuck/runaway 等维度的代表
-/// 录像不再内联进报告主体，改成各存一份 json 落 report-dir，报告只挂相对路径（主体干净可读）。
+/// **Per-game view override** (design draft section 1, section 11 item 6): auto-loads the project root `playtest.json` (use if present,
+/// otherwise default config=auto-derived view, behavior unchanged) — can pick components / rename / declare derived quantities (distance / alias / count) / give
+/// greedy a target (drive a derived quantity toward min/max) / override terminal event names. Representative recordings of dimensions like stuck/runaway in the report
+/// are no longer inlined into the report body; each is dropped as a separate json file into report-dir, and the report only references relative paths (clean readable body).
 ///
-/// 行为分档（优先级从上到下）：
-/// - `--llm N>0`：swarm（sessions 局策略档）+ N 局 LLM 档拟人玩，合并聚合出报告。LLM 局的
-///   note 进 `qualitative_notes`（主观提示，待人复核），它选的输入进录像可重放；策略档部分仍确定。
+/// Behavior tiers (priority top-down):
+/// - `--llm N>0`: swarm (sessions strategy-tier sessions) + N LLM-tier humanoid sessions, merged and aggregated into a report. LLM sessions'
+///   notes go into `qualitative_notes` (subjective hints, pending human review), their chosen inputs go into recordings (replayable); the strategy-tier portion remains deterministic.
 ///
-/// 其余三档：
-/// - 给了 `--seed-recording`：**种子式探索**（设计稿第 3 阶段）——加载录像当种子，
-///   `perturb_plan` 生成 N 条变异脚本（drop/swap/substitute/truncate 轮换 + 截断接 random 发散），
-///   `run_seed_swarm` 并行跑，聚合报告含 `ending_coverage`（哪些声明结局不可达）。`--sessions`=变异条数。
-/// - 没给但 `--sessions>1`：swarm——random+greedy+coverage+economy 四策略轮流 × 递增 seed
-///   （economy 专为模拟经营找数值崩，报告含 `numeric_breakage`：经济跑飞/崩盘/溢出）。
-///   **声明了 goal 的项目**（playtest.json 有 goal）默认自动把末尾少数几局（约 25%）换成前瞻搜索
-///   （lookahead），让导航/技巧类游戏被真玩起来、不被随机策略误报 unbeatable；没声明 goal 则
-///   默认组完全不变（向后兼容）。无需新选项，默认行为自动变聪明。
-/// - 没给且 `--sessions=1`：单局旧行为，出一条可重放录像。
+/// The other three tiers:
+/// - With `--seed-recording`: **seed-style exploration** (design draft phase 3) — load the recording as a seed,
+///   `perturb_plan` generates N mutation scripts (drop/swap/substitute/truncate rotation + truncate-then-random divergence),
+///   `run_seed_swarm` runs them in parallel, aggregated report contains `ending_coverage` (which declared endings are unreachable). `--sessions`=number of mutations.
+/// - Not given but `--sessions>1`: swarm — four strategies random+greedy+coverage+economy rotate × incrementing seed
+///   (economy is specialized for finding numeric breakage in simulation/management games, report contains `numeric_breakage`: runaway economy / collapse / overflow).
+///   **Projects that declare a goal** (playtest.json has goal) automatically replace the last few sessions (~25%) with lookahead search
+///   (lookahead), so navigation/skill-based games actually get played and are not misreported as unbeatable by random strategies; without a declared goal the
+///   default set is completely unchanged (backward compatible). No new option needed, default behavior automatically gets smarter.
+/// - Not given and `--sessions=1`: single-session legacy behavior, produces one replayable recording.
 ///
-/// 各局都在自己线程内 boot 一份运行时并行跑（QuickJS 非 Send，运行时绝不跨线程）。
+/// Each session boots its own runtime inside its own thread and runs in parallel (QuickJS is not Send, runtime never crosses threads).
 fn cmd_playtest(args: &[String]) -> Result<(), String> {
     use std::sync::Arc;
 
@@ -205,10 +205,10 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     let dir = PathBuf::from(dir);
 
     let mut strategy_name = "random".to_string();
-    // --horizon 现在指束搜索的**深度**（往前规划几帧）；保留旧 flag 名向后兼容，默认 8。
-    // depth=1 退化为单步前瞻（1-ply）。
+    // --horizon now refers to the beam search **depth** (how many frames to plan ahead); old flag name kept for backward compatibility, default 8.
+    // depth=1 degrades to single-step lookahead (1-ply).
     let mut horizon: u64 = 8;
-    // --beam 束宽（每层保留多少最优节点继续展开），仅 --strategy lookahead 用，默认 4。
+    // --beam beam width (how many best nodes per layer continue to expand), only used with --strategy lookahead, default 4.
     let mut beam: usize = 4;
     let mut seed: u64 = 0;
     let mut max_ticks: u64 = 600;
@@ -275,13 +275,13 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         }
     }
 
-    // 自动加载项目根 playtest.json（存在即用，否则默认 config=自动推视图、行为不变）。
-    // 解析失败带路径明确报错（vitric check 风格），不静默跳过。
+    // Auto-load the project root playtest.json (use if present, otherwise default config=auto-derived view, behavior unchanged).
+    // Parse errors report clearly with the path (vitric check style), do not silently skip.
     let config = PlaytestConfig::load(&dir)?.unwrap_or_default();
-    // 项目清单声明的权威通关事件：gates.playthroughs[].must_emit。脚本/LLM 游戏
-    // （如 echo 的 run-complete）的胜利事件不在通用默认 TerminalSpec 里，靠这条并进来，
-    // 否则会被误判"谁也通不了"、ending_coverage 空。boot 内部已加载，这里再 load 一次取
-    // manifest 是廉价的（只读 JSON），换来不必把 must_emit 一路穿过 boot 的好处。
+    // Authoritative clear events declared in the project manifest: gates.playthroughs[].must_emit. Script/LLM games
+    // (e.g. echo's run-complete) have win events that are not in the generic default TerminalSpec; they are merged in via this,
+    // otherwise they are misjudged as "no one can clear" and ending_coverage is empty. boot already loaded it internally; loading once more here to get
+    // the manifest is cheap (just reading JSON), and saves us from threading must_emit all the way through boot.
     let manifest_must_emit: Vec<String> = match vitric_data::Project::load(&dir) {
         Ok(project) => project
             .manifest
@@ -289,30 +289,30 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
             .as_ref()
             .map(|g| g.playthroughs.iter().map(|p| p.must_emit.clone()).collect())
             .unwrap_or_default(),
-        // 清单读不出来不在这里硬错（boot 自己会报）——退化为空集，等价没声明 gates。
+        // If the manifest cannot be read, do not hard-error here (boot itself will report) — degrade to an empty set, equivalent to no declared gates.
         Err(_) => Vec::new(),
     };
 
-    // 终止规格：playtest.json 的 terminal 覆盖（没写就是默认集合）先生效，
-    // 再把清单 must_emit 追加进 win 集合（叠加去重，不替换覆盖结果）。
+    // Terminal spec: playtest.json's terminal override (default set if absent) takes effect first,
+    // then the manifest must_emit is appended to the win set (additive dedup, does not replace the override result).
     let terminal = match &config.terminal {
         Some(ovr) => TerminalSpec::default().apply_override(ovr),
         None => TerminalSpec::default(),
     }
     .with_manifest_must_emit(&manifest_must_emit);
-    // 代表录像落盘目录：默认 <项目>/playtest-report/。报告主体只挂相对路径，录像各自一份文件。
+    // Representative recording drop directory: default <project>/playtest-report/. Report body only references relative paths, each recording is its own file.
     let report_dir = report_dir.unwrap_or_else(|| dir.join("playtest-report"));
 
-    // 项目名（HTML 标题展示用）：取项目目录最后一段，取不到退化用 "project"。
+    // Project name (for HTML title display): take the last segment of the project directory; if unavailable, fall back to "project".
     let project_name = dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("project")
         .to_string();
 
-    // 报告产出口径统一：外置代表录像到 report-dir（回填相对路径）→ 打干净 JSON 到 stdout →
-    // --out 时另存一份完整报告 JSON →（给了 --html）把人话 HTML 报告写到该路径。录像不内联进
-    // 报告主体（设计稿十一节第 6 条）；HTML 里只挂代表录像的相对链接（path 已回填）。
+    // Unified report emission contract: externalize representative recordings to report-dir (backfill relative paths) → print clean JSON to stdout →
+    // if --out, also save a full report JSON → (if --html given) write a human-readable HTML report to that path. Recordings are not inlined into
+    // the report body (design draft section 11 item 6); HTML only references the representative recording via a relative link (path is backfilled).
     let emit_report = |mut report: vitric_playtest::Report,
                        out_path: &Option<PathBuf>|
      -> Result<(), String> {
@@ -331,9 +331,9 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         Ok(())
     };
 
-    // --llm N>0：在 swarm 里额外跑 N 局 LLM 拟人玩（设计稿五阶段）。LLM 局的 note 进报告
-    // 的 qualitative_notes，它选的输入进录像（可重放）。装真 client（VITRIC_LLM_* 没配齐
-    // 直接报明确错误，不静默跳过）。LLM 档本就慢，单独串行跑，跑完并进策略档结果集聚合。
+    // --llm N>0: additionally run N LLM humanoid sessions in the swarm (design draft phase 5). LLM sessions' notes go into the report's
+    // qualitative_notes, their chosen inputs go into recordings (replayable). Install a real client (if VITRIC_LLM_* are not all set,
+    // report a clear error directly, do not silently skip). LLM tier is inherently slow, run serially, then merge into the strategy-tier result set for aggregation.
     if llm_sessions > 0 {
         let client: Arc<dyn LlmClient> = Arc::new(
             vitric_cli::playtest_llm::PlaytestLlmClient::from_env()?,
@@ -343,16 +343,16 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
             let engine = rt.rules.clone();
             Ok((sim, rt, engine))
         };
-        // 同一个工厂闭包要喂两个函数（run_swarm 移走会再无法用），借一份共享引用：
-        // &F where F: Fn 仍是 Fn + Sync，两边都用引用，不重复 boot 逻辑。
+        // The same factory closure has to feed two functions (run_swarm takes it by value and is no longer usable afterward), so share a reference:
+        // &F where F: Fn is still Fn + Sync, both sides use a reference, no duplicated boot logic.
         let factory_ref = &factory;
-        // 策略档：sessions 局廉价策略（轮换 + 递增 seed），和无 --llm 时同口径。
-        // 声明了 goal 的项目自动掺几局前瞻（default_plan 内部判 has_goal）。
+        // Strategy tier: sessions cheap-strategy sessions (rotation + incrementing seed), same contract as without --llm.
+        // Projects with a declared goal automatically mix in a few lookahead sessions (default_plan checks has_goal internally).
         let plan = default_plan(sessions, seed, max_ticks, terminal.clone(), config.goal.is_some());
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        // 带 config：greedy 朝 config.goal 走，视图按 include/exclude/relabel/派生量调整
+        // With config: greedy drives toward config.goal, view is adjusted via include/exclude/relabel/derived quantities
         let mut results = run_swarm_with_config(factory_ref, &plan, &config, threads)?;
-        // LLM 档：N 局拟人玩，结果并进同一个集合喂聚合器。目标描述拼 config.goal（有则给 LLM 指向）
+        // LLM tier: N humanoid sessions, results are merged into the same set fed to the aggregator. Goal description is assembled from config.goal (if present, gives the LLM a direction)
         let goal_hint = config
             .goal
             .as_ref()
@@ -369,22 +369,22 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
         )?;
         results.extend(llm_results);
 
-        // 有声明结局就一并算结局覆盖（叙事项目尤其需要）
+        // If endings are declared, also compute ending coverage (narrative projects especially need this)
         let (_, rt) = Runtime::boot(&dir)?;
         let report = aggregate_with_endings_and_declared(&results, &rt.rules, &terminal, &manifest_must_emit);
         return emit_report(report, &out_path);
     }
 
-    // 给了 --seed-recording：种子式探索（第 3 阶段）。加载种子录像 → perturb_plan 生成
-    // N 条变异 → ScriptedStrategy（截断接 random 发散）并行跑 → 聚合含 ending_coverage。
+    // With --seed-recording: seed-style exploration (phase 3). Load the seed recording → perturb_plan generates
+    // N mutations → ScriptedStrategy (truncate-then-random divergence) runs in parallel → aggregate, including ending_coverage.
     if let Some(seed_path) = &seed_recording {
         let rec_text = std::fs::read_to_string(seed_path)
             .map_err(|e| format!("读取种子录像 {} 失败: {e}", seed_path.display()))?;
         let seed_rec: Recording =
             serde_json::from_str(&rec_text).map_err(|e| format!("种子录像解析失败: {e}"))?;
 
-        // 变异条数 = --sessions（第 0 条是基线=原种子）。--seed 复用为扰动 PCG 播种，
-        // 截断脚本的 random 发散用 seed+1 错开（与扰动 PCG 不同源）。
+        // Mutation count = --sessions (the 0th is the baseline = original seed). --seed is reused as the perturb PCG seed,
+        // the truncated script's random divergence uses seed+1 to offset (different source from the perturb PCG).
         let plan = perturb_plan(&seed_rec, sessions as usize, seed);
         let factory = || -> Result<(_, _, _), String> {
             let (sim, rt) = Runtime::boot(&dir)?;
@@ -392,7 +392,7 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
             Ok((sim, rt, engine))
         };
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        // 种子回复跟着种子走：扰动只动输入，回复原样按原 tick 注回去（run_seed_swarm 内部按截断过滤）。
+        // Seed replies follow the seed: perturbation only changes inputs, replies are injected back at their original ticks as-is (run_seed_swarm filters by truncation internally).
         let results = run_seed_swarm(
             factory,
             &plan,
@@ -403,57 +403,57 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
             threads,
         )?;
 
-        // 结局覆盖要扫规则声明的结局集合，单独 boot 一份只读 Engine 喂聚合器
+        // Ending coverage needs to scan the rule-declared ending set, so boot a separate read-only Engine to feed the aggregator
         let (_, rt) = Runtime::boot(&dir)?;
         let report = aggregate_with_endings_and_declared(&results, &rt.rules, &terminal, &manifest_must_emit);
         return emit_report(report, &out_path);
     }
 
-    // N>1：swarm 跑批 + 聚合报告
+    // N>1: swarm batch + aggregated report
     if sessions > 1 {
-        // 计划：四策略轮流 × 递增 seed，凑够 N 局。每条 spec 自带 (策略,seed,max_ticks,terminal)，
-        // 一局结果只由 spec + config 决定（确定性铁律）——串行/并行结果一致。
-        // 声明了 goal（playtest.json）的项目，default_plan 自动把末尾少数几局换成前瞻搜索，
-        // 让导航/技巧类不被随机策略误报 unbeatable；没声明 goal 则默认组完全不变（向后兼容）。
+        // Plan: four strategies rotate × incrementing seed, to make up N sessions. Each spec carries (strategy, seed, max_ticks, terminal),
+        // a session's outcome is determined solely by spec + config (iron law of determinism) — serial and parallel runs give the same result.
+        // For projects with a declared goal (playtest.json), default_plan automatically replaces the last few sessions with lookahead search,
+        // so navigation/skill-based games are not misreported as unbeatable by random strategies; without a declared goal the default set is completely unchanged (backward compatible).
         let plan = default_plan(sessions, seed, max_ticks, terminal.clone(), config.goal.is_some());
 
-        // 工厂闭包：每个工作线程在自己线程内调它 boot 一份全新运行时。
-        // 返回 (Sim, Runtime, Engine)——Engine 是装配期无状态副本（derive Clone），
-        // 跑 run_session 时同时可变借 logic 和不可变借 engine 需要它独立一份。
+        // Factory closure: each worker thread calls it inside its own thread to boot a fresh runtime.
+        // Returns (Sim, Runtime, Engine) — Engine is an assembly-time stateless copy (derive Clone),
+        // running run_session needs to mutably borrow logic and immutably borrow engine at the same time, so engine must be a separate copy.
         let factory = || -> Result<(_, _, _), String> {
             let (sim, rt) = Runtime::boot(&dir)?;
             let engine = rt.rules.clone();
             Ok((sim, rt, engine))
         };
 
-        // 线程数默认机器并行度（run_swarm 内部再取 min(plan, cpu)）
+        // Thread count defaults to machine parallelism (run_swarm internally takes min(plan, cpu))
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        // 带 config：greedy 朝 config.goal 走，视图按 include/exclude/relabel/派生量调整。
-        // 有声明结局就算结局覆盖（用 config 覆盖后的 terminal 扫声明集合）。
+        // With config: greedy drives toward config.goal, view is adjusted via include/exclude/relabel/derived quantities.
+        // If endings are declared, compute ending coverage (scan the declared set using the config-overridden terminal).
         let results = run_swarm_with_config(factory, &plan, &config, threads)?;
         let (_, rt) = Runtime::boot(&dir)?;
         let report = aggregate_with_endings_and_declared(&results, &rt.rules, &terminal, &manifest_must_emit);
         return emit_report(report, &out_path);
     }
 
-    // N=1：单局旧行为（出可重放录像）。
+    // N=1: single-session legacy behavior (produces a replayable recording).
     let out = out_path.unwrap_or_else(|| dir.join("playtest-session.json"));
-    // boot 一对全新的 (sim, runtime)：录可重放录像必须从冷启动起录
+    // Boot a fresh (sim, runtime) pair: recording a replayable recording must start from a cold boot
     let (mut sim, mut rt) = Runtime::boot(&dir)?;
-    // 单局也走 config：终止覆盖 + 派生量视图（greedy/lookahead 找目标）。
+    // Single session also uses config: terminal override + derived-quantity view (greedy/lookahead finds the target).
     let cfg = SessionConfig { max_ticks, seed, terminal: terminal.clone(), playtest: config.clone(), ..Default::default() };
-    // run_session 要同时可变借 logic(rt) 和不可变借 engine(rt.rules)——同一对象借不动。
-    // Engine 是装配期无状态副本，复制一份只读的传进去最干净（见 Engine 的 derive 注释）。
+    // run_session needs to mutably borrow logic(rt) and immutably borrow engine(rt.rules) at the same time — cannot borrow the same object both ways.
+    // Engine is an assembly-time stateless copy; cloning a read-only copy to pass in is the cleanest approach (see Engine's derive comment).
     let engine = rt.rules.clone();
 
-    // lookahead 走束搜索滚动规划器（每真 tick 建深度 D=horizon、束宽 W=beam 的搜索树选最优首步），
-    // 其余走普通策略 run_session。成本注释：束搜索每真 tick 代价 ≤ W×(|候选动作|+1)×D 个投机 step，
-    // 远贵于廉价策略，所以只在显式 --strategy lookahead 时启用，**不进 swarm 默认轮换**（swarm 跑成百上千局）。
+    // lookahead uses a beam-search rolling planner (each real tick builds a depth D=horizon, beam width W=beam search tree to pick the best first step),
+    // the rest use the ordinary strategy run_session. Cost note: beam search cost per real tick ≤ W×(|candidate actions|+1)×D speculative steps,
+    // far more expensive than cheap strategies, so only enabled with explicit --strategy lookahead, **not in swarm default rotation** (swarm runs hundreds or thousands of sessions).
     let result = if strategy_name == "lookahead" {
         run_session_lookahead(&mut sim, &mut rt, &engine, &cfg, &LookaheadConfig { depth: horizon, beam_width: beam })?
     } else {
-        // economy 也能选——单局压一种策略看它怎么跑。
-        // greedy 有 config.goal 时朝目标走（playtest.json 声明派生量 + goal），否则退化随机。
+        // economy is also selectable — single-session stress one strategy and see how it runs.
+        // greedy drives toward the target when config.goal is present (playtest.json declares derived quantity + goal), otherwise degrades to random.
         let mut strategy: Box<dyn Strategy> = match strategy_name.as_str() {
             "random" => Box::new(RandomStrategy::new(seed)),
             "greedy" => match &config.goal {
@@ -480,13 +480,13 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `vitric gate`：交付门禁。报告（人和机器同一份 JSON）永远打到 stdout；
-/// 全部门禁 pass 才退出 0——"交付完成"由这里裁决，不由 agent 自述。
+/// `vitric gate`: delivery gate. The report (same JSON for humans and machines) always goes to stdout;
+/// all gates must pass to exit 0 — "delivery complete" is decided here, not by agent self-report.
 ///
-/// 门集：check + 通关录像重放 + 断言集（见 gate::run），外加**可选的 playtest 门**——清单
-/// 声明 `gates.playtest` 才跑：真跑一遍 playtest swarm（确定可复现）、聚合出报告、逐条核对
-/// 声明的契约（能不能通关 / 软锁数 / 不可达结局 / 惰性动作 / 数值崩），把"自动清地板"变成
-/// 交付契约。没声明 = 不跑这道门（向后兼容，现有 gate 行为不变）。
+/// Gate set: check + clear recording replay + assertion set (see gate::run), plus **optional playtest gate** — only runs when the manifest
+/// declares `gates.playtest`: actually runs a playtest swarm (verifiable reproducibility), aggregates a report, checks each
+/// declared contract (can clear / soft-lock count / unreachable endings / lazy actions / numeric breakage), turning "auto-clear the floor" into
+/// a delivery contract. Not declared = this gate is not run (backward compatible, existing gate behavior unchanged).
 fn cmd_gate(args: &[String]) -> Result<(), String> {
     let dir = args.first().ok_or("gate 缺少项目目录参数")?;
     let (report, pass) = vitric_cli::gate::run(&PathBuf::from(dir))?;
@@ -498,8 +498,8 @@ fn cmd_gate(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// `vitric team`：班子协同黑板。状态工具不是门——报告打到 stdout 后**永远成功退出**，
-/// 有卡点也只是 blocking 提示；交付裁决归 `vitric gate`。
+/// `vitric team`: team coordination blackboard. The status tool is not a gate — after the report goes to stdout it **always succeeds and exits**,
+/// blockages are only blocking hints; delivery verdict is up to `vitric gate`.
 fn cmd_team(args: &[String]) -> Result<(), String> {
     let dir = args.first().ok_or("team 缺少项目目录参数")?;
     let report = vitric_cli::team::run(&PathBuf::from(dir))?;
@@ -507,7 +507,7 @@ fn cmd_team(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `vitric turf`：地盘执法。报告同 gate 风格打到 stdout；有越界文件就退出 1。
+/// `vitric turf`: turf enforcement. Report goes to stdout in the same style as gate; any out-of-bounds file means exit 1.
 fn cmd_turf(args: &[String]) -> Result<(), String> {
     let (report, pass) = vitric_cli::turf::run(args)?;
     println!("{}", serde_json::to_string_pretty(&report).expect("报告可序列化"));
@@ -568,7 +568,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
             other => return Err(format!("未知选项 {other:?}。可用: --window --renderer --port --speed --ticks --record --load")),
         }
     }
-    // GPU 是窗口呈现路径，没有无头形态——选了 gpu 就等于要开窗
+    // GPU is a window presentation path, no headless form — choosing gpu means opening a window
     if matches!(renderer, window::Renderer::Gpu) {
         windowed = true;
     }
@@ -578,19 +578,19 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let (mut sim, mut rt) = Runtime::boot(&dir)?;
     let mut dispatcher = Dispatcher::new(project.schema.clone());
     dispatcher.load_assets(&dir.join("assets"))?;
-    // 清单挂了 font：启动期加载（缺失/损坏立刻报错），所有 Text 走矢量路径
+    // Manifest declares a font: load it at startup (missing/corrupt errors immediately), all Text goes through the vector path
     if let Some(font_rel) = &project.manifest.font {
         dispatcher.load_font(&dir.join(font_rel))?;
     }
     dispatcher.set_budgets(project.manifest.budgets.clone());
     dispatcher.ctl.speed = speed;
 
-    // 玩家存档：槽位固定在 <项目>/saves/，约定事件（save-game/load-game）、
-    // save/* RPC、--load 共用这一个 SaveStore——同一条代码路径同一套校验
+    // Player saves: slots are fixed under <project>/saves/, convention events (save-game/load-game),
+    // save/* RPC and --load all share this one SaveStore — same code path, same validation
     let saves = SaveStore::new(&dir, &project.manifest.name);
     if let Some(slot) = &load_slot {
-        // 录像必须从项目数据冷启动可逐位重放；从存档续玩的会话起点不是冷启动，
-        // 录出来的录像 vitric replay 必然在起点就跑偏——明确互斥，不产出废录像
+        // A recording must be bit-for-bit replayable from a cold boot of the project data; a session continued from a save is not a cold boot,
+        // the resulting recording would diverge at the very start in vitric replay — explicitly mutually exclusive, do not produce a broken recording
         if record_path.is_some() {
             return Err(
                 "--load 与 --record 互斥：录像要求从项目数据冷启动可重放，从存档续玩的\
@@ -598,7 +598,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
                     .to_string(),
             );
         }
-        // 在 tick 0 之前恢复：start 事件不会重发（存档时刻早已过了 tick 0）
+        // Restore before tick 0: the start event will not be re-emitted (the save's tick 0 has long passed)
         let snap = saves.read(slot)?;
         sim.restore(&snap, &mut rt).map_err(|e| format!("--load {slot}: 存档恢复失败: {e}"))?;
     }
@@ -609,14 +609,14 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     }
 
     let server = ControlServer::start(port)?;
-    // 音频：无声卡环境合法降级，横幅明说
+    // Audio: legitimate degradation in environments without a sound card, banner states this clearly
     let (mut audio_sink, audio_status) = match audio::Audio::open(dir.join("sounds")) {
         Ok(a) => (Some(a), "ok".to_string()),
         Err(e) => (None, format!("disabled: {e}")),
     };
-    // 运行时 LLM：环境变量配齐才启用；没配也是合法状态（llm-ask 会收到显式 llm-error）
+    // Runtime LLM: only enabled when env vars are all set; not configured is also a legitimate state (llm-ask receives an explicit llm-error)
     let mut llm = Llm::from_env();
-    // 启动横幅走 stdout 单行 JSON：AI 解析端口，人也看得懂
+    // Startup banner goes to stdout as a single-line JSON: AI parses the port, humans can also read it
     println!(
         "{}",
         serde_json::json!({
@@ -642,7 +642,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         };
     }
 
-    // 主循环：固定步长 + 倍速 + 帧边界处理控制命令
+    // Main loop: fixed step + speed multiplier + frame-boundary handling of control commands
     let mut last = Instant::now();
     let mut acc: f64 = 0.0;
     loop {
@@ -667,23 +667,23 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         }
 
         if max_ticks.is_some() {
-            // 有限跑：全速不睡觉
+            // Bounded run: full speed, no sleeping
             step_once(&mut sim, &mut rt, &mut dispatcher, &mut audio_sink, &mut llm)?;
             continue;
         }
 
-        // 实时跑：按墙钟攒步数（墙钟只决定「跑几步」，永远不进模拟）
+        // Real-time run: accumulate step count by wall clock (wall clock only decides "how many steps", never enters the simulation)
         let now = Instant::now();
         acc += now.duration_since(last).as_secs_f64() * dispatcher.ctl.speed;
         last = now;
-        let mut budget = 8; // 单帧补步上限，防螺旋死亡
+        let mut budget = 8; // per-frame catch-up step cap, prevents spiral of death
         while acc >= DT && budget > 0 {
             step_once(&mut sim, &mut rt, &mut dispatcher, &mut audio_sink, &mut llm)?;
             acc -= DT;
             budget -= 1;
         }
         if budget == 0 {
-            acc = 0.0; // 跟不上就丢，不追帧
+            acc = 0.0; // drop frames if behind, do not chase
         }
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -720,17 +720,17 @@ pub fn step_once(
     dispatcher.record_events(report.tick, &report.events);
     let observed = rt.drain_observed();
     audio::handle_sound_events(audio_sink, &observed);
-    // LLM：捕获本 tick 的 llm-ask 排队发请求，再收割已完成的回复注入下一 tick
+    // LLM: capture this tick's llm-ask, queue requests, then harvest completed replies and inject them into the next tick
     llm::handle_ask_events(llm, &observed, sim);
     llm::pump_replies(llm, sim);
     dispatcher.record_events(report.tick, &observed);
-    // 存档约定事件：save-game 写盘（纯输出副作用，同音频）；load-game 在这里——
-    // 帧边界、模拟之外——整体回跳到存档时刻。失败结构化上报 stderr，不崩游戏
+    // Save convention events: save-game writes to disk (pure output side effect, like audio); load-game happens here —
+    // frame boundary, outside the simulation — jump back to the save point as a whole. Failures are reported to stderr in structured form, do not crash the game
     for error in dispatcher.handle_save_load_events(&observed, sim, rt) {
         eprintln!("{}", serde_json::json!({"save_error": error}));
     }
     for failure in dispatcher.check_assertions(sim) {
-        // 断言失败实时上报到 stderr（结构化一行），同时存进 assert/failures
+        // Assertion failures are reported to stderr in real time (one structured line), and also stored into assert/failures
         eprintln!("{}", serde_json::json!({"assert_failure": failure}));
     }
     Ok(())

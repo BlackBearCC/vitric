@@ -1,8 +1,8 @@
-//! 玩家存档端到端：约定事件 save-game/load-game、`--load` 启动续玩、录像互斥。
+//! Player saves end-to-end: convention events save-game/load-game, `--load` boot to resume, recording mutual exclusion.
 //!
-//! 用 coin-run 的临时副本（加三条存档规则），不污染示例项目。
-//! in-process 部分逐步复刻 `vitric run` 主循环对存档事件的处理
-//! （step → drain_observed → handle_save_load_events），CLI 部分跑真二进制。
+//! Uses a temp copy of coin-run (with three save rules added), not polluting the example project.
+//! The in-process part incrementally replicates `vitric run`'s main-loop handling of save events
+//! (step → drain_observed → handle_save_load_events); the CLI part runs the real binary.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -30,7 +30,7 @@ fn copy_dir(src: &Path, dst: &Path) {
     }
 }
 
-/// coin-run 临时副本 + 存档规则：按 s 存 slot1、按 l 读 slot1、按 x 用非法槽名存。
+/// coin-run temp copy + save rules: press s to save slot1, press l to load slot1, press x to save with an illegal slot name.
 fn temp_copy(tag: &str) -> PathBuf {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/coin-run");
     let dst = std::env::temp_dir().join(format!("vitric-saves-{}-{tag}", std::process::id()));
@@ -56,7 +56,7 @@ fn temp_copy(tag: &str) -> PathBuf {
     dst
 }
 
-/// in-process 装配：与 vitric run 同款（Runtime + Dispatcher + SaveStore）。
+/// in-process assembly: same as vitric run (Runtime + Dispatcher + SaveStore).
 struct Game {
     sim: Sim,
     rt: Runtime,
@@ -72,7 +72,7 @@ fn boot(dir: &Path) -> Game {
 }
 
 impl Game {
-    /// 等价主循环的一步：step + 处理存档约定事件，返回存档错误记录。
+    /// Equivalent to one step of the main loop: step + handle save convention events, returns save error records.
     fn step(&mut self) -> Vec<Value> {
         self.sim.step(&mut self.rt).unwrap();
         let observed = self.rt.drain_observed();
@@ -92,7 +92,7 @@ fn save_event_writes_file_and_load_event_restores_state() {
         assert!(g.step().is_empty());
     }
 
-    // 按 s：存档文件落盘，带引擎版本 + 项目名 + 完整快照
+    // Press s: save file flushed to disk, carrying engine version + project name + full snapshot
     g.sim.inject_input("s", "pressed");
     assert!(g.step().is_empty());
     let save_path = dir.join("saves/slot1.json");
@@ -105,20 +105,20 @@ fn save_event_writes_file_and_load_event_restores_state() {
     let t_save = g.sim.tick;
     assert_eq!(file["snapshot"]["tick"], json!(t_save));
 
-    // 改变世界：向右跑 60 tick（吃金币、动画推帧，哈希必然变）
+    // Change the world: run right for 60 ticks (eat coins, advance animation frames, the hash must change)
     g.sim.inject_input("right", "pressed");
     for _ in 0..60 {
         assert!(g.step().is_empty());
     }
     assert_ne!(g.hash(), h_save);
 
-    // 按 l：状态精确回到存档时刻
+    // Press l: state returns exactly to the save moment
     g.sim.inject_input("l", "pressed");
     assert!(g.step().is_empty());
     assert_eq!(g.hash(), h_save, "load-game 后世界哈希必须等于存档时刻");
     assert_eq!(g.sim.tick, t_save);
 
-    // 续玩照常（读档不是终点，继续跑不出错、世界继续演化）
+    // Resume play as usual (loading is not the end; keep running without errors, the world keeps evolving)
     for _ in 0..30 {
         assert!(g.step().is_empty());
     }
@@ -132,7 +132,7 @@ fn bad_slot_and_missing_slot_report_structured_errors_without_crashing() {
     let dir = temp_copy("errors");
     let mut g = boot(&dir);
 
-    // 路径穿越槽名：拒绝 + 不落盘
+    // Path-traversal slot name: rejected + nothing flushed to disk
     g.sim.inject_input("x", "pressed");
     let errs = g.step();
     assert_eq!(errs.len(), 1, "{errs:?}");
@@ -140,7 +140,7 @@ fn bad_slot_and_missing_slot_report_structured_errors_without_crashing() {
     assert!(errs[0]["error"].as_str().unwrap().contains("不合法"), "{errs:?}");
     assert!(!dir.join("evil.json").exists() && !dir.join("saves").exists(), "非法槽名不许写出任何文件");
 
-    // 读不存在的槽：显式报错，游戏继续跑
+    // Load a non-existent slot: explicit error, the game keeps running
     g.sim.inject_input("l", "pressed");
     let errs = g.step();
     assert_eq!(errs.len(), 1, "{errs:?}");
@@ -162,10 +162,10 @@ fn load_game_refused_while_recording_and_recording_stays_replayable() {
     let mut errs = Vec::new();
     for t in 0..90 {
         if t == 5 {
-            g.sim.inject_input("s", "pressed"); // 录像中存档：纯输出副作用，放行
+            g.sim.inject_input("s", "pressed"); // Saving during a recording: pure output side effect, allowed
         }
         if t == 20 {
-            g.sim.inject_input("l", "pressed"); // 录像中读档：拒绝
+            g.sim.inject_input("l", "pressed"); // Loading during a recording: rejected
         }
         if t == 40 {
             g.sim.inject_input("right", "pressed");
@@ -178,7 +178,7 @@ fn load_game_refused_while_recording_and_recording_stays_replayable() {
     assert!(msg.contains("录像") && msg.contains("互斥"), "{msg}");
     assert!(g.sim.is_recording(), "拒绝读档后录像必须仍然有效");
 
-    // 录像仍可从冷启动逐位重放（读档被拒，时间线没断；重放中 save/load 事件无人执行）
+    // The recording can still be replayed bit-by-bit from a cold boot (loading was rejected, the timeline is unbroken; during replay save/load events are executed by no one)
     let rec = g.sim.stop_recording().unwrap();
     let (mut sim2, mut rt2) = Runtime::boot(&dir).unwrap();
     sim2.replay(&rec, &mut rt2).expect("拒绝读档后的录像必须可重放");
@@ -186,7 +186,7 @@ fn load_game_refused_while_recording_and_recording_stays_replayable() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-// ---- CLI：真二进制 ----
+// ---- CLI: real binary ----
 
 struct RunningGame {
     child: Child,
@@ -244,7 +244,7 @@ fn rpc(port: u16, method: &str, params: Value) -> Value {
 #[test]
 fn cli_load_boots_into_saved_state_and_save_rpcs_roundtrip() {
     let dir = temp_copy("cli-load");
-    // 先 in-process 造一份存档，记下存档时刻的哈希
+    // First build a save in-process, recording the hash at the save moment
     let mut g = boot(&dir);
     for _ in 0..30 {
         g.step();
@@ -255,7 +255,7 @@ fn cli_load_boots_into_saved_state_and_save_rpcs_roundtrip() {
     let t_save = g.sim.tick;
     drop(g);
 
-    // --load 续玩：极低倍速（几乎不前进），经控制面验证起点就是存档时刻
+    // --load resume: very low speed (barely advances), verify via the control plane that the starting point is the save moment
     let game = spawn_game(&dir, &["--load", "slot1", "--speed", "0.000001"]);
     let port = game.port;
     let r = rpc(port, "sim/pause", json!({}));
@@ -264,7 +264,7 @@ fn cli_load_boots_into_saved_state_and_save_rpcs_roundtrip() {
     assert_eq!(pong["result"]["tick"], json!(t_save), "--load 应恢复到存档 tick");
     assert_eq!(rpc(port, "sim/hash", json!({}))["result"], json!(h_save), "--load 应恢复到存档哈希");
 
-    // RPC 薄封装回环：save/list / save/write 新槽 / 改世界 / save/load 回滚
+    // Thin RPC wrapper round-trip: save/list / save/write a new slot / mutate the world / save/load to roll back
     assert_eq!(rpc(port, "save/list", json!({}))["result"], json!(["slot1"]));
     let r = rpc(port, "save/write", json!({"slot": "slot2"}));
     assert_eq!(r["ok"], json!(true), "{r}");
@@ -282,7 +282,7 @@ fn cli_load_boots_into_saved_state_and_save_rpcs_roundtrip() {
 #[test]
 fn cli_load_missing_slot_is_boot_error_listing_saves() {
     let dir = temp_copy("cli-missing");
-    // 放一份存档，让报错有东西可列
+    // Drop a save so the error has something to list
     let g = boot(&dir);
     SaveStore::new(&dir, "coin-run").write("slot1", &g.sim, &()).unwrap();
     drop(g);

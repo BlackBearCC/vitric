@@ -1,18 +1,24 @@
-//! 束搜索滚动规划器（run_session_lookahead）端到端：在真实 nav 导航项目上证明「技巧类游戏
-//! 需要的多 tick 机动能被规划出来」。
+//! Beam-search rolling planner (run_session_lookahead) end-to-end: prove on the real nav
+//! navigation project that "the multi-tick maneuver skill games need can be planned out".
 //!
-//! nav 关卡：hero 从 x=0 出发，x=5 处有堵挡路的墙（Collider h=2，墙顶 y=1 高过 hero 站地时的
-//! 脚底 y=0），必须**先起跳越过墙、再持续右行**，走到 x≥9.5 触发 reached-exit 通关。playtest.json
-//! 把目标声明成「最大化 hero 的 x 坐标」（向右推进）——跳跃那一帧不增加 x（甚至像在原地「浪费」
-//! 一帧），所以**单步前瞻（depth=1）只会贪心地一直按右、撞墙卡死**；只有规划够深的束搜索才算得出
-//! 「跳一下、越过墙、x 重新增长」这串收益，从而通关。
+//! nav level: hero starts at x=0; at x=5 there is a wall in the way (Collider h=2, wall top y=1
+//! higher than hero's foot y=0 when standing on ground); you must **first jump over the wall,
+//! then keep going right**, reaching x≥9.5 to trigger reached-exit and clear. playtest.json
+//! declares the goal as "maximize hero's x coordinate" (push right) — the jump frame does not
+//! increase x (it even looks like "wasting" a frame in place), so **single-step lookahead
+//! (depth=1) will only greedily keep pressing right, hit the wall and get stuck**; only beam
+//! search with enough depth can compute the return string "jump once, clear the wall, x grows
+//! again", and thus clear.
 //!
-//! 硬证据：
-//!  1. **同一关卡、同一规划器，depth=1（退化单步前瞻）超时，depth≥8 的束搜索通关**——证明规划
-//!     深度真带来了能力（这是本次「单步→束搜索」升级的核心证据）；
-//!  2. 同条件下 lookahead 通关（Win）而 random 超时（Timeout）；
-//!  3. lookahead 那局手工攒的录像被 Sim::replay 逐位复现（证明录像对、投机没污染）；
-//!  4. 同 (项目,seed,depth,beam) 两次 lookahead 的 outcome/ticks/录像逐字节一致。
+//! Hard evidence:
+//!  1. **Same level, same planner, depth=1 (degenerate single-step lookahead) times out,
+//!     depth≥8 beam search clears** — proving planning depth really brought capability (this is
+//!     the core evidence of this "single-step → beam search" upgrade);
+//!  2. Under the same conditions lookahead clears (Win) while random times out (Timeout);
+//!  3. The recording hand-built by that lookahead session is bit-reproduced by Sim::replay
+//!     (proving the recording is correct, speculation did not pollute);
+//!  4. Two lookahead runs of the same (project, seed, depth, beam) are byte-identical in
+//!     outcome/ticks/recording.
 
 use std::path::PathBuf;
 
@@ -23,21 +29,24 @@ use vitric_playtest::{
     StrategyKind, Strategy, TerminalSpec,
 };
 
-/// 本测试用的束搜索深度：nav 越墙机动实测 depth≥8 稳定通关（最小约 8），取 12 留余量。
+/// Beam-search depth used in this test: nav wall-clearing maneuver measured depth≥8 stable clear
+/// (minimum about 8), take 12 with margin.
 const NAV_DEPTH: u64 = 12;
-/// 本测试用的束宽。
+/// Beam width used in this test.
 const NAV_BEAM: usize = 4;
 
 fn nav_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../vitric-playtest/tests/fixtures/nav")
 }
 
-/// 仓库根的示例游戏目录（examples/ 在 workspace 根，本测试 crate 在 crates/vitric-cli 下）。
+/// Repository-root example game directory (examples/ is at the workspace root; this test crate is
+/// under crates/vitric-cli).
 fn example(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(name)
 }
 
-/// 加载 nav 的 playtest.json（含派生量 hero_x + goal:max + terminal win_events:["reached-exit"]）。
+/// Load nav's playtest.json (includes derived quantity hero_x + goal:max + terminal
+/// win_events:["reached-exit"]).
 fn nav_cfg(seed: u64, max_ticks: u64) -> (PlaytestConfig, SessionConfig) {
     let config = PlaytestConfig::load(&nav_dir()).unwrap().expect("nav 有 playtest.json");
     let terminal = match &config.terminal {
@@ -54,7 +63,8 @@ fn nav_cfg(seed: u64, max_ticks: u64) -> (PlaytestConfig, SessionConfig) {
     (config, cfg)
 }
 
-/// 跑一局束搜索 lookahead（显式指定 depth/beam，便于硬证据对照 depth=1 vs 深搜）。
+/// Run one beam-search lookahead session (explicitly specify depth/beam, for hard-evidence
+/// depth=1 vs deep search comparison).
 fn run_lookahead_db(seed: u64, max_ticks: u64, depth: u64, beam: usize) -> vitric_playtest::SessionResult {
     let (_, cfg) = nav_cfg(seed, max_ticks);
     let (mut sim, mut rt) = Runtime::boot(&nav_dir()).unwrap();
@@ -62,7 +72,7 @@ fn run_lookahead_db(seed: u64, max_ticks: u64, depth: u64, beam: usize) -> vitri
     run_session_lookahead(&mut sim, &mut rt, &engine, &cfg, &LookaheadConfig { depth, beam_width: beam }).unwrap()
 }
 
-/// 默认深度/束宽的 lookahead（多数硬证据用这个）。
+/// Lookahead with default depth/beam width (most hard evidence uses this).
 fn run_lookahead(seed: u64, max_ticks: u64) -> vitric_playtest::SessionResult {
     run_lookahead_db(seed, max_ticks, NAV_DEPTH, NAV_BEAM)
 }
@@ -75,17 +85,22 @@ fn run_random(seed: u64, max_ticks: u64) -> vitric_playtest::SessionResult {
     run_session(&mut sim, &mut rt, &engine, strat.as_mut(), &cfg).unwrap()
 }
 
-/// 硬证据 1（**本次升级的核心**）：同一关卡、同一规划器，**depth=1 退化单步前瞻超时，
-/// depth≥8 的束搜索通关**——规划深度真带来了「解多 tick 机动」的能力。
+/// Hard evidence 1 (**core of this upgrade**): same level, same planner, **depth=1 degenerate
+/// single-step lookahead times out, depth≥8 beam search clears** — planning depth really brought
+/// the capability to "solve multi-tick maneuvers".
 ///
-/// 为什么 depth=1 解不了：nav 目标是「最大化 hero_x」。在墙前，单步前瞻对每个候选只看 1 帧——
-/// 跳跃那一帧 x 不增加（甚至像浪费一帧），按右又被墙挡住 x 不变，没有任何单帧动作能改善 hero_x
-/// → 贪心退化成一直按右、撞墙卡死 → 超时。深度够的束搜索能往下看到「跳起→越过墙顶→再右行，
-/// hero_x 重新增长」这串收益，于是在墙前选择起跳 → 通关。这正是单步前瞻（旧实现）做不到、束搜索
-/// 才有的能力。
+/// Why depth=1 cannot solve it: nav's goal is "maximize hero_x". In front of the wall,
+/// single-step lookahead only looks 1 frame per candidate — the jump frame does not increase x
+/// (looks like wasting a frame), pressing right is blocked by the wall so x does not change, no
+/// single-frame action can improve hero_x → greedy degrades to keeping pressing right, hitting
+/// the wall and getting stuck → timeout. Beam search with enough depth can look down to the
+/// return string "jump up → clear the wall top → go right again, hero_x grows again", so in
+/// front of the wall it chooses to jump → clears. This is exactly the capability single-step
+/// lookahead (the old implementation) lacked and beam search has.
 #[test]
 fn lookahead_depth1_times_out_but_beam_search_wins() {
-    // depth=1：退化为单步前瞻（每候选只前瞻 1 帧）。撞墙卡死 → 超时。
+    // depth=1: degenerates to single-step lookahead (each candidate only looks ahead 1 frame).
+    // Hits the wall and gets stuck → timeout.
     let shallow = run_lookahead_db(0, 300, 1, NAV_BEAM);
     assert_eq!(
         shallow.outcome,
@@ -94,11 +109,12 @@ fn lookahead_depth1_times_out_but_beam_search_wins() {
         shallow.outcome,
         shallow.ticks
     );
-    // depth≥8 的束搜索：规划出「先跳过墙、再右行」→ 通关。
+    // depth≥8 beam search: plans out "first jump over the wall, then go right" → clears.
     let deep = run_lookahead_db(0, 300, NAV_DEPTH, NAV_BEAM);
     assert_eq!(deep.outcome, Outcome::Win, "深度束搜索应通关 nav（跳过墙到出口）");
     assert!(deep.ticks < shallow.ticks, "深搜通关 tick({}) 应远少于单步超时 tick({})", deep.ticks, shallow.ticks);
-    // 通关路径里**确实有起跳**——多 tick 机动（跳+持续右行）真涌现了，不是蹭出来的。
+    // The clear path **really has a jump** — multi-tick maneuver (jump + sustained right) really
+    // emerged, not fluked.
     assert!(
         deep.recording.inputs.iter().any(|i| i.action == "space"),
         "深搜通关录像里应记录到起跳（space），证明跳过墙的机动被规划出来：{:?}",
@@ -106,7 +122,7 @@ fn lookahead_depth1_times_out_but_beam_search_wins() {
     );
 }
 
-/// 硬证据 2：lookahead 通关，random 同条件超时。
+/// Hard evidence 2: lookahead clears, random times out under the same conditions.
 #[test]
 fn lookahead_wins_nav_where_random_times_out() {
     let look = run_lookahead(0, 600);
@@ -117,12 +133,12 @@ fn lookahead_wins_nav_where_random_times_out() {
     assert_eq!(rand.outcome, Outcome::Timeout, "随机策略凑不齐越墙序列 → 超时");
 }
 
-/// 硬证据 3：lookahead 手工攒的录像被 Sim::replay 逐位复现。
+/// Hard evidence 3: lookahead's hand-built recording is bit-reproduced by Sim::replay.
 #[test]
 fn lookahead_nav_recording_replays_bit_for_bit() {
     let look = run_lookahead(0, 600);
     assert_eq!(look.outcome, Outcome::Win);
-    // 越墙必有输入（起跳/右行），录像非空
+    // Wall-clearing must have inputs (jump/right), the recording is non-empty
     assert!(!look.recording.inputs.is_empty(), "通关录像应记录到注入的输入");
     assert!(look.recording.checkpoints.first().map(|c| c.0) == Some(0), "起点 checkpoint tick=0");
 
@@ -132,7 +148,8 @@ fn lookahead_nav_recording_replays_bit_for_bit() {
     assert_eq!(sim.world.state_hash(), look.recording.final_hash);
 }
 
-/// 硬证据 4：同 (项目,seed,depth,beam) 两次 lookahead 逐字节一致。
+/// Hard evidence 4: two lookahead runs of the same (project, seed, depth, beam) are
+/// byte-identical.
 #[test]
 fn lookahead_nav_is_deterministic_byte_for_byte() {
     let a = run_lookahead(0, 600);
@@ -144,21 +161,25 @@ fn lookahead_nav_is_deterministic_byte_for_byte() {
     assert_eq!(ja, jb, "同 (项目,seed,depth,beam) 两次束搜索录像必须逐字节一致");
 }
 
-// ---- 默认 swarm 自动掺前瞻：声明 goal 的技巧/导航类不再被误报 unbeatable ----
+// ---- Default swarm auto-mixes lookahead: skill/navigation games that declare goal are no longer
+// misreported as unbeatable ----
 //
-// 走的是 CLI cmd_playtest 默认 swarm 的同一条路：default_plan（声明 goal 时掺前瞻）+
-// run_swarm_with_config（按 spec 分流：Lookahead 走 run_session_lookahead，其余走 run_session）+
-// aggregate_with_endings_and_declared（CLI 默认聚合）。这里不通过子进程跑 CLI，而是直接
-// 复用同样的库函数，断言更精确（能看到 per-strategy 拆分、证明是前瞻局真把它通的）。
+// It goes through the same path as the CLI cmd_playtest default swarm: default_plan (mixes
+// lookahead when goal is declared) + run_swarm_with_config (dispatches by spec: Lookahead goes to
+// run_session_lookahead, the rest go to run_session) +
+// aggregate_with_endings_and_declared (CLI default aggregation). Here we do not run the CLI via
+// subprocess, but directly reuse the same library functions for more precise assertions (can see
+// per-strategy split, proving the lookahead session really cleared it).
 
-/// 在某项目目录上跑默认 swarm（default_plan + run_swarm_with_config），聚合出报告 + 原始结果。
+/// Run the default swarm (default_plan + run_swarm_with_config) on a project directory, aggregate
+/// the report + raw results.
 fn default_swarm(dir: PathBuf, sessions: u64, max_ticks: u64) -> (vitric_playtest::Report, Vec<vitric_playtest::LabeledResult>) {
     let config = PlaytestConfig::load(&dir).unwrap().unwrap_or_default();
     let terminal = match &config.terminal {
         Some(ovr) => TerminalSpec::default().apply_override(ovr),
         None => TerminalSpec::default(),
     };
-    // CLI 同口径：声明 goal 时掺前瞻，否则纯轮换
+    // Same as CLI: mix lookahead when goal is declared, otherwise pure rotation
     let plan = default_plan(sessions, 0, max_ticks, terminal.clone(), config.goal.is_some());
     let factory = {
         let dir = dir.clone();
@@ -175,13 +196,16 @@ fn default_swarm(dir: PathBuf, sessions: u64, max_ticks: u64) -> (vitric_playtes
     (report, results)
 }
 
-/// 硬证据：声明了 goal 的 nav，默认 swarm 通关率 > 0 且不报 unbeatable——前瞻局把它通了。
-/// （nav 声明了 goal，default_plan 自动把末尾 2 局换成束搜索前瞻；默认 swarm 深度足以算出跳墙序列。）
+/// Hard evidence: nav, which declares a goal, has a default swarm win rate > 0 and is not
+/// reported unbeatable — the lookahead session cleared it.
+/// (nav declares a goal, default_plan automatically swaps the last 2 sessions to beam-search
+/// lookahead; the default swarm depth is enough to compute the wall-jump sequence.)
 #[test]
 fn nav_default_swarm_is_not_unbeatable_thanks_to_lookahead() {
     let (report, results) = default_swarm(nav_dir(), 8, 600);
 
-    // 1) 默认 swarm 通关率 > 0、不报 unbeatable（修前若没有前瞻档、greedy 也通不了就会误报）。
+    // 1) Default swarm win rate > 0, not reported unbeatable (before the fix, with no lookahead
+    // tier, greedy also could not clear, it would be misreported).
     assert!(
         report.outcome_distribution.win_rate > 0.0,
         "声明 goal 的 nav 默认 swarm 应有通关，实际分布 {:?}",
@@ -189,32 +213,36 @@ fn nav_default_swarm_is_not_unbeatable_thanks_to_lookahead() {
     );
     assert!(!report.reachability.unbeatable_by_swarm, "能赢就不该标 unbeatable");
 
-    // 2) 计划里确实掺进了前瞻局（8 局 → 2 局），证明「声明 goal → 自动掺前瞻」生效。
+    // 2) The plan really mixed in lookahead sessions (8 sessions → 2 sessions), proving
+    // "declare goal → auto-mix lookahead" took effect.
     let look: Vec<_> = results
         .iter()
         .filter(|lr| matches!(lr.spec.strategy_kind, StrategyKind::Lookahead { .. }))
         .collect();
     assert_eq!(look.len(), 2, "8 局默认 swarm 应掺 2 局前瞻，实际 {}", look.len());
 
-    // 3) 前瞻局**确实通关**（不是别的策略蹭的）——前瞻是把 nav 玩通的关键档之一。
+    // 3) The lookahead session **really cleared** (not fluked by another strategy) — lookahead is
+    // one of the key tiers that plays nav through.
     assert!(
         look.iter().any(|lr| lr.result.outcome == Outcome::Win),
         "前瞻局应至少有一局通关 nav（越墙到出口），实际 {:?}",
         look.iter().map(|lr| lr.result.outcome).collect::<Vec<_>>()
     );
-    // 前瞻局带齐遥测（和普通局同口径）：state_trace 长度 = tick 数、有可序列化录像。
+    // The lookahead session carries full telemetry (same as a normal session): state_trace length
+    // = tick count, has a serializable recording.
     for lr in &look {
         assert_eq!(lr.result.state_trace.len(), lr.result.ticks as usize, "前瞻局 state_trace 同口径");
         assert!(!lr.result.recording.checkpoints.is_empty(), "前瞻局应有录像");
     }
 }
 
-/// 向后兼容硬证据：examples/jump 没有 playtest.json goal，默认 swarm 一局前瞻都不掺，
-/// 仍是 random/greedy/coverage/economy 纯轮换（行为同修前）。
+/// Backward-compat hard evidence: examples/jump has no playtest.json goal, the default swarm
+// mixes in zero lookahead sessions, still pure rotation of random/greedy/coverage/economy
+// (behavior unchanged from before the fix).
 #[test]
 fn jump_no_goal_default_swarm_has_no_lookahead() {
     let dir = example("jump");
-    // jump 无 playtest.json goal
+    // jump has no playtest.json goal
     let config = PlaytestConfig::load(&dir).unwrap().unwrap_or_default();
     assert!(config.goal.is_none(), "jump 不该有 goal（向后兼容前提）");
 
@@ -224,7 +252,7 @@ fn jump_no_goal_default_swarm_has_no_lookahead() {
         .filter(|lr| matches!(lr.spec.strategy_kind, StrategyKind::Lookahead { .. }))
         .count();
     assert_eq!(look, 0, "无 goal 的项目默认 swarm 不该掺任何前瞻局");
-    // 计划仍是四廉价策略纯轮换
+    // The plan is still pure rotation of the four cheap strategies
     for (k, lr) in results.iter().enumerate() {
         assert_eq!(
             lr.spec.strategy_kind,

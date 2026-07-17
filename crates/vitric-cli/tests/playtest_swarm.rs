@@ -1,15 +1,22 @@
-//! 埋雷测试游戏组：故意埋了已知缺陷的最小 Vitric 项目，断言 swarm + 聚合报告
-//! **逐个逮出**（设计稿第 2 阶段验收、八节「埋雷测试游戏」）。
+//! Mine-laying test game group: minimal Vitric projects with known defects deliberately laid,
+//! asserting the swarm + aggregated report **catches each one** (design draft stage 2
+//! acceptance, section 8 "mine-laying test games").
 //!
-//! 四颗雷各对应一个报告维度：
-//! - winnable    → 通关率 > 0 且 unbeatable_by_swarm=false（能赢的游戏不冤判）；
-//! - unbeatable  → unbeatable_by_swarm=true 且通关率 0（声明能赢但条件永不满足）；
-//! - softlock    → stuck_clusters 非空、命中局数 > 0（某动作把世界推进冻结死态）；
-//! - dead-action → 废动作出现在 inert_actions（声明了输入但 rules 没人接出响应）。
+//! Four mines each correspond to a report dimension:
+//! - winnable    → win rate > 0 and unbeatable_by_swarm=false (a winnable game is not falsely
+//!   accused);
+//! - unbeatable  → unbeatable_by_swarm=true and win rate 0 (declared winnable but the condition
+//!   never holds);
+//! - softlock    → stuck_clusters non-empty, hit count > 0 (some action pushes the world into a
+//!   frozen dead state);
+//! - dead-action → a dead action appears in inert_actions (an input is declared but no rule
+//!   handles it with a response).
 //!
-//! boot 需要 Runtime::boot（住在 vitric-cli），所以集成测试放这儿，用真 boot 跑真 swarm。
-//! 工厂闭包在测试侧 new 出来传给 run_swarm——每个工作线程自己 boot 一份运行时
-//! （QuickJS 非 Send，运行时绝不跨线程），跑完只回传 plain-data 的 SessionResult。
+//! boot needs Runtime::boot (lives in vitric-cli), so the integration test goes here, using
+//! real boot to run a real swarm.
+//! The factory closure is constructed on the test side and passed to run_swarm — each worker
+//! thread boots its own runtime (QuickJS is not Send, the runtime never crosses threads), and
+//! only the plain-data SessionResult is returned.
 
 use std::path::PathBuf;
 
@@ -18,29 +25,32 @@ use vitric_playtest::{
     aggregate, aggregate_with_endings, run_swarm, Report, SessionSpec, StrategyKind, TerminalSpec,
 };
 
-/// 埋雷项目目录（住在 vitric-playtest 的 tests/fixtures 下）。
+/// Mine-laying project directory (lives under vitric-playtest's tests/fixtures).
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../vitric-playtest/tests/fixtures")
         .join(name)
 }
 
-/// 仓库内的示例游戏目录（examples/ 在 workspace 根，本测试 crate 在 crates/vitric-cli 下）。
+/// Repository-root example game directory (examples/ is at the workspace root; this test crate
+/// is under crates/vitric-cli).
 fn example(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples").join(name)
 }
 
-/// 在某项目目录上跑一批（三策略轮流 × 递增 seed 凑够 sessions 局），聚合成报告。
-/// `with_engine=true` 走 `aggregate_with_endings`（CLI 默认路径，inert_actions 用静态判据）；
-/// false 走裸 `aggregate`（inert_actions 退化用旧运行时启发式）。
+/// Run a batch on a project directory (three strategies rotated × incrementing seed to make up
+/// `sessions` sessions), aggregate into a report.
+/// `with_engine=true` goes through `aggregate_with_endings` (the CLI default path,
+/// inert_actions uses the static criterion); false goes through bare `aggregate`
+/// (inert_actions degrades to the old runtime heuristic).
 fn playtest_report_at(dir: PathBuf, sessions: u64, max_ticks: u64, with_engine: bool) -> Report {
-    // 计划：random+greedy+coverage 轮流，seed 0..sessions
+    // Plan: random+greedy+coverage rotated, seed 0..sessions
     let mut plan: Vec<SessionSpec> = Vec::with_capacity(sessions as usize);
     for k in 0..sessions {
         let kind = StrategyKind::ALL[(k as usize) % StrategyKind::ALL.len()];
         plan.push(SessionSpec::new(kind, k, max_ticks));
     }
-    // 工厂：每线程自己 boot 一份全新运行时 + 复制只读 Engine
+    // Factory: each thread boots its own fresh runtime + clones the read-only Engine
     let factory = {
         let dir = dir.clone();
         move || -> Result<(_, _, _), String> {
@@ -59,14 +69,14 @@ fn playtest_report_at(dir: PathBuf, sessions: u64, max_ticks: u64, with_engine: 
     }
 }
 
-/// 在某埋雷项目上跑一批（裸 aggregate 路径，沿用老用例）。
+/// Run a batch on a mine-laying project (bare aggregate path, reuses the old test cases).
 fn playtest_report(name: &str, sessions: u64, max_ticks: u64) -> Report {
     playtest_report_at(fixture(name), sessions, max_ticks, false)
 }
 
 #[test]
 fn winnable_is_beaten_by_swarm() {
-    // 按 "key" 即发 game-won，random/coverage 几 tick 内就能通关
+    // Pressing "key" emits game-won immediately; random/coverage clears within a few ticks
     let rep = playtest_report("winnable", 9, 100);
     assert!(
         rep.outcome_distribution.win_rate > 0.0,
@@ -79,7 +89,8 @@ fn winnable_is_beaten_by_swarm() {
 
 #[test]
 fn unbeatable_is_flagged() {
-    // win 规则被永不满足的条件（gate.Lock.open==true，无人 set）挡死
+    // The win rule is blocked by a never-satisfied condition (gate.Lock.open==true, nobody sets
+    // it)
     let rep = playtest_report("unbeatable", 9, 100);
     assert!(
         rep.reachability.unbeatable_by_swarm,
@@ -91,7 +102,8 @@ fn unbeatable_is_flagged() {
 
 #[test]
 fn softlock_is_clustered() {
-    // "seal" 把世界推进 sealed=true 的冻结死态，此后任何输入都改不动状态、也没发终止
+    // "seal" pushes the world into the sealed=true frozen dead state; after that any input
+    // cannot change state, and no terminal is emitted
     let rep = playtest_report("softlock", 9, 200);
     assert!(
         !rep.stuck_clusters.is_empty(),
@@ -100,7 +112,7 @@ fn softlock_is_clustered() {
     );
     let total_hits: usize = rep.stuck_clusters.iter().map(|c| c.hits).sum();
     assert!(total_hits > 0, "命中局数应 > 0");
-    // 每簇都挂得到一条可重放录像（结论挂证据）
+    // Each cluster carries a replayable recording (conclusion carries evidence)
     for c in &rep.stuck_clusters {
         assert_eq!(c.representative.ticks, 200, "代表录像应跑满 max_ticks（卡死=超时）");
     }
@@ -108,8 +120,9 @@ fn softlock_is_clustered() {
 
 #[test]
 fn dead_action_is_inert() {
-    // "useless" 是唯一声明的输入动作，规则把 Scratch.v set 成它本来就有的初值 0（自我无效操作），
-    // 不产生任何真实效果。裸 aggregate（运行时启发式）路径下应判惰性。
+    // "useless" is the only declared input action; the rule sets Scratch.v to its original
+    // initial value 0 (a self-noop), producing no real effect. Under the bare aggregate
+    // (runtime heuristic) path it should be judged inert.
     let rep = playtest_report("dead-action", 9, 100);
     assert!(
         rep.inert_actions.contains(&"useless".to_string()),
@@ -120,8 +133,9 @@ fn dead_action_is_inert() {
 
 #[test]
 fn dead_action_is_inert_static_path() {
-    // 回归保护：换成静态判据（aggregate_with_endings = CLI 默认路径）后，"useless" 仍被判惰性
-    // ——它把字段 set 成初值是自我无效操作，没有真实效果。
+    // Regression guard: after switching to the static criterion
+    // (aggregate_with_endings = CLI default path), "useless" is still judged inert — it sets
+    // the field to its initial value, a self-noop with no real effect.
     let rep = playtest_report_at(fixture("dead-action"), 9, 100, true);
     assert!(
         rep.inert_actions.contains(&"useless".to_string()),
@@ -132,9 +146,10 @@ fn dead_action_is_inert_static_path() {
 
 #[test]
 fn jump_movement_keys_not_inert() {
-    // dogfood 修的假阳性：jump 的移动键 left/right/space/up 只 set Velocity（改状态）不 emit 事件，
-    // 旧运行时判据会冤标它们惰性。静态判据（CLI 默认路径）按「set 成 ≠ 初值的新值 = 有真实效果」
-    // 判定，这些键都不该再进 inert_actions。
+    // dogfood-fixed false positive: jump's movement keys left/right/space/up only set Velocity
+    // (change state) without emitting events; the old runtime criterion would falsely flag
+    // them inert. The static criterion (CLI default path) judges by "set to a new value ≠
+    // initial value = has real effect", so these keys should no longer enter inert_actions.
     let rep = playtest_report_at(example("jump"), 12, 120, true);
     for key in ["left", "right", "space", "up"] {
         assert!(
@@ -145,7 +160,8 @@ fn jump_movement_keys_not_inert() {
     }
 }
 
-/// swarm 串行 vs 并行结果逐项一致（确定性铁律），在真 boot 的埋雷项目上验。
+/// swarm serial vs parallel results are item-wise identical (determinism iron law), verified
+/// on a real-boot mine-laying project.
 #[test]
 fn swarm_serial_and_parallel_identical_on_fixture() {
     let dir = fixture("softlock");
@@ -168,14 +184,15 @@ fn swarm_serial_and_parallel_identical_on_fixture() {
         assert_eq!(a.result.ticks, b.result.ticks, "tick 数一致");
         assert_eq!(a.result.state_trace, b.result.state_trace, "状态轨迹逐项一致");
         assert_eq!(a.result.fired_events, b.result.fired_events, "事件集一致");
-        // 录像逐字节一致（确定性的硬证据）
+        // Recording byte-identical (hard evidence of determinism)
         let ja = serde_json::to_string(&a.result.recording).unwrap();
         let jb = serde_json::to_string(&b.result.recording).unwrap();
         assert_eq!(ja, jb, "同 spec 串/并行录像逐字节一致");
     }
 }
 
-/// 通关录像真能被 sim 离线重放校验通过（每条结论挂可重放录像 = 真可重放）。
+/// The clear recording really passes sim's offline replay check (each conclusion carries a
+/// replayable recording = truly replayable).
 #[test]
 fn winnable_recording_replays() {
     let dir = fixture("winnable");
@@ -188,7 +205,7 @@ fn winnable_recording_replays() {
     let results = run_swarm(factory, &plan, 1).unwrap();
     let lr = &results[0];
     assert_eq!(lr.result.outcome, vitric_playtest::Outcome::Win, "coverage 应通关 winnable");
-    // 录像离线重放：跑偏会 ReplayDiverged
+    // Offline recording replay: a divergence would raise ReplayDiverged
     let (mut sim, mut rt) = Runtime::boot(&dir).unwrap();
     sim.replay(&lr.result.recording, &mut rt).expect("通关录像必须可重放且逐位一致");
 }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-/// PCG32（PCG-XSH-RR）。自实现而不用 rand crate：
-/// 算法永远不变、状态就是两个 u64、可序列化进快照——确定性的地基不外包。
+/// PCG32 (PCG-XSH-RR). Implemented in-house instead of using the rand crate:
+/// the algorithm never changes, the state is just two u64s, and it serializes into snapshots — the foundation of determinism is not outsourced.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pcg32 {
     state: u64,
@@ -12,7 +12,7 @@ const MULT: u64 = 6364136223846793005;
 
 impl Pcg32 {
     pub fn new(seed: u64) -> Pcg32 {
-        // 参考实现的 seeding 流程，序列号固定取 54（任意奇数即可，写死保证确定性）
+        // Reference implementation's seeding flow; the sequence number is fixed at 54 (any odd number works; hard-coded for determinism)
         let mut rng = Pcg32 { state: 0, inc: (54 << 1) | 1 };
         rng.next_u32();
         rng.state = rng.state.wrapping_add(seed);
@@ -28,15 +28,15 @@ impl Pcg32 {
         xorshifted.rotate_right(rot)
     }
 
-    /// [0, 1) 浮点。
+    /// [0, 1) floating-point.
     pub fn next_f64(&mut self) -> f64 {
-        // 53 位精度：高 32 位 + 高 21 位拼
+        // 53-bit precision: high 32 bits + high 21 bits combined
         let hi = self.next_u32() as u64;
         let lo = self.next_u32() as u64;
         (((hi << 21) | (lo >> 11)) as f64) / (1u64 << 53) as f64
     }
 
-    /// [min, max] 闭区间整数。
+    /// [min, max] closed-interval integer.
     pub fn range_i64(&mut self, min: i64, max: i64) -> i64 {
         assert!(min <= max, "range_i64 要求 min <= max");
         let span = (max - min + 1) as u64;

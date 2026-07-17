@@ -1,21 +1,29 @@
-//! vitric assets --normals — 给项目素材批量生成法线贴图（命名配对 `xxx.png` → `xxx_n.png`，
-//! 渲染侧零配置自动启用，约定见 vitric-render 模块文档）。
+//! vitric assets --normals — batch-generate normal maps for project assets (paired naming
+//! `xxx.png` → `xxx_n.png`, auto-enabled on the render side with zero config; see the
+//! vitric-render module docs for the convention).
 //!
-//! 两条生成路，一条循环：
-//! - **程序化**（默认）：高度场 = 亮度×alpha×边缘倒角（距透明像素 [`BEVEL_RADIUS`] 像素的
-//!   渐变，精灵轮廓一圈鼓起来），Sobel 求梯度编码成法线。纯算术、固定遍历序——
-//!   同样的输入永远出同样的字节（确定性测试锁死）。
-//! - **--normals-ai**：豆包 Ark Seedream 图生图（精灵最近邻放大铺到 512x512 的 #8080FF
-//!   画布上发过去，拿回 2048x2048 再缩回原尺寸）。AI 出的向量不守物理（长度不一、z 可能
-//!   朝里），合法化（逐像素重新归一化、z 夹 ≥0.1、alpha 回填漫反射的）后才能进光照。
-//!   网络生成天然不确定——要可复现就把生成好的 _n 文件当素材进版本库，别重跑。
+//! Two generation paths, one loop:
+//! - **Procedural** (default): height field = luminance × alpha × edge bevel (a gradient
+//!   over [`BEVEL_RADIUS`] pixels from transparent pixels, raising the sprite outline), then
+//!   Sobel gradient encoded as a normal. Pure arithmetic, fixed traversal order — same input
+//!   always produces the same bytes (deterministic tests are locked).
+//! - **--normals-ai**: Doubao Ark Seedream image-to-image (sprite nearest-neighbor upscaled
+//!   onto a 512x512 #8080FF canvas, sent, then the 2048x2048 result downscaled back to original
+//!   size). Vectors returned by the AI are not physically valid (varying lengths, z may point
+//!   inward), so they must be sanitized (per-pixel renormalization, z clamped ≥0.1, alpha
+//!   backfilled from the diffuse) before lighting. Network generation is inherently
+//!   non-deterministic — for reproducibility, commit the generated _n files as assets instead
+//!   of rerunning.
 //!
-//! 共同约束：
-//! - `_n` 文件永远不当漫反射输入（不会生成 `xxx_n_n.png`）；已有配对的跳过不重生成。
-//! - 只新增文件、从不改既有文件——所以不需要 assets_original/ 备份那套安全门。
-//! - AI 配置只认环境变量（密钥不落盘）：`ARK_API_KEY`（必填，缺了显式报错）、
-//!   `VITRIC_NORMALS_MODEL`（默认 doubao-seedream-5-0-260128）、
-//!   `VITRIC_NORMALS_URL`（默认 Ark 正式端点；测试桩从这里注入）。
+//! Shared constraints:
+//! - `_n` files are never treated as diffuse input (no `xxx_n_n.png`); existing pairs are
+//!   skipped, not regenerated.
+//! - Only new files are added, never modifying existing files — so the assets_original/
+//!   backup safety gate is not needed.
+//! - AI configuration comes only from environment variables (no secrets on disk):
+//!   `ARK_API_KEY` (required, explicit error if missing),
+//!   `VITRIC_NORMALS_MODEL` (default doubao-seedream-5-0-260128),
+//!   `VITRIC_NORMALS_URL` (default Ark production endpoint; test stubs inject from here).
 
 use std::path::Path;
 
@@ -23,36 +31,41 @@ use serde_json::Value;
 
 use crate::assets_cmd::{collect_pngs, load_png, save_png, Img};
 
-/// Sobel 梯度 → 法线的强度系数（越大浮雕越陡）。刻意做成常量不做 CLI 参数：
-/// 全项目必须一个强度，参数化只会引诱出"半个项目一个陡度"的不和谐。
+/// Strength coefficient mapping Sobel gradient to normal (larger = steeper relief).
+/// Deliberately a constant, not a CLI parameter: the whole project must use one strength;
+/// parameterizing it only invites the disharmony of "half the project at one steepness".
 const SOBEL_STRENGTH: f64 = 2.0;
 
-/// 边缘倒角半径（像素）：距透明像素 1..=BEVEL_RADIUS 步的高度线性渐升。
-/// 图外按透明算——整张不带 alpha 的图也有一圈轮廓倒角。
+/// Edge bevel radius (pixels): height rises linearly over 1..=BEVEL_RADIUS steps from
+/// transparent pixels. Outside the image counts as transparent — even a fully opaque
+/// image gets an outline bevel.
 const BEVEL_RADIUS: u32 = 3;
 
-/// Ark 图生图正式端点（可被 VITRIC_NORMALS_URL 覆盖——测试桩从这进，不碰真网络）。
+/// Ark image-to-image production endpoint (can be overridden by VITRIC_NORMALS_URL —
+/// test stubs inject from here, never touching the real network).
 const ARK_URL: &str = "https://ark.cn-beijing.volces.com/api/v3/images/generations";
 
-/// 缺省模型（可被 VITRIC_NORMALS_MODEL 覆盖）。
+/// Default model (can be overridden by VITRIC_NORMALS_MODEL).
 const DEFAULT_MODEL: &str = "doubao-seedream-5-0-260128";
 
-/// 发给模型的画布边长 / 要求返回的边长（返回边长 = 画布 ×4，细节多采一点再缩回去）。
+/// Canvas side length sent to the model / required return side length (return side = canvas ×4,
+/// sampling more detail then downscaling back).
 const CANVAS: u32 = 512;
 const AI_OUT: u32 = 2048;
 
-/// 法线贴图的中性底色 #8080FF（解码后 ≈ 平面法线 (0,0,1)）。
+/// Neutral base color of normal maps #8080FF (decodes to ≈ flat normal (0,0,1)).
 const NEUTRAL: [u8; 4] = [0x80, 0x80, 0xff, 255];
 
-/// 图生图提示词。固定写死在代码里：提示词就是生成器的一部分，跟 SOBEL_STRENGTH 一样
-/// 不开口子——要改就改代码，全项目一致。
+/// Image-to-image prompt. Hardcoded in the source: the prompt is part of the generator,
+/// just like SOBEL_STRENGTH — no escape hatch; to change it, change the code so the whole
+/// project stays consistent.
 const PROMPT: &str = "Convert this sprite into a tangent-space normal map. \
     Keep the silhouette exactly identical, do not move or resize anything. \
     Flat areas must be the neutral normal color #8080FF; edges and raised details \
     tilt away from it (red = facing right, green = facing down). \
     Output only the normal map on a solid #8080FF background, no text, no labels.";
 
-/// AI 生成配置（全部来自环境变量，密钥不落盘）。
+/// AI generation configuration (all from environment variables, no secrets on disk).
 #[derive(Debug)]
 pub struct AiConfig {
     pub url: String,
@@ -61,13 +74,15 @@ pub struct AiConfig {
 }
 
 impl AiConfig {
-    /// 读环境变量。缺 ARK_API_KEY 直接报错——不静默降级到程序化路径
-    ///（用户点名要 AI，拿到程序化结果还以为是 AI 的，更难排查）。
+    /// Read environment variables. Missing ARK_API_KEY is an explicit error — no silent
+    /// fallback to the procedural path (if the user asked for AI, silently returning
+    /// procedural output would make issues harder to diagnose).
     pub fn from_env() -> Result<AiConfig, String> {
         AiConfig::from_lookup(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
     }
 
-    /// 依赖注入版（测试用：不碰进程环境变量，测试可并行）。
+    /// Dependency-injected variant (for tests: doesn't touch process env vars,
+    /// so tests can run in parallel).
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<AiConfig, String> {
         let key = get("ARK_API_KEY").ok_or(
             "--normals-ai 需要环境变量 ARK_API_KEY（豆包 Ark 平台密钥）。\
@@ -81,13 +96,13 @@ impl AiConfig {
     }
 }
 
-/// 生成报告（stdout JSON）。
+/// Generation report (stdout JSON).
 #[derive(Debug)]
 pub struct Report {
     pub mode: &'static str,
-    /// 本次新写出的 _n 文件（相对 assets/）。
+    /// _n files newly written this run (relative to assets/).
     pub generated: Vec<String>,
-    /// 已有配对而跳过的漫反射图。
+    /// Diffuse images skipped because an existing pair was present.
     pub skipped: Vec<String>,
 }
 
@@ -101,8 +116,8 @@ impl Report {
     }
 }
 
-/// 主流程：扫 assets/ → 给每张没有 _n 配对的非 _n PNG 生成 `xxx_n.png`。
-/// `ai = None` 走程序化路径，`Some(cfg)` 走 Ark 图生图。
+/// Main flow: scan assets/ → for each non-_n PNG without an _n pair, generate `xxx_n.png`.
+/// `ai = None` takes the procedural path; `Some(cfg)` takes the Ark image-to-image path.
 pub fn generate(project_dir: &Path, ai: Option<&AiConfig>) -> Result<Report, String> {
     let assets_dir = project_dir.join("assets");
     if !assets_dir.is_dir() {
@@ -122,7 +137,7 @@ pub fn generate(project_dir: &Path, ai: Option<&AiConfig>) -> Result<Report, Str
     let mut generated = Vec::new();
     let mut skipped = Vec::new();
     for rel in &rels {
-        // _n 文件永远不当漫反射输入（法线没有自己的法线）
+        // _n files are never treated as diffuse input (normals don't have their own normals)
         let Some(pair) = vitric_render::normal_map_name(rel) else { continue };
         if existing.contains(pair.as_str()) {
             skipped.push(rel.clone());
@@ -140,15 +155,16 @@ pub fn generate(project_dir: &Path, ai: Option<&AiConfig>) -> Result<Report, Str
 }
 
 // ---------------------------------------------------------------------------
-// 程序化路径：高度场（亮度×alpha×边缘倒角）→ Sobel → 编码
+// Procedural path: height field (luminance × alpha × edge bevel) → Sobel → encode
 // ---------------------------------------------------------------------------
 
-/// 程序化生成一张法线贴图（确定性：纯 f64 算术、固定遍历序）。
+/// Procedurally generate a normal map (deterministic: pure f64 arithmetic, fixed traversal order).
 fn procedural_normal(img: &Img) -> Img {
     let (w, h) = (img.width as usize, img.height as usize);
     let height_map = height_field(img);
     let mut rgba = Vec::with_capacity(w * h * 4);
-    // Sobel 核（x 方向；y 方向取转置）。越界采样 clamp 到边缘——和渲染侧 clamp 同语义
+    // Sobel kernel (x direction; y direction is the transpose). Out-of-bounds sampling
+    // clamps to the edge — same semantics as the render-side clamp.
     let sample = |x: i64, y: i64| -> f64 {
         let xc = x.clamp(0, w as i64 - 1) as usize;
         let yc = y.clamp(0, h as i64 - 1) as usize;
@@ -158,7 +174,8 @@ fn procedural_normal(img: &Img) -> Img {
         for x in 0..w as i64 {
             let a = img.rgba[(y as usize * w + x as usize) * 4 + 3];
             if a == 0 {
-                // 透明像素没有表面：写中性色 + alpha 0（渲染采不到，编码统一利于压缩）
+                // Transparent pixels have no surface: write neutral color + alpha 0
+                // (renderer never samples them; uniform encoding helps compression).
                 rgba.extend_from_slice(&[NEUTRAL[0], NEUTRAL[1], NEUTRAL[2], 0]);
                 continue;
             }
@@ -166,7 +183,8 @@ fn procedural_normal(img: &Img) -> Img {
                 - (sample(x - 1, y - 1) + 2.0 * sample(x - 1, y) + sample(x - 1, y + 1));
             let gy = (sample(x - 1, y + 1) + 2.0 * sample(x, y + 1) + sample(x + 1, y + 1))
                 - (sample(x - 1, y - 1) + 2.0 * sample(x, y - 1) + sample(x + 1, y - 1));
-            // 高度向 +x 增 → 表面朝左倾（nx 负）；y 同理（图像 y 向下 = 屏幕 y 向下）
+            // Height rising toward +x → surface tilts left (nx negative); same for y
+            // (image y downward = screen y downward).
             let nx = -gx * SOBEL_STRENGTH;
             let ny = -gy * SOBEL_STRENGTH;
             let len = (nx * nx + ny * ny + 1.0).sqrt();
@@ -174,20 +192,23 @@ fn procedural_normal(img: &Img) -> Img {
                 encode(nx / len),
                 encode(ny / len),
                 encode(1.0 / len),
-                a, // alpha 跟漫反射走（半透明边缘保持一致的形状信息）
+                a, // alpha follows the diffuse (semi-transparent edges keep consistent shape info)
             ]);
         }
     }
     Img { width: img.width, height: img.height, rgba }
 }
 
-/// 高度场：亮度（Rec.601）× alpha × 边缘倒角。
-/// 倒角 = min(到透明像素的步数, BEVEL_RADIUS) / BEVEL_RADIUS——轮廓一圈线性鼓起。
-/// 距离用 4 邻接 BFS（整数步数，无浮点距离开方——确定性免费拿到）；**图外算透明**：
-/// 不带 alpha 的整图也有边框倒角（贴图块想要无缝拼接就别用程序化路径，见 art-pipeline）。
+/// Height field: luminance (Rec.601) × alpha × edge bevel.
+/// Bevel = min(steps to a transparent pixel, BEVEL_RADIUS) / BEVEL_RADIUS — a linear rise
+/// around the outline. Distance uses 4-connected BFS (integer step count, no floating-point
+/// sqrt — determinism for free); **outside the image counts as transparent**: a fully opaque
+/// image still gets a border bevel (if tile blocks need seamless tiling, don't use the
+/// procedural path; see art-pipeline).
 fn height_field(img: &Img) -> Vec<f64> {
     let (w, h) = (img.width as usize, img.height as usize);
-    // BFS 距透明：透明像素距离 0；图外算透明 → 边框像素从 1 起
+    // BFS distance to transparency: transparent pixels have distance 0; outside the image
+    // counts as transparent → border pixels start at 1.
     let mut dist = vec![u32::MAX; w * h];
     let mut queue = std::collections::VecDeque::new();
     for y in 0..h {
@@ -197,7 +218,7 @@ fn height_field(img: &Img) -> Vec<f64> {
                 dist[i] = 0;
                 queue.push_back((x, y));
             } else if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
-                dist[i] = 1; // 贴着图外（图外 = 透明）
+                dist[i] = 1; // adjacent to outside the image (outside = transparent)
                 queue.push_back((x, y));
             }
         }
@@ -205,7 +226,7 @@ fn height_field(img: &Img) -> Vec<f64> {
     while let Some((x, y)) = queue.pop_front() {
         let d = dist[y * w + x];
         if d >= BEVEL_RADIUS {
-            continue; // 倒角半径之外的距离不影响结果，不用扩散到底
+            continue; // distances beyond the bevel radius don't affect the result; no need to fully diffuse
         }
         let neighbors =
             [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)];
@@ -220,7 +241,7 @@ fn height_field(img: &Img) -> Vec<f64> {
     for (i, slot) in out.iter_mut().enumerate() {
         let px = &img.rgba[i * 4..i * 4 + 4];
         if px[3] == 0 {
-            continue; // 透明 = 高度 0
+            continue; // transparent = height 0
         }
         let lum = (0.299 * px[0] as f64 + 0.587 * px[1] as f64 + 0.114 * px[2] as f64) / 255.0;
         let alpha = px[3] as f64 / 255.0;
@@ -230,17 +251,18 @@ fn height_field(img: &Img) -> Vec<f64> {
     out
 }
 
-/// [-1,1] → 0..255（四舍五入；0 → 128 即中性分量）。
+/// [-1,1] → 0..255 (rounded; 0 → 128, the neutral component).
 fn encode(v: f64) -> u8 {
     ((v * 0.5 + 0.5) * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
 // ---------------------------------------------------------------------------
-// AI 路径：铺画布 → Ark 图生图 → 缩回原尺寸 → 合法化
+// AI path: lay out canvas → Ark image-to-image → downscale to original size → sanitize
 // ---------------------------------------------------------------------------
 
-/// AI 生成一张法线贴图（铺画布 → 请求 → 下载 → 缩回 → 合法化）。
-/// 网络/格式错误全部显式向上抛（带端点和回显），不静默换路径。
+/// AI-generate a normal map (lay out canvas → request → download → downscale → sanitize).
+/// Network/format errors all propagate explicitly (with endpoint and echoed response),
+/// never silently switching paths.
 fn ai_normal(cfg: &AiConfig, img: &Img) -> Result<Img, String> {
     let canvas = paste_on_canvas(img);
     let png = encode_png_bytes(&canvas)?;
@@ -257,8 +279,9 @@ fn ai_normal(cfg: &AiConfig, img: &Img) -> Result<Img, String> {
     Ok(sanitize(&downscale_from_canvas(&result, img), img))
 }
 
-/// 精灵最近邻缩放铺到 CANVAS×CANVAS 的 #8080FF 画布中央（保持宽高比）。
-/// 中性底色 = 画布本身就是合法的"平面"法线，模型不用猜背景该是什么。
+/// Nearest-neighbor scale the sprite onto the center of a CANVAS×CANVAS #8080FF canvas
+/// (preserving aspect ratio). The neutral base color means the canvas itself is a valid
+/// "flat" normal, so the model doesn't have to guess what the background should be.
 fn paste_on_canvas(img: &Img) -> Img {
     let (tw, th, ox, oy) = canvas_layout(img);
     let mut rgba = NEUTRAL.repeat((CANVAS * CANVAS) as usize);
@@ -268,7 +291,7 @@ fn paste_on_canvas(img: &Img) -> Img {
             let sx = (x as u64 * img.width as u64 / tw as u64) as usize;
             let s = (sy * img.width as usize + sx) * 4;
             if img.rgba[s + 3] == 0 {
-                continue; // 透明像素留画布中性色
+                continue; // transparent pixels keep the canvas neutral color
             }
             let d = (((oy + y) * CANVAS + ox + x) * 4) as usize;
             rgba[d..d + 3].copy_from_slice(&img.rgba[s..s + 3]);
@@ -277,7 +300,7 @@ fn paste_on_canvas(img: &Img) -> Img {
     Img { width: CANVAS, height: CANVAS, rgba }
 }
 
-/// 精灵在画布上的布局：缩放后尺寸（保持宽高比、至少 1px）+ 居中偏移。
+/// Sprite layout on the canvas: scaled dimensions (aspect-preserving, at least 1px) + centered offset.
 fn canvas_layout(img: &Img) -> (u32, u32, u32, u32) {
     let scale = (CANVAS as f64 / img.width as f64).min(CANVAS as f64 / img.height as f64);
     let tw = ((img.width as f64 * scale) as u32).clamp(1, CANVAS);
@@ -285,13 +308,14 @@ fn canvas_layout(img: &Img) -> (u32, u32, u32, u32) {
     ((tw), (th), (CANVAS - tw) / 2, (CANVAS - th) / 2)
 }
 
-/// 从 2048 的返回图里把精灵区域最近邻缩回原尺寸（返回图 = 画布 ×(AI_OUT/CANVAS)）。
+/// Nearest-neighbor downscale the sprite region out of the 2048 result back to original size
+/// (result image = canvas × (AI_OUT/CANVAS)).
 fn downscale_from_canvas(result: &Img, sprite: &Img) -> Img {
     let (tw, th, ox, oy) = canvas_layout(sprite);
-    let f = (AI_OUT / CANVAS) as f64; // 画布 → 返回图的放大倍数
+    let f = (AI_OUT / CANVAS) as f64; // upscale factor from canvas to result image
     let mut rgba = Vec::with_capacity((sprite.width * sprite.height * 4) as usize);
     for y in 0..sprite.height {
-        // 精灵像素中心 → 画布坐标 → 返回图坐标（全程最近邻）
+        // Sprite pixel center → canvas coordinate → result image coordinate (nearest-neighbor throughout)
         let cy = oy as f64 + (y as f64 + 0.5) * th as f64 / sprite.height as f64;
         let ry = ((cy * f) as i64).clamp(0, AI_OUT as i64 - 1) as usize;
         for x in 0..sprite.width {
@@ -304,9 +328,11 @@ fn downscale_from_canvas(result: &Img, sprite: &Img) -> Img {
     Img { width: sprite.width, height: sprite.height, rgba }
 }
 
-/// 合法化：AI 出的向量不守物理（长度不一、z 可能朝里），逐像素重新归一化、
-/// z 夹 ≥0.1（先取绝对值再夹再归一，归一后仍保证 z ≥ 0.1——精确到重缩 xy），
-/// alpha 回填漫反射的（剪影必须逐像素一致，AI 的边缘羽化不可信）。
+/// Sanitize: AI-produced vectors are not physically valid (varying lengths, z may point
+/// inward), so per-pixel renormalize, clamp z ≥ 0.1 (take abs first, then clamp, then
+/// renormalize — still guarantees z ≥ 0.1 after renormalization by rescaling xy precisely),
+/// and backfill alpha from the diffuse (silhouette must match pixel-for-pixel; the AI's
+/// edge feathering is not trustworthy).
 fn sanitize(raw: &Img, diffuse: &Img) -> Img {
     let mut rgba = Vec::with_capacity(raw.rgba.len());
     for (npx, dpx) in raw.rgba.chunks_exact(4).zip(diffuse.rgba.chunks_exact(4)) {
@@ -321,10 +347,11 @@ fn sanitize(raw: &Img, diffuse: &Img) -> Img {
         let (mut x, mut y, mut z) =
             if len < 1e-9 { (0.0, 0.0, 1.0) } else { (nx / len, ny / len, nz / len) };
         if z < 0.1 {
-            // 归一化可能把 z 又压回 0.1 以下：钉死 z=0.1，xy 等比缩回单位球面
+            // Renormalization may push z back below 0.1: pin z=0.1 and rescale xy back
+            // onto the unit sphere.
             z = 0.1;
             let xy = (x * x + y * y).sqrt();
-            let s = (1.0 - z * z).sqrt() / xy; // z<0.1 时 xy≈1 > 0，除法安全
+            let s = (1.0 - z * z).sqrt() / xy; // when z<0.1, xy≈1 > 0, division is safe
             x *= s;
             y *= s;
         }
@@ -333,8 +360,9 @@ fn sanitize(raw: &Img, diffuse: &Img) -> Img {
     Img { width: raw.width, height: raw.height, rgba }
 }
 
-/// 调 Ark 图生图，返回结果图的 PNG 字节。请求/解析模式对齐 llm.rs（ureq 同步阻塞、
-/// 错误带端点与回显截断）。response_format=url：先拿 JSON 里的 URL 再下载一次。
+/// Call Ark image-to-image and return the result image's PNG bytes. Request/parsing pattern
+/// mirrors llm.rs (ureq synchronous blocking, errors carry endpoint and truncated echo).
+/// response_format=url: first take the URL from the JSON, then download it once more.
 fn call_ark(cfg: &AiConfig, data_url: &str) -> Result<Vec<u8>, String> {
     let body = serde_json::json!({
         "model": cfg.model,
@@ -368,12 +396,12 @@ fn call_ark(cfg: &AiConfig, data_url: &str) -> Result<Vec<u8>, String> {
     img_resp
         .body_mut()
         .with_config()
-        .limit(64 * 1024 * 1024) // 2048² 的 PNG 可能超 ureq 默认 10MB 上限
+        .limit(64 * 1024 * 1024) // a 2048² PNG may exceed ureq's default 10MB limit
         .read_to_vec()
         .map_err(|e| format!("Ark 结果图读取失败: {e}"))
 }
 
-/// PNG 字节 → Img（内存版，下载结果不落临时文件）。
+/// PNG bytes → Img (in-memory; downloaded results are not written to temp files).
 fn decode_png_bytes(bytes: &[u8]) -> Result<Img, String> {
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let mut reader = decoder.read_info().map_err(|e| format!("PNG 解码失败: {e}"))?;
@@ -394,7 +422,7 @@ fn decode_png_bytes(bytes: &[u8]) -> Result<Img, String> {
     Ok(Img { width: info.width, height: info.height, rgba })
 }
 
-/// Img → PNG 字节（内存版，发请求用）。
+/// Img → PNG bytes (in-memory; used for sending requests).
 fn encode_png_bytes(img: &Img) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     {
@@ -407,7 +435,7 @@ fn encode_png_bytes(img: &Img) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// 标准 base64（带 padding）。手写 20 行不值得为它进一个新依赖。
+/// Standard base64 (with padding). 20 hand-written lines aren't worth a new dependency for.
 fn base64(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -426,7 +454,7 @@ fn base64(data: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// 建临时项目：assets/ 下若干 (名字, 宽, 高, RGBA)。
+    /// Build a temp project: several (name, width, height, RGBA) under assets/.
     fn project_with(tag: &str, files: &[(&str, u32, u32, &[u8])]) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("vitric-norm-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -442,7 +470,8 @@ mod tests {
         dir
     }
 
-    /// 12x12 透明画布中央 8x8 灰色方块（2..10）——程序化路径的标准测试精灵。
+    /// 12x12 transparent canvas with an 8x8 gray square in the center (2..10) — the standard
+    /// test sprite for the procedural path.
     fn square_sprite() -> Vec<u8> {
         let mut rgba = vec![0u8; 12 * 12 * 4];
         for y in 2..10 {
@@ -468,7 +497,7 @@ mod tests {
         assert_eq!(report.generated, vec!["hero_n.png"]);
         let n = load_png(&dir.join("assets/hero_n.png")).unwrap();
         assert_eq!((n.width, n.height), (12, 12));
-        // 方块 2..10：边缘像素的法线朝外（屏幕空间 x 右 y 下）
+        // Square 2..10: edge-pixel normals point outward (screen space: x right, y down)
         let left = px(&n, 2, 6);
         let right = px(&n, 9, 6);
         let top = px(&n, 6, 2);
@@ -477,9 +506,9 @@ mod tests {
         assert!(right[0] > 128, "右缘法线朝右（红 > 128）: {right:?}");
         assert!(top[1] < 128, "上缘法线朝上（绿 < 128，y 向下）: {top:?}");
         assert!(bottom[1] > 128, "下缘法线朝下（绿 > 128）: {bottom:?}");
-        // 中心平坦区：中性法线，alpha 跟漫反射
+        // Central flat region: neutral normal, alpha follows the diffuse
         assert_eq!(px(&n, 6, 6), [128, 128, 255, 255], "倒角半径外的平坦区是中性法线");
-        // 透明区：中性色 + alpha 0
+        // Transparent region: neutral color + alpha 0
         assert_eq!(px(&n, 0, 0), [128, 128, 255, 0]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -503,7 +532,7 @@ mod tests {
     #[test]
     fn existing_pairs_are_skipped_and_n_files_never_become_inputs() {
         let sprite = square_sprite();
-        let marker = [1u8, 2, 3, 255].repeat(4); // 2x2 假法线（内容随便，只看动没动）
+        let marker = [1u8, 2, 3, 255].repeat(4); // 2x2 fake normal (content arbitrary, only checking if it changes)
         let dir = project_with(
             "skip",
             &[("hero.png", 12, 12, &sprite), ("hero_n.png", 2, 2, &marker)],
@@ -513,7 +542,7 @@ mod tests {
         assert!(report.generated.is_empty(), "有配对的不重生成: {report:?}");
         assert_eq!(report.skipped, vec!["hero.png"]);
         assert_eq!(before, std::fs::read(dir.join("assets/hero_n.png")).unwrap(), "既有 _n 一个字节不动");
-        // _n 文件永远不当漫反射输入：不存在 hero_n_n.png
+        // _n files are never treated as diffuse input: no hero_n_n.png exists
         assert!(!dir.join("assets/hero_n_n.png").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -522,12 +551,12 @@ mod tests {
     fn missing_ark_key_is_an_explicit_error() {
         let err = AiConfig::from_lookup(|_| None).unwrap_err();
         assert!(err.contains("ARK_API_KEY"), "{err}");
-        // 配齐了走默认端点/模型
+        // With everything set, default endpoint/model is used
         let cfg = AiConfig::from_lookup(|k| (k == "ARK_API_KEY").then(|| "sk-x".to_string()))
             .unwrap();
         assert_eq!(cfg.url, ARK_URL);
         assert_eq!(cfg.model, DEFAULT_MODEL);
-        // 模型/端点可被环境变量覆盖
+        // Model/endpoint can be overridden by environment variables
         let cfg = AiConfig::from_lookup(|k| Some(format!("v-{k}"))).unwrap();
         assert_eq!(cfg.model, "v-VITRIC_NORMALS_MODEL");
         assert_eq!(cfg.url, "v-VITRIC_NORMALS_URL");
@@ -544,13 +573,14 @@ mod tests {
 
     #[test]
     fn ai_path_sanitizes_against_local_stub() {
-        // 桩服务器：①验证请求形状并回 data[0].url；②按 url 提供一张 2048² 的"坏法线"
-        //（向量不归一且 z 朝里：(10,200,30) → nz<0）。生成完断言全部像素被合法化。
+        // Stub server: ① validate request shape and return data[0].url; ② serve a 2048²
+        // "bad normal" via that url (vectors not normalized and z pointing inward:
+        // (10,200,30) → nz<0). After generation, assert all pixels are sanitized.
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr();
         let url = format!("http://{addr}/api/v3/images/generations");
         let handle = std::thread::spawn(move || {
-            // 第一个请求：图生图
+            // First request: image-to-image
             let mut req = server.recv().unwrap();
             assert_eq!(req.method(), &tiny_http::Method::Post);
             let mut body = String::new();
@@ -574,7 +604,8 @@ mod tests {
                 ),
             )
             .unwrap();
-            // 第二个请求：下载结果图（纯色"坏法线"，PNG 行间过滤压得很小）
+            // Second request: download the result image (solid color "bad normal",
+            // PNG row-filter compresses very small)
             let bad = Img {
                 width: AI_OUT,
                 height: AI_OUT,
@@ -586,7 +617,7 @@ mod tests {
             req.respond(tiny_http::Response::from_data(png_bytes)).unwrap();
         });
 
-        // 精灵：4x4，左半不透明右半透明——alpha 回填要能看出差别
+        // Sprite: 4x4, left half opaque right half transparent — alpha backfill must show a difference
         let mut sprite = vec![0u8; 4 * 4 * 4];
         for y in 0..4 {
             for x in 0..2 {
@@ -609,7 +640,7 @@ mod tests {
                     assert_eq!([p[0], p[1], p[2]], [128, 128, 255], "透明区写中性色");
                     continue;
                 }
-                // 合法化后：单位长度（编码量化误差内）且 z ≥ 0.1
+                // After sanitization: unit length (within encoding quantization error) and z ≥ 0.1
                 let nx = p[0] as f64 / 255.0 * 2.0 - 1.0;
                 let ny = p[1] as f64 / 255.0 * 2.0 - 1.0;
                 let nz = p[2] as f64 / 255.0 * 2.0 - 1.0;
@@ -624,14 +655,16 @@ mod tests {
 
     #[test]
     fn sanitize_math_holds_at_extremes() {
-        // 纯 xy 向量（z=0 编码 128... 即解码后 0.0039）→ 夹到 z=0.1、xy 缩回球面
+        // Pure xy vector (z=0 encodes 128... i.e. decodes to 0.0039) → clamp to z=0.1,
+        // rescale xy back onto the sphere
         let raw = Img { width: 1, height: 1, rgba: vec![255, 128, 128, 255] };
         let diffuse = Img { width: 1, height: 1, rgba: vec![255, 255, 255, 255] };
         let out = sanitize(&raw, &diffuse);
         let nz = out.rgba[2] as f64 / 255.0 * 2.0 - 1.0;
         assert!(nz >= 0.1 - 0.01, "z 夹到 ≥0.1: {nz}");
-        // (128,128,128) 解码不是精确零（每分量 ±1/255）：按正常路径归一化成对角向量。
-        // 锁死字节：(0.0039,0.0039,0.0039) → 归一 (0.577,0.577,0.577) → 编码 201
+        // (128,128,128) does not decode to exact zero (±1/255 per channel): normal-path
+        // normalization produces a diagonal vector.
+        // Locked bytes: (0.0039,0.0039,0.0039) → normalized (0.577,0.577,0.577) → encoded 201
         let raw = Img { width: 1, height: 1, rgba: vec![128, 128, 128, 255] };
         let out = sanitize(&raw, &diffuse);
         assert_eq!(&out.rgba[..3], &[201, 201, 201], "近零向量归一化成对角单位向量");

@@ -2,8 +2,8 @@ use serde_json::{Map, Value};
 
 use vitric_data::ValidationReport;
 
-/// 运行时事件：规则的燃料。内建事件有 `input`（{"action","phase"}）、
-/// `collision`（{"a","b"}，实体句柄字符串）；规则用 `emit` 可以造任意自定义事件。
+/// Runtime event: the fuel of rules. Built-in events include `input` ({"action","phase"}),
+/// `collision` ({"a","b"}, entity handle strings); rules can use `emit` to produce arbitrary custom events.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
     pub name: String,
@@ -19,13 +19,13 @@ impl Event {
     }
 }
 
-/// 触发器。
+/// Trigger.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Trigger {
-    /// 每 tick 触发一次；配 `each` 则按实体逐个触发。
+    /// Fires once per tick; with `each`, fires once per entity.
     Tick,
-    /// 事件触发。`filter`：事件 data 字段的等值过滤。
-    /// `between`：碰撞语法糖——绑定 `self`=有第一个组件的实体、`other`=有第二个组件的实体。
+    /// Event-triggered. `filter`: equality filter on event data fields.
+    /// `between`: collision syntax sugar — binds `self` to the entity with the first component, `other` to the entity with the second component.
     Event {
         name: String,
         filter: Map<String, Value>,
@@ -33,60 +33,60 @@ pub enum Trigger {
     },
 }
 
-/// 一条规则。
+/// A single rule.
 #[derive(Debug, Clone)]
 pub struct Rule {
     pub id: String,
     pub trigger: Trigger,
-    /// 配合 Tick 触发：对拥有这些组件的每个实体各跑一次，绑定为 `self`。
+    /// Used with Tick trigger: runs once for each entity that has these components, bound as `self`.
     pub each: Option<Vec<String>>,
-    /// 条件三元组 [左, 操作符, 右]，全部成立才执行。
+    /// Condition triples [left, operator, right]; all must hold to execute.
     pub conditions: Vec<(String, String, Value)>,
-    /// 动作，按序执行。
+    /// Actions, executed in order.
     pub actions: Vec<Value>,
 }
 
-/// 一个项目的全部规则（解析+静态校验后）。
+/// All rules of a project (after parsing + static validation).
 #[derive(Debug, Clone, Default)]
 pub struct RuleSet {
     pub rules: Vec<Rule>,
 }
 
-/// 规则自省出来的一个「可注入动作」：动作名 + 它在规则里出现过的 phase。
-/// 这是「这局能干啥」的权威词汇——describe（控制面）和 SceneView（试玩）都从它出发，
-/// 两边对齐到同一个真相。放在 vitric-rules 因为它纯是对规则集的内省（规则是动作的来源），
-/// 不该让消费方各自重抄一遍扫规则的逻辑。
+/// An "injectable action" introspected from rules: action name + the phases it appears with in rules.
+/// This is the authoritative vocabulary of "what this game can do" — describe (control plane) and SceneView (playtest) both start from it,
+/// aligned to the same source of truth. It lives in vitric-rules because it is pure introspection over the rule set (rules are the source of actions),
+/// and consumers shouldn't each re-implement the rule-scanning logic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputAction {
-    /// 输入动作名（input 触发器 filter 里的 action 字段值）。
+    /// Input action name (the value of the action field in an input trigger's filter).
     pub action: String,
-    /// 这个动作在规则里出现过的 phase（"pressed" / "released"），按首次出现序去重。
+    /// Phases this action appears with in rules ("pressed" / "released"), deduplicated in first-occurrence order.
     pub phases: Vec<String>,
 }
 
-/// 从规则集派生「输入动作词汇」：扫所有 `input` 事件触发器，收 distinct action，
-/// 每个动作带上它出现过的 phase。
+/// Derive the "input action vocabulary" from a rule set: scan all `input` event triggers, collect distinct actions,
+/// each with the phases it appeared with.
 ///
-/// 顺序确定（输出必须可复现）：
-/// - action 按规则在规则集里的出现序首次见到时记下（后面再出现不挪位）；
-/// - 每个 action 的 phases 同样按首次出现序去重收集。
+/// Order is deterministic (output must be reproducible):
+/// - actions are recorded in the order of their first appearance within the rule set (later occurrences don't reorder);
+/// - phases for each action are also collected in first-occurrence order, deduplicated.
 ///
-/// 不带 phase 字段的 input 触发器（filter 里没写 phase）只贡献动作名、不贡献 phase——
-/// 它对 pressed/released 都不挑，phases 留空由消费方按需补全（SceneView 默认补
-/// {pressed, released} 两相）。非 input 触发器（tick / collision / 自定义事件）一概不算。
+/// An input trigger without a phase field (no phase in its filter) contributes only the action name, no phase —
+/// it doesn't care about pressed/released, so phases is left empty for consumers to fill in as needed (SceneView defaults to
+/// both {pressed, released}). Non-input triggers (tick / collision / custom events) are never counted.
 pub fn input_actions(rules: &RuleSet) -> Vec<InputAction> {
     let mut out: Vec<InputAction> = Vec::new();
     for rule in &rules.rules {
         let Trigger::Event { name, filter, .. } = &rule.trigger else {
-            continue; // 只看 input 事件触发器
+            continue; // only look at input event triggers
         };
         if name != "input" {
             continue;
         }
         let Some(action) = filter.get("action").and_then(|v| v.as_str()) else {
-            continue; // input 触发器没声明具体 action 名 = 不贡献动作词汇
+            continue; // an input trigger without a specific action name contributes nothing to the action vocabulary
         };
-        // phase 是可选的：写了就收，没写不收（动作仍记一份，phases 可能为空）
+        // phase is optional: collected if present, skipped if absent (the action is still recorded; phases may be empty)
         let phase = filter.get("phase").and_then(|v| v.as_str());
         match out.iter_mut().find(|a| a.action == action) {
             Some(existing) => {
@@ -109,8 +109,8 @@ const OPS: &[&str] = &["==", "!=", "<", "<=", ">", ">=", "exists", "!exists"];
 const ACTION_KINDS: &[&str] = &["set", "add", "spawn", "despawn", "emit", "call"];
 
 impl RuleSet {
-    /// 解析规则文件。格式: {"rules": [ {...}, ... ]}
-    /// 所有结构问题一次报全。
+    /// Parse a rule file. Format: {"rules": [ {...}, ... ]}
+    /// All structural problems are reported at once.
     pub fn parse(doc: &Value, file: &str) -> Result<RuleSet, ValidationReport> {
         let mut report = ValidationReport::default();
         let mut set = RuleSet::default();
@@ -126,7 +126,7 @@ impl RuleSet {
         let mut seen_ids: Vec<String> = Vec::new();
         for (i, rdoc) in rules.iter().enumerate() {
             let rpath = format!("{file}#/rules/{i}");
-            // id 查重在结构解析之前做：规则其他部分写错不该掩盖重复 id
+            // id duplicate check happens before structural parsing: errors elsewhere in the rule shouldn't mask a duplicate id
             if let Some(id) = rdoc.get("id").and_then(|v| v.as_str()) {
                 if seen_ids.iter().any(|s| s == id) {
                     report.push(
@@ -297,9 +297,9 @@ fn parse_rule(doc: &Value, rpath: &str, report: &mut ValidationReport) -> Option
                 broken = true;
                 continue;
             }
-            let p = parts.expect("已校验");
-            let left = p[0].as_str().expect("已校验").to_string();
-            let op = p[1].as_str().expect("已校验").to_string();
+            let p = parts.expect("validated");
+            let left = p[0].as_str().expect("validated").to_string();
+            let op = p[1].as_str().expect("validated").to_string();
             if !OPS.contains(&op.as_str()) {
                 report.push(
                     "VR009",
@@ -360,7 +360,7 @@ fn parse_rule(doc: &Value, rpath: &str, report: &mut ValidationReport) -> Option
     if broken || trigger.is_none() {
         return None;
     }
-    Some(Rule { id, trigger: trigger.expect("已检查"), each, conditions, actions })
+    Some(Rule { id, trigger: trigger.expect("checked above"), each, conditions, actions })
 }
 
 #[cfg(test)]
@@ -413,8 +413,8 @@ mod tests {
 
     #[test]
     fn input_actions_collects_distinct_actions_and_phases() {
-        // left 有 pressed+released 两条规则 → 一个动作两 phase；right 只有 pressed。
-        // tick / collision / 自定义事件触发器一概不算。
+        // left has pressed+released across two rules → one action with two phases; right only has pressed.
+        // tick / collision / custom event triggers are never counted.
         let set = RuleSet::parse(
             &json!({"rules": [
                 {"id": "left-go", "on": {"event": "input", "filter": {"action": "left", "phase": "pressed"}},
@@ -431,8 +431,8 @@ mod tests {
         )
         .unwrap();
         let acts = input_actions(&set);
-        // distinct action 按出现序：left 先于 right；非 input 触发器不贡献
-        assert_eq!(acts.len(), 2, "只 left/right 两个动作: {acts:?}");
+        // distinct actions in first-seen order: left precedes right; non-input triggers contribute nothing
+        assert_eq!(acts.len(), 2, "only left/right two actions: {acts:?}");
         assert_eq!(acts[0].action, "left");
         assert_eq!(acts[0].phases, vec!["pressed".to_string(), "released".to_string()]);
         assert_eq!(acts[1].action, "right");
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn input_actions_action_without_phase_has_empty_phases() {
-        // input 触发器只声明 action、没写 phase（对两相都不挑）：动作仍记一份，phases 为空。
+        // an input trigger that declares only action, no phase (indifferent to both phases): the action is still recorded once, with empty phases.
         let set = RuleSet::parse(
             &json!({"rules": [
                 {"id": "any", "on": {"event": "input", "filter": {"action": "menu"}},
@@ -473,7 +473,7 @@ mod tests {
 
     #[test]
     fn input_actions_ignores_non_input_and_filterless_input() {
-        // 没有任何 input 触发器 → 空；input 触发器但 filter 没 action 字段也不贡献。
+        // no input triggers at all → empty; an input trigger whose filter lacks an action field also contributes nothing.
         let set = RuleSet::parse(
             &json!({"rules": [
                 {"id": "t", "on": "tick", "do": [{"emit": "x", "data": {}}]},

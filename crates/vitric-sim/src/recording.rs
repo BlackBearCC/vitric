@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// 一条录下来的输入。
+/// A recorded input.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputRecord {
     pub tick: u64,
@@ -9,42 +9,42 @@ pub struct InputRecord {
     pub phase: String,
 }
 
-/// 一条录下来的外部回复（LLM 回复这类异步到达的外部内容）。
-/// 与输入同级：它是世界之外进入模拟的**第二条**也是最后一条通道。
+/// A recorded external reply (async-arriving external content such as an LLM reply).
+/// Same level as inputs: it is the **second** and last channel for content outside the world to enter the simulation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReplyRecord {
     pub tick: u64,
-    /// 事件名（约定 "llm-reply" / "llm-error"，但通道本身不限定）。
+    /// Event name (convention: "llm-reply" / "llm-error", but the channel itself doesn't enforce).
     pub name: String,
-    /// 事件 data（JSON 对象）。
+    /// Event data (JSON object).
     pub data: serde_json::Value,
 }
 
-/// 一局游戏的完整录像：种子 + 输入序列 + 外部回复序列 + 校验点。
-/// 这就是确定性的全部需要——重放它必然逐帧复现原局。
+/// A complete recording of a run: seed + input sequence + external reply sequence + checkpoints.
+/// This is everything determinism needs — replaying it must reproduce the original run frame by frame.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Recording {
     pub seed: u64,
     pub inputs: Vec<InputRecord>,
-    /// 外部回复（LLM 等）。重放时按 tick 原样重新注入——重放永远不碰网络。
-    /// serde(default)：旧录像没有这个字段，等价于「这局没有外部回复」，语义不变。
+    /// External replies (LLM, etc.). Re-injected at the original tick during replay — replay never touches the network.
+    /// serde(default): old recordings without this field are equivalent to "this run has no external replies"; semantics unchanged.
     #[serde(default)]
     pub replies: Vec<ReplyRecord>,
-    /// 周期性状态哈希 (tick, hash)，重放时逐点比对，跑偏立即定位到区间。
+    /// Periodic state hashes (tick, hash), compared point by point during replay; divergence is located to the interval immediately.
     pub checkpoints: Vec<(u64, u64)>,
-    /// 录像覆盖的总 tick 数。
+    /// Total number of ticks the recording covers.
     pub ticks: u64,
-    /// 结束时的世界状态哈希。
+    /// World state hash at the end.
     pub final_hash: u64,
 }
 
 impl Recording {
-    /// 某 tick 的全部输入（录像按 tick 升序存）。
+    /// All inputs at a given tick (the recording stores them in ascending tick order).
     pub fn inputs_at(&self, tick: u64) -> impl Iterator<Item = &InputRecord> {
         self.inputs.iter().filter(move |r| r.tick == tick)
     }
 
-    /// 某 tick 的全部外部回复（录像按 tick 升序存）。
+    /// All external replies at a given tick (the recording stores them in ascending tick order).
     pub fn replies_at(&self, tick: u64) -> impl Iterator<Item = &ReplyRecord> {
         self.replies.iter().filter(move |r| r.tick == tick)
     }

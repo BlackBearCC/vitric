@@ -1,26 +1,33 @@
-//! `vitric turf` — 地盘执法。
+//! `vitric turf` — turf enforcement.
 //!
-//! 立场：班子协议第一条是"文件即地盘"——每个角色只写自己的目录，这条纪律
-//! 不能靠 subagent 自觉，要引擎机械执法。用法：
+//! Stance: the first rule of the team protocol is "files are turf" — each role only writes
+//! its own directory, and this discipline can't rely on subagents' self-awareness; the
+//! engine must enforce it mechanically. Usage:
 //!
 //! ```text
-//! vitric turf <项目目录> --role <角色> <改动文件...>
+//! vitric turf <project_dir> --role <role> <changed_files...>
 //! ```
 //!
-//! 改动文件路径**相对项目目录**解释（绝对路径也认，但必须落在项目内）。
-//! 任何文件越出该角色的地盘 → 报告里逐条点名 + 退出 1；处方永远是同一句：
-//! 跨地盘需求走事件约定提给导演，不直接改别人的文件。
+//! Changed-file paths are interpreted **relative to the project directory** (absolute paths
+//! are accepted but must fall inside the project). Any file outside the role's turf → the
+//! report names each violation + exits 1; the prescription is always the same line:
+//! cross-turf needs go through the event convention to the director, don't directly edit
+//! someone else's files.
 //!
-//! 地盘表是引擎定义的（与仓库 team/README.md 的表一字一句对齐）：
+//! The turf table is engine-defined (aligned word-for-word with the table in the repo's
+//! team/README.md):
 //! art=assets/+animations.json+palette.json | level=scenes/ | gameplay=rules/+scripts/
-//! audio=sounds/ | narrative=scenes/（文案住在场景 Text 里，与 level 共享目录）
-//! qa=qa/+recordings/ | director=一切（GDD.md/schema.json/vitric.json 只有导演能动）。
+//! audio=sounds/ | narrative=scenes/ (narrative lives in scene Text, sharing the directory
+//! with level)
+//! qa=qa/+recordings/ | director=everything (GDD.md/schema.json/vitric.json only the director
+//! can edit).
 
 use std::path::Path;
 
 use serde_json::{json, Value};
 
-/// 角色 → (可写目录, 可写单文件)。director 不在表里——它可写项目内一切。
+/// Role → (writable directories, writable single files). director is not in the table —
+/// it can write everything inside the project.
 const TURF: &[(&str, &[&str], &[&str])] = &[
     ("art", &["assets"], &["animations.json", "palette.json"]),
     ("level", &["scenes"], &[]),
@@ -30,15 +37,16 @@ const TURF: &[(&str, &[&str], &[&str])] = &[
     ("qa", &["qa", "recordings"], &[]),
 ];
 
-/// 跑地盘执法。返回 (JSON 报告, 是否全在地盘内)；Err 只用于用法错误
-/// （缺参数/未知角色/项目目录不存在）——这些是硬错误，不是一份 pass=false 的报告。
+/// Run turf enforcement. Returns (JSON report, whether all in turf); Err is only for usage
+/// errors (missing args / unknown role / nonexistent project dir) — these are hard errors,
+/// not a pass=false report.
 pub fn run(args: &[String]) -> Result<(Value, bool), String> {
     let dir = args.first().ok_or("turf 缺少项目目录参数。用法: vitric turf <项目目录> --role <角色> <改动文件...>")?;
     let dir_path = Path::new(dir);
     if !dir_path.is_dir() {
         return Err(format!("项目目录 {dir} 不存在或不是目录"));
     }
-    // 绝对路径的改动文件要靠规范化的项目根来折算成相对路径
+    // Absolute-path changed files need a canonicalized project root to convert to relative paths
     let abs_dir = std::fs::canonicalize(dir_path)
         .map_err(|e| format!("项目目录 {dir} 无法规范化: {e}"))?
         .to_string_lossy()
@@ -63,7 +71,7 @@ pub fn run(args: &[String]) -> Result<(Value, bool), String> {
         return Err("turf 缺少改动文件参数——把本次改动的文件列在命令末尾（路径相对项目目录）".to_string());
     }
 
-    // 角色合法性：未知角色是硬错误并列出全部可选项，不静默当 pass/fail
+    // Role validity: unknown role is a hard error listing all options, not silently treated as pass/fail
     let turf: Option<(&[&str], &[&str])> = if role == "director" {
         None
     } else {
@@ -82,7 +90,7 @@ pub fn run(args: &[String]) -> Result<(Value, bool), String> {
         match normalize(file, &abs_dir) {
             Err(reason) => violations.push(json!({"file": file, "reason": reason})),
             Ok(rel) => {
-                // director 可写项目内一切；其他角色查地盘表
+                // director can write everything inside the project; other roles check the turf table
                 if let Some((dirs, singles)) = turf {
                     if !in_turf(&rel, dirs, singles) {
                         violations.push(json!({
@@ -130,16 +138,19 @@ fn in_turf(rel: &str, dirs: &[&str], singles: &[&str]) -> bool {
         || dirs.iter().any(|d| rel == *d || rel.starts_with(&format!("{d}/")))
 }
 
-/// 把一个改动文件路径折算成项目内的相对路径（'/' 分隔）。
-/// 折算不动 = 违规：绝对路径不在项目下、相对路径 `..` 逃出项目目录，都给显式理由。
-/// 纯词法处理（不碰文件系统）——改动文件可能已被删除，canonicalize 会失败。
+/// Convert a changed-file path to a relative path inside the project ('/' separated).
+/// Failure to convert = violation: absolute path not under the project, or relative path
+/// with `..` escaping the project dir — each gets an explicit reason.
+/// Pure lexical processing (no filesystem access) — the changed file may already be deleted,
+/// canonicalize would fail.
 fn normalize(file: &str, abs_dir: &str) -> Result<String, String> {
     let file = file.replace('\\', "/");
-    // 绝对路径（Unix / Windows 盘符）：必须落在项目目录下
+    // Absolute path (Unix / Windows drive letter): must fall under the project directory
     let is_abs = file.starts_with('/')
         || (file.len() >= 3 && file.as_bytes()[1] == b':' && file.as_bytes()[2] == b'/');
     let rel = if is_abs {
-        // 剩余部分必须以 '/' 开头才算真的在项目目录下（防 /proj 撞上 /proj-other 前缀）
+        // The remainder must start with '/' to truly be under the project dir (prevents /proj
+        // colliding with the /proj-other prefix)
         match file.strip_prefix(abs_dir) {
             Some(r) if r.starts_with('/') && !r.trim_start_matches('/').is_empty() => {
                 r.trim_start_matches('/').to_string()
@@ -149,7 +160,7 @@ fn normalize(file: &str, abs_dir: &str) -> Result<String, String> {
     } else {
         file
     };
-    // 词法归一：消化 "." 与 ".."，弹空即逃逸
+    // Lexical normalization: consume "." and ".."; popping empty = escape
     let mut parts: Vec<&str> = Vec::new();
     for comp in rel.split('/') {
         match comp {
@@ -180,9 +191,9 @@ mod tests {
         assert!(normalize("../outside.json", "/proj").unwrap_err().contains("逃出"));
         assert!(normalize("/etc/passwd", "/proj").unwrap_err().contains("之外"));
         assert_eq!(normalize("/proj/assets/x.png", "/proj").unwrap(), "assets/x.png");
-        // 项目根的前缀撞名不算项目内：/proj-other 不是 /proj 的子路径
+        // Project root prefix collision doesn't count as inside: /proj-other isn't a subpath of /proj
         assert!(normalize("/proj-other/x.png", "/proj").unwrap_err().contains("之外"));
-        // Windows 风格：反斜杠与盘符都折算
+        // Windows style: backslashes and drive letters both convert
         assert_eq!(normalize("assets\\x.png", "/proj").unwrap(), "assets/x.png");
         assert!(normalize("C:/other/x.png", "C:/proj").unwrap_err().contains("之外"));
     }
@@ -195,7 +206,7 @@ mod tests {
         assert!(in_turf("assets/sub/y.png", dirs, singles));
         assert!(in_turf("palette.json", dirs, singles));
         assert!(!in_turf("scenes/main.json", dirs, singles));
-        // 前缀撞名不算：assets_original/ 不是 assets/
+        // Prefix collision doesn't count: assets_original/ is not assets/
         assert!(!in_turf("assets_original/x.png", dirs, singles));
     }
 }

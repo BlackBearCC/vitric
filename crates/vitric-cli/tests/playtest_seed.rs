@@ -1,12 +1,17 @@
-//! 种子式探索埋雷验收（设计稿三节、十一节第 3 条）：一个解谜/剧情埋雷项目
-//! `branching`，拿一条「到 ending-bad」的种子录像当起点，受控扰动它的输入序列，
-//! 断言种子探索**逮出**：
-//!   1. 不可达结局 `ending-good`——声明了（go-good 规则 emit 它）但**任何扰动都到不了**，
-//!      因为它的守卫 `path == 99` 永不成立（没有任何规则把 path 设成 99，flag bug）；
-//!   2. 顺序软锁——扰动把必经步骤打乱/截断后，世界冻在一个改不动的死态（Timeout + 状态冻结）。
+//! Seed-based exploration mine-laying acceptance (design draft section 3, section 11 item 3):
+//! a puzzle/narrative mine-laying project `branching`, taking a seed recording "to ending-bad"
+//! as the starting point, perturbing its input sequence in a controlled way, asserting seed
+//! exploration **catches**:
+//!   1. Unreachable ending `ending-good` — declared (the go-good rule emits it) but **no
+//!      perturbation can reach it**, because its guard `path == 99` never holds (no rule sets
+//!      path to 99, a flag bug);
+//!   2. Ordering soft-lock — after perturbation scrambles/truncates the required steps, the
+//!      world freezes in an unchangeable dead state (Timeout + state frozen).
 //!
-//! 用真 `Runtime::boot` 跑真 swarm（boot 住在 vitric-cli，所以集成测试放这儿）。
-//! 种子录像在测试里手填（构造 `Recording`），不依赖外部文件。
+//! Uses a real `Runtime::boot` to run a real swarm (boot lives in vitric-cli, so the
+//! integration test goes here).
+//! The seed recording is hand-filled in the test (constructing a `Recording`), with no
+//! dependency on external files.
 
 use std::path::PathBuf;
 
@@ -22,8 +27,10 @@ fn branching_dir() -> PathBuf {
         .join("../vitric-playtest/tests/fixtures/branching")
 }
 
-/// 一条到 ending-bad 的种子录像（gate 证书的角色）：take-key → open-door → go-bad。
-/// inputs 即「证明这局能通到 ending-bad」的脚本——种子探索拿它当起点扰动。
+/// A seed recording reaching ending-bad (the role of the gate certificate): take-key →
+/// open-door → go-bad.
+/// The inputs are the script that "proves this session can reach ending-bad" — seed
+/// exploration takes it as the starting point to perturb.
 fn seed_to_bad() -> Recording {
     Recording {
         inputs: vec![
@@ -36,7 +43,8 @@ fn seed_to_bad() -> Recording {
     }
 }
 
-/// 工厂：每线程自己 boot 一份运行时 + 复制只读 Engine（QuickJS 非 Send 同款约束）。
+/// Factory: each thread boots its own runtime + clones the read-only Engine (same QuickJS
+/// non-Send constraint).
 fn factory(dir: PathBuf) -> impl Fn() -> Result<(vitric_sim::Sim, Runtime, vitric_rules::Engine), String> + Sync {
     move || {
         let (sim, rt) = Runtime::boot(&dir)?;
@@ -47,7 +55,8 @@ fn factory(dir: PathBuf) -> impl Fn() -> Result<(vitric_sim::Sim, Runtime, vitri
 
 #[test]
 fn baseline_seed_reaches_ending_bad() {
-    // 基线（未扰动种子）应复现到 ending-bad——种子探索的对照基准
+    // Baseline (un-perturbed seed) should reproduce reaching ending-bad — the control
+    // reference for seed exploration
     let dir = branching_dir();
     let (mut sim, mut rt) = Runtime::boot(&dir).unwrap();
     let engine = rt.rules.clone();
@@ -69,7 +78,8 @@ fn baseline_seed_reaches_ending_bad() {
 #[test]
 fn seed_exploration_flags_unreachable_good_ending_and_softlock() {
     let dir = branching_dir();
-    // 从种子生成 N 条扰动（含基线），每条跑一局
+    // Generate N perturbations from the seed (including the baseline), run one session per
+    // perturbation
     let plan = perturb_plan(&seed_to_bad(), 40, 12345);
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let results = run_seed_swarm(
@@ -83,13 +93,14 @@ fn seed_exploration_flags_unreachable_good_ending_and_softlock() {
     )
     .expect("种子探索 swarm 应跑通");
 
-    // 结局覆盖：扫规则声明的结局（go-good emit ending-good、go-bad emit ending-bad），
-    // 比对运行里到达了哪些
+    // Ending coverage: scan the rule-declared endings (go-good emits ending-good, go-bad emits
+    // ending-bad), compare which ones were reached during the runs
     let (_, rt) = Runtime::boot(&dir).unwrap();
     let report = aggregate_with_endings(&results, &rt.rules, &TerminalSpec::default());
     let ec = report.ending_coverage.expect("传了引擎应有结局覆盖");
 
-    // 1) 不可达结局：ending-good 声明了但 0 局可达（flag bug：守卫 path==99 永不成立）
+    // 1) Unreachable ending: ending-good is declared but 0 sessions reach it (flag bug: guard
+    //    path==99 never holds)
     assert!(
         ec.declared_endings.contains(&"ending-good".to_string()),
         "go-good 规则 emit ending-good，必须算声明结局，实际 declared={:?}",
@@ -100,13 +111,14 @@ fn seed_exploration_flags_unreachable_good_ending_and_softlock() {
         "任何扰动都到不了 ending-good，必须标不可达，实际 unreachable={:?}",
         ec.unreachable_endings
     );
-    // ending-bad 是可达的（基线就到了），不该误标不可达
+    // ending-bad is reachable (the baseline reaches it), should not be mis-flagged unreachable
     assert!(
         !ec.unreachable_endings.contains(&"ending-bad".to_string()),
         "ending-bad 基线就到达，不该标不可达"
     );
 
-    // 2) 顺序软锁：扰动把必经步骤打乱/截断后，世界冻在死态——stuck_clusters 非空
+    // 2) Ordering soft-lock: after perturbation scrambles/truncates the required steps, the
+    //    world freezes in a dead state — stuck_clusters is non-empty
     assert!(
         !report.stuck_clusters.is_empty(),
         "扰动应制造出至少一簇顺序软锁（冻结死态），实际 {:?}",
@@ -114,7 +126,7 @@ fn seed_exploration_flags_unreachable_good_ending_and_softlock() {
     );
     let total_hits: usize = report.stuck_clusters.iter().map(|c| c.hits).sum();
     assert!(total_hits > 0, "软锁命中局数应 > 0");
-    // 每簇挂得到可重放录像（结论挂证据）
+    // Each cluster carries a replayable recording (conclusion carries evidence)
     for c in &report.stuck_clusters {
         assert!(c.representative.ticks > 0, "卡死簇应带一条可重放代表录像");
     }
@@ -122,7 +134,8 @@ fn seed_exploration_flags_unreachable_good_ending_and_softlock() {
 
 #[test]
 fn seed_exploration_is_deterministic_serial_vs_parallel() {
-    // 种子探索串行/并行结果逐项一致（确定性铁律），同一组扰动两种并行度跑
+    // Seed exploration serial/parallel results are item-wise identical (determinism iron law),
+    // the same set of perturbations run at two parallelism levels
     let dir = branching_dir();
     let plan = perturb_plan(&seed_to_bad(), 20, 999);
     let serial =

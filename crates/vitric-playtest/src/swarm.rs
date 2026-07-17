@@ -1,15 +1,16 @@
-//! swarm 跑批：把一份「跑哪些局」的计划并行铺到多个工作线程，每局出一份
-//! plain-data 的 [`LabeledResult`]（设计稿七节 A2、九节性能预算）。
+//! Swarm batch execution: spreads a "which sessions to run" plan across multiple worker threads in parallel,
+//! each session producing a plain-data [`LabeledResult`] (design draft section 7 A2, section 9 perf budget).
 //!
-//! **关键并行架构（避 QuickJS 非 Send 坑）**：脚本运行时（QuickJS）不是 `Send`，
-//! 不能跨线程搬。所以约定：调用方给一个 **工厂闭包** `factory: Fn() -> (Sim, R, Engine)`，
-//! 每个工作线程**在自己线程内**调 `factory()` 自己 boot 一份全新运行时，跑完只把
-//! plain-data 的结果（`SessionResult`，全是 Send 的数值/字符串/录像）回传。运行时
-//! 对象绝不跨线程边界——线程间只流动「怎么跑」的 spec 和「跑出什么」的结果。
+//! **Key parallel architecture (avoiding the QuickJS non-Send pitfall)**: the script runtime (QuickJS) is not `Send`,
+//! and cannot be moved across threads. So the convention: the caller provides a **factory closure** `factory: Fn() -> (Sim, R, Engine)`,
+//! each worker thread **inside its own thread** calls `factory()` to boot a fresh runtime, and only the plain-data
+//! results (`SessionResult` — all-Send numbers/strings/recordings) are passed back. Runtime objects never cross
+//! the thread boundary — only the "how to run" spec and the "what came out" result flow between threads.
 //!
-//! **确定性铁律**：每条 spec 自带 (策略, seed, max_ticks, terminal)，一局的结果只由
-//! spec 决定，不碰线程调度——所以 `run_swarm` 串行跑和并行跑，结果逐项一致。线程只
-//! 决定「谁先跑完」，不决定「跑出什么」；结果按 spec 在 plan 里的原始下标归位。
+//! **Determinism rule**: each spec carries its own (strategy, seed, max_ticks, terminal); a session's result is
+//! decided solely by the spec, not by thread scheduling — so `run_swarm` produces identical results whether run
+//! serially or in parallel. Threads decide only "who finishes first", not "what gets produced"; results are
+//! re-homed by the spec's original index in the plan.
 
 use std::sync::Arc;
 use std::thread;
@@ -25,34 +26,34 @@ use crate::strategy::{
     CoverageStrategy, EconomyStrategy, GreedyStrategy, RandomStrategy, ScriptedStrategy, Strategy,
 };
 
-/// 策略种类（spec 里用名字指定，跑的时候据此 new 出策略实例）。
-/// 是可序列化的纯标签——结果带回它，聚合器按 strategy_kind 分组。
+/// Strategy kind (named in the spec; instantiated at run time based on this).
+/// A serializable pure label — results carry it back, and the aggregator groups by strategy_kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StrategyKind {
     Random,
     Greedy,
     Coverage,
-    /// 经济压力策略（模拟经营找数值崩）：锁定一个动作连按 R 次再轮转（设计稿四阶段）。
+    /// Economy pressure strategy (sim-management games, finds numeric breakage): locks one action and repeats it R times before rotating (design draft section 4).
     Economy,
-    /// 种子探索的脚本回放局——只作**标签**（结果归类用）。脚本本身不在 SessionSpec 里
-    /// （脚本是变长的，且每条不同），由 `run_seed_swarm` 直接持有 Perturbation 构造策略。
+    /// Scripted replay session for seed exploration — used only as a **label** (for result grouping). The script itself isn't in SessionSpec
+    /// (scripts are variable-length and each one differs); `run_seed_swarm` holds the Perturbation directly to build the strategy.
     Scripted,
-    /// LLM 拟人玩局——只作**标签**（设计稿五阶段）。LLM 策略带 client（非 Send 的 trait 对象
-    /// 形态各异），不从 (kind,seed) 构造，由 `cmd_playtest --llm` 直接持有 LlmStrategy 跑，
-    /// 跑完贴这个标签把结果并进 swarm 结果集（note 进 qualitative_notes）。
+    /// LLM human-like play session — used only as a **label** (design draft stage 5). The LLM strategy carries a client (a non-Send trait object
+    /// in various shapes), isn't constructed from (kind, seed); `cmd_playtest --llm` holds the LlmStrategy directly to run it,
+    /// then tags results with this label to merge them into the swarm result set (notes go into qualitative_notes).
     Llm,
-    /// 前瞻规划器局（技巧/导航类专用）。它不是 `Strategy`——要 sim/logic 自己 snapshot/restore
-    /// 跑束搜索投机选最优动作（走 `run_session_lookahead` 而非 `run_session`），所以搜索深度
-    /// `depth` 直接挂在变体上（束宽用默认 [`DEFAULT_SWARM_LOOKAHEAD_BEAM`]，swarm 不另调）。
-    /// 声明了 goal 的项目，默认 swarm 会掺几局这种进来（导航类才不被误报 unbeatable）。
-    /// `run_one` 在每会话执行处按这个变体分流到 `run_session_lookahead`。
+    /// Lookahead planner session (skill/navigation-type specific). It isn't a `Strategy` — sim/logic themselves snapshot/restore
+    /// to run beam-search speculative action selection (goes through `run_session_lookahead` not `run_session`), so the search depth
+    /// `depth` is attached directly to the variant (beam width uses the default [`DEFAULT_SWARM_LOOKAHEAD_BEAM`]; swarm doesn't override it).
+    /// For projects that declare a goal, the default swarm mixes a few of these sessions in (otherwise navigation-type games get misreported as unbeatable).
+    /// `run_one` dispatches this variant to `run_session_lookahead` at each session execution point.
     Lookahead { depth: u64 },
 }
 
 impl StrategyKind {
-    /// 廉价策略档全集（CLI 默认轮流跑这几种用）。**不含 Scripted**——脚本回放走种子探索
-    /// 专路（`run_seed_swarm`），不进「广度覆盖」的策略轮换。含 Economy：模拟经营游戏靠它
-    /// 才逮得到经济跑飞/崩盘，把它放进默认轮换不挑游戏类型（非经营游戏它就是另一种压力测试）。
+    /// Full set of cheap strategy tiers (the CLI rotates through these by default). **Excludes Scripted** — scripted replay goes through
+    /// the seed-exploration-specific path (`run_seed_swarm`), not the "breadth-coverage" strategy rotation. Includes Economy: sim-management games need it
+    /// to catch economy runaway/collapse, so it's in the default rotation regardless of game type (in non-management games it's just another stress test).
     pub const ALL: [StrategyKind; 4] = [
         StrategyKind::Random,
         StrategyKind::Greedy,
@@ -60,7 +61,7 @@ impl StrategyKind {
         StrategyKind::Economy,
     ];
 
-    /// 短名（报告/CLI 显示用）。
+    /// Short name (for report/CLI display).
     pub fn name(self) -> &'static str {
         match self {
             StrategyKind::Random => "random",
@@ -73,9 +74,9 @@ impl StrategyKind {
         }
     }
 
-    /// 按种类 + seed 造一个策略实例（PCG 播种，确定可复现）。
-    /// `goal`：greedy 的派生目标（playtest.json 声明）——有目标时 greedy 朝它走，无则退化随机。
-    /// 其他策略不看 goal。Scripted/Llm 不走这条路（脚本/client 不在 seed 里）——明确 panic 不静默退化。
+    /// Build a strategy instance from kind + seed (PCG-seeded, deterministic and reproducible).
+    /// `goal`: greedy's derived goal (declared in playtest.json) — with a goal greedy walks toward it; without one it degrades to random.
+    /// Other strategies ignore goal. Scripted/Llm don't go through this path (script/client aren't in the seed) — they explicitly panic rather than silently degrade.
     fn build(self, seed: u64, goal: &Option<crate::config::GoalSpec>) -> Box<dyn Strategy> {
         match self {
             StrategyKind::Random => Box::new(RandomStrategy::new(seed)),
@@ -98,8 +99,8 @@ impl StrategyKind {
     }
 }
 
-/// 一局的规格：跑哪种策略、什么 seed、跑多少 tick、哪些事件算终止。
-/// 一局的结果**只**由它决定（确定性铁律）。
+/// One session's spec: which strategy, which seed, how many ticks, which events count as terminal.
+/// A session's result is decided **solely** by it (determinism rule).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionSpec {
     pub strategy_kind: StrategyKind,
@@ -109,13 +110,13 @@ pub struct SessionSpec {
 }
 
 impl SessionSpec {
-    /// 常用构造：默认终止规格。
+    /// Common constructor: default terminal spec.
     pub fn new(strategy_kind: StrategyKind, seed: u64, max_ticks: u64) -> SessionSpec {
         SessionSpec { strategy_kind, seed, max_ticks, terminal: TerminalSpec::default() }
     }
 }
 
-/// 带 spec 标签的一局结果（哪个策略/seed 跑出来的 + 跑出什么）。聚合器吃这个。
+/// A session result with its spec label (which strategy/seed produced it + what it produced). The aggregator consumes this.
 #[derive(Debug, Clone)]
 pub struct LabeledResult {
     pub spec: SessionSpec,
@@ -123,36 +124,36 @@ pub struct LabeledResult {
 }
 
 impl LabeledResult {
-    /// 便捷读取：这局的结局。
+    /// Convenience read: this session's outcome.
     pub fn outcome(&self) -> Outcome {
         self.result.outcome
     }
 }
 
-/// 默认 swarm 掺入的前瞻局用的**束搜索深度**。比单局 `--strategy lookahead` 的默认 depth=8
-/// 略大留余量：技巧/导航类要规划够深才算得出「先跳过墙再右行」这种多 tick 机动的收益——nav
-/// 跳墙的收益（越过墙顶后 hero_x 重新增长）要起跳后约 5 帧才显现，depth 太浅（实测 ≤6）看不到
-/// 就退化成原地踏步。12 配束宽 4 是 nav fixture 实测稳定通关深度（最小约 8，留 1.5× 余量）。
-/// 束搜索线性于深度（每真 tick 投机步 ≤ max(W,根动作数)×(B+1)×D，见 session.rs 性能注释），
-/// 导航类 B 个位数，depth 12 成本可控。单局 `--strategy lookahead` 不受此影响（用 `--horizon`→
-/// depth，默认 8，用户可显式调大解更难的多 tick 机动）。
+/// **Beam search depth** used by lookahead sessions mixed into the default swarm. Slightly larger than the default depth=8 of single-session `--strategy lookahead`,
+/// leaving headroom: skill/navigation-type games need deep enough planning to evaluate the payoff of multi-tick maneuvers like "first jump over the wall, then move right" —
+/// the payoff of a nav wall-jump (hero_x grows again after clearing the wall top) only shows up ~5 frames after takeoff, and a depth too shallow (empirically ≤6) misses it
+/// and degenerates to marking time in place. depth 12 with beam width 4 is the empirically stable clear-depth on the nav fixture (minimum ~8, leaving 1.5× headroom).
+/// Beam search is linear in depth (per real tick the speculative steps ≤ max(W, root-action count)×(B+1)×D, see the perf comment in session.rs);
+/// navigation-type B is single-digit, so depth 12 is affordable. Single-session `--strategy lookahead` is unaffected (it uses `--horizon`→
+/// depth, default 8; users can explicitly raise it to solve harder multi-tick maneuvers).
 pub const DEFAULT_SWARM_LOOKAHEAD_DEPTH: u64 = 12;
 
-/// 默认 swarm 掺入的前瞻局用的**束宽**。导航/技巧类需要保留几条「先变差再变好」的分支（贴墙、
-/// 起跳、横移并存），束宽 1 = 纯贪心容易剪掉跳墙路径；4 给足探索余量又不至于太慢。
+/// **Beam width** used by lookahead sessions mixed into the default swarm. Navigation/skill types need to keep a few "first gets worse, then gets better" branches (hugging a wall,
+/// taking off, lateral motion coexisting); beam width 1 = pure greedy, which easily prunes the wall-jump path; 4 gives enough exploration headroom without being too slow.
 pub const DEFAULT_SWARM_LOOKAHEAD_BEAM: usize = 4;
 
-/// 默认 swarm 的会话计划：N 局，廉价策略（random/greedy/coverage/economy）轮换 × 递增 seed。
+/// Default swarm session plan: N sessions, cheap strategies (random/greedy/coverage/economy) rotated × incrementing seeds.
 ///
-/// **声明了 goal 时掺前瞻**：lookahead 需要项目声明 goal（`playtest.json` 的 PlaytestConfig.goal）
-/// 才有方向，否则没意义。所以仅当 `has_goal` 为真时，把计划里固定少数几局换成 `Lookahead`——
-/// 导航/技巧类（先跳上墙再走）random 0% 通关，不掺前瞻就会被误报 unbeatable。比例克制（束搜索慢：
-/// 每真 tick ≤ W×(B+1)×D 个投机 step）：取 `min(N, max(2, N/4))` 局（约 25%，至少 2、
-/// 不超过 N）。**没声明 goal 时一局都不换**，默认组完全不变（向后兼容）。
+/// **When a goal is declared, mix in lookahead**: lookahead requires the project to declare a goal (`playtest.json`'s PlaytestConfig.goal)
+/// to have a direction; otherwise it's meaningless. So only when `has_goal` is true, a fixed small number of sessions in the plan are swapped to `Lookahead` —
+/// navigation/skill types (first jump onto a wall, then walk) get 0% clear rate with random, and would be misreported as unbeatable without mixing in lookahead. Ratio is restrained (beam search is slow:
+/// per real tick ≤ W×(B+1)×D speculative steps): take `min(N, max(2, N/4))` sessions (about 25%, at least 2,
+/// not exceeding N). **When no goal is declared, not a single session is swapped**, and the default set is entirely unchanged (backward compatible).
 ///
-/// 掺入的前瞻局用 [`DEFAULT_SWARM_LOOKAHEAD_DEPTH`]（比单局默认深，多 tick 机动才看得到收益）。
-/// 哪几局换成前瞻：取计划**末尾**那几局换（前面的轮换槽位不动，diff 最小、好对账）。被换的局
-/// 沿用它原本的 seed/max_ticks/terminal，只把 strategy_kind 改成 `Lookahead{depth}`。
+/// The mixed-in lookahead sessions use [`DEFAULT_SWARM_LOOKAHEAD_DEPTH`] (deeper than the single-session default, so multi-tick maneuvers show their payoff).
+/// Which sessions get swapped: the **trailing** ones (the earlier rotation slots are untouched, minimizing the diff and easing reconciliation). Swapped sessions
+/// retain their original seed/max_ticks/terminal, only their strategy_kind changes to `Lookahead{depth}`.
 pub fn default_plan(
     sessions: u64,
     seed: u64,
@@ -166,9 +167,9 @@ pub fn default_plan(
         plan.push(SessionSpec { strategy_kind: kind, seed: seed + k, max_ticks, terminal: terminal.clone() });
     }
     if has_goal && sessions > 0 {
-        // 掺入局数：约 1/4，至少 2，但不超过总局数。
+        // Number of mixed-in sessions: about 1/4, at least 2, but not exceeding the total session count.
         let look_n = ((sessions / 4).max(2)).min(sessions) as usize;
-        // 换末尾 look_n 局（前面轮换槽位不动）。
+        // Swap the trailing look_n sessions (the earlier rotation slots are untouched).
         let start = plan.len() - look_n;
         for spec in &mut plan[start..] {
             spec.strategy_kind =
@@ -178,10 +179,10 @@ pub fn default_plan(
     plan
 }
 
-/// 跑一条 spec（在调用线程内 boot 一份运行时，跑一局，出标签结果）。
-/// swarm 的串行/并行两条路都收敛到这一个函数——保证「怎么跑都跑出同一份结果」。
-/// `config`：每游戏视图覆盖（include/exclude/relabel/派生量/goal/terminal）。greedy 用它的 goal
-/// 找目标；session 用它走 derive_with_config。默认空配置=自动推，行为同阶段 1~5。
+/// Run one spec (boot a runtime inside the calling thread, run a session, produce a labeled result).
+/// Both the serial and parallel paths of swarm converge on this single function — guaranteeing "always the same result no matter how you run it".
+/// `config`: per-game view overrides (include/exclude/relabel/derived quantities/goal/terminal). greedy uses its goal
+/// to find the target; session uses it for derive_with_config. Default empty config = auto-derive, behavior identical to stages 1~5.
 fn run_one<R, F>(
     factory: &F,
     spec: &SessionSpec,
@@ -191,22 +192,22 @@ where
     R: GameLogic,
     F: Fn() -> Result<(Sim, R, Engine), String>,
 {
-    // 每局自己 boot：运行时不跨局复用（录可重放录像必须冷启动），更不跨线程
+    // Each session boots its own runtime: runtimes aren't reused across sessions (a replayable recording requires a cold start), let alone across threads.
     let (mut sim, mut logic, engine) = factory()?;
     let cfg = SessionConfig {
         max_ticks: spec.max_ticks,
         seed: spec.seed,
         terminal: spec.terminal.clone(),
         playtest: config.clone(),
-        // 普通 swarm/单局不重放种子回复（那是种子探索专路 run_seed_swarm 才有的事）
+        // Normal swarm/single-session doesn't replay seed replies (that's a seed-exploration-specific concern for run_seed_swarm).
         seed_replies: Vec::new(),
     };
-    // 分流：Lookahead 不是 Strategy，要 sim/logic 自己 snapshot/restore 投机选动作，走
-    // run_session_lookahead；其余照旧 build 出 Strategy 走 run_session。两条路同口径产
-    // SessionResult（state_trace/numeric_summary/fired_events/notes/recording 都齐），聚合不缺数据。
+    // Dispatch: Lookahead isn't a Strategy — sim/logic themselves snapshot/restore to speculatively pick actions, going through
+    // run_session_lookahead; the rest build a Strategy as before and go through run_session. Both paths produce SessionResult with the same shape
+    // (state_trace/numeric_summary/fired_events/notes/recording all populated), so the aggregator doesn't lack data.
     let result = match spec.strategy_kind {
         StrategyKind::Lookahead { depth } => {
-            // swarm 掺入的前瞻局用默认束宽（DEFAULT_SWARM_LOOKAHEAD_BEAM），深度由变体携带。
+            // swarm-mixed lookahead sessions use the default beam width (DEFAULT_SWARM_LOOKAHEAD_BEAM); depth is carried by the variant.
             run_session_lookahead(
                 &mut sim,
                 &mut logic,
@@ -223,11 +224,11 @@ where
     Ok(LabeledResult { spec: spec.clone(), result })
 }
 
-/// 跑一整批策略局。`factory` 必须 `Sync`（多个线程共享同一个闭包引用、各自调一次）；
-/// `threads` 是想用的并行度上限（实际取 `min(threads, plan 长度, available_parallelism)`）。
+/// Run a whole batch of strategy sessions. `factory` must be `Sync` (multiple threads share the same closure reference, each calling it once);
+/// `threads` is the desired parallelism upper bound (the actual value is `min(threads, plan length, available_parallelism)`).
 ///
-/// 结果顺序与 `plan` 一致（按原始下标归位），与线程调度无关——所以串行结果和并行结果
-/// 逐项一致。任一局 boot/跑出错，整批返回那个错（fail-fast，不吞）。
+/// Result order matches `plan` (re-homed by original index), independent of thread scheduling — so serial and parallel results are
+/// item-by-item identical. If any session errors during boot/run, the whole batch returns that error (fail-fast, not swallowed).
 pub fn run_swarm<R, F>(
     factory: F,
     plan: &[SessionSpec],
@@ -237,13 +238,13 @@ where
     R: GameLogic,
     F: Fn() -> Result<(Sim, R, Engine), String> + Sync,
 {
-    // 默认空配置（自动推视图、greedy 无目标退化随机）——和阶段 1~5 行为一致。
+    // Default empty config (auto-derive view, greedy degrades to random without a goal) — behavior identical to stages 1~5.
     run_swarm_with_config(factory, plan, &crate::config::PlaytestConfig::default(), threads)
 }
 
-/// 带每游戏视图覆盖的 swarm（设计稿一节「自动推 + 可选覆盖」、十一节第 6 条）。
-/// `config` 对整批生效：策略看到 include/exclude/relabel/派生量调整后的视图，greedy 朝
-/// config.goal 走。其余确定性/并行/归位保证同 [`run_swarm`]。
+/// Swarm with per-game view overrides (design draft section 1 "auto-derive + optional overrides", section 11 item 6).
+/// `config` applies to the whole batch: strategies see the include/exclude/relabel/derived-quantity-adjusted view, greedy walks toward
+/// config.goal. Other determinism/parallelism/re-homing guarantees are the same as [`run_swarm`].
 pub fn run_swarm_with_config<R, F>(
     factory: F,
     plan: &[SessionSpec],
@@ -254,22 +255,22 @@ where
     R: GameLogic,
     F: Fn() -> Result<(Sim, R, Engine), String> + Sync,
 {
-    // 按下标跑：每条 spec 在调用线程内 boot 一份运行时 + build 策略（带 config.goal），跑一局
+    // Run by index: each spec boots a runtime inside the calling thread + builds a strategy (with config.goal), runs a session.
     run_indexed(plan.len(), threads, |i| run_one::<R, F>(&factory, &plan[i], config))
 }
 
-/// 种子探索批跑（设计稿三节）：把一组**扰动脚本**铺到并行线程，每条用
-/// [`ScriptedStrategy`] 跑一局——脚本喂回去复现/走岔，截断的接 random 发散。
-/// 复用 `run_swarm` 同款下标并行核（`run_indexed`），所以**串行/并行结果逐项一致**，
-/// 结果可直接喂 `aggregate_with_endings`（含不可达结局）。
+/// Seed-exploration batch runner (design draft section 3): spreads a set of **perturbation scripts** across parallel threads, each using
+/// [`ScriptedStrategy`] to run a session — the script is fed back to reproduce/diverge, and truncated scripts hand off to random for divergence.
+/// Reuses the same index-parallel core as `run_swarm` (`run_indexed`), so **serial/parallel results are item-by-item identical**,
+/// and results can be fed directly to `aggregate_with_endings` (including unreachable endings).
 ///
-/// `seed_replies`：种子录像里的外部回复（LLM 内容等）。扰动只动**输入**，回复跟着种子走、
-/// 原样按原 tick 注回去（和 `Sim::replay` 同口径）——否则靠回复才通关的结局（如 echo）基线
-/// 复现不出来。截断脚本只注**截断点之前**的回复（截断后是 random 发散，没有种子回复了）。
+/// `seed_replies`: external replies in the seed recording (LLM content, etc.). Perturbation only touches **inputs**; replies follow the seed and are
+/// re-injected at their original ticks (same accounting as `Sim::replay`) — otherwise endings that require a reply to clear (e.g. echo) couldn't be
+/// reproduced by the baseline. Truncated scripts only inject replies **before the truncation point** (after truncation it's random divergence, no more seed replies).
 ///
-/// 每条结果的 spec 标 `StrategyKind::Scripted`、seed=该脚本在 plan 里的下标
-/// （让结果可对账到具体哪条扰动；脚本本身不进 spec，太长且变长）。
-/// 截断脚本（`truncate_at=Some`）的发散随机用 `explore_seed + 下标` 播种——确定可复现。
+/// Each result's spec is tagged `StrategyKind::Scripted` with seed=that script's index in the plan
+/// (so results can be reconciled to the specific perturbation; the script itself isn't in the spec — too long and variable-length).
+/// Truncated scripts (`truncate_at=Some`) seed their divergence random with `explore_seed + index` — deterministic and reproducible.
 pub fn run_seed_swarm<R, F>(
     factory: F,
     plan: &[Perturbation],
@@ -286,16 +287,16 @@ where
     run_indexed(plan.len(), threads, |i| {
         let pert = &plan[i];
         let (mut sim, mut logic, engine) = factory()?;
-        // 截断脚本接 random 发散；非截断脚本放完即止（None）。
-        // 发散 random 用 explore_seed + 下标播种：每条脚本一个独立可复现的发散序列。
+        // Truncated scripts hand off to random for divergence; non-truncated scripts stop after replay (None).
+        // The divergence random is seeded with explore_seed + index: each script gets its own independent reproducible divergence sequence.
         let then_explore: Option<Box<dyn Strategy>> = if pert.truncate_at.is_some() {
             Some(Box::new(RandomStrategy::new(explore_seed.wrapping_add(i as u64))))
         } else {
             None
         };
         let mut strategy = ScriptedStrategy::new(pert.script.clone(), then_explore);
-        // 这局要注的种子回复：截断脚本只留截断点之前的（截断后没有种子回复）；
-        // 非截断脚本注全部。drop/swap/substitute 不改 tick 轴，回复照原 tick 注。
+        // Seed replies to inject for this session: truncated scripts keep only those before the truncation point (after truncation there are no seed replies);
+        // non-truncated scripts inject all. drop/swap/substitute don't change the tick axis, replies are injected at their original ticks.
         let replies: Vec<ReplyRecord> = match pert.truncate_at {
             Some(cut) => seed_replies.iter().filter(|r| r.tick < cut).cloned().collect(),
             None => seed_replies.to_vec(),
@@ -308,7 +309,7 @@ where
             ..Default::default()
         };
         let result = run_session(&mut sim, &mut logic, &engine, &mut strategy, &cfg)?;
-        // spec 标 Scripted + seed=下标，便于把结果对回具体哪条扰动
+        // spec is tagged Scripted + seed=index, to reconcile the result back to the specific perturbation
         let spec = SessionSpec {
             strategy_kind: StrategyKind::Scripted,
             seed: i as u64,
@@ -319,16 +320,16 @@ where
     })
 }
 
-/// LLM 档批跑（设计稿五阶段）：少量 LLM 代理读同一份 Scene View 拟人玩 + 吐定性 note。
+/// LLM-tier batch runner (design draft stage 5): a few LLM agents read the same Scene View to play human-like + emit qualitative notes.
 ///
-/// **为什么串行、不并行**：LLM 局天然慢、单独限流、不拖累策略档（设计稿九节）；而且 LLM
-/// 推理不确定，这几局的 outcome/note **不要求跨次复现**——并行与否对结果没有「确定性」意义。
-/// 串行最简单：共享一个 `client`（`Arc<dyn LlmClient>`，Send+Sync），逐局自己 boot 一份运行时
-/// （和策略档同款冷启动约束，录像才可重放），跑一局 LlmStrategy，贴 `StrategyKind::Llm` 标签。
+/// **Why serial, not parallel**: LLM sessions are inherently slow, separately rate-limited, and don't drag down strategy tiers (design draft section 9); moreover LLM
+/// inference is non-deterministic, so the outcome/notes of these sessions **don't require cross-run reproducibility** — parallelism has no "determinism" meaning for the result.
+/// Serial is simplest: share one `client` (`Arc<dyn LlmClient>`, Send+Sync), boot a fresh runtime per session
+/// (same cold-start constraint as strategy tiers, so the recording is replayable), run a LlmStrategy session, and tag with `StrategyKind::Llm`.
 ///
-/// 每局 seed=`base_seed + 下标`（给 LlmStrategy 的预留 PCG 播种，当前不影响选择，留作对账）。
-/// `goal` 拼进提示词的目标描述。返回的 `LabeledResult` 可直接和策略档结果**拼进同一个结果集**
-/// 喂聚合器——LLM 局的 note 进 `qualitative_notes`，它选的输入进录像（可 `Sim::replay` 复现）。
+/// Each session's seed=`base_seed + index` (seeds LlmStrategy's reserved PCG; currently doesn't affect selection, kept for reconciliation).
+/// `goal` becomes the goal description in the prompt. The returned `LabeledResult` can be **merged into the same result set** as strategy-tier results
+/// and fed to the aggregator — LLM-session notes go into `qualitative_notes`, and the inputs it picks go into the recording (reproducible via `Sim::replay`).
 pub fn run_llm_sessions<R, F>(
     factory: F,
     client: Arc<dyn LlmClient>,
@@ -346,7 +347,7 @@ where
     for i in 0..count {
         let (mut sim, mut logic, engine) = factory()?;
         let seed = base_seed.wrapping_add(i as u64);
-        // 每局一个新 LlmStrategy，共享同一个 client（Arc 包成 Box<dyn LlmClient> 喂构造）
+        // Each session gets a fresh LlmStrategy, sharing the same client (Arc wrapped as Box<dyn LlmClient> for the constructor)
         let mut strategy = LlmStrategy::new(Box::new(SharedClient(client.clone())), goal, seed);
         let cfg = SessionConfig { max_ticks, seed, terminal: terminal.clone(), ..Default::default() };
         let result = run_session(&mut sim, &mut logic, &engine, &mut strategy, &cfg)?;
@@ -361,8 +362,8 @@ where
     Ok(out)
 }
 
-/// 把 `Arc<dyn LlmClient>` 包成一个 `LlmClient`，让多局共享同一个底层 client
-/// （Box 要独占所有权，Arc 让 N 局都拿到同一个真 client，省 N 次重连/重配）。
+/// Wraps `Arc<dyn LlmClient>` as an `LlmClient`, letting multiple sessions share the same underlying client
+/// (Box requires exclusive ownership; Arc lets N sessions all get the same real client, saving N reconnections/reconfigurations).
 struct SharedClient(Arc<dyn LlmClient>);
 
 impl LlmClient for SharedClient {
@@ -371,9 +372,9 @@ impl LlmClient for SharedClient {
     }
 }
 
-/// 下标并行核：跑 `len` 个任务，第 i 个任务由 `task(i)` 定义，结果按下标归位。
-/// `run_swarm` 和 `run_seed_swarm` 共用它——线程切分/归位/fail-fast 只此一份，
-/// 保证两条路「串行/并行逐项一致」的确定性铁律是同一套保证。
+/// Index-parallel core: runs `len` tasks, the i-th defined by `task(i)`, results re-homed by index.
+/// Shared by `run_swarm` and `run_seed_swarm` — thread splitting / re-homing / fail-fast lives in one place,
+/// so the "serial/parallel item-by-item identical" determinism rule is the same guarantee for both paths.
 fn run_indexed<T>(
     len: usize,
     threads: usize,
@@ -386,11 +387,11 @@ where
         return Ok(Vec::new());
     }
 
-    // 实际线程数：不超过想要的、不超过任务数、不超过机器核数（默认拿 available_parallelism）
+    // Actual thread count: no more than desired, no more than task count, no more than machine cores (default to available_parallelism)
     let cpu = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let n_threads = threads.max(1).min(len).min(cpu.max(1));
 
-    // 单线程：直接串行，连 scope 都不开（小批量/单核常态，零线程开销）
+    // Single thread: just run serially, don't even open a scope (common case for small batches/single core, zero thread overhead)
     if n_threads <= 1 {
         let mut out = Vec::with_capacity(len);
         for i in 0..len {
@@ -399,14 +400,14 @@ where
         return Ok(out);
     }
 
-    // 多线程：把下标轮流分给 n_threads 个桶（round-robin 切分），每个线程跑自己那批，
-    // 结果连同原始下标一起回收，最后按下标归位。切法不影响结果（确定性不依赖切分）。
+    // Multi-thread: round-robin indices into n_threads buckets, each thread runs its own batch,
+    // results are collected back with their original indices, then re-homed by index. The splitting doesn't affect results (determinism doesn't depend on splitting).
     let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); n_threads];
     for i in 0..len {
         buckets[i % n_threads].push(i);
     }
 
-    // scope 让工作线程能借 task（栈上引用），无需 'static / Arc
+    // scope lets worker threads borrow task (stack reference), no 'static / Arc needed
     let collected: Vec<Result<Vec<(usize, LabeledResult)>, String>> = thread::scope(|scope| {
         let task_ref = &task;
         let handles: Vec<_> = buckets
@@ -415,7 +416,7 @@ where
                 scope.spawn(move || {
                     let mut local = Vec::with_capacity(idxs.len());
                     for i in idxs {
-                        // 任一局出错就把错带出来（fail-fast，不静默丢）
+                        // Any session error carries the error out (fail-fast, not silently dropped)
                         local.push((i, task_ref(i)?));
                     }
                     Ok(local)
@@ -425,7 +426,7 @@ where
         handles.into_iter().map(|h| h.join().expect("工作线程不应 panic")).collect()
     });
 
-    // 汇总：先把所有线程的错收掉（有错就返回第一个），再按原始下标排回去
+    // Aggregate: first collect all thread errors (return the first if any), then sort back by original index
     let mut indexed: Vec<(usize, LabeledResult)> = Vec::with_capacity(len);
     for chunk in collected {
         indexed.extend(chunk?);
@@ -447,7 +448,7 @@ mod tests {
         Engine::new(RuleSet::parse(&json!({"rules": []}), "r.json").unwrap(), schema)
     }
 
-    /// 在第 N tick 发一个终止事件的最小逻辑（与 session 测试同款，但本文件自带一份）。
+    /// Minimal logic that emits a terminal event at tick N (same as the session tests, but this file has its own copy).
     struct EmitAt {
         at: u64,
         event: String,
@@ -471,13 +472,13 @@ mod tests {
         }
     }
 
-    /// 工厂：每次造一对新 (sim, logic, engine)。win_at=Some(n) 则在第 n tick 发 game-won。
+    /// Factory: builds a fresh (sim, logic, engine) each call. win_at=Some(n) emits game-won at tick n.
     fn factory_winning(win_at: Option<u64>) -> impl Fn() -> Result<(Sim, EmitAt, Engine), String> {
         move || {
             let sim = Sim::new(1);
             let logic = match win_at {
                 Some(at) => EmitAt { at, event: "game-won".to_string(), pending: vec![] },
-                // 永不发终止事件：用一个不可能命中的 at
+                // Never emits a terminal event: use an unreachable at
                 None => EmitAt { at: u64::MAX, event: "nope".to_string(), pending: vec![] },
             };
             Ok((sim, logic, empty_engine()))
@@ -500,9 +501,9 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    // ---- default_plan：声明 goal 时掺前瞻 / 无 goal 完全不变 ----
+    // ---- default_plan: mix in lookahead when goal declared / unchanged without goal ----
 
-    /// 一个会话计划里前瞻局的数量。
+    /// Number of lookahead sessions in a session plan.
     fn count_lookahead(plan: &[SessionSpec]) -> usize {
         plan.iter()
             .filter(|s| matches!(s.strategy_kind, StrategyKind::Lookahead { .. }))
@@ -511,7 +512,7 @@ mod tests {
 
     #[test]
     fn default_plan_no_goal_is_pure_rotation_unchanged() {
-        // 无 goal：计划必须和「四策略轮换 × 递增 seed」逐条一致，一局前瞻都不掺（向后兼容）。
+        // No goal: the plan must match "four-strategy rotation × incrementing seed" item-by-item, with zero lookahead sessions (backward compatible).
         let plan = default_plan(8, 0, 50, TerminalSpec::default(), false);
         assert_eq!(plan.len(), 8);
         assert_eq!(count_lookahead(&plan), 0, "无 goal 不该掺前瞻");
@@ -523,20 +524,20 @@ mod tests {
 
     #[test]
     fn default_plan_with_goal_mixes_in_lookahead() {
-        // 有 goal：约 1/4 局换成前瞻（8 局 → 2 局），换的是末尾几局，其余轮换槽位不动。
+        // With goal: about 1/4 of sessions swap to lookahead (8 → 2), the trailing ones are swapped, the rest of the rotation slots are untouched.
         let plan = default_plan(8, 0, 50, TerminalSpec::default(), true);
         assert_eq!(plan.len(), 8);
         assert_eq!(count_lookahead(&plan), 2, "8 局应掺 2 局前瞻（约 25%）: {plan:?}");
-        // 末尾 2 局是前瞻、前 6 局仍是原轮换
+        // The trailing 2 are lookahead; the first 6 are still the original rotation
         assert!(matches!(plan[6].strategy_kind, StrategyKind::Lookahead { .. }));
         assert!(matches!(plan[7].strategy_kind, StrategyKind::Lookahead { .. }));
         for (k, spec) in plan.iter().enumerate().take(6) {
             assert_eq!(spec.strategy_kind, StrategyKind::ALL[k % StrategyKind::ALL.len()]);
         }
-        // 前瞻局沿用原 seed/max_ticks/terminal，只换 kind
+        // Lookahead sessions retain their original seed/max_ticks/terminal; only kind is swapped
         assert_eq!(plan[7].seed, 7);
         assert_eq!(plan[7].max_ticks, 50);
-        // 掺入的前瞻用默认 swarm 搜索深度（比单局默认深）
+        // The mixed-in lookahead uses the default swarm search depth (deeper than the single-session default)
         assert_eq!(
             plan[7].strategy_kind,
             StrategyKind::Lookahead { depth: DEFAULT_SWARM_LOOKAHEAD_DEPTH }
@@ -545,37 +546,37 @@ mod tests {
 
     #[test]
     fn default_plan_with_goal_keeps_at_least_two_lookahead_for_small_n() {
-        // 小 N：至少 2 局前瞻、但不超过总局数。N=1 → 1 局（min 起作用）。
+        // Small N: at least 2 lookahead sessions, but not exceeding the total session count. N=1 → 1 session (min kicks in).
         assert_eq!(count_lookahead(&default_plan(1, 0, 50, TerminalSpec::default(), true)), 1);
         assert_eq!(count_lookahead(&default_plan(3, 0, 50, TerminalSpec::default(), true)), 2);
-        // N=20 → 1/4=5 局
+        // N=20 → 1/4=5 sessions
         assert_eq!(count_lookahead(&default_plan(20, 0, 50, TerminalSpec::default(), true)), 5);
     }
 
-    /// 一个会发 game-won 的最小逻辑，但只有「没注入任何输入」才发——用来证明前瞻局确实走了
-    /// `run_session_lookahead`（它会逐候选投机；空动作词汇下「不操作」是唯一候选，照样能跑通通关）。
-    /// 这里主要验证 run_one 对 Lookahead 变体的分流：不 panic（build 会 panic）、产出齐遥测。
+    /// A minimal logic that emits game-won, but only when "no input was injected" — to prove the lookahead session actually went through
+    /// `run_session_lookahead` (it speculatively tries each candidate; with an empty action vocabulary "do nothing" is the only candidate, still clearing).
+    /// Mainly verifies run_one's dispatch of the Lookahead variant: doesn't panic (build would panic), produces full telemetry.
     #[test]
     fn run_swarm_dispatches_lookahead_spec_to_lookahead_runner() {
-        // 计划：一局普通 random + 一局 Lookahead。两局都应跑通、都带齐遥测（state_trace 非空、有录像）。
+        // Plan: one normal random + one Lookahead. Both should run through, both carrying full telemetry (state_trace non-empty, has recording).
         let plan = vec![
             SessionSpec::new(StrategyKind::Random, 0, 20),
             SessionSpec::new(StrategyKind::Lookahead { depth: 4 }, 1, 20),
         ];
-        // factory_winning(Some(3))：tick 3 发 game-won，两条路都该在 tick 4 通关
+        // factory_winning(Some(3)): emits game-won at tick 3, both paths should clear at tick 4
         let out = run_swarm(factory_winning(Some(3)), &plan, 2).unwrap();
         assert_eq!(out.len(), 2);
-        // 前瞻局没 panic（若误走 build 会 panic）、结局/遥测齐全
+        // The lookahead session didn't panic (would panic if it mistakenly went through build); outcome/telemetry all populated
         let look = &out[1];
         assert!(matches!(look.spec.strategy_kind, StrategyKind::Lookahead { .. }));
         assert_eq!(look.outcome(), Outcome::Win, "前瞻局也该收到 tick3 的 game-won");
         assert_eq!(look.result.ticks, 4);
-        // 遥测同口径：每 tick 一条 state_hash + 一份可序列化录像
+        // Telemetry has the same shape: one state_hash per tick + a serializable recording
         assert_eq!(look.result.state_trace.len(), look.result.ticks as usize);
         assert!(!look.result.recording.checkpoints.is_empty());
     }
 
-    /// 含前瞻局的混合计划，串行 vs 并行逐项一致（确定性铁律对前瞻同样成立）。
+    /// Mixed plan containing lookahead sessions; serial vs parallel are item-by-item identical (the determinism rule holds for lookahead too).
     #[test]
     fn swarm_mixed_lookahead_serial_and_parallel_identical() {
         let plan = vec![
@@ -603,7 +604,7 @@ mod tests {
         let plan = small_plan();
         let out = run_swarm(factory_winning(Some(3)), &plan, 4).unwrap();
         assert_eq!(out.len(), plan.len());
-        // 每个结果的 spec 必须等于 plan 里对应位置的 spec（顺序未被线程打乱）
+        // Each result's spec must equal the spec at the corresponding position in plan (order wasn't shuffled by threads)
         for (lr, spec) in out.iter().zip(plan.iter()) {
             assert_eq!(&lr.spec, spec);
         }
@@ -612,7 +613,7 @@ mod tests {
     #[test]
     fn swarm_serial_and_parallel_are_identical() {
         let plan = small_plan();
-        // 1 线程（串行）vs 8 线程（并行）：outcome/ticks/state_trace 必须逐项一致
+        // 1 thread (serial) vs 8 threads (parallel): outcome/ticks/state_trace must be item-by-item identical
         let serial = run_swarm(factory_winning(Some(5)), &plan, 1).unwrap();
         let parallel = run_swarm(factory_winning(Some(5)), &plan, 8).unwrap();
         assert_eq!(serial.len(), parallel.len());
@@ -635,7 +636,7 @@ mod tests {
 
     #[test]
     fn swarm_collects_win_outcomes() {
-        // 第 3 tick 发 game-won → 每局都应在 tick 4 通关
+        // Emit game-won at tick 3 → every session should clear at tick 4
         let plan = small_plan();
         let out = run_swarm(factory_winning(Some(3)), &plan, 4).unwrap();
         assert!(out.iter().all(|lr| lr.outcome() == Outcome::Win), "全部应通关");
@@ -660,7 +661,7 @@ mod tests {
         vec![
             pert(PerturbOp::Baseline, vec![(1, "go")], None),
             pert(PerturbOp::Drop, vec![], None),
-            pert(PerturbOp::Truncate, vec![(1, "go")], Some(2)), // 截断后 random 发散
+            pert(PerturbOp::Truncate, vec![(1, "go")], Some(2)), // truncated, then random divergence
         ]
     }
 
@@ -712,8 +713,8 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    /// 一个只有收到 "oracle-says" 回复才发 game-won 的逻辑——靠回复才通关，光按输入通不了。
-    /// 用来验证种子探索真把种子回复按 tick 注回去了（基线该复现到 Win）。
+    /// A logic that emits game-won only when it receives an "oracle-says" reply — clears only via the reply, not by pressing inputs.
+    /// Used to verify that seed exploration really re-injects seed replies at their ticks (the baseline should reproduce the Win).
     struct WinOnReply {
         pending: Vec<Event>,
     }
@@ -743,14 +744,14 @@ mod tests {
 
     #[test]
     fn seed_swarm_injects_seed_replies_baseline_reaches_win() {
-        // 种子：tick 2 一条 oracle-says{answer:"open"}（靠它才通关）。脚本只有输入（这里空脚本）。
+        // Seed: an oracle-says{answer:"open"} at tick 2 (required to clear). The script carries only inputs (here an empty script).
         let plan = vec![pert(PerturbOp::Baseline, vec![], None)];
         let replies = vec![ReplyRecord {
             tick: 2,
             name: "oracle-says".to_string(),
             data: json!({"answer": "open"}),
         }];
-        // 注了种子回复 → 基线复现到 Win
+        // With seed replies injected → the baseline reproduces the Win
         let out = run_seed_swarm(
             factory_reply_gated(),
             &plan,
@@ -763,7 +764,7 @@ mod tests {
         .unwrap();
         assert_eq!(out[0].outcome(), Outcome::Win, "种子回复注回去了，基线该通关");
 
-        // 反证：不传种子回复 → 没有 oracle-says → 永远通不了 → Timeout
+        // Counter-evidence: without seed replies → no oracle-says → never clears → Timeout
         let out_no = run_seed_swarm(
             factory_reply_gated(),
             &plan,
@@ -779,7 +780,7 @@ mod tests {
 
     #[test]
     fn seed_swarm_truncate_drops_replies_after_cut() {
-        // 种子回复在 tick 5；截断点在 tick 3 → 截断后没有种子回复 → 注不到那条 → 通不了。
+        // Seed reply at tick 5; truncation point at tick 3 → after truncation there are no seed replies → that reply can't be injected → can't clear.
         let plan = vec![pert(PerturbOp::Truncate, vec![], Some(3))];
         let replies = vec![ReplyRecord {
             tick: 5,

@@ -1,5 +1,5 @@
-// glow 的脚本层:动画状态机 + 粒子迸发
-// 动画选择:腾空=jump,跑动=walk,静止=idle——状态全由组件推导,无私藏状态
+// glow script layer: animation state machine + particle burst
+// Animation choice: airborne=jump, running=walk, still=idle — state is fully derived from components, no hidden state
 vitric.system("hero-anim", { query: ["Player","Body","Velocity","Anim"], writes: ["Anim"] }, (entities) => {
   for (const e of entities) {
     const moving = Math.abs(e.Velocity.x) > 0.1;
@@ -8,7 +8,7 @@ vitric.system("hero-anim", { query: ["Player","Body","Velocity","Anim"], writes:
   }
 });
 
-// 粒子迸发:尘土/宝石火花/通关彩带,寿命交给引擎 Particle 系统收尾
+// Particle burst: dust / gem sparks / victory confetti; lifetime is reaped by the engine Particle system
 vitric.fn("burst", (args, ctx) => {
   const kinds = {
     dust:     { colors: ["#d8c8a0","#c4b48e"],            img: "dust.png", up: 2,  spread: 3, ttl: 22, s: 0.4 },
@@ -27,7 +27,7 @@ vitric.fn("burst", (args, ctx) => {
   }
 });
 
-// 萤火虫氛围:每 24 tick 在英雄附近放一只慢慢上飘的暖光点,寿命交给 Particle
+// Firefly ambience: every 24 ticks spawn a slow-drifting warm light point near the hero; lifetime reaped by Particle
 vitric.system("fireflies", { query: ["Player", "Position"], writes: [] }, (entities, ctx) => {
   if (ctx.tick % 24 !== 0) return;
   for (const e of entities) {

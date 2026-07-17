@@ -1,7 +1,7 @@
-//! `vitric team` / `vitric turf` 端到端：协同黑板与地盘执法。
+//! `vitric team` / `vitric turf` end-to-end: the collaboration blackboard and turf enforcement.
 //!
-//! 立场锁定：黑板从文件机械读状态、永远退出 0（状态工具不是门）；
-//! 地盘表是引擎定义的纪律——角色越界必退出 1 并逐条点名，导演可写一切。
+//! Position lock: the blackboard reads state mechanically from files and always exits 0 (a state tool is not a gate);
+//! the turf table is engine-defined discipline — a role crossing its boundary must exit 1 and name each violation, while the director may write everything.
 
 use std::fs;
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
-/// 把 coin-run 复制一份到临时目录（测试要增删 GDD/录像，不能动共享示例）。
+/// Copy coin-run into a temp directory (tests need to add/remove GDD/recordings and must not touch the shared example).
 fn copy_example(tag: &str) -> PathBuf {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/coin-run");
     let dst = std::env::temp_dir().join(format!("vitric-team-{}-{tag}", std::process::id()));
@@ -55,7 +55,7 @@ fn report_of(out: &Output) -> Value {
 fn team_reports_sane_counts_and_always_exits_zero() {
     let dir = copy_example("counts");
     let out = vitric(&["team", dir.to_str().unwrap()]);
-    // 黑板是状态工具不是门：缺 GDD/palette/gates 一堆卡点也必须退出 0
+    // The blackboard is a state tool, not a gate: even with a pile of blockers (missing GDD/palette/gates) it must exit 0
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let r = report_of(&out);
 
@@ -64,7 +64,7 @@ fn team_reports_sane_counts_and_always_exits_zero() {
     assert_eq!(r["contract"]["manifest"], true);
     assert_eq!(r["contract"]["schema_parses"], true);
 
-    // 计数从真实示例派生（值锁住——coin-run 内容变了这里要跟着改，这是黑板的契约）
+    // Counts derived from the real example (values locked — if coin-run content changes this must change too, that is the blackboard's contract)
     assert_eq!(r["roles"]["art"]["assets"], 8);
     assert_eq!(r["roles"]["art"]["palette"], false);
     assert_eq!(r["roles"]["art"]["normals"], 0);
@@ -80,7 +80,7 @@ fn team_reports_sane_counts_and_always_exits_zero() {
     assert_eq!(r["roles"]["qa"]["asserts"], false);
     assert_eq!(r["roles"]["qa"]["recordings"], 0);
 
-    // 卡点提示：没 GDD、没 palette、没 gates 都要被点名
+    // Blocker hints: no GDD, no palette, no gates must all be named
     let blocking = serde_json::to_string(&r["blocking"]).unwrap();
     assert!(blocking.contains("GDD.md"), "{blocking}");
     assert!(blocking.contains("palette.json"), "{blocking}");
@@ -96,7 +96,7 @@ fn team_sees_contract_gates_and_missing_recording_without_running_gate() {
     fs::write(dir.join("palette.json"), "{\"colors\": []}").unwrap();
     fs::create_dir_all(dir.join("qa")).unwrap();
     fs::write(dir.join("qa/asserts.json"), "[]").unwrap();
-    // 声明门禁但录像还没录：黑板要报"录像缺失"，但只查文件在不在，不重放（裁决归 gate）
+    // Declare a gate but the recording is not yet recorded: the blackboard must report "recording missing", but only checks file existence, no replay (the verdict belongs to gate)
     let manifest_path = dir.join("vitric.json");
     let mut manifest: Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
@@ -124,7 +124,7 @@ fn team_sees_contract_gates_and_missing_recording_without_running_gate() {
 
 #[test]
 fn team_degrades_gracefully_when_project_is_broken() {
-    // 立项第一天连 vitric.json 都没有：黑板照样出报告 + 显式 error 字段，仍退出 0
+    // Day one of a project, not even vitric.json exists: the blackboard still produces a report + an explicit error field, still exits 0
     let dir = std::env::temp_dir().join(format!("vitric-team-{}-broken", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -135,12 +135,12 @@ fn team_degrades_gracefully_when_project_is_broken() {
     assert_eq!(r["contract"]["manifest"], false);
     assert!(r["contract"]["manifest_error"].is_string());
     assert_eq!(r["contract"]["schema_parses"], false);
-    // 装配不起来：systems/fns 是 null（未知）而不是 0（谎报）
+    // Cannot be assembled: systems/fns are null (unknown) rather than 0 (misreported)
     assert!(r["roles"]["gameplay"]["systems"].is_null());
     assert!(r["roles"]["gameplay"]["load_error"].is_string());
     fs::remove_dir_all(&dir).unwrap();
 
-    // 目录不存在是硬错误（黑板能面对残缺项目，不能面对不存在的目录）
+    // A non-existent directory is a hard error (the blackboard can face a broken project, but not a non-existent directory)
     let out = vitric(&["team", "/nonexistent/vitric-team-dir"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("不存在"));
@@ -204,7 +204,7 @@ fn turf_director_may_touch_everything_inside_project() {
 #[test]
 fn turf_files_outside_project_violate_even_for_director() {
     let dir = copy_example("turf-outside");
-    // 绝对路径在项目外 + 相对路径 .. 逃逸：都是违规，导演也不例外
+    // An absolute path outside the project + a relative .. escape: both are violations, even for the director
     let out = vitric(&[
         "turf",
         dir.to_str().unwrap(),
@@ -222,10 +222,10 @@ fn turf_files_outside_project_violate_even_for_director() {
 #[test]
 fn turf_narrative_shares_scenes_and_audio_owns_sounds() {
     let dir = copy_example("turf-share");
-    // 文案与关卡共享 scenes/（文案住在场景 Text 里）
+    // Narrative and level share scenes/ (narrative lives in scene Text)
     let out = vitric(&["turf", dir.to_str().unwrap(), "--role", "narrative", "scenes/main.json"]);
     assert!(out.status.success(), "narrative 可写 scenes/");
-    // 音频独立成档：sounds/ 归 audio，gameplay 碰 sounds/ 就是越界
+    // Audio is its own lane: sounds/ belongs to audio, gameplay touching sounds/ is a boundary violation
     let out = vitric(&["turf", dir.to_str().unwrap(), "--role", "gameplay", "sounds/jump.wav"]);
     assert_eq!(out.status.code(), Some(1), "gameplay 不许碰 sounds/");
     let out = vitric(&["turf", dir.to_str().unwrap(), "--role", "audio", "sounds/jump.wav"]);
@@ -236,12 +236,12 @@ fn turf_narrative_shares_scenes_and_audio_owns_sounds() {
 #[test]
 fn turf_usage_errors_are_explicit() {
     let dir = copy_example("turf-usage");
-    // 未知角色：硬错误并列出全部可选项
+    // Unknown role: hard error and lists all available options
     let out = vitric(&["turf", dir.to_str().unwrap(), "--role", "hacker", "x.png"]);
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("director") && err.contains("art") && err.contains("qa"), "{err}");
-    // 没给改动文件：硬错误，不是空 pass
+    // No changed files given: hard error, not an empty pass
     let out = vitric(&["turf", dir.to_str().unwrap(), "--role", "art"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("改动文件"));

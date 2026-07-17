@@ -1,7 +1,7 @@
-// ember 的脚本层:动画状态机 + 火盆计数 + 粒子迸发
-// 脚本无私藏状态——跨 tick 状态全在组件里,快照/回放安全。
+// ember script layer: animation state machine + brazier counting + particle burst
+// Scripts keep no hidden state — cross-tick state lives entirely in components, snapshot/replay safe.
 
-// 动画选择:腾空=jump,移动=walk,静止=idle
+// Animation choice: airborne=jump, moving=walk, still=idle
 vitric.system("hero-anim", { query: ["Player", "Body", "Velocity", "Anim"], writes: ["Anim"] }, (entities) => {
   for (const e of entities) {
     const moving = Math.abs(e.Velocity.x) > 0.1;
@@ -10,9 +10,9 @@ vitric.system("hero-anim", { query: ["Player", "Body", "Velocity", "Anim"], writ
   }
 });
 
-// 火盆计数:每 tick 数已点亮的火盆,发 lit-count{c} 给 HUD 规则(幂等,重复 set 文本无副作用)。
-// 全 4 座点亮时发 all-lit;它每 tick 都会发,但 win 规则带 ["@door","exists"] 守卫,
-// 门一消失规则就空转——无需脚本记忆上一次的计数,确定性安全。
+// Brazier count: every tick, count lit braziers and emit lit-count{c} to the HUD rule (idempotent; repeatedly setting the text has no side effects).
+// When all 4 are lit, emit all-lit; it fires every tick, but the win rule is guarded by ["@door","exists"],
+// so once the door is gone the rule no-ops — no need for the script to remember the last count; deterministic and safe.
 vitric.system("brazier-counter", { query: ["Brazier"], writes: [] }, (entities, ctx) => {
   let lit = 0;
   for (const e of entities) {
@@ -22,7 +22,7 @@ vitric.system("brazier-counter", { query: ["Brazier"], writes: [] }, (entities, 
   if (lit >= 4) ctx.emit("all-lit", {});
 });
 
-// 粒子迸发:尘土/火花/通关彩带,寿命交给引擎 Particle 系统收尾
+// Particle burst: dust / sparks / victory confetti; lifetime reaped by the engine Particle system
 vitric.fn("burst", (args, ctx) => {
   const kinds = {
     dust:     { colors: ["#d8c8a0", "#c4b48e"],                     img: "",         up: 2, spread: 3, ttl: 22, s: 0.4, light: 0 },

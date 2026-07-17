@@ -1,4 +1,4 @@
-//! glow 旗舰示例端到端：AI 美术素材加载、收集/通关链路、juice（屏震/粒子/HUD）全验。
+//! glow flagship example end-to-end: AI art asset loading, collection/clear chain, juice (screen shake/particles/HUD) all verified.
 
 use std::path::PathBuf;
 
@@ -18,7 +18,7 @@ fn collect_gem_then_light_the_lantern() {
     for _ in 0..60 {
         sim.step(&mut rt).unwrap();
     }
-    // 传送到第一颗宝石:吃到 → 计分/HUD/屏震/火花粒子
+    // Teleport to the first gem: collect it → score/HUD/screen shake/spark particles
     sim.world.set_field(hero, "Position.x", json!(10.0)).unwrap();
     sim.world.set_field(hero, "Position.y", json!(4.6)).unwrap();
     for _ in 0..3 {
@@ -31,7 +31,7 @@ fn collect_gem_then_light_the_lantern() {
     assert!(sim.world.get_field(cam, "Shake.amplitude").unwrap().as_f64().unwrap() > 0.0);
     assert!(!sim.world.query(&["Particle"]).is_empty(), "应有火花/萤火虫粒子在场");
 
-    // 传送到灯笼:通关 → 文案/game-won;粒子最终会被引擎清干净
+    // Teleport to the lantern: clear → copy/game-won; particles eventually cleaned up by the engine
     sim.world.set_field(hero, "Position.x", json!(47.0)).unwrap();
     sim.world.set_field(hero, "Position.y", json!(1.6)).unwrap();
     let mut won = false;
@@ -45,25 +45,25 @@ fn collect_gem_then_light_the_lantern() {
 
 #[test]
 fn lantern_sparks_emitter_is_visible_and_deterministic() {
-    // 灯笼火花（Emitter，纯渲染层粒子）：传送到灯笼旁、相机跟过去后，
-    // 画面必须真的有粒子在动，且同一 tick 渲两次逐字节一致
+    // Lantern sparks (Emitter, pure render-layer particles): teleport next to the lantern, after the camera follows over,
+    // the frame must actually have particles moving, and rendering the same tick twice is byte-identical
     let (mut sim, mut rt) = Runtime::boot(&dir()).unwrap();
     let hero = sim.world.entity("hero").unwrap();
     sim.world.set_field(hero, "Position.x", json!(44.0)).unwrap();
     sim.world.set_field(hero, "Position.y", json!(2.0)).unwrap();
     for _ in 0..240 {
-        sim.step(&mut rt).unwrap(); // 相机 lerp 跟到位 + 粒子流进入稳态
+        sim.step(&mut rt).unwrap(); // Camera lerp catches up + particle stream reaches steady state
     }
     let assets = vitric_render::Assets::load_dir(&dir().join("assets")).unwrap();
     let a = vitric_render::render_world(&sim.world, 320, 180, &assets, sim.tick).unwrap();
     let b = vitric_render::render_world(&sim.world, 320, 180, &assets, sim.tick).unwrap();
     assert_eq!(a, b, "同一 tick 两次渲染逐字节一致");
-    // 把发射器关掉再渲同一 tick：画面必须不同——证明火花真的画出来了
+    // Turn the emitter off and render the same tick again: the frame must differ — proving sparks were actually drawn
     let sparks = sim.world.entity("lantern-sparks").unwrap();
     sim.world.set_field(sparks, "Emitter.active", json!(false)).unwrap();
     let muted = vitric_render::render_world(&sim.world, 320, 180, &assets, sim.tick).unwrap();
     assert_ne!(a, muted, "active=false 后画面应少了火花");
-    // describe 给发射器汇总行
+    // describe produces a summary row for the emitter
     let d = vitric_render::describe_world(&sim.world, 320, 180).unwrap();
     let ems = d["emitters"].as_array().unwrap();
     assert_eq!(ems[0]["name"], json!("lantern-sparks"));

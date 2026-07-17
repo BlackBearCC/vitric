@@ -1,14 +1,14 @@
-//! 主题 Theme（1.2）——UI 控件的样式卷：一处定义、全局引用、单控件可覆盖。
+//! Theme (1.2) — the style roll of UI controls: defined once, referenced globally, overridable per control.
 //!
-//! 定位（和 schema/序列同原则）：引擎给通用控件原语，Theme 是把"颜色/字号/边距/按钮各
-//! 状态样式"这些散落参数收成一份可换肤的声明。换肤 = 换一份 Theme 引用，不动场景结构。
-//! `themes/<名>.json`，清单 `themes` 列表声明，运行时控件按名字引用（check 校验名存在）。
+//! Positioning (same principle as schema/sequence): the engine provides generic control primitives, and Theme gathers scattered parameters like "colors / font size / margins / per-state button
+//! styles" into a swappable declarative definition. Skinning = swapping a Theme reference, without touching scene structure.
+//! `themes/<name>.json`, declared in the manifest's `themes` list, controls reference by name at runtime (check validates name existence).
 //!
-//! Theme 是**纯静态数据**：不进世界状态/哈希/录像（它是装配期常量，和 schema、动画片段
-//! 同级——定义在文件里，运行时只读不写）。控件按状态从 Theme 取颜色/尺寸，取出来的值
-//! 进渲染，控件自身的状态（focused/pressed）才进组件。
+//! Theme is **purely static data**: it does not enter world state / hash / recordings (it's an assembly-time constant, same level as schema, animation clips
+//! — defined in files, read-only at runtime). Controls fetch colors/sizes from Theme by state; the fetched values
+//! go into rendering, while the control's own state (focused/pressed) goes into components.
 //!
-//! 格式：
+//! Format:
 //! ```json
 //! {
 //!   "colors": {"bg": "#1b1d26", "text": "#f0f0f0", "focus": "#5a7bb5", "disabled": "#555555"},
@@ -21,9 +21,9 @@
 //!   }
 //! }
 //! ```
-//! `colors` 是全局颜色卷（兜底/通用引用），`button.<state>` 是按钮四态的背景/文字色。
-//! 缺省：未声明的 button 状态从 `colors` 推（focused→focus 色、disabled→disabled 色，
-//! normal/pressed→bg），让最小 Theme（只写 colors）也能用。
+//! `colors` is the global color roll (fallback / generic reference), `button.<state>` is the background/text color for the four button states.
+//! Default: undeclared button states are derived from `colors` (focused -> focus color, disabled -> disabled color,
+//! normal/pressed -> bg), so that a minimal Theme (only writing colors) still works.
 
 use std::collections::BTreeMap;
 
@@ -31,41 +31,41 @@ use serde_json::Value;
 
 use crate::ValidationReport;
 
-/// 按钮一个状态的样式（背景 + 文字色，都是 `#rrggbb`/`#rrggbbaa` 字面）。
+/// Style of one button state (background + text color, both `#rrggbb`/`#rrggbbaa` literals).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ButtonStyle {
     pub bg: String,
     pub text: String,
 }
 
-/// 一份主题。装配期常量，不进世界状态。
+/// A theme. An assembly-time constant; does not enter world state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
-    /// 主题名（取文件名，去掉 `themes/` 前缀和 `.json` 后缀）。
+    /// Theme name (taken from the file name, stripping the `themes/` prefix and `.json` suffix).
     pub name: String,
-    /// 全局颜色卷：bg / text / focus / disabled（缺省给一组中性值）。
+    /// Global color roll: bg / text / focus / disabled (a set of neutral values is given as default).
     pub colors: BTreeMap<String, String>,
-    /// 默认字号（像素）。
+    /// Default font size (pixels).
     pub font_size: f64,
-    /// 控件默认内边距（像素）。
+    /// Default inner padding of controls (pixels).
     pub padding: f64,
-    /// 控件默认外边距（像素，容器间距用）。
+    /// Default outer margin of controls (pixels, also used for container spacing).
     pub margin: f64,
-    /// 按钮四态样式（normal/focused/pressed/disabled 全填，解析时已按 colors 补全）。
+    /// Styles for the four button states (normal/focused/pressed/disabled all filled in; already completed from colors at parse time).
     pub button: BTreeMap<String, ButtonStyle>,
 }
 
-/// 按钮状态名（Theme.button 的键，和 vitric-render 的 ButtonState 同步）。
+/// Button state names (keys of Theme.button, kept in sync with vitric-render's ButtonState).
 const STATES: &[&str] = &["normal", "focused", "pressed", "disabled"];
 
 impl Theme {
-    /// 取某个按钮状态的样式（state 必是 STATES 之一，解析时已补全，直接取）。
+    /// Fetch the style of a button state (state must be one of STATES; already completed at parse time, fetched directly).
     pub fn button_style(&self, state: &str) -> Option<&ButtonStyle> {
         self.button.get(state)
     }
 
-    /// 解析一份 Theme 文档。结构/颜色格式问题推进 report（带路径 + VDxxx + 提示），
-    /// 一次报全。`name` 是主题名，`tpath` 是文件路径前缀（错误路径用）。
+    /// Parse a Theme document. Structural / color format problems are pushed into report (with path + VDxxx + hint),
+    /// reporting all at once. `name` is the theme name, `tpath` is the file path prefix (used in error paths).
     pub fn parse(doc: &Value, name: &str, tpath: &str, report: &mut ValidationReport) -> Theme {
         let obj = match doc.as_object() {
             Some(o) => o,
@@ -80,7 +80,7 @@ impl Theme {
             }
         };
 
-        // 颜色卷：每个值校验成合法 #rrggbb(aa)
+        // Color roll: each value is validated as a legal #rrggbb(aa)
         let mut colors = BTreeMap::new();
         if let Some(cobj) = obj.get("colors").and_then(|v| v.as_object()) {
             for (key, v) in cobj {
@@ -103,7 +103,7 @@ impl Theme {
                 }
             }
         }
-        // 缺省颜色（让只写一部分的 Theme 也能取到 bg/text/focus/disabled）
+        // Default colors (so a Theme that only writes part of them can still get bg/text/focus/disabled)
         let default_color = |k: &str| match k {
             "bg" => "#1b1d26",
             "text" => "#f0f0f0",
@@ -119,11 +119,11 @@ impl Theme {
         let padding = read_size(obj, "padding", 8.0, tpath, report);
         let margin = read_size(obj, "margin", 8.0, tpath, report);
 
-        // 按钮各状态样式：声明了就校验，没声明从 colors 推（最小 Theme 也可用）
+        // Per-state button styles: if declared, validate; if not, derive from colors (minimal Theme also works)
         let mut button = BTreeMap::new();
         let button_obj = obj.get("button").and_then(|v| v.as_object());
         if let Some(bobj) = button_obj {
-            // 报告未知状态键（拼错 state 名静默吞掉 = 后门）
+            // Report unknown state keys (silently swallowing a misspelled state name = a backdoor)
             for key in bobj.keys() {
                 if !STATES.contains(&key.as_str()) {
                     report.push(
@@ -137,7 +137,7 @@ impl Theme {
         }
         for &state in STATES {
             let declared = button_obj.and_then(|b| b.get(state)).and_then(|v| v.as_object());
-            // 该状态的缺省底色：focused→focus、disabled→disabled、其余→bg
+            // Default background color for this state: focused -> focus, disabled -> disabled, others -> bg
             let fallback_bg = match state {
                 "focused" => colors["focus"].clone(),
                 "disabled" => colors["disabled"].clone(),
@@ -152,7 +152,7 @@ impl Theme {
         Theme { name: name.to_string(), colors, font_size, padding, margin, button }
     }
 
-    /// 一份中性兜底主题（解析硬失败时返回，避免后续取色 panic；错误已进 report）。
+    /// A neutral fallback theme (returned when parsing hard-fails, to avoid subsequent color-fetch panics; errors already in report).
     fn neutral(name: &str) -> Theme {
         let mut colors = BTreeMap::new();
         for (k, v) in [("bg", "#1b1d26"), ("text", "#f0f0f0"), ("focus", "#5a7bb5"), ("disabled", "#555555")] {
@@ -171,7 +171,7 @@ impl Theme {
     }
 }
 
-/// 读一个非负数值字段（缺省给 default，负数/非数字报 VD082）。
+/// Read a non-negative numeric field (default given if absent; negative / non-number reports VD082).
 fn read_size(
     obj: &serde_json::Map<String, Value>,
     key: &str,
@@ -205,7 +205,7 @@ fn read_size(
     }
 }
 
-/// 读按钮某状态的某色字段（缺/没声明 = fallback；声明了非法颜色报 VD081）。
+/// Read a color field of a button state (missing / undeclared = fallback; a declared illegal color reports VD081).
 fn read_button_color(
     declared: Option<&serde_json::Map<String, Value>>,
     field: &str,
@@ -229,7 +229,7 @@ fn read_button_color(
     }
 }
 
-/// `#rrggbb` 或 `#rrggbbaa` 校验（和渲染层 parse_color_a 同口径）。
+/// Validate `#rrggbb` or `#rrggbbaa` (same scope as the render layer's parse_color_a).
 fn is_hex_color(s: &str) -> bool {
     let Some(hex) = s.strip_prefix('#') else { return false };
     (hex.len() == 6 || hex.len() == 8) && hex.chars().all(|c| c.is_ascii_hexdigit())
@@ -269,13 +269,13 @@ mod tests {
 
     #[test]
     fn minimal_theme_fills_button_states_from_colors() {
-        // 只给 colors，button 四态从 colors 推全
+        // Only colors given; button's four states are derived from colors
         let (t, errs) = parse(json!({"colors": {"bg": "#111111", "focus": "#2222ff"}}));
         assert!(errs.is_empty(), "{errs:?}");
         assert_eq!(t.button_style("normal").unwrap().bg, "#111111", "normal 用 bg");
         assert_eq!(t.button_style("focused").unwrap().bg, "#2222ff", "focused 用 focus 色");
         assert_eq!(t.button_style("disabled").unwrap().bg, "#555555", "disabled 用缺省 disabled 色");
-        // 四态全在
+        // All four states present
         for s in STATES {
             assert!(t.button_style(s).is_some(), "{s} 必须补全");
         }

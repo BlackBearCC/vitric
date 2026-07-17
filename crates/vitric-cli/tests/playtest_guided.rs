@@ -1,12 +1,18 @@
-//! 第 6 阶段验收：每游戏 playtest.json 覆盖 + 派生量让 greedy 真有方向。
+//! Stage 6 acceptance: per-game playtest.json coverage + derived quantities give greedy a real
+//! direction.
 //!
-//! guided 是个 1D 引导平台：hero 在 x=0，exit 在 x=8，按 right 朝出口走、到 x≥8 发 game-won。
-//! 它的 playtest.json 声明了一个 `distance` 派生量 `to_exit`（hero→exit 曼哈顿距离）+ `goal:min`。
+//! guided is a 1D guided platform: hero at x=0, exit at x=8; press right toward the exit; at
+//! x≥8 emit game-won.
+//! Its playtest.json declares a `distance` derived quantity `to_exit` (hero→exit Manhattan
+//! distance) + `goal:min`.
 //!
-//! 断言（证明派生量真让 greedy 有方向，不是随机乱晃）：
-//! - greedy（接 goal）在更小 max_ticks 内通关，random 同条件超时 → greedy 更快接近目标；
-//! - observation.derived 含声明的 to_exit 距离值，且随 hero 移动而变化；
-//! - 有 goal 的 greedy 行为与无 goal（默认 config）不同。
+//! Assertions (proving the derived quantity really gives greedy a direction, not random
+//! wandering):
+//! - greedy (taking goal) clears within a smaller max_ticks, random times out under the same
+//!   conditions → greedy approaches the goal faster;
+//! - observation.derived contains the declared to_exit distance value, and it changes as hero
+//!   moves;
+//! - greedy with goal behaves differently from greedy without goal (default config).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -21,7 +27,7 @@ fn guided_dir() -> PathBuf {
         .join("../vitric-playtest/tests/fixtures/guided")
 }
 
-/// 加载 guided 项目根的 playtest.json（声明派生量 to_exit + goal:min）。
+/// Load guided project root's playtest.json (declares the derived quantity to_exit + goal:min).
 fn guided_config() -> PlaytestConfig {
     PlaytestConfig::load(&guided_dir())
         .expect("playtest.json 应解析成功")
@@ -36,7 +42,8 @@ fn factory_for(dir: PathBuf) -> impl Fn() -> Result<(vitric_sim::Sim, Runtime, v
     }
 }
 
-/// 跑一种策略 N 局（同 max_ticks、同起始 seed 递增），返回通关局数 + 最快通关 tick。
+/// Run N sessions of one strategy (same max_ticks, incrementing start seed), return the win count
+/// + fastest win tick.
 fn run_kind(
     kind: StrategyKind,
     config: &PlaytestConfig,
@@ -59,8 +66,10 @@ fn run_kind(
 #[test]
 fn greedy_with_goal_reaches_exit_faster_than_random() {
     let config = guided_config();
-    // greedy 接 config.goal（朝 to_exit min 走）；random 同 config 但不看目标。
-    // 给一个对 random 偏紧的 max_ticks：greedy 有方向能在内通关，random 大概率超时。
+    // greedy takes config.goal (walks toward to_exit min); random uses the same config but does
+    // not look at the goal.
+    // Give a max_ticks that is tight for random: greedy has direction and can clear within it,
+    // random mostly times out.
     let max_ticks = 200;
     let (greedy_wins, greedy_fastest) = run_kind(StrategyKind::Greedy, &config, 6, max_ticks);
     let (random_wins, _) = run_kind(StrategyKind::Random, &config, 6, max_ticks);
@@ -73,7 +82,8 @@ fn greedy_with_goal_reaches_exit_faster_than_random() {
         greedy_wins > random_wins,
         "带 goal 的 greedy 通关数应多于 random（更快接近目标）：greedy={greedy_wins} random={random_wins}"
     );
-    // 最快通关 tick 应明显小于 max_ticks（greedy 直奔出口，不是踩点超时）
+    // The fastest win tick should be clearly smaller than max_ticks (greedy heads straight to the
+    // exit, not edge-case timeout)
     let fastest = greedy_fastest.expect("greedy 有通关局");
     assert!(fastest < max_ticks, "greedy 最快通关 {fastest} tick 应 < {max_ticks}");
 }
@@ -85,7 +95,7 @@ fn observation_carries_declared_distance_and_it_changes_with_movement() {
     let engine = rt.rules.clone();
     let terminal = TerminalSpec::default();
 
-    // 初始：hero(0,0) exit(8,0) → 曼哈顿距离 8
+    // Initial: hero(0,0) exit(8,0) → Manhattan distance 8
     let view0 = SceneView::derive_with_config(&sim.world, &engine, &terminal, &config);
     let d0 = view0
         .observation
@@ -95,7 +105,8 @@ fn observation_carries_declared_distance_and_it_changes_with_movement() {
         .expect("observation.derived.to_exit 应存在");
     assert!((d0 - 8.0).abs() < 1e-9, "初始距离应为 8，实际 {d0}");
 
-    // 朝出口走若干 tick，距离应变小（派生量随移动变化，不是静态常量）
+    // Walk toward the exit for several ticks, the distance should shrink (the derived quantity
+    // changes with movement, not a static constant)
     sim.inject_input("right", "pressed");
     for _ in 0..30 {
         sim.step(&mut rt).unwrap();
@@ -112,8 +123,9 @@ fn observation_carries_declared_distance_and_it_changes_with_movement() {
 
 #[test]
 fn greedy_behaves_differently_with_and_without_goal() {
-    // 同一个 guided 项目：有 goal（playtest.json）vs 无 goal（默认 config），
-    // greedy 的录像应不同——证明 goal 真改变了行为（而非巧合一致）。
+    // Same guided project: with goal (playtest.json) vs without goal (default config),
+    // greedy's recording should differ — proving goal really changed behavior (not coincidental
+    // identity).
     let with_goal = guided_config();
     let no_goal = PlaytestConfig::default();
     let plan = vec![SessionSpec::new(StrategyKind::Greedy, 0, 200)];
@@ -133,8 +145,10 @@ fn softlock_dir() -> PathBuf {
 
 #[test]
 fn cli_report_dir_externalizes_recordings_and_keeps_body_clean() {
-    // 经二进制跑 softlock swarm（有卡死簇 → 有代表录像），落代表录像到临时 report-dir。
-    // 断言：stdout 报告主体不内联录像（无 checkpoints），report-dir 里有单独 json，引用挂相对路径。
+    // Run the softlock swarm via the binary (has stuck clusters → has representative recordings),
+    // drop representative recordings into a temp report-dir.
+    // Assertions: the stdout report body does not inline recordings (no checkpoints), the
+    // report-dir has separate json files, references hang on relative paths.
     let report_dir = std::env::temp_dir()
         .join(format!("vitric-cli-report-dir-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&report_dir);
@@ -158,14 +172,14 @@ fn cli_report_dir_externalizes_recordings_and_keeps_body_clean() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     let report: serde_json::Value = serde_json::from_str(&stdout).expect("stdout 应是干净 JSON");
 
-    // 报告主体不内联录像（checkpoints 是录像独有的大块字段）
+    // Report body does not inline recordings (checkpoints is the large block unique to recordings)
     assert!(!stdout.contains("checkpoints"), "报告主体不该内联录像: {stdout}");
     let clusters = report["stuck_clusters"].as_array().unwrap();
     assert!(!clusters.is_empty(), "softlock 应聚出卡死簇");
     let repr = &clusters[0]["representative"];
     let rel = repr["path"].as_str().expect("落盘后代表录像应挂相对路径");
     assert!(rel.ends_with(".json"), "路径是 json 文件: {rel}");
-    // report-dir 里那份文件真存在且能解析回录像
+    // The file in report-dir really exists and parses back to a recording
     let full = report_dir.join(rel);
     assert!(full.exists(), "代表录像文件应真写出: {}", full.display());
     let rec: vitric_sim::Recording =
@@ -177,8 +191,9 @@ fn cli_report_dir_externalizes_recordings_and_keeps_body_clean() {
 
 #[test]
 fn cli_without_playtest_json_uses_default_config() {
-    // softlock 没有 playtest.json → 默认 config（自动推视图、greedy 无目标退化随机），
-    // 报告照样产出（向后兼容：无配置文件不改变行为）。
+    // softlock has no playtest.json → default config (auto-derive view, greedy without target
+    // degrades to random); the report is still produced (backward compatible: no config file
+    // does not change behavior).
     let report_dir = std::env::temp_dir()
         .join(format!("vitric-cli-nocfg-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&report_dir);
@@ -202,7 +217,8 @@ fn cli_without_playtest_json_uses_default_config() {
 
 #[test]
 fn guided_swarm_serial_and_parallel_identical_with_config() {
-    // 带 config 的 swarm 也满足确定性铁律：串行/并行逐项一致（含派生量视图、greedy 接 goal）。
+    // A swarm with config also satisfies the determinism iron law: serial/parallel identical item
+    // by item (including derived-quantity view, greedy taking goal).
     let config = guided_config();
     let plan: Vec<SessionSpec> = (0..6)
         .map(|k| SessionSpec::new(StrategyKind::Greedy, k, 200))

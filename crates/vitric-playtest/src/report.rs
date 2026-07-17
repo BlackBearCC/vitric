@@ -1,13 +1,16 @@
-//! 聚合器 + 地板报告（设计稿五节「聚合与报告」、九节性能预算）。
+//! Aggregator + floor report (design draft section 5 "Aggregation and Report", section 9 perf budget).
 //!
-//! 吃一批 [`LabeledResult`]（多策略 × 多 seed 跑出来的局），**一趟 O(局 × tick)** 聚合成
-//! 一份可序列化的 [`Report`]：机器读 JSON + 人话读 `summary`。第 2 阶段只做几个**扎实、
-//! 测得准**的维度——通关率/可达性/卡死候选/节奏/惰性动作/主导策略——不硬塞测不准的
-//! （数值崩、不可达内容这些要派生量/语义，留给后续阶段）。
+//! Consumes a batch of [`LabeledResult`] (sessions run with multiple strategies × multiple seeds),
+//! aggregating them in **one O(sessions × ticks) pass** into a serializable [`Report`]: machine-readable
+//! JSON + human-readable `summary`. Stage 2 only does a few **solid, accurately-measured** dimensions —
+//! clear rate / reachability / stuck candidates / pacing / inert actions / dominant strategy — and does
+//! not force in dimensions that can't be measured accurately (numeric breakage, unreachable content
+//! require derived quantities / semantics, left to later stages).
 //!
-//! 诚实标注：`stuck_clusters`（软锁）和 `inert_actions`（废动作）都是**启发式候选**，
-//! 不是定论——有些游戏合法静止、有些动作合法地不产生事件。报告把它们标成「候选」，
-//! 交给人复核（每条都挂得到一局可重放录像，能直接重放看）。
+//! Honest labeling: `stuck_clusters` (soft-locks) and `inert_actions` (dead actions) are both
+//! **heuristic candidates**, not conclusions — some games legitimately stay still, some actions
+//! legitimately produce no events. The report labels them as "candidates" and hands them to humans
+//! for review (each one carries a replayable session recording, you can replay it directly to see).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,34 +22,43 @@ use vitric_sim::Recording;
 use crate::scene_view::{Outcome, TerminalSpec};
 use crate::swarm::{LabeledResult, StrategyKind};
 
-/// 一条「代表录像」的轻量引用（设计稿五节「每条结论挂可重放录像」、十一节第 6 条报告打磨）。
+/// A lightweight reference to a "representative recording" (design draft section 5 "each conclusion
+/// carries a replayable recording", section 11 item 6 report polish).
 ///
-/// **报告主体不再内联整坨录像**：以前每个维度（卡死/跑飞/note…）的 `sample_recording` 把
-/// 一整段录像 JSON 塞进报告，几十个维度叠起来报告就成了「一大坨录像」，人话主体被淹没。
-/// 现在维度只挂这个轻量引用——序列化进报告 JSON 的只有 `path`（落盘后的相对路径）+ `ticks` +
-/// `outcome`，报告主体干净可读。
+/// **The report body no longer inlines whole recordings**: previously each dimension's
+/// (stuck/runaway/note…) `sample_recording` embedded an entire recording JSON into the report; with
+/// dozens of dimensions stacked together the report became "one giant blob of recordings", drowning
+/// the human-readable body. Now each dimension only carries this lightweight reference — only `path`
+/// (the relative path after being written to disk) + `ticks` + `outcome` are serialized into the
+/// report JSON, keeping the body clean and readable.
 ///
-/// 真录像字节存在 `recording` 里供调用方写文件 / 离线重放，但 `#[serde(skip)]`——**不进报告
-/// JSON**。聚合时 `path=None`（还没落盘），由 `cmd_playtest`/调用方写进 `--report-dir` 后回填
-/// 相对路径。`key` 是这条代表录像的稳定文件名（维度+字段+策略+seed 拼出来，确定可复现）。
+/// The actual recording bytes live in `recording` for the caller to write to a file / replay offline,
+/// but `#[serde(skip)]` — **not in the report JSON**. At aggregation time `path=None` (not yet on
+/// disk); `cmd_playtest`/the caller writes it into `--report-dir` and back-fills the relative path.
+/// `key` is the stable filename for this representative recording (spliced from dimension + field +
+/// strategy + seed, deterministically reproducible).
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordingRef {
-    /// 落盘后的相对路径（相对 report-dir）。聚合时为 None，调用方写文件后回填。
+    /// Relative path after being written to disk (relative to report-dir). None at aggregation time;
+    /// the caller back-fills it after writing the file.
     pub path: Option<String>,
-    /// 录像跑了多少 tick（不读文件也能看个大概）。
+    /// How many ticks this recording ran (you can see a rough picture without reading the file).
     pub ticks: u64,
-    /// 这局的结局。
+    /// The outcome of this session.
     pub outcome: Outcome,
-    /// 稳定文件名键（确定可复现）——调用方按它落盘成 `<key>.json`。不进报告 JSON。
+    /// Stable filename key (deterministically reproducible) — the caller writes it to disk as
+    /// `<key>.json`. Not in the report JSON.
     #[serde(skip)]
     pub key: String,
-    /// 真录像字节（供离线重放/写文件）。**不进报告 JSON**（报告主体只挂路径）。
+    /// The actual recording bytes (for offline replay / writing to file). **Not in the report JSON**
+    /// (the body only carries the path).
     #[serde(skip)]
     pub recording: Recording,
 }
 
 impl RecordingRef {
-    /// 从一局代表结果造引用：key 由维度标签 + 代表策略/seed 拼成（稳定、确定）。
+    /// Build a reference from a representative session result: key is spliced from the dimension
+    /// label + the representative strategy/seed (stable, deterministic).
     fn from_sample(dimension: &str, rep: &LabeledResult) -> RecordingRef {
         let key = format!(
             "{dimension}-{}-{}",
@@ -63,54 +75,70 @@ impl RecordingRef {
     }
 }
 
-/// 「末尾连续多少 tick 状态哈希完全不变」算冻结候选的阈值（设计稿：K 默认 60）。
+/// Threshold for considering a session a freeze candidate based on "how many consecutive trailing
+/// ticks have a completely unchanged state hash" (design draft: K defaults to 60).
 pub const DEFAULT_FREEZE_K: usize = 60;
 
-/// 跑飞判据阈值（设计稿四阶段「runaway: max>初值的 1000 倍或 >1e6」）。注释说明、可后续配：
-/// - 末值/峰值 ≫ 首值（`> first × RUNAWAY_RATIO`）说明这字段无界长——单看绝对值会冤判
-///   本来就大的字段，看相对倍率更稳；
-/// - **或**峰值 `> RUNAWAY_ABS` 绝对上界（首值为 0/负时倍率失效，用绝对阈兜底）；
-/// - 且 `monotonic_up`（只增不减）——真跑飞是单向爆涨，一涨一跌的波动不算。
+/// Runaway detection thresholds (design draft stage 4 "runaway: max > 1000× the initial value, or >1e6").
+/// Annotated here, configurable later:
+/// - end value / peak value ≫ first value (`> first × RUNAWAY_RATIO`) means this field grows unboundedly
+///   — looking at the absolute value alone would falsely flag fields that were already large; the
+///   relative ratio is more stable;
+/// - **or** peak value `> RUNAWAY_ABS` absolute ceiling (when the first value is 0/negative the ratio
+///   is invalid, so the absolute threshold acts as a fallback);
+/// - and `monotonic_up` (only ever grows, never decreases) — true runaway is a one-way explosion;
+///   up-and-down oscillation doesn't count.
 ///
-/// 两条任一命中即候选（诚实标候选，合法强成长也可能命中，留人复核）。
+/// Hitting either makes the field a candidate (honestly labeled candidate; legitimate strong growth
+/// curves may also hit, leave for human review).
 const RUNAWAY_RATIO: f64 = 1000.0;
 const RUNAWAY_ABS: f64 = 1e6;
 
-/// 跑飞相对阈还要求峰值达到这个绝对下限——否则「0.008→8.116」这种倍率虚高但实际很小的
-/// 增长（物理微移/微小累积）会被冤判。真跑飞总会涨到一个有意义的大数。
+/// The relative runaway threshold additionally requires the peak to reach this absolute lower bound —
+/// otherwise growth like "0.008 → 8.116" with an inflated ratio but actually tiny magnitude (physical
+/// micro-movement / tiny accumulation) would be falsely flagged. Real runaway always grows to a
+/// meaningfully large number.
 const RUNAWAY_RATIO_MIN_ABS: f64 = 1000.0;
 
-/// 非经济组件：坐标/速度/相机/灯光这些不是经济资源——坐标单调移动不是「无界增长」、
-/// 灯光角度归零不是「崩盘」。numeric_breakage 把这些组件的字段整个排除（dogfood 实测：
-/// 重力下落让 Position.y 被误报 runaway；菜单灯 Light.angle=0 + 卡死被误报 collapse）。
+/// Non-economy components: position/velocity/camera/lighting aren't economy resources — a coordinate
+/// moving monotonically isn't "unbounded growth", a light angle returning to zero isn't "collapse".
+/// numeric_breakage excludes all fields of these components entirely (dogfood empirical: gravity
+/// falling caused Position.y to be misreported as runaway; menu light Light.angle=0 + stuck was
+/// misreported as collapse).
 const NON_ECONOMY_COMPONENTS: &[&str] =
     &["Position", "Velocity", "Camera", "Shake", "Light", "Ambient"];
 
-/// 字段 key 形如 `<实体>/<组件>.<字段>`，取出组件名；非该格式时退化用整串首段。
+/// Field keys look like `<entity>/<component>.<field>`; extract the component name. When the input
+/// isn't in this format, degrades to taking the first segment of the whole string.
 fn field_component(field: &str) -> Option<&str> {
     let comp_field = field.rsplit_once('/').map_or(field, |(_, cf)| cf);
     comp_field.split('.').next()
 }
 
-/// 该字段是否属于非经济组件（经济崩判定要整个跳过它）。
+/// Whether this field belongs to a non-economy component (economy-breakage detection skips it
+/// entirely).
 fn is_non_economy_field(field: &str) -> bool {
     field_component(field).is_some_and(|c| NON_ECONOMY_COMPONENTS.contains(&c))
 }
 
-/// 一招鲜判据：某动作在通关局注入里的占比阈值（≥ 这个比例 → 候选）。
-/// 0.8 = 通关全靠这一招按了八成以上，其他动作几乎没用——选择意义存疑。
+/// Dominant-action criterion: the share threshold of an action among injections in winning sessions
+/// (≥ this ratio → candidate). 0.8 = wins rely on this one action for over 80% of presses, other
+/// actions barely used — choice meaningfulness is doubtful.
 const DOMINANT_ACTION_SHARE: f64 = 0.8;
-/// 一招鲜至少要有这么多通关局垫底才下论断（样本太小不算「碾压」）。
+/// Dominant action requires at least this many winning sessions as a baseline before concluding
+/// (too small a sample isn't "domination").
 const DOMINANT_ACTION_MIN_WINS: usize = 3;
 
-/// 内建事件名：这些事件不算「某个 input 动作引发了规则响应」——它们是引擎机制，
-/// 跟某个 input 动作有没有被规则接住无关：
-/// - `start`：sim 在 tick 0 无条件发的生命周期事件（每局都有，与动作无关）；
-/// - `input`：动作本身的事件，不是「响应」；
-/// - `collision`：内建碰撞系统发的，不是 input 规则的产物；
-/// - 其余是序列/动画/UI/场景这些引擎子系统的通用动词。
+/// Built-in event names: these don't count as "an input action triggered a rule response" — they're
+/// engine mechanics, independent of whether an input action is caught by a rule:
+/// - `start`: a lifecycle event sim emits unconditionally at tick 0 (every session has it, unrelated
+///   to actions);
+/// - `input`: the action's own event, not a "response";
+/// - `collision`: emitted by the built-in collision system, not a product of an input rule;
+/// - the rest are common verbs of engine subsystems like sequence/animation/UI/scene.
 ///
-/// 判惰性动作时把它们排除——只有规则**自定义 emit** 的事件才算「这个动作引发了响应」。
+/// They are excluded when detecting inert actions — only events **custom-emitted by rules** count
+/// as "this action triggered a response".
 const BUILTIN_EVENTS: &[&str] = &[
     "start",
     "input",
@@ -125,157 +153,180 @@ fn is_builtin_event(name: &str) -> bool {
     BUILTIN_EVENTS.contains(&name)
 }
 
-/// 把字段路径/标签里的非文件名字符（`/` `.` 等）换成 `_`，拼稳定文件名用。
+/// Replace non-filename characters in field paths / labels (`/`, `.`, etc.) with `_`, used to build
+/// stable filenames.
 fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
         .collect()
 }
 
-/// 结局分布 + 通关率。
+/// Outcome distribution + clear rate.
 #[derive(Debug, Clone, Serialize)]
 pub struct OutcomeDistribution {
     pub win: usize,
     pub lose: usize,
     pub timeout: usize,
     pub total: usize,
-    /// 通关率 = win / total（total=0 时为 0）。
+    /// Clear rate = win / total (0 when total=0).
     pub win_rate: f64,
 }
 
-/// 可达性：并起来触发过的终止/里程碑事件 + 「swarm 通不了」信号。
+/// Reachability: terminal / milestone events fired across the union of sessions + the "swarm can't
+/// beat it" signal.
 #[derive(Debug, Clone, Serialize)]
 pub struct Reachability {
-    /// 所有局并集里触发过的终止/里程碑事件名（排序，确定）。
+    /// Names of terminal / milestone events fired in the union of all sessions (sorted, deterministic).
     pub reached_events: Vec<String>,
-    /// 0 局 Win → true（最强信号之一：声明了能赢但 swarm 谁都没赢到）。
+    /// 0 sessions Win → true (one of the strongest signals: declared winnable but no swarm session won).
     pub unbeatable_by_swarm: bool,
 }
 
-/// 结局覆盖（设计稿三节种子探索验收的核心：不可达结局）。
+/// Ending coverage (the core of design draft section 3 seed-exploration acceptance: unreachable endings).
 ///
-/// **「声明结局集合」从哪来**（注释说明，见任务三）：扫规则里所有 `emit` 动作的事件名，
-/// 凡命中 `TerminalSpec`（win/lose 命名集合或 `ending-*` 前缀）的，就是这游戏**声明它能产出**
-/// 的结局。这一步是静态扫规则——所以即便某个结局在所有局里**一次都没被 emit 过**，我们照样
-/// 知道它「被声明了」，从而能判它**不可达**（声明了但 0 局触达）。光看 `fired_events`（运行时
-/// 真发过的事件）做不到这点：没发过的事件压根不在里面，会被「没声明」和「声明了但没到」混为一谈。
+/// **Where the "declared ending set" comes from** (annotated, see task 3): scan all `emit` action
+/// event names in the rules; any that match `TerminalSpec` (win/lose named sets or `ending-*` prefix)
+/// are the endings this game **declares it can produce**. This step is a static rule scan — so even
+/// if an ending is **never emitted** in any session, we still know it "was declared", and can judge
+/// it **unreachable** (declared but reached by 0 sessions). Looking at `fired_events` alone (events
+/// actually fired at runtime) can't do this: never-fired events aren't in there at all, conflating
+/// "not declared" with "declared but never reached".
 #[derive(Debug, Clone, Serialize)]
 pub struct EndingCoverage {
-    /// 这游戏声明能产出的全部结局事件名（扫规则 emit ∩ TerminalSpec，排序去重）。
+    /// All ending event names this game declares it can produce (rules' emit ∩ TerminalSpec, sorted
+    /// and deduped).
     pub declared_endings: Vec<String>,
-    /// 至少被一局触达过的结局（declared ∩ 任意局 fired_events，排序）。
+    /// Endings reached by at least one session (declared ∩ any session's fired_events, sorted).
     pub reached_endings: Vec<String>,
-    /// **声明了但 0 局可达的结局**——种子探试的头号靶子（设计稿三节「不可达结局」）。
+    /// **Declared but reached by 0 sessions** — the prime target of seed exploration (design draft
+    /// section 3 "unreachable endings").
     pub unreachable_endings: Vec<String>,
 }
 
-/// 一簇软锁候选：一批局在同一个「冻结状态哈希」上卡死且没到终止。
+/// A cluster of soft-lock candidates: a batch of sessions stuck on the same "frozen state hash"
+/// without reaching termination.
 #[derive(Debug, Clone, Serialize)]
 pub struct StuckCluster {
-    /// 冻结时的状态哈希（十六进制字面）——同一死态的局聚到同一桶。
+    /// State hash at freeze time (hex literal) — sessions in the same dead state cluster into one
+    /// bucket.
     pub frozen_hash: String,
-    /// 命中这个死态的局数。
+    /// How many sessions hit this dead state.
     pub hits: usize,
-    /// 该死态对应策略/seed（拿一局当代表，能据此重放）。
+    /// The strategy/seed for this dead state (take one session as representative, can replay from it).
     pub sample_strategy: String,
     pub sample_seed: u64,
-    /// 代表录像引用（落盘后只挂路径，不内联整坨录像）——「每条结论挂可重放录像」。
+    /// Representative recording reference (after being written to disk only the path is attached,
+    /// no whole recording inlined) — "each conclusion carries a replayable recording".
     pub representative: RecordingRef,
 }
 
-/// 节奏：到终止的 tick 分布（Timeout 局单列，不混进「到终止用了多久」）。
+/// Pacing: tick distribution up to termination (Timeout sessions listed separately, not mixed into
+/// "how long until termination").
 #[derive(Debug, Clone, Serialize)]
 pub struct Pacing {
-    /// 到终止（Win/Lose）的局的 tick：min / 中位 / max。无终止局时为 None。
+    /// Ticks of sessions that terminated (Win/Lose): min / median / max. None when no terminating
+    /// sessions.
     pub terminated_min: Option<u64>,
     pub terminated_median: Option<u64>,
     pub terminated_max: Option<u64>,
-    /// 终止 tick 的直方桶（固定 5 桶，按 [min,max] 等宽切；标签是桶上界）。
+    /// Histogram buckets of termination ticks (fixed 5 buckets, equal-width cuts over [min, max];
+    /// labels are bucket upper bounds).
     pub histogram: Vec<HistogramBucket>,
-    /// Timeout 局数（没到终止，单列不进上面的分布）。
+    /// Number of Timeout sessions (didn't terminate, listed separately and not in the distribution
+    /// above).
     pub timeout_count: usize,
 }
 
-/// 一个直方桶。
+/// One histogram bucket.
 #[derive(Debug, Clone, Serialize)]
 pub struct HistogramBucket {
-    /// 桶上界（tick）。
+    /// Bucket upper bound (tick).
     pub upper: u64,
     pub count: usize,
 }
 
-/// 单个策略的表现（分组聚合）。
+/// One strategy's performance (grouped aggregation).
 #[derive(Debug, Clone, Serialize)]
 pub struct StrategyStats {
     pub strategy: String,
     pub sessions: usize,
     pub win_rate: f64,
-    /// 该策略通关局的中位 tick（无通关局为 None）。
+    /// Median tick of this strategy's winning sessions (None when no winning sessions).
     pub median_win_ticks: Option<u64>,
 }
 
-/// 主导策略：分策略表现 + 「某策略碾压」标记 + 「一招鲜」动作标记。
+/// Dominant strategy: per-strategy performance + a "some strategy dominates" flag + a "one-trick"
+/// action flag.
 #[derive(Debug, Clone, Serialize)]
 pub struct DominantStrategy {
     pub per_strategy: Vec<StrategyStats>,
-    /// 若某策略通关率 ≥2× 次优且样本足（每策略 ≥4 局），标出它的名字；否则 None。
+    /// If some strategy's win rate is ≥2× the runner-up and the sample is sufficient (≥4 sessions
+    /// per strategy), flag its name; otherwise None.
     pub dominant: Option<String>,
-    /// **一招鲜**候选（设计稿五节「一招鲜/主导策略」、十一节四阶段「主导策略深化」）：
-    /// 在**通关局**里某单个动作高频出现、其他动作几乎不出现 → 这一招碾压其他玩法、
-    /// 别的选择没意义。诚实标「候选」（高频≠唯一致胜，但值得人复核选择设计）。None=无此现象。
+    /// **One-trick** candidate (design draft section 5 "one-trick/dominant strategy", section 11
+    /// stage 4 "dominant strategy deepening"): in **winning sessions** a single action appears
+    /// frequently while other actions barely appear → this one action dominates other playstyles,
+    /// other choices are meaningless. Honestly labeled "candidate" (high frequency ≠ the only way
+    /// to win, but worth human review of the choice design). None = no such phenomenon.
     pub dominant_action: Option<DominantAction>,
 }
 
-/// 一招鲜动作候选：通关局里某动作占了绝大多数注入。
+/// One-trick action candidate: a single action dominates injections in winning sessions.
 #[derive(Debug, Clone, Serialize)]
 pub struct DominantAction {
-    /// 这个霸榜的动作名。
+    /// The action that tops the chart.
     pub action: String,
-    /// 它在所有通关局注入总数里的占比（0..1）。
+    /// Its share of the total injection count across all winning sessions (0..1).
     pub share: f64,
-    /// 统计基于多少局通关局。
+    /// How many winning sessions the statistics are based on.
     pub winning_sessions: usize,
 }
 
-/// 数值崩维度（设计稿五节「数值崩」、十一节四阶段验收）。三类候选都按**字段名聚类**报，
-/// 诚实标「候选」（合法的强成长曲线也可能像跑飞，留人复核；每条挂得到可重放录像）。
+/// Numeric breakage dimension (design draft section 5 "numeric breakage", section 11 stage 4
+/// acceptance). All three candidate kinds are reported **clustered by field name**, honestly labeled
+/// "candidate" (legitimate strong growth curves may also look like runaway, leave for human review;
+/// each carries a replayable recording).
 #[derive(Debug, Clone, Serialize)]
 pub struct NumericBreakage {
-    /// 跑飞候选：某字段在多局里 max 极大、末值≫首值且只增不减（经济无界增长）。
+    /// Runaway candidates: a field with very large max in multiple sessions, end value ≫ first value
+    /// and only ever grows (unbounded economy growth).
     pub runaway: Vec<RunawayField>,
-    /// 崩盘软锁候选：某字段触达 0 且**那一局落进了卡死簇**（资源归零后世界冻结）。
+    /// Collapse soft-lock candidates: a field hit 0 and **that session fell into a stuck cluster**
+    /// (the world froze after the resource was drained).
     pub collapse: Vec<CollapseField>,
-    /// 溢出候选：某字段出现过 inf/nan（数值溢出/除零的硬信号）。
+    /// Overflow candidates: a field had inf/nan at some point (a hard signal of numeric overflow /
+    /// divide-by-zero).
     pub non_finite: Vec<NonFiniteField>,
 }
 
-/// 一个跑飞字段（按字段名聚类的若干局）。
+/// One runaway field (several sessions clustered by field name).
 #[derive(Debug, Clone, Serialize)]
 pub struct RunawayField {
-    /// 数值字段路径（如 `treasury/Resources.gold`）。
+    /// Numeric field path (e.g. `treasury/Resources.gold`).
     pub field: String,
-    /// 命中跑飞判据的局数。
+    /// Number of sessions hitting the runaway criterion.
     pub hits: usize,
-    /// 这些局里观测到的最大 max（跑成多大）。
+    /// The largest max observed across these sessions (how big it ran away to).
     pub peak_max: f64,
-    /// 代表局（拿一局的策略/seed/录像，能据此重放看跑飞过程）。
+    /// Representative session (take one session's strategy/seed/recording, can replay to watch the
+    /// runaway process).
     pub sample_strategy: String,
     pub sample_seed: u64,
     pub representative: RecordingRef,
 }
 
-/// 一个崩盘字段（按字段名聚类的若干局）。
+/// One collapse field (several sessions clustered by field name).
 #[derive(Debug, Clone, Serialize)]
 pub struct CollapseField {
     pub field: String,
-    /// 命中「归零 + 那局卡死」的局数。
+    /// Number of sessions hitting "returned to zero + that session got stuck".
     pub hits: usize,
     pub sample_strategy: String,
     pub sample_seed: u64,
     pub representative: RecordingRef,
 }
 
-/// 一个出现过非有限值的字段。
+/// One field that has taken a non-finite value.
 #[derive(Debug, Clone, Serialize)]
 pub struct NonFiniteField {
     pub field: String,
@@ -285,68 +336,81 @@ pub struct NonFiniteField {
     pub representative: RecordingRef,
 }
 
-/// LLM 定性 note 汇总（设计稿五节「LLM 定性 note」、十一节第 5 阶段）。
+/// LLM qualitative note aggregation (design draft section 5 "LLM qualitative note", section 11
+/// stage 5).
 ///
-/// **诚实定位**：这一整块是 **LLM 主观提示，不是真人判定，待人复核**——LLM 看着觉得
-/// 「看不懂/前后矛盾/选项没意义」，可能对、也可能是它自己没看懂。报告把它和「机械逮出的
-/// 结构破绽」（软锁/不可达/数值崩那些确定性结论）分开摆，不混为一谈。
+/// **Honest positioning**: this whole block is **LLM subjective hint, not a real-person verdict,
+/// pending human review** — the LLM thinks something "unclear / contradictory / meaningless choice",
+/// it may be right or it may be the LLM itself not understanding. The report places this separately
+/// from the "mechanically-caught structural breakage" (the deterministic conclusions of soft-lock /
+/// unreachable / numeric breakage), not conflating them.
 ///
-/// LLM 局的 note 本就不要求跨次复现（LLM 非确定），所以这块**不**进确定性保证；但每条 note
-/// 都挂得到它那局的可重放录像（`representative`），人能回放到那一刻看 LLM 在说哪一幕。
+/// LLM session notes don't require cross-run reproducibility anyway (LLM is non-deterministic), so
+/// this block does **not** enter the determinism guarantee; but each note carries its session's
+/// replayable recording (`representative`), so a human can scrub to that moment and see what scene
+/// the LLM was talking about.
 #[derive(Debug, Clone, Serialize)]
 pub struct QualitativeNotes {
-    /// 收到的 note 总条数（含重复）。
+    /// Total number of notes received (including duplicates).
     pub total: usize,
-    /// 按 kind 分组、组内按文本去重后的 note 簇（排序确定）。
+    /// Note clusters grouped by kind and deduped by text within each group (sorted deterministically).
     pub clusters: Vec<NoteCluster>,
 }
 
-/// 一簇定性 note：同一 kind + 同一文本归一成一条，记命中次数 + 代表局录像。
+/// One cluster of qualitative notes: same kind + same text normalized into one entry, recording the
+/// hit count + a representative session recording.
 #[derive(Debug, Clone, Serialize)]
 pub struct NoteCluster {
-    /// note 类型（clarity/continuity/choice/other）。
+    /// Note kind (clarity/continuity/choice/other).
     pub kind: String,
-    /// note 正文（归一后的代表文本）。
+    /// Note body (the representative text after normalization).
     pub text: String,
-    /// 这条 note 出现过几次（跨局 + 同局多 tick 累加）。
+    /// How many times this note appeared (summed across sessions + multiple ticks in the same session).
     pub count: usize,
-    /// 第一次见到它的决策 tick（代表 tick，便于回放定位到那一刻）。
+    /// The decision tick where it was first seen (representative tick, easy for replay to locate that
+    /// moment).
     pub sample_tick: u64,
-    /// 代表局的策略/seed（对回是哪局 LLM 说的）。
+    /// The representative session's strategy/seed (identifies which session the LLM said it in).
     pub sample_strategy: String,
     pub sample_seed: u64,
-    /// 代表录像引用——回放到那一幕看 LLM 在说什么（结论挂证据，落盘后只挂路径）。
+    /// Representative recording reference — scrub to that scene to see what the LLM was saying
+    /// (conclusions carry evidence; after being written to disk only the path is attached).
     pub representative: RecordingRef,
 }
 
-/// 地板报告（机器 JSON + 人话 summary）。第 2 阶段的几个扎实维度。
+/// Floor report (machine JSON + human-readable summary). The few solid dimensions of stage 2.
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub sessions: usize,
     pub outcome_distribution: OutcomeDistribution,
     pub reachability: Reachability,
-    /// 结局覆盖：声明了哪些结局、到了哪些、哪些 0 局可达（不可达结局）。
-    /// 没传引擎（不知道声明集合）时为 None——空 declared 和「没算过」是两回事。
+    /// Ending coverage: which endings are declared, which were reached, which were reached by 0
+    /// sessions (unreachable endings). None when no engine was passed in (the declared set is
+    /// unknown) — an empty declared set is different from "not computed".
     pub ending_coverage: Option<EndingCoverage>,
-    /// 软锁候选（诚实标注：候选，不是定论）。
+    /// Soft-lock candidates (honestly labeled: candidates, not conclusions).
     pub stuck_clusters: Vec<StuckCluster>,
     pub pacing: Pacing,
-    /// 疑似惰性动作（轻量启发式候选）。
+    /// Suspected inert actions (lightweight heuristic candidates).
     pub inert_actions: Vec<String>,
     pub dominant_strategy: DominantStrategy,
-    /// 数值崩：经济跑飞/崩盘软锁/溢出（设计稿四阶段）。诚实标候选。
+    /// Numeric breakage: economy runaway / collapse soft-lock / overflow (design draft stage 4).
+    /// Honestly labeled candidate.
     pub numeric_breakage: NumericBreakage,
-    /// LLM 定性 note 汇总（设计稿第 5 阶段）：清晰度/连续性/选择有效性，按 kind 分组去重。
-    /// 诚实标「LLM 主观提示，非真人判，待人复核」——和上面的机械结构结论分开摆。
+    /// LLM qualitative note aggregation (design draft stage 5): clarity / continuity / choice
+    /// effectiveness, grouped by kind and deduped. Honestly labeled "LLM subjective hint, not a
+    /// real-person verdict, pending human review" — placed separately from the mechanical structural
+    /// conclusions above.
     pub qualitative_notes: QualitativeNotes,
-    /// 人话摘要：一两句把上面最关键的几条说清。
+    /// Human-readable summary: one or two sentences stating the most critical findings above.
     pub summary: String,
 }
 
 impl Report {
-    /// 走遍报告里所有维度的代表录像引用（可变借）——调用方据此把录像写进 report-dir 并回填
-    /// 相对路径。顺序确定（按维度声明序），每条只出现一次。报告里没有重复持有同一 RecordingRef
-    /// 的地方，所以遍历即全集。
+    /// Walk all dimension representative recording references in the report (mutable borrows) — the
+    /// caller uses this to write recordings into report-dir and back-fill relative paths. Order is
+    /// deterministic (by dimension declaration order), each appears only once. The report doesn't
+    /// hold duplicate references to the same RecordingRef anywhere, so the traversal is the full set.
     pub fn representatives_mut(&mut self) -> Vec<&mut RecordingRef> {
         let mut refs: Vec<&mut RecordingRef> = Vec::new();
         for c in &mut self.stuck_clusters {
@@ -367,9 +431,11 @@ impl Report {
         refs
     }
 
-    /// 把所有代表录像写进 `report_dir` 下的单独 json 文件，并把每条引用的 `path` 回填成相对
-    /// 路径（相对 report_dir）。报告主体 JSON 因此只挂路径、不内联整坨录像。文件名 = `<key>.json`
-    /// （key 确定可复现）。report_dir 不存在则创建。返回写出的文件数。
+    /// Write all representative recordings into separate json files under `report_dir`, and back-fill
+    /// each reference's `path` with the relative path (relative to report_dir). The report body JSON
+    /// thus only carries paths, no whole recordings inlined. Filename = `<key>.json` (key is
+    /// deterministically reproducible). Creates report_dir if missing. Returns the number of files
+    /// written.
     pub fn externalize_recordings(&mut self, report_dir: &std::path::Path) -> Result<usize, String> {
         let refs = self.representatives_mut();
         if refs.is_empty() {
@@ -391,24 +457,30 @@ impl Report {
     }
 }
 
-/// 聚合入口：一批标签结果 → 一份报告。用默认冻结阈值 K，不算结局覆盖
-/// （不传引擎=不知道声明结局集合，`ending_coverage` 为 None）。
-/// 不传引擎也意味着 `inert_actions` 退化用旧的运行时启发式（没规则可做静态判据）。
+/// Aggregation entry: a batch of labeled results → a report. Uses the default freeze threshold K and
+/// doesn't compute ending coverage (no engine passed in = the declared ending set is unknown,
+/// `ending_coverage` is None).
+/// No engine also means `inert_actions` degrades to the old runtime heuristic (no rules to do a
+/// static criterion from).
 pub fn aggregate(results: &[LabeledResult]) -> Report {
     aggregate_inner(results, DEFAULT_FREEZE_K, None, None)
 }
 
-/// 聚合（可调冻结阈值 K，给测试用）。一趟扫，不做平方比对。
+/// Aggregate (with adjustable freeze threshold K, for tests). One-pass scan, no quadratic
+/// comparisons.
 pub fn aggregate_with_freeze_k(results: &[LabeledResult], freeze_k: usize) -> Report {
     aggregate_inner(results, freeze_k, None, None)
 }
 
-/// 聚合 + 结局覆盖（种子探索专用）。`engine`/`terminal` 用来扫规则声明的结局集合，
-/// 报告含 `ending_coverage`（哪些声明结局不可达）。这是设计稿三节验收的入口。
+/// Aggregate + ending coverage (seed-exploration-specific). `engine`/`terminal` are used to scan the
+/// rules' declared ending set; the report includes `ending_coverage` (which declared endings are
+/// unreachable). This is the entry point for design draft section 3 acceptance.
 ///
-/// 传了引擎，`inert_actions` 也改走**静态判据**（扫规则的 `do` 看有没有真实效果），
-/// 而不是旧的运行时「有没有 emit 过事件」启发式——后者会把「只 set 状态不 emit」的
-/// 移动键（left/right/space/up）冤标惰性。默认 CLI 路径走这个入口，所以默认就是静态判据。
+/// With the engine passed in, `inert_actions` also switches to the **static criterion** (scan the
+/// rules' `do` to see if there's a real effect), instead of the old runtime "did any event get
+/// emitted" heuristic — the latter would falsely flag movement keys (left/right/space/up) that "only
+/// set state but don't emit" as inert. The default CLI path goes through this entry, so the default
+/// is the static criterion.
 pub fn aggregate_with_endings(
     results: &[LabeledResult],
     engine: &Engine,
@@ -418,10 +490,12 @@ pub fn aggregate_with_endings(
     aggregate_inner(results, DEFAULT_FREEZE_K, Some(declared), Some(engine))
 }
 
-/// 同 [`aggregate_with_endings`]，但额外把清单声明的结局名（`gates.playthroughs[].must_emit`）
-/// 并进声明结局集。规则静态扫描只看 `do` 里的 `emit`，逮不到脚本/LLM 发的事件
-/// （echo 的 `run-complete` 由 JS 系统发，规则里根本没这条 emit），ending_coverage 因此漏判。
-/// 把清单的权威通关事件并进来，脚本/LLM 游戏的结局才认得出（与规则扫描结果取并集、去重）。
+/// Same as [`aggregate_with_endings`], but additionally merges manifest-declared ending names
+/// (`gates.playthroughs[].must_emit`) into the declared ending set. The static rule scan only looks
+/// at `do`'s `emit`, so it can't catch events emitted by scripts/LLMs (echo's `run-complete` is sent
+/// by the JS system, the rules don't have this emit at all), and ending_coverage would miss them.
+/// Merging in the manifest's authoritative win-event makes the endings of script/LLM games
+/// recognizable (unioned with the rule scan result, deduped).
 pub fn aggregate_with_endings_and_declared(
     results: &[LabeledResult],
     engine: &Engine,
@@ -432,8 +506,9 @@ pub fn aggregate_with_endings_and_declared(
     aggregate_inner(results, DEFAULT_FREEZE_K, Some(declared), Some(engine))
 }
 
-/// 聚合内核：declared=Some 时算结局覆盖，None 时跳过。
-/// `engine=Some` 时 `inert_actions` 走静态判据，None 时退化用运行时启发式。
+/// Aggregation kernel: when declared=Some, compute ending coverage; when None, skip.
+/// When `engine=Some`, `inert_actions` uses the static criterion; when None, degrades to the runtime
+/// heuristic.
 fn aggregate_inner(
     results: &[LabeledResult],
     freeze_k: usize,
@@ -447,7 +522,8 @@ fn aggregate_inner(
     let pacing = aggregate_pacing(results);
     let inert_actions = aggregate_inert(results, engine);
     let dominant_strategy = aggregate_dominant(results);
-    // 数值崩要知道「哪些局卡死了」来判 collapse——用同一套冻结判据算出卡死局下标集合。
+    // Numeric breakage needs to know "which sessions got stuck" to judge collapse — use the same
+    // freeze criterion to compute the set of stuck session indices.
     let stuck_idx = stuck_session_indices(results, freeze_k);
     let numeric_breakage = aggregate_numeric_breakage(results, &stuck_idx);
     let qualitative_notes = aggregate_notes(results);
@@ -476,9 +552,11 @@ fn aggregate_inner(
     }
 }
 
-/// 扫规则里所有 `emit` 动作的事件名，凡命中 TerminalSpec（win/lose 命名或 ending 前缀）的
-/// 就是「声明的结局」。排序去重——确定且便于对账。**静态扫规则**，不看运行时是否真发过，
-/// 所以从没被 emit 的结局也能被认定为「声明了」（这正是判不可达的前提，见 EndingCoverage 注释）。
+/// Scan all `emit` action event names in the rules; any matching TerminalSpec (win/lose names or
+/// ending prefix) is a "declared ending". Sorted and deduped — deterministic and easy to reconcile.
+/// **Static rule scan**, doesn't look at whether it was actually fired at runtime, so an ending that
+/// has never been emitted can still be identified as "declared" (this is the premise for judging
+/// unreachability, see the EndingCoverage comment).
 fn declared_endings(
     engine: &Engine,
     terminal: &TerminalSpec,
@@ -487,7 +565,7 @@ fn declared_endings(
     let mut declared: BTreeSet<String> = BTreeSet::new();
     for rule in &engine.rules.rules {
         for action in &rule.actions {
-            // 动作是 JSON 对象；emit 动作形如 {"emit": "<事件名>", "data": {...}}
+            // Action is a JSON object; an emit action looks like {"emit": "<event name>", "data": {...}}
             if let Some(name) = action.get("emit").and_then(|v| v.as_str()) {
                 if terminal.classify(name).is_some() {
                     declared.insert(name.to_string());
@@ -495,17 +573,18 @@ fn declared_endings(
             }
         }
     }
-    // 并进清单声明的结局名（gates.playthroughs[].must_emit）——脚本/LLM 发的事件
-    // 规则里没有 emit，只能靠清单声明补上（与规则扫描取并集，BTreeSet 自动去重排序）。
+    // Merge in manifest-declared ending names (gates.playthroughs[].must_emit) — events fired by
+    // scripts/LLM aren't in the rules' emit, can only be supplemented via manifest declaration
+    // (unioned with the rule scan, BTreeSet auto-dedupes and sorts).
     for name in manifest_declared {
         declared.insert(name.clone());
     }
     declared.into_iter().collect()
 }
 
-/// 结局覆盖：declared ∩ 任意局 fired_events = 触达；declared − 触达 = 不可达。
+/// Ending coverage: declared ∩ any session's fired_events = reached; declared − reached = unreachable.
 fn aggregate_ending_coverage(declared: Vec<String>, results: &[LabeledResult]) -> EndingCoverage {
-    // 所有局触发过的事件并集（含终止与里程碑）
+    // Union of all events fired across sessions (including terminal and milestone)
     let mut fired: BTreeSet<&str> = BTreeSet::new();
     for lr in results {
         for ev in &lr.result.fired_events {
@@ -541,28 +620,32 @@ fn aggregate_outcomes(results: &[LabeledResult]) -> OutcomeDistribution {
 }
 
 fn aggregate_reachability(results: &[LabeledResult], dist: &OutcomeDistribution) -> Reachability {
-    // 并集：所有局触发过的事件名（BTreeSet 自动排序去重 = 确定）
+    // Union: event names fired across all sessions (BTreeSet auto-sorts and dedupes = deterministic)
     let mut reached: BTreeSet<String> = BTreeSet::new();
     for lr in results {
         for ev in &lr.result.fired_events {
             reached.insert(ev.clone());
         }
     }
-    // unbeatable：有局但 0 局 Win（没局时不下这个论断——没数据不是「打不过」）
+    // unbeatable: there are sessions but 0 Win (when there are no sessions we don't make this
+    // claim — no data isn't "can't be beaten")
     let unbeatable_by_swarm = dist.total > 0 && dist.win == 0;
     Reachability { reached_events: reached.into_iter().collect(), unbeatable_by_swarm }
 }
 
-/// 一局是否「卡死」：Timeout + 末尾连续相同 state_hash ≥ K。卡死即返 Some(冻结 hash)，否则 None。
-/// 软锁聚类和数值崩的 collapse 判定共用它——同一套冻结判据，不各写一份免得阈值漂移。
+/// Whether a session is "stuck": Timeout + the trailing identical state_hash runs for ≥ K. Returns
+/// Some(frozen hash) if stuck, None otherwise.
+/// Soft-lock clustering and numeric breakage's collapse judgment share it — same freeze criterion,
+/// not duplicated to avoid threshold drift.
 fn frozen_tail_hash(lr: &LabeledResult, freeze_k: usize) -> Option<u64> {
-    // Timeout 才可能是软锁；Win/Lose 是正常到了尽头，不算卡死
+    // Only Timeout can be a soft-lock; Win/Lose reached the end normally, not stuck
     if lr.result.outcome != Outcome::Timeout {
         return None;
     }
     let trace = &lr.result.state_trace;
     let last = *trace.last()?;
-    // 从末尾往前数：末值连续重复了多少 tick（末尾冻结长度）
+    // Count backward from the end: how many consecutive trailing ticks have the end value (the
+    // trailing freeze length)
     let mut run = 0usize;
     for &h in trace.iter().rev() {
         if h == last {
@@ -578,7 +661,8 @@ fn frozen_tail_hash(lr: &LabeledResult, freeze_k: usize) -> Option<u64> {
     }
 }
 
-/// 卡死局的下标集合（数值崩 collapse 判定要拿它和「归零字段」求交）。
+/// Set of stuck session indices (numeric breakage's collapse judgment intersects it with
+/// "returned-to-zero fields").
 fn stuck_session_indices(results: &[LabeledResult], freeze_k: usize) -> BTreeSet<usize> {
     results
         .iter()
@@ -588,16 +672,19 @@ fn stuck_session_indices(results: &[LabeledResult], freeze_k: usize) -> BTreeSet
         .collect()
 }
 
-/// 软锁候选：每局看末尾连续相同的 state_hash 跑了多长。≥K 且没到终止 → 冻结候选。
-/// 按「冻结时的 hash」分桶，每桶命中局数 + 一条代表录像。
+/// Soft-lock candidates: for each session, look at how long the trailing identical state_hash runs.
+/// ≥K and didn't terminate → freeze candidate.
+/// Bucketed by "hash at freeze time"; each bucket records hit count + one representative recording.
 fn aggregate_stuck(results: &[LabeledResult], freeze_k: usize) -> Vec<StuckCluster> {
-    // 桶：frozen_hash -> (命中数, 代表局)。BTreeMap 保证输出顺序确定。
+    // Bucket: frozen_hash -> (hit count, representative session). BTreeMap guarantees deterministic
+    // output order.
     let mut buckets: BTreeMap<u64, (usize, &LabeledResult)> = BTreeMap::new();
     for lr in results {
         if let Some(last) = frozen_tail_hash(lr, freeze_k) {
             let entry = buckets.entry(last).or_insert((0, lr));
             entry.0 += 1;
-            // 代表局保第一个遇到的（BTreeMap 输出序确定，命中数累加）
+            // Representative session keeps the first one encountered (BTreeMap output order is
+            // deterministic, hit count accumulates)
         }
     }
     buckets
@@ -612,18 +699,24 @@ fn aggregate_stuck(results: &[LabeledResult], freeze_k: usize) -> Vec<StuckClust
         .collect()
 }
 
-/// 数值崩聚合（设计稿四阶段）：把各局的 `numeric_summary` 按**字段名聚类**，逮三类——
-/// - runaway：该字段在某局 monotonic_up 且（末值≫首值 或 峰值过绝对阈）→ 无界增长；
-/// - collapse：该字段在某局 hit_zero 且**那一局卡死**（落在 stuck_idx）→ 归零后软锁；
-/// - non_finite：该字段在某局出现过 inf/nan → 溢出/除零。
+/// Numeric breakage aggregation (design draft stage 4): cluster each session's `numeric_summary` by
+/// **field name**, catching three kinds —
+/// - runaway: the field is monotonic_up in some session AND (end value ≫ first value OR peak exceeds
+///   the absolute threshold) → unbounded growth;
+/// - collapse: the field hit_zero in some session AND **that session got stuck** (in stuck_idx) →
+///   soft-lock after returning to zero;
+/// - non_finite: the field had inf/nan in some session → overflow / divide-by-zero.
 ///
-/// 一趟扫所有局（O(局 × 字段数)，不存历史不做平方比对），每类按字段名归桶，桶里累计命中
-/// 局数 + 留一条代表局（拿它的策略/seed/录像）。输出按字段名排序（BTreeMap）= 确定。
+/// One pass over all sessions (O(sessions × field count), no history stored, no quadratic
+/// comparison); each kind is bucketed by field name, accumulating hit count + keeping one
+/// representative session (taking its strategy/seed/recording). Output sorted by field name
+/// (BTreeMap) = deterministic.
 fn aggregate_numeric_breakage(
     results: &[LabeledResult],
     stuck_idx: &BTreeSet<usize>,
 ) -> NumericBreakage {
-    // 三类各一张桶：field -> (命中局数, 峰值max, 代表局)。BTreeMap 保证输出确定。
+    // One bucket map per kind: field -> (hit session count, peak max, representative session).
+    // BTreeMap guarantees deterministic output.
     let mut runaway: BTreeMap<&str, (usize, f64, &LabeledResult)> = BTreeMap::new();
     let mut collapse: BTreeMap<&str, (usize, &LabeledResult)> = BTreeMap::new();
     let mut non_finite: BTreeMap<&str, (usize, &LabeledResult)> = BTreeMap::new();
@@ -631,26 +724,30 @@ fn aggregate_numeric_breakage(
     for (i, lr) in results.iter().enumerate() {
         let is_stuck = stuck_idx.contains(&i);
         for (field, stat) in &lr.result.numeric_summary {
-            // 非经济字段（坐标/速度/灯光等）不是经济资源，整个跳过经济崩判定（避免移动/灯光冤报）
+            // Non-economy fields (position/velocity/lighting etc.) aren't economy resources; skip
+            // them entirely in economy-breakage detection (avoid movement/lighting false reports)
             if is_non_economy_field(field) {
                 continue;
             }
-            // 溢出：出现过非有限值
+            // Overflow: a non-finite value was observed
             if stat.non_finite {
                 let e = non_finite.entry(field.as_str()).or_insert((0, lr));
                 e.0 += 1;
             }
-            // 跑飞：只增不减 + （末值/峰值远超首值 或 峰值过绝对阈）
+            // Runaway: only-ever-grows AND (end/peak value far exceeds first value OR peak exceeds
+            // the absolute threshold)
             if is_runaway(stat) {
                 let e = runaway.entry(field.as_str()).or_insert((0, stat.max, lr));
                 e.0 += 1;
                 if stat.max > e.1 {
-                    e.1 = stat.max; // 桶里保最大的峰值（最能说明跑多飞）
+                    e.1 = stat.max; // Keep the largest peak in the bucket (most telling of runaway)
                 }
             }
-            // 崩盘软锁：曾 >0 后归零 + 那局卡死。要求 first>0（dogfood：Run.node/Light.angle
-            // 初值就是 0，不是「崩」只是从没涨起来，那是 stuck 信号不是 collapse）；
-            // 光归零也不算（很多资源正常会到 0 又回来），必须叠加那局卡死。
+            // Collapse soft-lock: was >0 then returned to zero + that session got stuck. Requires
+            // first>0 (dogfood: Run.node/Light.angle start at 0, that's not "collapse" but rather
+            // "never grew", which is a stuck signal not collapse);
+            // returning to zero alone doesn't count either (many resources legitimately hit 0 and
+            // come back), must be combined with that session getting stuck.
             if stat.first > 0.0 && stat.hit_zero && is_stuck {
                 let e = collapse.entry(field.as_str()).or_insert((0, lr));
                 e.0 += 1;
@@ -702,31 +799,41 @@ fn aggregate_numeric_breakage(
     }
 }
 
-/// 一个字段的整局摘要是否命中跑飞判据。非有限单独归 non_finite，这里只看有限范围的爆涨。
+/// Whether a field's whole-session summary hits the runaway criterion. Non-finite values go to
+/// non_finite separately; this only looks at explosion within the finite range.
 fn is_runaway(stat: &crate::session::NumericStat) -> bool {
     if !stat.monotonic_up || stat.non_finite {
         return false;
     }
-    // 绝对阈：峰值过 1e6（首值 0/负时倍率失效，用它兜底）
+    // Absolute threshold: peak exceeds 1e6 (when the first value is 0/negative the ratio is invalid,
+    // this is the fallback)
     if stat.max > RUNAWAY_ABS {
         return true;
     }
-    // 相对阈：峰值 ≫ 首值（首值 >0 才算倍率，避免 0 当分母）；且峰值要达到绝对下限，
-    // 否则「0.008→8.116」这种倍率虚高但实际很小的增长被冤判（dogfood 教训）。
+    // Relative threshold: peak ≫ first value (only meaningful as a ratio when first > 0, to avoid
+    // dividing by 0); and the peak must reach the absolute lower bound, otherwise growth like
+    // "0.008 → 8.116" with an inflated ratio but actually tiny magnitude would be falsely flagged
+    // (dogfood lesson).
     stat.first > 0.0 && stat.max > stat.first * RUNAWAY_RATIO && stat.max >= RUNAWAY_RATIO_MIN_ABS
 }
 
-/// LLM 定性 note 聚合（设计稿第 5 阶段）：把各局的 `notes` 汇总，按 (kind, 文本) 归一去重、
-/// 累计命中次数，挂第一次见到它的 tick / 代表局录像。
+/// LLM qualitative note aggregation (design draft stage 5): summarize each session's `notes`,
+/// normalize-dedupe by (kind, text), accumulate hit counts, and attach the tick where it was first
+/// seen / a representative session recording.
 ///
-/// 去重键 = (kind, 归一文本)：同一句话不管出现在哪局哪个 tick 都归一成一条 count++，避免
-/// 「LLM 每局都说同一句矛盾」刷屏。归一文本 = trim 后的原文（不做语义聚类，那要再上一层 LLM，
-/// 超出本阶段范围；诚实地只做字面去重）。输出按 (kind, 文本) 排序（BTreeMap）= 确定。
+/// Dedupe key = (kind, normalized text): the same sentence is normalized into one entry count++
+/// regardless of which session/tick it appears in, to avoid "the LLM says the same contradiction in
+/// every session" flooding the report. Normalized text = trimmed original (no semantic clustering,
+/// that would need another layer of LLM, beyond this stage's scope; honestly only literal dedupe).
+/// Output sorted by (kind, text) (BTreeMap) = deterministic.
 ///
-/// 注意：note 本身是 LLM 局的非确定产物，这个聚合**不**进确定性保证（设计稿八节「LLM 档除外」）；
-/// 但聚合逻辑本身是纯函数——给定同一批 notes 必出同一份汇总。
+/// Note: notes themselves are non-deterministic products of LLM sessions, this aggregation does
+/// **not** enter the determinism guarantee (design draft section 8 "LLM tier excluded"); but the
+/// aggregation logic itself is a pure function — given the same batch of notes it always produces
+/// the same summary.
 fn aggregate_notes(results: &[LabeledResult]) -> QualitativeNotes {
-    // 桶：(kind, 文本) -> (命中次数, 代表 tick, 代表局)。BTreeMap 保证输出顺序确定。
+    // Bucket: (kind, text) -> (hit count, representative tick, representative session). BTreeMap
+    // guarantees deterministic output order.
     let mut buckets: BTreeMap<(String, String), (usize, u64, &LabeledResult)> = BTreeMap::new();
     let mut total = 0usize;
     for lr in results {
@@ -735,7 +842,8 @@ fn aggregate_notes(results: &[LabeledResult]) -> QualitativeNotes {
             let key = (note.kind.clone(), note.text.trim().to_string());
             let entry = buckets.entry(key).or_insert((0, note.tick, lr));
             entry.0 += 1;
-            // 代表 tick/局保第一个遇到的（BTreeMap 输出序确定，count 累加）
+            // Representative tick/session keeps the first one encountered (BTreeMap output order is
+            // deterministic, count accumulates)
         }
     }
     let clusters = buckets
@@ -758,7 +866,7 @@ fn aggregate_notes(results: &[LabeledResult]) -> QualitativeNotes {
 }
 
 fn aggregate_pacing(results: &[LabeledResult]) -> Pacing {
-    // 终止局（Win/Lose）的 tick，排序求 min/median/max + 直方
+    // Ticks of terminating sessions (Win/Lose), sorted for min/median/max + histogram
     let mut term_ticks: Vec<u64> = results
         .iter()
         .filter(|lr| lr.result.outcome != Outcome::Timeout)
@@ -789,7 +897,8 @@ fn aggregate_pacing(results: &[LabeledResult]) -> Pacing {
     }
 }
 
-/// 固定 5 桶等宽直方。min==max（全同值）时退化成单桶。
+/// Fixed 5-bucket equal-width histogram. When min==max (all values the same) it degenerates into a
+/// single bucket.
 fn build_histogram(sorted: &[u64], min: u64, max: u64) -> Vec<HistogramBucket> {
     const N_BUCKETS: u64 = 5;
     if min == max {
@@ -798,34 +907,43 @@ fn build_histogram(sorted: &[u64], min: u64, max: u64) -> Vec<HistogramBucket> {
     let span = max - min;
     let mut counts = vec![0usize; N_BUCKETS as usize];
     for &t in sorted {
-        // 落桶：(t-min)/span 映射到 [0, N_BUCKETS)，max 归到最后一桶
+        // Bucket: (t-min)/span maps to [0, N_BUCKETS); max goes to the last bucket
         let b = ((t - min) * N_BUCKETS / (span + 1)).min(N_BUCKETS - 1) as usize;
         counts[b] += 1;
     }
     (0..N_BUCKETS)
         .map(|i| {
-            // 桶上界：第 i 桶覆盖 [min + i*step, min + (i+1)*step)
+            // Bucket upper bound: bucket i covers [min + i*step, min + (i+1)*step)
             let upper = min + (i + 1) * (span + 1) / N_BUCKETS;
             HistogramBucket { upper, count: counts[i as usize] }
         })
         .collect()
 }
 
-/// 惰性动作候选：声明了输入、但**没有任何规则在它身上产生真实效果**的 input 动作。
+/// Inert action candidates: input actions that are declared but **no rule produces a real effect on
+/// them**.
 ///
-/// **判据从运行时改成静态**（dogfood examples/jump 实测的假阳性根因）：旧判据看「这个动作在
-/// 所有局里有没有引发过非内建事件（emit）」，但平台游戏的移动键（left/right/space/up）只
-/// `set Velocity`（改状态）**不 emit 事件**，于是被冤标惰性——任何「只 set/改状态不 emit」的
-/// 动作都会中招，是高频假阳性。新判据不看运行时发没发事件，而是**静态扫规则**：一个 input 动作
-/// 真惰性，当且仅当它触发的所有规则的 `do` 都不产生任何真实效果（空 `do`、或只有自我无效操作，
-/// 比如把字段 set 成它本来就有的初值）。只要有一条触发规则含真实效果动作（spawn/despawn/emit/
-/// call、非零 add、或把字段 set 成≠初值的新值）→ 不惰性。这是保守判据：宁可漏判也别冤判常用动作。
+/// **Criterion changed from runtime to static** (root cause of false positives observed dogfooding
+/// examples/jump): the old criterion looked at "did this action trigger any non-built-in event
+/// (emit) across all sessions", but platformer movement keys (left/right/space/up) only
+/// `set Velocity` (modify state) and **don't emit events**, so they got falsely flagged as inert —
+/// any action that "only sets/modifies state without emitting" was hit, a high-frequency false
+/// positive. The new criterion doesn't look at whether events fired at runtime, but **statically
+/// scans the rules**: an input action is truly inert if and only if all rules it triggers have `do`s
+/// that produce no real effect (empty `do`, or only self-nullifying operations like setting a field
+/// to the initial value it already has). As long as one triggered rule contains a real-effect action
+/// (spawn/despawn/emit/call, non-zero add, or setting a field to a new value ≠ initial) → not inert.
+/// This is a conservative criterion: better to miss inert actions than to falsely flag commonly-used
+/// ones.
 ///
-/// `engine=Some` 走静态判据（默认 CLI 路径）；`engine=None`（裸 `aggregate`，没规则信息）退化用
-/// 旧的运行时启发式——「被注入过、但从没和任何非内建事件同局出现」的动作。诚实标「候选/待复核」
-/// 措辞不变：合法地不产生可观测效果的动作也可能命中，留人复核。
+/// `engine=Some` uses the static criterion (the default CLI path); `engine=None` (bare `aggregate`,
+/// no rule info) degrades to the old runtime heuristic — actions "injected, but never co-occurring
+/// with a non-built-in event in any session". The honest "candidate / pending review" wording is
+/// unchanged: actions that legitimately produce no observable effect may also be hit, leave for
+/// human review.
 fn aggregate_inert(results: &[LabeledResult], engine: Option<&Engine>) -> Vec<String> {
-    // 词汇：所有局注入过的动作并集（候选只从真被注入过的动作里出，不臆测没跑过的动作）。
+    // Vocabulary: union of all actions injected across sessions (candidates only come from actions
+    // actually injected, no speculating about actions that never ran).
     let mut vocab: BTreeSet<String> = BTreeSet::new();
     for lr in results {
         for r in &lr.result.recording.inputs {
@@ -833,15 +951,19 @@ fn aggregate_inert(results: &[LabeledResult], engine: Option<&Engine>) -> Vec<St
         }
     }
 
-    // 静态判据（有引擎时）：扫规则，逐个 input 动作看它触发的规则有没有真实效果。
+    // Static criterion (when engine is present): scan rules, check for each input action whether
+    // the rules it triggers have any real effect.
     if let Some(engine) = engine {
         let inert_set = static_inert_actions(engine);
-        // 与注入词汇求交：只报真被跑到过、且静态判定无效果的动作（避免报从没注入的动作）。
+        // Intersect with the injection vocabulary: only report actions that actually ran and were
+        // judged to have no effect statically (avoid reporting actions that were never injected).
         return vocab.intersection(&inert_set).cloned().collect();
     }
 
-    // 退化路径（无引擎）：旧的运行时启发式。「引发过非内建事件」的动作集合——某局有非内建
-    // 事件 → 该局注入过的动作都记一笔可能有响应；惰性 = 词汇里从没出现在有响应局里的动作。
+    // Degraded path (no engine): the old runtime heuristic. The set of actions "that triggered a
+    // non-built-in event" — if a session had a non-built-in event → all actions injected in that
+    // session get a "possibly responsive" mark; inert = actions in the vocabulary that never
+    // appeared in a responsive session.
     let mut responsive: BTreeSet<String> = BTreeSet::new();
     for lr in results {
         let actions_this: BTreeSet<&str> =
@@ -856,18 +978,21 @@ fn aggregate_inert(results: &[LabeledResult], engine: Option<&Engine>) -> Vec<St
     vocab.difference(&responsive).cloned().collect()
 }
 
-/// 静态判据：扫引擎规则，返回「所有触发规则都没有真实效果」的 input 动作集合。
+/// Static criterion: scan the engine rules and return the set of input actions "whose triggered
+/// rules all have no real effect".
 ///
-/// 对每个被 input 规则声明的动作（按 `filter.action` 收集），看挂在它名下的全部规则：
-/// 只要有**一条**规则的 `do` 含真实效果动作 → 这个动作不惰性；全部规则都无真实效果 → 惰性。
-/// （某动作压根没有任何规则接——理论上 derive_actions 不会把它列进词汇，但若出现也算惰性，
-/// 因为「没规则接 = 没效果」。）输出 BTreeSet 自动排序去重，确定。
+/// For each action declared by an input rule (collected via `filter.action`), look at all rules
+/// attached to it: as long as **one** rule's `do` contains a real-effect action → this action is
+/// not inert; if all rules have no real effect → inert. (An action with no rule attached at all —
+/// theoretically derive_actions wouldn't list it in the vocabulary, but if it happens it also
+/// counts as inert, because "no rule attached = no effect".) Output BTreeSet auto-sorts and
+/// dedupes, deterministic.
 fn static_inert_actions(engine: &Engine) -> BTreeSet<String> {
-    // 动作 -> 它名下有没有任意一条「有真实效果」的规则
+    // action -> whether any "real-effect" rule is attached to it
     let mut has_effect: BTreeMap<&str, bool> = BTreeMap::new();
     for rule in &engine.rules.rules {
         let Trigger::Event { name, filter, .. } = &rule.trigger else {
-            continue; // 只看 input 触发的规则
+            continue; // Only look at input-triggered rules
         };
         if name != "input" {
             continue;
@@ -879,7 +1004,7 @@ fn static_inert_actions(engine: &Engine) -> BTreeSet<String> {
         let entry = has_effect.entry(action).or_insert(false);
         *entry = *entry || effectful;
     }
-    // 惰性 = 名下没有任何有效果规则的动作
+    // Inert = actions with no effectful rule attached
     has_effect
         .into_iter()
         .filter(|(_, eff)| !*eff)
@@ -887,17 +1012,21 @@ fn static_inert_actions(engine: &Engine) -> BTreeSet<String> {
         .collect()
 }
 
-/// 一个 `do` 动作（JSON 对象）静态上是否**可能产生真实效果**。保守：判不准就算「有效果」
-/// （宁可漏判惰性也别冤判常用动作）。
-/// - `spawn`/`despawn`/`emit`/`call`：必有效果（建/删实体、发事件、调脚本）。
-/// - `add`：`by` 不是字面 0 就算有效果（加 0 是无效操作）。`by` 取不到/非字面数 → 当有效果。
-/// - `set`：把目标字段 set 成它的 schema 初值（effective_default）= 自我无效操作，无效果；
-///   set 成 ≠ 初值、或 `to` 是动态引用/格式串、或目标解析不出 schema 字段 → 当有效果。
+/// Whether a `do` action (JSON object) **could produce a real effect** statically. Conservative:
+/// when in doubt, treat it as "has effect" (better to miss inert actions than to falsely flag
+/// commonly-used ones).
+/// - `spawn`/`despawn`/`emit`/`call`: definitely have effect (create/destroy entities, fire events,
+///   call scripts).
+/// - `add`: `by` not being literal 0 counts as having effect (adding 0 is a no-op). When `by`
+///   can't be fetched / isn't a literal number → treat as having effect.
+/// - `set`: setting a target field to its schema initial value (effective_default) = self-nullifying
+///   no-op, no effect; setting to ≠ initial, or `to` being a dynamic reference / format string, or
+///   the target not resolving to a schema field → treat as having effect.
 fn action_has_effect(action: &Value, schema: &vitric_data::Schema) -> bool {
     let Some(obj) = action.as_object() else {
-        return true; // 不是对象（理论上解析期已挡掉），保守当有效果
+        return true; // Not an object (theoretically blocked at parse time), conservatively treat as having effect
     };
-    // 状态创建/销毁/发事件/调脚本——一律有效果
+    // State create/destroy/fire-event/call-script — always have effect
     if obj.contains_key("spawn")
         || obj.contains_key("despawn")
         || obj.contains_key("emit")
@@ -905,38 +1034,44 @@ fn action_has_effect(action: &Value, schema: &vitric_data::Schema) -> bool {
     {
         return true;
     }
-    // add：by 是字面 0 才算无效；其余（非零、引用、缺失）都当有效果
+    // add: by being literal 0 is the only no-op; everything else (non-zero, reference, missing)
+    // counts as having effect
     if obj.contains_key("add") {
         return match obj.get("by").and_then(|v| v.as_f64()) {
             Some(by) => by != 0.0,
-            None => true, // by 是引用/格式串等动态值 → 当有效果（保守）
+            None => true, // by is a dynamic value like a reference/format string → treat as having effect (conservative)
         };
     }
-    // set：判是不是「把字段 set 成它本来就有的初值」这种自我无效操作
+    // set: judge whether it's "setting a field to the initial value it already had" — a self-nullifying no-op
     if let Some(target) = obj.get("set").and_then(|v| v.as_str()) {
         let Some(to) = obj.get("to") else {
-            return true; // 缺 to（解析期已挡），保守
+            return true; // Missing to (blocked at parse time), conservative
         };
-        // to 是动态引用（字符串引用 self./other./@/event.）或 format 对象 → 当有效果
+        // to is a dynamic reference (string referencing self./other./@/event.) or a format object → treat as having effect
         if !is_static_literal(to) {
             return true;
         }
         match field_def(schema, target) {
-            // 解析得到 schema 字段：把 to 按字段类型归一后和初值比（绕开 0 vs 0.0 这种
-            // int/float 表示差异——初值已 canonicalize 成浮点，to 也要同样归一才比得对）。
-            // 归一后 = 初值 → 自我无效操作，无效果；≠ 初值 → 有效果。
+            // Resolved to a schema field: normalize `to` by field type and compare to the initial
+            // value (to bypass int/float representation differences like 0 vs 0.0 — the initial
+            // value is already canonicalized to float, `to` must be normalized the same way to
+            // compare correctly). After normalization = initial value → self-nullifying no-op, no
+            // effect; ≠ initial value → has effect.
             Some(fdef) => fdef.ty.canonicalize(to) != fdef.effective_default(),
-            // 目标路径解析不出 schema 字段（自定义路径/组件未声明）→ 保守当有效果
+            // Target path doesn't resolve to a schema field (custom path / undeclared component) →
+            // conservatively treat as having effect
             None => true,
         }
     } else {
-        // 走到这说明是未知动作类型（解析期已挡），保守当有效果
+        // Reaching here means it's an unknown action type (blocked at parse time), conservatively
+        // treat as having effect
         true
     }
 }
 
-/// `to` 的值是不是「静态字面常量」（能直接和初值比）。字符串里带引用前缀（self./other./@/
-/// event.）或是对象/数组（如 {"format":...}）都算动态，不算静态字面。
+/// Whether `to`'s value is a "static literal constant" (can be directly compared to the initial
+/// value). Strings containing reference prefixes (self./other./@/event.) or being objects/arrays
+/// (like {"format":...}) all count as dynamic, not static literals.
 fn is_static_literal(v: &Value) -> bool {
     match v {
         Value::String(s) => {
@@ -945,23 +1080,26 @@ fn is_static_literal(v: &Value) -> bool {
                 || s.starts_with('@')
                 || s.starts_with("event."))
         }
-        // 对象/数组可能是 format/引用结构，不当静态字面
+        // Objects/arrays may be format/reference structures, not treated as static literals
         Value::Object(_) | Value::Array(_) => false,
-        // 数字/布尔/null 都是静态字面
+        // Numbers/booleans/null are all static literals
         _ => true,
     }
 }
 
-/// 解析 set 目标路径 `<实体引用>.<组件>.<字段>`，查它在 schema 里的字段定义。
-/// 实体引用是首段（@名字 / self / other / 句柄），组件是第二段，剩下是字段路径。
-/// 只支持顶层字段（组件.字段，不含再下一层嵌套）——够覆盖埋雷/移动键这类用法；
-/// 解析不出组件/字段则返回 None（调用方保守当「有效果」）。
+/// Parse a set target path `<entity reference>.<component>.<field>` and look up its field definition
+/// in the schema.
+/// The entity reference is the first segment (@name / self / other / handle), the component is the
+/// second, the rest is the field path. Only supports top-level fields (component.field, no deeper
+/// nesting) — enough to cover landmine/movement-key usage; if the component/field can't be parsed,
+/// returns None (the caller conservatively treats it as "has effect").
 fn field_def<'a>(schema: &'a vitric_data::Schema, target: &str) -> Option<&'a vitric_data::FieldDef> {
     let mut segs = target.split('.');
-    let _entity = segs.next()?; // 实体引用段，跳过
+    let _entity = segs.next()?; // Entity reference segment, skip
     let component = segs.next()?;
     let field = segs.next()?;
-    // 还有更深的嵌套字段（vec2.x 这种）就不判初值——保守，让调用方当有效果
+    // Deeper nested fields (like vec2.x) — don't judge the initial value; conservatively let the
+    // caller treat as having effect
     if segs.next().is_some() {
         return None;
     }
@@ -969,9 +1107,10 @@ fn field_def<'a>(schema: &'a vitric_data::Schema, target: &str) -> Option<&'a vi
 }
 
 fn aggregate_dominant(results: &[LabeledResult]) -> DominantStrategy {
-    // 分组：strategy_kind -> (局数, win 数, win 局的 tick 列表)
+    // Grouping: strategy_kind -> (session count, win count, list of winning-session ticks)
     let mut groups: BTreeMap<&'static str, (usize, usize, Vec<u64>)> = BTreeMap::new();
-    // 先确保三种策略都有桶（便于稳定输出，即便某策略 0 局）
+    // First ensure all three strategies have a bucket (for stable output even when a strategy has
+    // 0 sessions)
     for kind in StrategyKind::ALL {
         groups.entry(kind.name()).or_insert((0, 0, Vec::new()));
     }
@@ -996,16 +1135,20 @@ fn aggregate_dominant(results: &[LabeledResult]) -> DominantStrategy {
             median_win_ticks,
         });
     }
-    // 主导判定：通关率最高的策略 ≥2× 次优，且双方样本都 ≥4 局（样本足才下论断）
+    // Dominance decision: the strategy with the highest win rate ≥2× the runner-up, and both sides
+    // have ≥4 sessions (a sufficient sample to make a claim)
     let dominant = find_dominant(&per_strategy);
-    // 一招鲜：通关局里某动作高频碾压其他动作（设计稿四阶段「主导策略深化」）
+    // One-trick: in winning sessions some action highly dominates other actions (design draft stage
+    // 4 "dominant strategy deepening")
     let dominant_action = find_dominant_action(results);
     DominantStrategy { per_strategy, dominant, dominant_action }
 }
 
-/// 一招鲜动作：统计**通关局**里各动作的注入次数，若某一个动作占了总注入的 ≥80%、
-/// 且垫底的通关局够多，标它为候选（这一招碾压其他玩法、别的选择没意义）。
-/// 数据源 = 通关局录像的 inputs（注入动作即录像，确定可重放）。
+/// One-trick action: count injections per action in **winning sessions**; if some action accounts
+/// for ≥80% of total injections, and there are enough winning sessions as a baseline, flag it as a
+/// candidate (this one action dominates other playstyles, other choices are meaningless).
+/// Data source = winning sessions' recording inputs (injected actions = the recording,
+/// deterministically replayable).
 fn find_dominant_action(results: &[LabeledResult]) -> Option<DominantAction> {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut total = 0usize;
@@ -1021,9 +1164,11 @@ fn find_dominant_action(results: &[LabeledResult]) -> Option<DominantAction> {
         }
     }
     if winning_sessions < DOMINANT_ACTION_MIN_WINS || total == 0 {
-        return None; // 通关局太少 / 通关都没按动作（瞬时通关），不下论断
+        return None; // Too few winning sessions / winning without pressing actions (instant clear),
+        // don't make a claim
     }
-    // 取注入最多的动作；并列时取字段名靠前的（BTreeMap 序，确定）
+    // Take the most-injected action; on ties take the lexicographically smallest field name
+    // (BTreeMap order, deterministic)
     let (action, &top) = counts.iter().max_by_key(|(name, c)| (**c, std::cmp::Reverse(**name)))?;
     let share = top as f64 / total as f64;
     if share >= DOMINANT_ACTION_SHARE {
@@ -1033,20 +1178,21 @@ fn find_dominant_action(results: &[LabeledResult]) -> Option<DominantAction> {
     }
 }
 
-/// 主导：按 win_rate 降序，头名 ≥2× 次名且头名样本 ≥4 局；次名 win_rate=0 时只要头名
-/// 真有通关且样本足也算碾压（0 的 2 倍还是 0，单独处理）。
+/// Dominant: sort by win_rate descending; the top one is ≥2× the runner-up and the top one's sample
+/// is ≥4 sessions; when the runner-up's win_rate=0, as long as the top one actually has wins and a
+/// sufficient sample it counts as domination (2× 0 is still 0, handled separately).
 fn find_dominant(stats: &[StrategyStats]) -> Option<String> {
     const MIN_SAMPLE: usize = 4;
     let mut ranked: Vec<&StrategyStats> =
         stats.iter().filter(|s| s.sessions >= MIN_SAMPLE).collect();
     if ranked.len() < 2 {
-        return None; // 不足两个够样本的策略，没法比「碾压」
+        return None; // Fewer than two strategies with sufficient samples, can't compare "domination"
     }
     ranked.sort_by(|a, b| b.win_rate.partial_cmp(&a.win_rate).expect("win_rate 非 NaN"));
     let top = ranked[0];
     let second = ranked[1];
     if top.win_rate <= 0.0 {
-        return None; // 头名都没赢，谈不上主导
+        return None; // Top one didn't win either, no dominance to speak of
     }
     if top.win_rate >= 2.0 * second.win_rate {
         Some(top.strategy.clone())
@@ -1142,7 +1288,7 @@ fn build_summary(
         ));
     }
     if !notes.clusters.is_empty() {
-        // 按 kind 统计去重后各有几条（continuity/clarity/choice 概况）
+        // Count how many deduped entries per kind (a continuity/clarity/choice overview)
         let mut by_kind: BTreeMap<&str, usize> = BTreeMap::new();
         for c in &notes.clusters {
             *by_kind.entry(c.kind.as_str()).or_insert(0) += 1;
@@ -1167,7 +1313,7 @@ mod tests {
     use crate::swarm::{SessionSpec, StrategyKind};
     use vitric_sim::{InputRecord, Recording};
 
-    /// 造一条带 telemetry 的 LabeledResult（喂聚合器）。
+    /// Build a LabeledResult with telemetry (to feed the aggregator).
     fn labeled(
         kind: StrategyKind,
         seed: u64,
@@ -1199,7 +1345,7 @@ mod tests {
         }
     }
 
-    /// 造一条带 LLM note 的 LabeledResult（喂 note 聚合器）。
+    /// Build a LabeledResult with LLM notes (to feed the note aggregator).
     fn labeled_with_notes(
         kind: StrategyKind,
         seed: u64,
@@ -1214,7 +1360,7 @@ mod tests {
         crate::strategy::PlaytestNote { tick, kind: kind.to_string(), text: text.to_string() }
     }
 
-    /// 造一条带数值摘要的 LabeledResult（喂数值崩聚合器）。
+    /// Build a LabeledResult with a numeric summary (to feed the numeric-breakage aggregator).
     fn labeled_numeric(
         kind: StrategyKind,
         seed: u64,
@@ -1269,16 +1415,17 @@ mod tests {
 
     #[test]
     fn reachability_empty_is_not_unbeatable() {
-        // 没局 = 没数据，不下「打不过」论断
+        // No sessions = no data, don't make a "can't be beaten" claim
         let rep = aggregate(&[]);
         assert!(!rep.reachability.unbeatable_by_swarm);
     }
 
     #[test]
     fn stuck_clusters_groups_frozen_tail() {
-        // 两局都在末尾连续 >K tick 哈希冻结成同一个 hash（=999），且都 Timeout
+        // Both sessions freeze on the same hash (=999) for >K consecutive trailing ticks, and both
+        // are Timeout
         let mut trace_a = vec![1, 2, 3];
-        trace_a.extend(std::iter::repeat_n(999u64, 70)); // 末尾 70 tick 冻在 999
+        trace_a.extend(std::iter::repeat_n(999u64, 70)); // trailing 70 ticks frozen at 999
         let mut trace_b = vec![5, 6];
         trace_b.extend(std::iter::repeat_n(999u64, 65));
         let r = vec![
@@ -1293,10 +1440,10 @@ mod tests {
 
     #[test]
     fn stuck_ignores_short_freeze_and_terminated() {
-        // 冻结不够 K，不算
+        // Freeze shorter than K, doesn't count
         let mut short = vec![1, 2];
         short.extend(std::iter::repeat_n(7u64, 10));
-        // 冻结够长但已 Win（正常到尽头，不算软锁）
+        // Freeze long enough but already Win (reached the end normally, not a soft-lock)
         let mut won = vec![1u64];
         won.extend(std::iter::repeat_n(8u64, 80));
         let r = vec![
@@ -1326,12 +1473,12 @@ mod tests {
 
     #[test]
     fn inert_actions_flags_action_with_no_response() {
-        // dead 动作：被注入但所在局没有任何非内建事件
-        // live 动作：所在局有非内建事件 noop
+        // dead action: injected but its session had no non-built-in events
+        // live action: its session had a non-built-in event noop
         let r = vec![
-            // 一局注入 left，触发了 noop（非内建）→ left 有响应
+            // One session injects left, fires noop (non-built-in) → left is responsive
             labeled(StrategyKind::Coverage, 0, Outcome::Timeout, 5, vec![], vec!["noop"], vec!["left"]),
-            // 一局注入 dead，只有内建 input 事件 → dead 无响应
+            // One session injects dead, only has the built-in input event → dead is unresponsive
             labeled(StrategyKind::Coverage, 1, Outcome::Timeout, 5, vec![], vec!["input"], vec!["dead"]),
         ];
         let rep = aggregate(&r);
@@ -1339,7 +1486,7 @@ mod tests {
         assert!(!rep.inert_actions.contains(&"left".to_string()));
     }
 
-    /// 造一个引擎：给定若干 input 规则（action, do 动作列表）+ schema。
+    /// Build an engine: given several input rules (action, do action list) + schema.
     fn inert_engine(rules: serde_json::Value, schema: serde_json::Value) -> Engine {
         let schema = Schema::parse(&schema, "s.json").unwrap();
         Engine::new(RuleSet::parse(&rules, "r.json").unwrap(), schema)
@@ -1347,8 +1494,8 @@ mod tests {
 
     #[test]
     fn static_inert_set_to_default_is_inert_but_set_to_new_value_is_not() {
-        // useless: set Scratch.v 成它的初值 0（自我无效操作）→ 惰性
-        // live:    set Vel.x 成 ≠ 初值(0) 的 -8（真实状态变更）→ 不惰性
+        // useless: set Scratch.v to its initial value 0 (self-nullifying no-op) → inert
+        // live:    set Vel.x to -8 (≠ initial 0, a real state change) → not inert
         let eng = inert_engine(
             serde_json::json!({"rules": [
                 {"id": "useless", "on": {"event": "input", "filter": {"action": "useless", "phase": "pressed"}},
@@ -1361,7 +1508,7 @@ mod tests {
                 "Vel": {"fields": {"x": {"type": "number"}}}
             }}),
         );
-        // 两个动作都注入过（让候选词汇含它们）
+        // Both actions were injected (so they're in the candidate vocabulary)
         let r = vec![
             labeled(StrategyKind::Coverage, 0, Outcome::Timeout, 5, vec![], vec![], vec!["useless"]),
             labeled(StrategyKind::Coverage, 1, Outcome::Timeout, 5, vec![], vec![], vec!["live"]),
@@ -1373,7 +1520,7 @@ mod tests {
 
     #[test]
     fn static_inert_emit_and_spawn_are_effectful() {
-        // 含 emit / spawn 的规则一律有真实效果 → 对应动作不惰性
+        // Rules with emit / spawn always have a real effect → corresponding actions aren't inert
         let eng = inert_engine(
             serde_json::json!({"rules": [
                 {"id": "fire", "on": {"event": "input", "filter": {"action": "fire", "phase": "pressed"}},
@@ -1393,7 +1540,8 @@ mod tests {
 
     #[test]
     fn static_inert_multi_rule_one_effectful_wins() {
-        // 同一动作两条规则：一条自我无效(set 成初值)、一条有效果(emit) → 整体不惰性
+        // Same action with two rules: one self-nullifying (set to initial value), one with effect
+        // (emit) → overall not inert
         let eng = inert_engine(
             serde_json::json!({"rules": [
                 {"id": "noop", "on": {"event": "input", "filter": {"action": "act", "phase": "pressed"}},
@@ -1412,7 +1560,8 @@ mod tests {
 
     #[test]
     fn static_inert_only_reports_injected_actions() {
-        // 静态上 useless 惰性，但若它从没被注入过 → 不报（候选只从真跑过的动作里出）
+        // Statically useless is inert, but if it was never injected → not reported (candidates only
+        // come from actions that actually ran)
         let eng = inert_engine(
             serde_json::json!({"rules": [
                 {"id": "useless", "on": {"event": "input", "filter": {"action": "useless", "phase": "pressed"}},
@@ -1422,7 +1571,7 @@ mod tests {
                 "Scratch": {"fields": {"v": {"type": "number", "default": 0}}}
             }}),
         );
-        // 没注入任何动作
+        // No actions injected
         let r = vec![labeled(StrategyKind::Coverage, 0, Outcome::Timeout, 5, vec![], vec![], vec![])];
         let rep = aggregate_with_endings(&r, &eng, &TerminalSpec::default());
         assert!(rep.inert_actions.is_empty(), "没注入过的动作不进候选: {:?}", rep.inert_actions);
@@ -1430,7 +1579,8 @@ mod tests {
 
     #[test]
     fn dominant_strategy_flagged_when_one_crushes() {
-        // coverage 4 局全通关（win_rate 1.0），random 4 局全超时（0.0）→ coverage 碾压
+        // coverage 4 sessions all win (win_rate 1.0), random 4 sessions all timeout (0.0) → coverage
+        // dominates
         let mut r = Vec::new();
         for seed in 0..4u64 {
             r.push(labeled(StrategyKind::Coverage, seed, Outcome::Win, 10, vec![], vec![], vec![]));
@@ -1442,10 +1592,10 @@ mod tests {
 
     #[test]
     fn dominant_none_when_close() {
-        // 两策略通关率接近（不到 2×）→ 不标主导
+        // Two strategies' win rates are close (less than 2×) → no dominant flagged
         let mut r = Vec::new();
         for seed in 0..4u64 {
-            // coverage 3/4 win, random 2/4 win：1.5× < 2×
+            // coverage 3/4 win, random 2/4 win: 1.5× < 2×
             r.push(labeled(StrategyKind::Coverage, seed, if seed < 3 { Outcome::Win } else { Outcome::Timeout }, 10, vec![], vec![], vec![]));
             r.push(labeled(StrategyKind::Random, seed, if seed < 2 { Outcome::Win } else { Outcome::Timeout }, 10, vec![], vec![], vec![]));
         }
@@ -1455,7 +1605,7 @@ mod tests {
 
     #[test]
     fn dominant_none_when_sample_too_small() {
-        // 样本不足 4 局：不下主导论断
+        // Sample smaller than 4 sessions: don't make a dominance claim
         let r = vec![
             labeled(StrategyKind::Coverage, 0, Outcome::Win, 10, vec![], vec![], vec![]),
             labeled(StrategyKind::Random, 0, Outcome::Timeout, 99, vec![], vec![], vec![]),
@@ -1468,7 +1618,7 @@ mod tests {
     use vitric_data::Schema;
     use vitric_rules::{Engine, RuleSet};
 
-    /// 造一个声明了若干结局事件（rules 里 emit）的引擎。
+    /// Build an engine that declares several ending events (via emit in rules).
     fn engine_with_emits(emit_events: &[&str]) -> Engine {
         let rules: Vec<serde_json::Value> = emit_events
             .iter()
@@ -1490,7 +1640,8 @@ mod tests {
 
     #[test]
     fn ending_coverage_flags_declared_but_unreached() {
-        // 引擎声明能 emit ending-good 和 ending-bad；运行里只触达过 ending-bad
+        // The engine declares it can emit ending-good and ending-bad; at runtime only ending-bad was
+        // reached
         let eng = engine_with_emits(&["ending-good", "ending-bad"]);
         let r = vec![
             labeled(StrategyKind::Random, 0, Outcome::Win, 10, vec![], vec!["ending-bad"], vec![]),
@@ -1517,7 +1668,8 @@ mod tests {
 
     #[test]
     fn ending_coverage_only_counts_terminal_emits() {
-        // 引擎 emit 了一个非结局事件 milestone 和一个结局 ending-x：只 ending-x 算声明结局
+        // The engine emits a non-ending event milestone and an ending ending-x: only ending-x counts
+        // as a declared ending
         let eng = engine_with_emits(&["milestone", "ending-x"]);
         let r = vec![labeled(StrategyKind::Random, 0, Outcome::Timeout, 50, vec![], vec!["milestone"], vec![])];
         let rep = aggregate_with_endings(&r, &eng, &TerminalSpec::default());
@@ -1556,9 +1708,9 @@ mod tests {
         assert_eq!(serde_json::to_string(&a).unwrap(), serde_json::to_string(&b).unwrap());
     }
 
-    // ---- 数值崩维度（numeric_breakage）单元测试 ----
+    // ---- Numeric breakage dimension (numeric_breakage) unit tests ----
 
-    /// 造一个 NumericStat（按场景设值，绕过 private start/observe）。
+    /// Build a NumericStat with scenario-specific values (bypassing private start/observe).
     fn nstat(
         first: f64,
         last: f64,
@@ -1573,7 +1725,7 @@ mod tests {
 
     #[test]
     fn numeric_breakage_flags_runaway_by_absolute_threshold() {
-        // gold 从 100 单调涨到 5e6（> 1e6 绝对阈）→ 跑飞
+        // gold grows monotonically from 100 to 5e6 (> 1e6 absolute threshold) → runaway
         let r = vec![labeled_numeric(
             StrategyKind::Economy,
             0,
@@ -1590,7 +1742,7 @@ mod tests {
 
     #[test]
     fn numeric_breakage_flags_runaway_by_ratio() {
-        // gold 50 → 80000（1600× > 1000× 倍率阈），峰值 <1e6 但相对暴涨
+        // gold 50 → 80000 (1600× > 1000× ratio threshold), peak <1e6 but a relative explosion
         let r = vec![labeled_numeric(
             StrategyKind::Economy,
             0,
@@ -1605,8 +1757,9 @@ mod tests {
 
     #[test]
     fn numeric_breakage_excludes_spatial_fields() {
-        // dogfood 教训：重力下落让 Position.y 从近 0 单调涨到几十，倍率虚高但不是经济跑飞。
-        // 同样的统计放在 Position（空间）上必须被排除，放在经济字段上也因峰值太小不冤判。
+        // dogfood lesson: gravity falling made Position.y grow monotonically from near 0 to tens,
+        // with an inflated ratio but not economy runaway. The same statistics on Position (spatial)
+        // must be excluded, and on economy fields also not falsely flagged due to a too-small peak.
         let stats = nstat(0.008, 8.116, 0.008, 8.116, true, false, false);
         let r = vec![labeled_numeric(
             StrategyKind::Random,
@@ -1617,7 +1770,7 @@ mod tests {
             vec![
                 ("hero/Position.y", stats.clone()),
                 ("hero/Velocity.x", stats.clone()),
-                ("hero/Resources.coins", stats), // 经济字段但峰值 8.116 < 绝对下限 → 也不算
+                ("hero/Resources.coins", stats), // economy field but peak 8.116 < absolute lower bound → also not flagged
             ],
         )];
         let rep = aggregate(&r);
@@ -1630,7 +1783,8 @@ mod tests {
 
     #[test]
     fn numeric_breakage_ratio_needs_min_abs() {
-        // 经济字段倍率超 1000× 但峰值只到 8.116（< 绝对下限）→ 不算跑飞（避免微小值起步冤判）
+        // Economy field ratio exceeds 1000× but peak only reaches 8.116 (< absolute lower bound) →
+        // not runaway (avoids false positives from small starting values)
         let r = vec![labeled_numeric(
             StrategyKind::Economy,
             0,
@@ -1645,7 +1799,8 @@ mod tests {
 
     #[test]
     fn numeric_breakage_runaway_needs_monotonic() {
-        // 峰值过 1e6 但中途降过（非单调）→ 不算跑飞（一涨一跌的波动不是无界增长）
+        // Peak exceeds 1e6 but dropped midway (non-monotonic) → not runaway (up-and-down
+        // oscillation isn't unbounded growth)
         let r = vec![labeled_numeric(
             StrategyKind::Economy,
             0,
@@ -1660,7 +1815,8 @@ mod tests {
 
     #[test]
     fn numeric_breakage_clusters_runaway_by_field_name() {
-        // 同字段名在多局命中 → 聚成一桶、hits 累加、peak 取最大
+        // Same field name hit in multiple sessions → cluster into one bucket, accumulate hits, take
+        // the max peak
         let r = vec![
             labeled_numeric(StrategyKind::Economy, 0, Outcome::Timeout, 100, vec![],
                 vec![("v/R.gold", nstat(1.0, 2e6, 1.0, 2e6, true, false, false))]),
@@ -1675,14 +1831,16 @@ mod tests {
 
     #[test]
     fn numeric_breakage_flags_collapse_only_when_stuck() {
-        // 两局都归零；但只有卡死那局（末尾冻结 ≥K）算崩盘软锁
+        // Both sessions return to zero; but only the stuck one (trailing freeze ≥K) counts as a
+        // collapse soft-lock
         let mut frozen = vec![1u64, 2];
-        frozen.extend(std::iter::repeat_n(7u64, 70)); // 末尾冻结 → 卡死
+        frozen.extend(std::iter::repeat_n(7u64, 70)); // trailing freeze → stuck
         let r = vec![
-            // 归零 + 卡死 → collapse
+            // Returned to zero + stuck → collapse
             labeled_numeric(StrategyKind::Economy, 0, Outcome::Timeout, frozen.len() as u64, frozen,
                 vec![("base/Res.fuel", nstat(100.0, 0.0, 0.0, 100.0, false, true, false))]),
-            // 归零但没卡死（状态还在变）→ 不算（资源正常会到 0 又回来）
+            // Returned to zero but not stuck (state still changing) → doesn't count (resources
+            // legitimately hit 0 and come back)
             labeled_numeric(StrategyKind::Economy, 1, Outcome::Timeout, 5, vec![1, 2, 3, 4, 5],
                 vec![("base/Res.fuel", nstat(100.0, 0.0, 0.0, 100.0, false, true, false))]),
         ];
@@ -1694,11 +1852,12 @@ mod tests {
 
     #[test]
     fn numeric_breakage_collapse_excludes_light_and_zero_start() {
-        // dogfood echo 教训：菜单态卡死时，任何当时为 0 的字段都被误报 collapse。
-        // 非经济字段(Light)整个排除；初值就是 0 的字段(Run.node 从没涨起来)不是「崩」而是
-        // stuck 信号；只有「曾 >0 后归零 + 卡死」的真经济资源才算 collapse。
+        // dogfood echo lesson: when stuck on the menu state, any field that was 0 at the time got
+        // misreported as collapse. Non-economy fields (Light) are excluded entirely; fields whose
+        // initial value is 0 (Run.node never grew) aren't "collapse" but a stuck signal; only real
+        // economy resources that "were >0 then returned to 0 + stuck" count as collapse.
         let mut frozen = vec![1u64, 2];
-        frozen.extend(std::iter::repeat_n(7u64, 70)); // 末尾冻结 → 卡死
+        frozen.extend(std::iter::repeat_n(7u64, 70)); // trailing freeze → stuck
         let r = vec![labeled_numeric(
             StrategyKind::Random,
             0,
@@ -1706,11 +1865,12 @@ mod tests {
             frozen.len() as u64,
             frozen,
             vec![
-                // 灯光归零(非经济) → 排除
+                // Light returned to zero (non-economy) → excluded
                 ("menu-lamp/Light.angle", nstat(0.5, 0.0, 0.0, 0.5, false, true, false)),
-                // 进度初值就是 0(从没涨起来) → 不算崩，是 stuck
+                // Progress's initial value is 0 (never grew) → not collapse, it's a stuck signal
                 ("progress/Run.node", nstat(0.0, 0.0, 0.0, 0.0, false, true, false)),
-                // 真经济资源:曾 >0 后归零 + 卡死 → 这个才算 collapse（回归保护）
+                // Real economy resource: was >0 then returned to 0 + stuck → only this counts as
+                // collapse (regression protection)
                 ("base/Res.fuel", nstat(100.0, 0.0, 0.0, 100.0, false, true, false)),
             ],
         )];
@@ -1737,7 +1897,8 @@ mod tests {
 
     #[test]
     fn numeric_breakage_empty_when_healthy() {
-        // 健康字段：小幅波动、不归零、不溢出 → 三类全空
+        // Healthy field: small fluctuations, doesn't return to zero, no overflow → all three kinds
+        // empty
         let r = vec![labeled_numeric(
             StrategyKind::Random,
             0,
@@ -1752,11 +1913,12 @@ mod tests {
         assert!(rep.numeric_breakage.non_finite.is_empty());
     }
 
-    // ---- 主导动作（dominant_action 一招鲜）单元测试 ----
+    // ---- Dominant action (dominant_action one-trick) unit tests ----
 
     #[test]
     fn dominant_action_flagged_when_one_action_dominates_wins() {
-        // 4 局通关，每局都狂按 "cheese"（9 次）+ 别的动作 1 次 → cheese 占 90% > 80%
+        // 4 winning sessions, each spamming "cheese" (9 times) + 1 other action → cheese accounts
+        // for 90% > 80%
         let mut r = Vec::new();
         for seed in 0..4u64 {
             let mut injected = vec!["cheese"; 9];
@@ -1772,7 +1934,7 @@ mod tests {
 
     #[test]
     fn dominant_action_none_when_balanced() {
-        // 通关局动作均衡（a/b 各半）→ 没有一招鲜
+        // Winning-session actions are balanced (a/b half each) → no one-trick
         let mut r = Vec::new();
         for seed in 0..4u64 {
             r.push(labeled(StrategyKind::Random, seed, Outcome::Win, 20, vec![], vec![],
@@ -1784,7 +1946,8 @@ mod tests {
 
     #[test]
     fn dominant_action_ignores_non_winning_sessions() {
-        // 超时局狂按 cheese 不算数；只看通关局——通关局太少 → None
+        // Timeout sessions spamming cheese don't count; only winning sessions are looked at — too
+        // few winning sessions → None
         let r = vec![
             labeled(StrategyKind::Random, 0, Outcome::Timeout, 20, vec![], vec![], vec!["cheese"; 20]),
             labeled(StrategyKind::Random, 1, Outcome::Win, 5, vec![], vec![], vec!["a", "b"]),
@@ -1793,11 +1956,11 @@ mod tests {
         assert!(rep.dominant_strategy.dominant_action.is_none(), "通关局不足/不偏，不下论断");
     }
 
-    // ---- LLM 定性 note（qualitative_notes）单元测试 ----
+    // ---- LLM qualitative note (qualitative_notes) unit tests ----
 
     #[test]
     fn qualitative_notes_empty_when_no_llm() {
-        // 纯廉价策略局没有 note → 汇总为空
+        // Pure cheap-strategy sessions have no notes → empty summary
         let r = vec![labeled(StrategyKind::Random, 0, Outcome::Win, 10, vec![], vec![], vec![])];
         let rep = aggregate(&r);
         assert_eq!(rep.qualitative_notes.total, 0);
@@ -1806,7 +1969,8 @@ mod tests {
 
     #[test]
     fn qualitative_notes_groups_by_kind_and_dedups_text() {
-        // 同一句矛盾在两局都说 → 去重成一条 count=2；另一条不同文本单列
+        // The same contradiction sentence appears in two sessions → deduped into one entry
+        // count=2; another different text is listed separately
         let r = vec![
             labeled_with_notes(StrategyKind::Scripted, 0, vec![
                 note(3, "continuity", "管理员这句和上一幕矛盾"),
@@ -1832,7 +1996,7 @@ mod tests {
 
     #[test]
     fn qualitative_notes_same_text_different_kind_not_merged() {
-        // 文本相同但 kind 不同 → 不归一（去重键含 kind）
+        // Same text but different kind → not merged (dedupe key includes kind)
         let r = vec![labeled_with_notes(StrategyKind::Scripted, 0, vec![
             note(1, "clarity", "这步没意义"),
             note(2, "choice", "这步没意义"),
@@ -1856,7 +2020,8 @@ mod tests {
 
     #[test]
     fn qualitative_notes_is_deterministic_aggregation() {
-        // 聚合本身是纯函数：同一批 notes 两次聚出同一份汇总（note 本身非确定不影响这点）
+        // The aggregation itself is a pure function: the same batch of notes produces the same
+        // summary twice (the non-determinism of notes themselves doesn't affect this)
         let build = || {
             vec![labeled_with_notes(StrategyKind::Scripted, 0, vec![
                 note(2, "clarity", "b"),
@@ -1884,9 +2049,10 @@ mod tests {
         assert!(rep.summary.contains("跑飞"), "summary 应提跑飞: {}", rep.summary);
     }
 
-    // ---- 第 6 阶段：代表录像外置（不再内联进报告 JSON） ----
+    // ---- Stage 6: representative recording externalization (no longer inlined into report JSON) ----
 
-    /// 造一个末尾冻结 ≥K 的卡死局（让报告里有一条 stuck 代表录像）。
+    /// Build a stuck session with a trailing freeze ≥K (so the report has a stuck representative
+    /// recording).
     fn stuck_labeled(kind: StrategyKind, seed: u64) -> LabeledResult {
         let mut trace = vec![1u64, 2, 3];
         trace.extend(std::iter::repeat_n(42u64, 70));
@@ -1896,12 +2062,13 @@ mod tests {
 
     #[test]
     fn report_json_does_not_inline_recordings() {
-        // 报告主体 JSON 里不该出现录像的内联字段（checkpoints/inputs 那些大块）
+        // The report body JSON shouldn't contain inlined recording fields (checkpoints/inputs etc.,
+        // those big chunks)
         let rep = aggregate(&[stuck_labeled(StrategyKind::Random, 0)]);
         assert_eq!(rep.stuck_clusters.len(), 1, "应有一簇卡死");
         let json = serde_json::to_string(&rep).unwrap();
         assert!(!json.contains("checkpoints"), "报告 JSON 不该内联录像 checkpoints: {json}");
-        // representative 里序列化出来的只有 path/ticks/outcome，没有 recording/key
+        // The representative only serializes path/ticks/outcome, no recording/key
         assert!(json.contains("representative"));
         assert!(json.contains("\"ticks\""));
         assert!(!json.contains("\"recording\""), "recording 字段必须 serde skip");
@@ -1912,7 +2079,8 @@ mod tests {
     fn representative_path_is_none_before_externalize() {
         let rep = aggregate(&[stuck_labeled(StrategyKind::Random, 0)]);
         assert!(rep.stuck_clusters[0].representative.path.is_none(), "落盘前 path=None");
-        // 但内存里录像和 ticks/outcome 仍在（供重放/写文件）
+        // But in memory the recording and ticks/outcome are still there (for replay / writing to
+        // file)
         assert!(rep.stuck_clusters[0].representative.ticks > 0);
         assert_eq!(rep.stuck_clusters[0].representative.outcome, Outcome::Timeout);
     }
@@ -1920,7 +2088,7 @@ mod tests {
     #[test]
     fn externalize_writes_files_and_fills_paths() {
         let mut rep = aggregate(&[stuck_labeled(StrategyKind::Random, 7)]);
-        // 写进临时目录（测试后清理，不污染 repo）
+        // Write to a temp directory (cleaned up after the test, doesn't pollute the repo)
         let dir = std::env::temp_dir()
             .join(format!("vitric-playtest-report-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1929,19 +2097,20 @@ mod tests {
         let r = &rep.stuck_clusters[0].representative;
         let path = r.path.as_ref().expect("落盘后 path 应被回填");
         assert!(path.ends_with(".json"), "路径是 json 文件: {path}");
-        // 文件真存在且能解析回录像
+        // The file actually exists and can be parsed back into a recording
         let full = dir.join(path);
         assert!(full.exists(), "代表录像文件应真写出: {}", full.display());
         let text = std::fs::read_to_string(&full).unwrap();
         let rec: vitric_sim::Recording = serde_json::from_str(&text).unwrap();
         assert_eq!(rec.ticks, r.ticks, "落盘录像与引用 ticks 一致");
-        // 清理
+        // Cleanup
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn externalize_key_is_deterministic_same_input() {
-        // 同输入两次聚合，代表录像 key 一致（确定可复现的文件名）
+        // Aggregating the same input twice produces the same representative recording key
+        // (deterministically reproducible filename)
         let a = aggregate(&[stuck_labeled(StrategyKind::Random, 3)]);
         let b = aggregate(&[stuck_labeled(StrategyKind::Random, 3)]);
         assert_eq!(
@@ -1953,7 +2122,8 @@ mod tests {
 
     #[test]
     fn externalize_no_op_when_no_representatives() {
-        // 没有任何代表录像维度时，externalize 写 0 个文件、不建目录
+        // When there are no representative-recording dimensions, externalize writes 0 files and
+        // doesn't create the directory
         let rep_results =
             vec![labeled(StrategyKind::Random, 0, Outcome::Win, 5, vec![], vec![], vec![])];
         let mut rep = aggregate(&rep_results);

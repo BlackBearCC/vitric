@@ -1,4 +1,4 @@
-//! cave-gen 示例端到端：配方生成关卡的确定性与玩法规则。
+//! cave-gen example end-to-end: determinism and gameplay rules of recipe-based level generation.
 
 use std::path::PathBuf;
 
@@ -13,13 +13,13 @@ fn example_dir() -> PathBuf {
 #[test]
 fn recipe_generates_exactly_what_it_says() {
     let (mut sim, mut rt) = Runtime::boot(&example_dir()).unwrap();
-    // tick 0 的 start 事件触发生成（call 的事件下一 tick 才被脚本消化完）
+    // The start event on tick 0 triggers generation (the emitted event is fully digested by the script on the next tick)
     sim.step(&mut rt).unwrap();
     assert_eq!(sim.world.query(&["Gem"]).len(), 10, "配方说 10 颗宝石");
     assert_eq!(sim.world.query(&["Hazard"]).len(), 14, "配方说 14 个尖刺");
-    // 生成物都有图形和碰撞体
+    // All generated objects have a sprite and a collider
     assert_eq!(sim.world.query(&["Gem", "Sprite", "Collider"]).len(), 10);
-    // 出生点安全区干净
+    // The spawn-point safe zone is clean
     for id in sim.world.query(&["Hazard"]) {
         let x = sim.world.get_field(id, "Position.x").unwrap().as_f64().unwrap();
         let y = sim.world.get_field(id, "Position.y").unwrap().as_f64().unwrap();
@@ -41,7 +41,7 @@ fn same_seed_same_cave_and_replay_holds() {
     };
     assert_eq!(gen_hash(), gen_hash(), "同种子必然生成同一张关卡");
 
-    // 含生成过程的录像重放
+    // Replay of a recording that includes the generation process
     let (mut sim, mut rt) = Runtime::boot(&example_dir()).unwrap();
     sim.start_recording();
     sim.inject_input("right", "pressed");
@@ -59,7 +59,7 @@ fn gem_collection_and_hazard_reset_rules() {
     sim.step(&mut rt).unwrap();
     let player = sim.world.entity("player").unwrap();
 
-    // 把玩家直接放到一颗宝石上 → 吃到 +1
+    // Place the player directly on a gem → collect it +1
     let gem = sim.world.query(&["Gem"])[0];
     let gx = sim.world.get_field(gem, "Position.x").unwrap().clone();
     let gy = sim.world.get_field(gem, "Position.y").unwrap().clone();
@@ -70,7 +70,7 @@ fn gem_collection_and_hazard_reset_rules() {
     assert!(!sim.world.is_alive(gem), "宝石被吃掉");
     assert_eq!(sim.world.query(&["Gem"]).len(), 9);
 
-    // 放到尖刺上 → 弹回出生点
+    // Place on a spike → bounce back to the spawn point
     let hazard = sim.world.query(&["Hazard"])[0];
     let hx = sim.world.get_field(hazard, "Position.x").unwrap().clone();
     let hy = sim.world.get_field(hazard, "Position.y").unwrap().clone();
@@ -87,7 +87,7 @@ fn collecting_all_gems_clears_level() {
     let (mut sim, mut rt) = Runtime::boot(&example_dir()).unwrap();
     sim.step(&mut rt).unwrap();
     let player = sim.world.entity("player").unwrap();
-    // 逐颗瞬移收集
+    // Collect one by one via teleport
     let mut events = Vec::new();
     for _ in 0..10 {
         let gems = sim.world.query(&["Gem"]);

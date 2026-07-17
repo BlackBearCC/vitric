@@ -1,34 +1,34 @@
-//! 缓动曲线——补间系统（`Tween` 组件，见 sim.rs 的 `advance_tweens`）的数学部分。
+//! Easing curves — the math part of the tween system (`Tween` component, see `advance_tweens` in sim.rs).
 //!
-//! 全部是 progress ∈ [0,1] 的解析式（纯函数），**禁累加积分**：第 T tick 的值
-//! 永远由 `from + (to - from) · ease(elapsed/duration)` 一步算出，不在上一帧的
-//! 值上叠增量——浮点累加的误差会让快照回退后的续播轨迹分歧，解析式天然没有这个问题。
-//! 公式取业界通行的三次方系（easings.net 同款），ease-out-back 的回弹系数
-//! c1 = 1.70158（约 10% 过冲的经典值）。
+//! All are closed-form expressions of progress ∈ [0,1] (pure functions), **no cumulative integration**: the value at tick T
+//! is always computed in one step as `from + (to - from) · ease(elapsed/duration)`, not by stacking deltas on the previous frame's
+//! value — floating-point accumulation error would diverge the resume trajectory after a snapshot rollback, while closed-form expressions have no such problem.
+//! Formulas follow the industry-standard cubic family (same as easings.net); the overshoot coefficient of ease-out-back is
+//! c1 = 1.70158 (the classic ~10% overshoot value).
 
 use std::fmt;
 
-/// 缓动曲线。固定枚举——曲线集合是引擎约定的一部分，不开放自定义
-/// （要任意曲线请用规则/脚本逐 tick 写字段，那是图灵完备通道的活）。
+/// Easing curve. Fixed enum — the curve set is part of the engine contract; custom curves are not exposed
+/// (for arbitrary curves, use rules/scripts to write the field tick by tick; that's the job of the Turing-complete channel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ease {
-    /// 匀速。
+    /// Uniform speed.
     Linear,
-    /// 三次方加速（慢进）。
+    /// Cubic acceleration (slow-in).
     In,
-    /// 三次方减速（慢出）。
+    /// Cubic deceleration (slow-out).
     Out,
-    /// 先加速后减速。
+    /// Accelerate then decelerate.
     InOut,
-    /// 减速 + 末端过冲回弹（值会短暂超过终点再回来）。
+    /// Decelerate + end overshoot bounce (the value briefly exceeds the target then returns).
     OutBack,
 }
 
-/// 全部曲线名（错误提示用，顺序即文档顺序）。
+/// All curve names (used in error messages; order matches the doc order).
 pub const EASE_NAMES: &[&str] = &["linear", "ease-in", "ease-out", "ease-in-out", "ease-out-back"];
 
 impl Ease {
-    /// 按名字解析。未知名字显式报错并列出全部可用曲线。
+    /// Parse by name. Unknown names produce an explicit error listing all available curves.
     pub fn parse(name: &str) -> Result<Ease, String> {
         match name {
             "linear" => Ok(Ease::Linear),
@@ -43,10 +43,10 @@ impl Ease {
         }
     }
 
-    /// 曲线本体：progress ∈ [0,1] → 进度系数（OutBack 会短暂超过 1）。
+    /// Curve body: progress ∈ [0,1] → progress coefficient (OutBack briefly exceeds 1).
     pub fn apply(self, p: f64) -> f64 {
-        // 起点钉死为 0：OutBack 的多项式在 p=0 数学上等于 0，但浮点求值留下
-        // 2.2e-16 的尾巴——起跑 tick 写的必须精确是起始值，端点不交给浮点碰运气
+        // Pin the start point to 0: OutBack's polynomial is mathematically 0 at p=0, but floating-point evaluation leaves
+        // a 2.2e-16 tail — the starting tick must write exactly the starting value; endpoints shouldn't be left to floating-point luck
         if p == 0.0 {
             return 0.0;
         }
@@ -83,8 +83,8 @@ impl fmt::Display for Ease {
     }
 }
 
-/// 第 elapsed tick（0..duration）的补间值。**只在中途调用**：到期那 tick
-/// 不走这条公式，由调用方精确写终值（不留浮点尾巴）——这条约定写进了补间合同。
+/// The tween value at the elapsed-th tick (0..duration). **Only called mid-flight**: at the expiry tick
+/// this formula is not used; the caller writes the final value exactly (no floating-point tail) — this convention is part of the tween contract.
 pub fn tween_value(from: f64, to: f64, ease: Ease, elapsed: u64, duration: u64) -> f64 {
     let p = elapsed as f64 / duration as f64;
     from + (to - from) * ease.apply(p)
@@ -94,10 +94,10 @@ pub fn tween_value(from: f64, to: f64, ease: Ease, elapsed: u64, duration: u64) 
 mod tests {
     use super::*;
 
-    /// 五条曲线逐值断言（关键点精确值——三次方在二进制分数点上是精确的）。
+    /// Per-value asserts for the five curves (exact values at key points — cubics are exact at binary fractional points).
     #[test]
     fn ease_values_are_exact_at_key_points() {
-        // 端点：所有曲线 0 → 0、1 → 1
+        // Endpoints: all curves 0 → 0, 1 → 1
         for &name in EASE_NAMES {
             let e = Ease::parse(name).unwrap();
             assert_eq!(e.apply(0.0), 0.0, "{name}(0)");
@@ -115,22 +115,22 @@ mod tests {
         assert_eq!(Ease::Out.apply(0.25), 1.0 - 0.421875);
         assert_eq!(Ease::Out.apply(0.5), 0.875);
         assert_eq!(Ease::Out.apply(0.75), 1.0 - 0.015625);
-        // ease-in-out: 前半 4p³，后半 1 - (2-2p)³/2
+        // ease-in-out: first half 4p³, second half 1 - (2-2p)³/2
         assert_eq!(Ease::InOut.apply(0.25), 0.0625);
         assert_eq!(Ease::InOut.apply(0.5), 0.5);
         assert_eq!(Ease::InOut.apply(0.75), 0.9375);
-        // ease-out-back: 1 + c3·(p-1)³ + c1·(p-1)²，c1 = 1.70158、c3 = 2.70158
+        // ease-out-back: 1 + c3·(p-1)³ + c1·(p-1)², c1 = 1.70158, c3 = 2.70158
         let back = |p: f64| 1.0 + 2.70158 * (p - 1.0).powi(3) + 1.70158 * (p - 1.0) * (p - 1.0);
         assert_eq!(Ease::OutBack.apply(0.25), back(0.25));
         assert_eq!(Ease::OutBack.apply(0.5), back(0.5));
         assert_eq!(Ease::OutBack.apply(0.75), back(0.75));
-        // 过冲：中后段必须超过 1（这是 out-back 存在的意义）
+        // Overshoot: the mid-late segment must exceed 1 (this is the whole point of out-back)
         assert!(Ease::OutBack.apply(0.7) > 1.0);
     }
 
     #[test]
     fn ease_in_out_halves_join_continuously() {
-        // 半点两侧公式衔接：左极限 4·(0.5)³ = 0.5 = 右公式在 0.5 的值
+        // Formula continuity across the midpoint: left limit 4·(0.5)³ = 0.5 = the right formula's value at 0.5
         let left = Ease::InOut.apply(0.5 - 1e-12);
         let right = Ease::InOut.apply(0.5 + 1e-12);
         assert!((left - 0.5).abs() < 1e-9 && (right - 0.5).abs() < 1e-9);
@@ -149,11 +149,11 @@ mod tests {
 
     #[test]
     fn tween_value_is_pure_function_of_elapsed() {
-        // 同参数同 elapsed 永远同值（解析式，无内部状态）
+        // Same params same elapsed → always same value (closed-form, no internal state)
         let a = tween_value(1.0, 5.0, Ease::InOut, 7, 40);
         let b = tween_value(1.0, 5.0, Ease::InOut, 7, 40);
         assert_eq!(a, b);
-        // linear 中点恰是算术平均
+        // linear midpoint is exactly the arithmetic mean
         assert_eq!(tween_value(1.0, 5.0, Ease::Linear, 20, 40), 3.0);
     }
 }

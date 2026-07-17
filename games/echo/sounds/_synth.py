@@ -1,5 +1,5 @@
-# echo 音效合成（确定性：纯 stdlib，random 固定种子）。重跑即重建全部 wav。
-# 配方约定：16-bit PCM / 44100Hz / 单声道；包络首尾淡入淡出 >=5ms 防爆音；峰值 <=0.7 防削波。
+# echo sound effect synth (deterministic: pure stdlib, random fixed seed). Re-run rebuilds all wav.
+# Recipe convention: 16-bit PCM / 44100Hz / mono; envelope fade in/out >=5ms at both ends to prevent pops; peak <=0.7 to prevent clipping.
 import math, random, struct, wave, os
 
 SR = 44100
@@ -27,11 +27,11 @@ def env_exp(i, n, k=5.0):
 rng = random.Random(42)
 noise_buf = [rng.uniform(-1, 1) for _ in range(SR * 2)]
 
-# click —— UI 选中：880Hz 短正弦泡
+# click —— UI select: 880Hz short sine blip
 n = int(SR * 0.05)
 write_wav("click.wav", [math.sin(2 * math.pi * 880 * i / SR) * env_exp(i, n, 6) for i in range(n)])
 
-# card —— 出牌挥扫：白噪声高通感 + 频率下扫
+# card —— card play sweep: white noise high-pass feel + frequency down-sweep
 n = int(SR * 0.12)
 buf = []
 for i in range(n):
@@ -41,7 +41,7 @@ for i in range(n):
     buf.append(s * env_exp(i, n, 4))
 write_wav("card.wav", buf)
 
-# lamp —— 放灯：暖两音琶音 440→660
+# lamp —— place lamp: warm two-note arpeggio 440→660
 n = int(SR * 0.14)
 buf = []
 for i in range(n):
@@ -50,7 +50,7 @@ for i in range(n):
     buf.append(math.sin(2 * math.pi * f * i / SR) * env_exp(j, n // 2, 4))
 write_wav("lamp.wav", buf)
 
-# hiss —— 影怪行动嘶声：低通噪声
+# hiss —— shadow creature action hiss: low-pass noise
 n = int(SR * 0.22)
 buf, lp = [], 0.0
 for i in range(n):
@@ -58,7 +58,7 @@ for i in range(n):
     buf.append(lp * (1 - abs(2 * i / n - 1)))
 write_wav("hiss.wav", buf)
 
-# stun —— 光灼僵直：高频滋滋 + 噪声
+# stun —— light burn stiffen: high-frequency sizzle + noise
 n = int(SR * 0.18)
 buf = []
 for i in range(n):
@@ -66,7 +66,7 @@ for i in range(n):
     buf.append(s * env_exp(i, n, 3))
 write_wav("stun.wav", buf)
 
-# hit —— 玩家受击：锯齿下行 400→120
+# hit —— player hit: sawtooth descending 400→120
 n = int(SR * 0.15)
 buf = []
 ph = 0.0
@@ -76,7 +76,7 @@ for i in range(n):
     buf.append((2 * (ph % 1) - 1) * env_exp(i, n, 3))
 write_wav("hit.wav", buf)
 
-# die —— 影怪消散：200→60 沉落 + 噪声尾
+# die —— shadow creature dissipate: 200→60 descent + noise tail
 n = int(SR * 0.22)
 buf = []
 ph = 0.0
@@ -86,7 +86,7 @@ for i in range(n):
     buf.append((math.sin(2 * math.pi * ph) * 0.8 + noise_buf[i] * 0.2) * env_exp(i, n, 3.5))
 write_wav("die.wav", buf)
 
-# devour —— Boss 吞灯：150→55 低吼
+# devour —— Boss devour lamp: 150→55 low growl
 n = int(SR * 0.2)
 buf = []
 ph = 0.0
@@ -96,11 +96,11 @@ for i in range(n):
     buf.append(math.sin(2 * math.pi * ph) * (1 - 0.3 * math.sin(2 * math.pi * 18 * i / SR)) * env_exp(i, n, 2.5))
 write_wav("devour.wav", buf)
 
-# reject —— 出牌无效：短促双低音蜂鸣
+# reject —— invalid card play: short double low-tone buzz
 n = int(SR * 0.1)
 write_wav("reject.wav", [math.sin(2 * math.pi * 160 * i / SR) * (1 if i < n // 2 else 0.6) * env_exp(i % (n // 2), n // 2, 4) for i in range(n)])
 
-# win —— 胜利：大三和弦琶音上行 523/659/784/1046
+# win —— victory: major chord arpeggio ascending 523/659/784/1046
 notes = [523.25, 659.25, 783.99, 1046.5]
 seg = int(SR * 0.12)
 buf = []
@@ -113,7 +113,7 @@ for i in range(tail):
     buf.append(s * env_exp(i, tail, 3))
 write_wav("win.wav", buf)
 
-# lose —— 失败：小调下行三音
+# lose —— defeat: minor descending three-note
 notes = [392.0, 311.13, 261.63]
 seg = int(SR * 0.22)
 buf = []
@@ -122,7 +122,7 @@ for f in notes:
         buf.append(math.sin(2 * math.pi * f * i / SR) * env_exp(i, seg, 2.0))
 write_wav("lose.wav", buf)
 
-# ---- BGM：首尾样本对齐避免循环咔哒（每段和弦自带起落包络，段长整除） ----
+# ---- BGM: align head/tail samples to avoid loop clicks (each chord segment carries its own attack/release envelope, segment length divides evenly) ----
 
 def chord(fs, dur, vol=1.0, pulse=0):
     n = int(SR * dur)
@@ -136,19 +136,19 @@ def chord(fs, dur, vol=1.0, pulse=0):
         out.append(s * g * vol)
     return out
 
-# bgm-menu —— 静谧：Am F C G 低音琶音垫，2.4s×4 = 9.6s 循环
+# bgm-menu —— serene: Am F C G bass arpeggio pad, 2.4s×4 = 9.6s loop
 prog = [[220.0, 261.63, 329.63], [174.61, 220.0, 261.63], [130.81, 196.0, 261.63], [196.0, 246.94, 293.66]]
 buf = []
 for fs in prog:
     buf += chord(fs, 2.4, vol=0.8)
 write_wav("bgm-menu.wav", buf, peak=0.45)
 
-# bgm-battle —— 紧张：D 小调脉冲 ostinato + 三全音垫，1.8s×4 = 7.2s 循环
+# bgm-battle —— tense: D minor pulse ostinato + tritone pad, 1.8s×4 = 7.2s loop
 prog = [[146.83, 220.0], [146.83, 207.65], [138.59, 220.0], [146.83, 233.08]]
 buf = []
 for fs in prog:
     seg = chord(fs, 1.8, vol=0.7, pulse=4)
-    # 叠一条八分音符低音脉冲
+    # layer an eighth-note bass pulse
     step = int(SR * 0.225)
     for k in range(8):
         f0 = fs[0] / 2

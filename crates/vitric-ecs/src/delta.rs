@@ -1,35 +1,37 @@
-//! 帧间差量（scene delta）——两份场景视图 JSON 的纯比对，只说「变了啥」。
+//! Frame-to-frame delta (scene delta) — a pure comparison of two scene-view JSONs, reporting only "what changed".
 //!
-//! 为什么放在 vitric-ecs：这是对 describe 输出（纯 JSON）做的纯 JSON 比对，
-//! 不依赖规则/渲染/模拟——describe（vitric-render）和控制面（vitric-control）
-//! 都已经依赖 vitric-ecs，放这里两边都够得到，且 ecs 只有 serde 依赖、不会造环。
-//! 纯函数、确定、可单测：同两帧永远同输出。
+//! Why this lives in vitric-ecs: this is a pure JSON comparison done on the output of describe (pure JSON),
+//! with no dependency on rules/render/simulation — both describe (vitric-render) and the control plane
+//! (vitric-control) already depend on vitric-ecs, so placing it here is reachable by both, and ecs has only
+//! serde as a dependency, so no cycle is created. Pure functions, deterministic, unit-testable: same two
+//! frames -> same output forever.
 //!
-//! 输入约定：两帧都是 describe 的输出形态——实体散在顶层 `visible` / `offscreen`
-//! 两个数组里，每个实体对象带 `id`（字符串句柄，跨帧稳定标识）。按 id 配对比较：
-//! - `appeared`：只在新帧出现的实体（带它的新对象）；
-//! - `disappeared`：只在旧帧出现的实体的 id；
-//! - `changed`：两帧都在、但有字段变了的实体，`id → {字段: [旧值, 新值]}`。
-//!   字段比对到顶层键（world / sprite / relative_to_focal / name / region / direction…
-//!   整块比，块内变了就整块进 [旧,新]）——对 agent「自上次以来位置/可见性变没变」
-//!   最直接。实体从 visible 挪到 offscreen 算「还在、变了」（同一 id 仍配上对），
-//!   不算 disappeared。
+//! Input convention: both frames are describe's output shape — entities are spread across the top-level
+//! `visible` / `offscreen` arrays, each entity object carries an `id` (string handle, stable cross-frame
+//! identifier). Pair by id and compare:
+//! - `appeared`: entities only in the new frame (with their new object);
+//! - `disappeared`: ids of entities only in the old frame;
+//! - `changed`: entities present in both frames but with changed fields, `id -> {field: [old value, new value]}`.
+//!   Field comparison goes down to top-level keys (world / sprite / relative_to_focal / name / region / direction...
+//!   compared as a whole block; if a block changed, the whole block goes into [old, new]) — most directly useful
+//!   for an agent asking "has my position/visibility changed since last time". An entity moving from visible to
+//!   offscreen counts as "still present, changed" (the same id is still paired), not as disappeared.
 
 use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
-/// 比两份场景视图（describe 输出）求帧间差量。纯函数，确定。
+/// Compute the frame-to-frame delta between two scene views (describe output). Pure function, deterministic.
 ///
-/// 输出形如：
+/// Output shape:
 /// ```json
-/// {"appeared": [ {实体对象...} ], "disappeared": ["e2v1", ...],
+/// {"appeared": [ {entity object...} ], "disappeared": ["e2v1", ...],
 ///  "changed": {"e1v1": {"world": [{"x":0,"y":0}, {"x":5,"y":0}]}}}
 /// ```
-/// 三个集合都按实体 id 的字典序排列（BTreeMap/已排序），输出可复现。
+/// All three sets are sorted by entity id in lexicographic order (BTreeMap / already sorted), so the output is reproducible.
 pub fn scene_delta(prev: &Value, cur: &Value) -> Value {
-    // 各自按 id 收实体（visible + offscreen 合一：一个 id 在哪个桶不影响「它在不在」）。
-    // 同 id 在两个桶里重复出现（理论上不会）以后者为准——describe 不会这么产，稳妥兜底。
+    // Collect entities by id from each side (visible + offscreen merged: which bucket an id is in doesn't affect "is it there").
+    // If the same id appears in both buckets (theoretically won't happen), the latter wins — describe never produces this, just a safe fallback.
     let prev_ents = collect_entities(prev);
     let cur_ents = collect_entities(cur);
 
@@ -37,7 +39,7 @@ pub fn scene_delta(prev: &Value, cur: &Value) -> Value {
     let mut disappeared: Vec<String> = Vec::new();
     let mut changed: Map<String, Value> = Map::new();
 
-    // 新帧里的每个实体：旧帧没有 = appeared；都有 = 逐字段比，有变化才进 changed。
+    // For each entity in the new frame: not in old = appeared; in both = compare field by field, only enters changed if there's a change.
     for (id, cur_obj) in &cur_ents {
         match prev_ents.get(id) {
             None => appeared.push((*cur_obj).clone()),
@@ -49,13 +51,13 @@ pub fn scene_delta(prev: &Value, cur: &Value) -> Value {
             }
         }
     }
-    // 旧帧有、新帧没有 = disappeared（只记 id，对象已经不在了）。
+    // In old but not in new = disappeared (only the id is recorded, the object is gone).
     for id in prev_ents.keys() {
         if !cur_ents.contains_key(id) {
             disappeared.push(id.clone());
         }
     }
-    // prev_ents/cur_ents 是 BTreeMap，keys/iter 已是字典序；appeared 也随之有序。
+    // prev_ents/cur_ents are BTreeMaps, so keys/iter are already in lexicographic order; appeared is ordered accordingly.
 
     json!({
         "appeared": appeared,
@@ -64,8 +66,8 @@ pub fn scene_delta(prev: &Value, cur: &Value) -> Value {
     })
 }
 
-/// 从一份 describe 输出里按 id 收实体（visible + offscreen 两个数组合并）。
-/// 没有 id 字段的条目跳过（describe 保证有 id；缺了无法跨帧配对，忽略最稳妥）。
+/// Collect entities by id from a describe output (merging the visible + offscreen arrays).
+/// Entries without an id field are skipped (describe guarantees an id; without one, cross-frame pairing is impossible, so ignoring is safest).
 fn collect_entities(view: &Value) -> BTreeMap<String, &Value> {
     let mut out: BTreeMap<String, &Value> = BTreeMap::new();
     for bucket in ["visible", "offscreen"] {
@@ -80,18 +82,18 @@ fn collect_entities(view: &Value) -> BTreeMap<String, &Value> {
     out
 }
 
-/// 逐顶层字段比两个实体对象，收变了的：`字段名 → [旧值, 新值]`。
-/// id 字段本身不进 diff（它是配对键，按定义两帧相等）。出现的新字段旧值记 null、
-/// 消失的旧字段新值记 null——对 agent「这块出现了/没了」同样是「变了」。
-/// 比到顶层键即止（块内容整块比、整块进 [旧,新]），不再往下钻——位置/精灵/相对关系
-/// 都是小对象，整块给反而比逐叶子更好读。
+/// Compare two entity objects top-level field by field, collecting changes: `field name -> [old value, new value]`.
+/// The id field itself is not part of the diff (it's the pairing key, equal across frames by definition). New fields get null as the old value,
+/// and disappeared fields get null as the new value — to an agent, "this block appeared/gone" is also "changed".
+/// Comparison stops at top-level keys (each block is compared and emitted as a whole into [old, new]), without drilling deeper — position/sprite/relative-to
+/// are all small objects; emitting the whole block is more readable than going leaf by leaf.
 fn diff_fields(prev: &Value, cur: &Value) -> Map<String, Value> {
     let empty = Map::new();
     let prev_obj = prev.as_object().unwrap_or(&empty);
     let cur_obj = cur.as_object().unwrap_or(&empty);
 
     let mut out: Map<String, Value> = Map::new();
-    // 新帧的字段：和旧帧比，不同（含新增）就记 [旧, 新]
+    // Fields in the new frame: compare with old, record [old, new] if different (including new fields)
     for (k, cv) in cur_obj {
         if k == "id" {
             continue;
@@ -101,7 +103,7 @@ fn diff_fields(prev: &Value, cur: &Value) -> Map<String, Value> {
             out.insert(k.clone(), json!([pv.cloned().unwrap_or(Value::Null), cv.clone()]));
         }
     }
-    // 旧帧有、新帧没了的字段：记 [旧, null]
+    // Fields in old but gone in new: record [old, null]
     for (k, pv) in prev_obj {
         if k == "id" || cur_obj.contains_key(k) {
             continue;
@@ -115,7 +117,7 @@ fn diff_fields(prev: &Value, cur: &Value) -> Map<String, Value> {
 mod tests {
     use super::*;
 
-    /// 攒一份最小 describe 形态：把若干实体放进 visible 桶。
+    /// Build a minimal describe shape: put some entities into the visible bucket.
     fn view(visible: Vec<Value>) -> Value {
         json!({"visible": visible, "offscreen": []})
     }
@@ -126,20 +128,20 @@ mod tests {
 
     #[test]
     fn appeared_disappeared_changed_each() {
-        // prev: a(0,0) b(1,1)；cur: a(5,0 移动) c(2,2 新)。b 消失。
+        // prev: a(0,0) b(1,1); cur: a(5,0 moved) c(2,2 new). b disappears.
         let prev = view(vec![ent("e1v1", 0.0, 0.0), ent("e2v1", 1.0, 1.0)]);
         let cur = view(vec![ent("e1v1", 5.0, 0.0), ent("e3v1", 2.0, 2.0)]);
         let d = scene_delta(&prev, &cur);
 
-        // appeared: 只有 c
+        // appeared: only c
         let app = d["appeared"].as_array().unwrap();
         assert_eq!(app.len(), 1);
         assert_eq!(app[0]["id"], json!("e3v1"));
 
-        // disappeared: 只有 b
+        // disappeared: only b
         assert_eq!(d["disappeared"], json!(["e2v1"]));
 
-        // changed: a 的 world 从 (0,0) 变 (5,0)
+        // changed: a's world changed from (0,0) to (5,0)
         let changed = d["changed"].as_object().unwrap();
         assert_eq!(changed.len(), 1);
         let a_world = &changed["e1v1"]["world"];
@@ -149,7 +151,7 @@ mod tests {
 
     #[test]
     fn unchanged_entity_not_in_changed() {
-        // 完全没动 → changed 空、appeared/disappeared 空
+        // Completely unchanged -> changed empty, appeared/disappeared empty
         let prev = view(vec![ent("e1v1", 3.0, 4.0)]);
         let cur = view(vec![ent("e1v1", 3.0, 4.0)]);
         let d = scene_delta(&prev, &cur);
@@ -167,7 +169,7 @@ mod tests {
 
     #[test]
     fn entity_moving_visible_to_offscreen_is_changed_not_disappeared() {
-        // 同一 id 从 visible 挪到 offscreen：还在、算 changed（字段变了），不算消失。
+        // Same id moved from visible to offscreen: still present, counts as changed (fields changed), not as disappeared.
         let prev = json!({"visible": [ent("e1v1", 0.0, 0.0)], "offscreen": []});
         let cur = json!({
             "visible": [],
@@ -176,7 +178,7 @@ mod tests {
         let d = scene_delta(&prev, &cur);
         assert!(d["disappeared"].as_array().unwrap().is_empty(), "没消失: {d}");
         assert!(d["appeared"].as_array().unwrap().is_empty());
-        // world 变了 + 多出 direction、少了 sprite —— 都算字段变化
+        // world changed + gained direction, lost sprite — all count as field changes
         let ch = &d["changed"]["e1v1"];
         assert_eq!(ch["world"][1], json!({"x": 999.0, "y": 0.0}));
         assert_eq!(ch["direction"], json!([Value::Null, json!("右")]), "新增字段旧值 null");
@@ -185,9 +187,9 @@ mod tests {
 
     #[test]
     fn empty_views_yield_empty_delta() {
-        // 第一帧场景（prev 没有 visible/offscreen 键）也不炸：全空
+        // First frame (prev has no visible/offscreen keys) doesn't blow up either: all empty
         let d = scene_delta(&json!({}), &view(vec![ent("e1v1", 0.0, 0.0)]));
-        // prev 空 → 新帧那个实体算 appeared
+        // prev empty -> the entity in the new frame counts as appeared
         assert_eq!(d["appeared"].as_array().unwrap().len(), 1);
         assert!(d["disappeared"].as_array().unwrap().is_empty());
         assert!(d["changed"].as_object().unwrap().is_empty());

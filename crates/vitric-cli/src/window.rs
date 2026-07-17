@@ -1,16 +1,22 @@
-//! 窗口呈现 — 人的驾驶舱。
+//! Window presentation — the human's cockpit.
 //!
-//! 两条上屏路径，由 `--renderer` 选：
-//! - cpu（默认）：vitric-render 光栅化的同一块像素经 softbuffer 上屏，
-//!   所见 = agent 截图所见，逐字节一致
-//! - gpu：wgpu 走显卡，读同一套组件约定，视觉语义对齐 CPU 路径（见 gpu.rs）；
-//!   初始化失败直接报错退出，不静默回退——用户该换 --renderer cpu 时要明说
+//! Two presentation paths, selected via `--renderer`:
+//! - cpu (default): the same pixel buffer rasterized by vitric-render goes to screen
+//!   via softbuffer; what you see = what the agent screenshot sees, byte for byte
+//! - gpu: wgpu drives the GPU, reads the same component conventions, visually
+//!   semantically aligned with the CPU path (see gpu.rs); on init failure it errors
+//!   out and exits, never silently falls back — when the user should switch to
+//!   --renderer cpu that must be said explicitly
 //!
-//! 键盘事件映射成 input 事件注入模拟，和控制面 `input/inject` 走同一条管道；
-//! 鼠标左/右键映射成 `mouse` / `mouse-alt` 事件（世界坐标 + 拾取结果，经回复
-//! 通道被录像、可重放），和控制面 `input/click` 走同一条管道——人和 AI 是
-//! 同级玩家。左键同时照旧驱动检查器点选/拖拽（同一击两个含义，检查器只在
-//! 窗口模式存在，游戏不想要可忽略）。鼠标点选/拖拽不依赖呈现路径，两边行为一致。
+//! Keyboard events are mapped to input events injected into the simulation, going
+//! through the same pipe as the control plane `input/inject`; mouse left/right
+//! buttons map to `mouse` / `mouse-alt` events (world coordinates + pick result,
+//! recorded and replayable via the reply channel), going through the same pipe as
+//! the control plane `input/click` — human and AI are peer players. The left
+//! button also still drives inspector select/drag (one click, two meanings; the
+//! inspector only exists in window mode, the game can ignore it if not wanted).
+//! Mouse pick/drag does not depend on the presentation path, both sides behave
+//! identically.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -33,20 +39,21 @@ use crate::audio::Audio;
 use crate::gpu::GpuPresenter;
 use crate::step_once;
 
-/// 渲染/输入统一参照分辨率。UI 布局与点击拾取都以 1920×1080 为基准，所以窗口任意
-/// 尺寸都先渲染到这个分辨率再拉伸上屏、光标也映射到这个空间——保证 4K 等高分屏下
-/// UI 不会缩成屏角一小撮、世界点击不错位。
+/// Unified render/input reference resolution. UI layout and click picking are
+/// based on 1920x1080, so any window size first renders to this resolution then
+/// scales up; the cursor also maps into this space - guarantees UI doesn't shrink
+/// to a corner on 4K displays and world clicks stay aligned.
 const REF_W: u32 = 1920;
 const REF_H: u32 = 1080;
 
-/// 上屏路径选择（来自 `--renderer`）。
+/// Presentation path selection (from `--renderer`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Renderer {
     Cpu,
     Gpu,
 }
 
-/// 已就绪的呈现器（窗口创建后才能建）。GpuPresenter 体积大，装箱压平变体差异。
+/// Ready presenter (can only be built after the window is created). GpuPresenter is large, boxed to flatten variant size differences.
 enum Presenter {
     Cpu(softbuffer::Surface<Arc<Window>, Arc<Window>>),
     Gpu(Box<GpuPresenter>),
@@ -60,21 +67,21 @@ pub struct WindowedGame {
     audio: Option<Audio>,
     llm: Llm,
     renderer: Renderer,
-    /// 窗口标题（项目名 — Vitric）：任务栏/切窗里游戏要有自己的名字。
+    /// Window title (project name — Vitric): the game needs its own name in the taskbar/window switcher.
     title: String,
     window: Option<Arc<Window>>,
     presenter: Option<Presenter>,
     last: Instant,
     acc: f64,
-    /// 鼠标当前位置（物理像素）。
+    /// Current mouse position (physical pixels).
     cursor: (f64, f64),
-    /// 拖拽中：被拖实体 + 抓取点相对实体中心的世界偏移。
+    /// While dragging: the dragged entity + the world offset of the grab point relative to the entity center.
     drag: Option<(vitric_ecs::EntityId, f64, f64)>,
     pub error: Option<String>,
 }
 
 impl WindowedGame {
-    #[allow(clippy::too_many_arguments)] // 装配函数，调用点只有 cmd_run 一处
+    #[allow(clippy::too_many_arguments)] // assemble function, only one call site: cmd_run
     pub fn new(
         sim: Sim,
         rt: Runtime,
@@ -104,7 +111,7 @@ impl WindowedGame {
         }
     }
 
-    /// 开窗口跑到退出（关窗 / sim/quit / 逻辑出错）。
+    /// Open the window and run until exit (window close / sim/quit / logic error).
     pub fn run(mut self) -> Result<(Sim, Option<String>), String> {
         let event_loop = EventLoop::new().map_err(|e| format!("窗口事件循环创建失败: {e}"))?;
         event_loop.set_control_flow(ControlFlow::Poll);
@@ -124,15 +131,18 @@ impl WindowedGame {
                 let (Some(w), Some(h)) =
                     (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
                 else {
-                    return; // 最小化等零尺寸状态
+                    return; // minimized, zero-size state
                 };
                 if surface.resize(w, h).is_err() {
                     return;
                 }
-                // 固定按 1920×1080 参照分辨率渲染，再拉伸铺满窗口。UI 布局/点击拾取都
-                // 以 1920×1080 为参照系，渲染锁同一参照系才对得齐——否则 4K 等分辨率下
-                // 固定像素的 UI 会缩成屏角一小撮、世界点击也错位。self.cursor 已在
-                // CursorMoved 里映射到参照空间，viewport() 也返回参照尺寸，全链路一致。
+                // Always render at the 1920x1080 reference resolution, then stretch to fill
+                // the window. UI layout / click picking both use 1920x1080 as the reference
+                // frame; the render must lock to the same reference frame to stay aligned --
+                // otherwise at 4K and similar resolutions fixed-pixel UI would shrink into a
+                // tiny corner and world clicks would misalign. self.cursor is already mapped
+                // to the reference space in CursorMoved, and viewport() returns reference
+                // dimensions, so the whole chain stays consistent.
                 let mut rgba = match vitric_render::render_world(
                     &self.sim.world,
                     REF_W,
@@ -146,7 +156,7 @@ impl WindowedGame {
                         return;
                     }
                 };
-                // 检查器高亮：选中实体画青色描边（人点的或 AI inspect/select 设的）
+                // Inspector highlight: draw a cyan outline on the selected entity (set by human click or AI inspect/select)
                 if let Some(selected) = self.dispatcher.selection() {
                     let _ = vitric_render::draw_selection_outline(
                         &mut rgba,
@@ -157,7 +167,7 @@ impl WindowedGame {
                         self.sim.tick,
                     );
                 }
-                // 建造落点预览：建造模式且选了类型时，光标所在格画半透明绿虚影
+                // Build placement preview: in build mode with a selected kind, draw a translucent green ghost on the tile under the cursor.
                 if let Ok(uistate) = self.sim.world.entity("uistate") {
                     let mode = self
                         .sim
@@ -177,7 +187,7 @@ impl WindowedGame {
                         .to_string();
                     if mode == "build" && !kind.is_empty() {
                         let (px, py) = self.cursor;
-                        // 光标在菜单/面板上时不画落点预览（只在地图上方显示）
+                        // Skip placement preview when the cursor is over a menu/panel (only show over the map).
                         if !vitric_render::point_over_ui(&self.sim.world, REF_W, REF_H, px, py) {
                             if let Ok((wx, wy)) = vitric_render::screen_to_world(
                                 &self.sim.world,
@@ -202,8 +212,9 @@ impl WindowedGame {
                 let Ok(mut frame) = surface.buffer_mut() else {
                     return;
                 };
-                // 1920×1080 帧最近邻拉伸到窗口尺寸 → softbuffer 0RGB u32。
-                // 宽高比不一致时按各轴独立缩放（轻微拉伸），优先铺满 + 渲染/点击一致。
+                // Nearest-neighbor stretch the 1920x1080 frame to the window size -> softbuffer 0RGB u32.
+                // When aspect ratios differ, scale each axis independently (slight stretch) to
+                // prioritize filling the screen + keep render/click consistent.
                 let (sw, sh) = (size.width, size.height);
                 for y in 0..sh {
                     let sy = (y as u64 * REF_H as u64 / sh as u64) as u32;
@@ -220,7 +231,7 @@ impl WindowedGame {
                 let _ = frame.present();
             }
             Presenter::Gpu(gpu) => {
-                // 尺寸/热重载都在 present 内部处理（resize 重配表面、代次变了重建图集）
+                // Sizing / hot-reload are handled inside present (resize reconfigures the surface; generation change rebuilds the atlas)
                 if let Err(e) = gpu.present(
                     &self.sim.world,
                     self.dispatcher.assets(),
@@ -235,27 +246,29 @@ impl WindowedGame {
     }
 
     fn viewport(&self) -> Option<(u32, u32)> {
-        // 输入用的视口恒为参照分辨率（渲染锁同一参照系）——光标已映射到该空间
+        // The viewport used for input is always the reference resolution (render locks to the same reference frame) -- the cursor is already mapped to this space.
         let size = self.window.as_ref()?.inner_size();
         (size.width > 0 && size.height > 0).then_some((REF_W, REF_H))
     }
 
-    /// 左键按下：同一次点击两个含义——
-    /// 1. 游戏输入：注入 `mouse` 事件（世界坐标 + 拾取结果，经回复通道被录像、可重放）；
-    /// 2. 检查器：点选实体（命中开始拖拽，空地取消选中）。
-    ///    游戏不想要检查器行为可忽略选中态——检查器只在窗口模式存在。
+    /// Left button down: one click, two meanings —
+    /// 1. Game input: inject a `mouse` event (world coordinates + pick result, recorded
+    ///    and replayable via the reply channel);
+    /// 2. Inspector: pick an entity (hit starts a drag, empty space clears the selection).
+    ///    Games that don't want inspector behavior can ignore the selection state — the
+    ///    inspector only exists in window mode.
     fn mouse_down(&mut self) {
         let Some((w, h)) = self.viewport() else { return };
         let (px, py) = self.cursor;
         self.inject_mouse(w, h, "left");
-        // 光标压在 UI 上时不做世界拾取/拖拽（否则会抓起菜单背后的世界实体）
+        // Skip world picking/drag when the cursor is over UI (otherwise it would grab world entities behind the menu).
         if vitric_render::point_over_ui(&self.sim.world, w, h, px, py) {
             return;
         }
         match vitric_render::pick(&self.sim.world, w, h, px, py) {
             Ok(Some(id)) => {
                 self.dispatcher.set_selection(Some(id));
-                // 记抓取偏移，拖拽时实体不跳心
+                // Record grab offset so the entity doesn't jump to the cursor during drag
                 if let (Ok((wx, wy)), Ok(ex), Ok(ey)) = (
                     vitric_render::screen_to_world(&self.sim.world, w, h, px, py),
                     self.sim.world.get_field(id, "Position.x").map(|v| v.as_f64().unwrap_or(0.0)),
@@ -269,19 +282,22 @@ impl WindowedGame {
         }
     }
 
-    /// 右键按下：只注入 `mouse-alt` 事件（payload 同 `mouse`），不动检查器。
+    /// Right button down: only inject a `mouse-alt` event (same payload as `mouse`), does not touch the inspector.
     fn mouse_alt_down(&mut self) {
         let Some((w, h)) = self.viewport() else { return };
         self.inject_mouse(w, h, "right");
     }
 
-    /// 把光标处的点击翻译成世界坐标 + 拾取结果，经回复通道注入模拟
-    /// （和控制面 `input/click` 同一条路径——人和 AI 是同级玩家）。
-    /// 坐标用不抖的相机（screen_to_world）：点击对的是世界本体，抖动只是视觉装饰。
+    /// Translate a click at the cursor into world coordinates + pick result, and inject
+    /// it into the simulation via the reply channel (same path as the control plane
+    /// `input/click` — human and AI are peer players).
+    /// Coordinates use the non-jittering camera (screen_to_world): clicks target the
+    /// world itself, jitter is only visual decoration.
     fn inject_mouse(&mut self, w: u32, h: u32, button: &str) {
         let (px, py) = self.cursor;
-        // 光标压在 UI（菜单/面板）上时，这次点击归 UI——不再往世界注入，避免点穿到
-        // 下面的地图（之前点建造菜单会同时在菜单底下的瓦片上触发世界点击）
+        // When the cursor is over UI (menu/panel), this click belongs to the UI -- don't
+        // inject it into the world, to avoid clicking through to the map below (previously
+        // clicking the build menu would also trigger a world click on the tile beneath it).
         let over_ui = vitric_render::point_over_ui(&self.sim.world, w, h, px, py);
         if !over_ui {
             match vitric_render::screen_to_world(&self.sim.world, w, h, px, py) {
@@ -293,9 +309,12 @@ impl WindowedGame {
                 Err(e) => eprintln!("[vitric] 鼠标点击坐标换算失败: {e}"),
             }
         }
-        // 场上有 UI 时，同一次点击额外注入 UI 点击（屏幕归一化坐标，拾取推迟到 tick 内
-        // 换算到参照系 1920×1080 比 UI 矩形）。世界点击与 UI 点击两套坐标系并存：
-        // 世界点击拾取 Sprite（经相机），UI 点击拾取屏幕空间叠加层（不经相机）。
+        // When there is UI on screen, the same click additionally injects a UI click
+        // (screen-normalized coordinates; picking is deferred to inside the tick where
+        // it is converted to the 1920×1080 reference frame and tested against UI rects).
+        // World clicks and UI clicks use two coexisting coordinate systems: world
+        // clicks pick Sprites (through the camera), UI clicks pick screen-space
+        // overlays (no camera).
         if w > 0 && h > 0 && vitric_render::has_ui(&self.sim.world) {
             let (nx, ny) = (px / w as f64, py / h as f64);
             if let Err(e) = vitric_control::inject_ui_click(&mut self.sim, nx, ny, button) {
@@ -304,9 +323,9 @@ impl WindowedGame {
         }
     }
 
-    /// 拖拽：把选中实体的 Position 写回数据层——人的微调 AI 立刻可见。
+    /// Drag: write the selected entity's Position back to the data layer — human tweaks are immediately visible to the AI.
     fn mouse_drag(&mut self) {
-        // 录像只记输入流，拖拽写 Position 不会进录像，会让录像不可重放——录制中禁用
+        // Recording only captures the input stream; dragging writes Position which would not be recorded, breaking replay — disabled while recording
         if self.sim.is_recording() {
             if self.drag.take().is_some() {
                 eprintln!("[vitric] 正在录像，检查器拖拽已禁用（拖动不进录像，会让录像不可重放）");
@@ -328,9 +347,9 @@ impl WindowedGame {
 
     fn handle_key(&mut self, event: KeyEvent) {
         if event.repeat {
-            return; // 自动重复不进模拟，按住的语义靠 pressed/released 对
+            return; // auto-repeat does not enter the simulation; hold semantics rely on pressed/released pairs
         }
-        // F11 = 窗口命令(切无边框全屏),不进模拟输入流
+        // F11 = window command (toggle borderless fullscreen), does not enter the simulation input stream
         if event.physical_key == PhysicalKey::Code(KeyCode::F11) {
             if event.state == ElementState::Pressed {
                 if let Some(w) = &self.window {
@@ -352,9 +371,11 @@ impl WindowedGame {
             ElementState::Released => "released",
         };
         self.sim.inject_input(&action, phase);
-        // 场上有 UI（UiRoot）时，方向键/回车额外注入标准 UI 导航动作（ui-up/down/left/
-        // right/confirm）——交互系统只认 ui-* 前缀，游戏自己的 left/jump 不受影响。
-        // 两条都进输入流、都进录像，重放一致。
+        // When there is UI on screen (UiRoot), arrow keys / Enter additionally inject
+        // standard UI navigation actions (ui-up/down/left/right/confirm) — the
+        // interaction system only honors the ui-* prefix, the game's own left/jump is
+        // unaffected. Both go into the input stream and into the recording, replay is
+        // consistent.
         if vitric_render::has_ui(&self.sim.world) {
             let ui_action = match action.as_str() {
                 "up" => Some("ui-up"),
@@ -371,7 +392,7 @@ impl WindowedGame {
     }
 }
 
-/// 按键 → 动作名。方向键/空格等用语义名，字母数字用字符本身（小写）。
+/// Key → action name. Arrow keys / space etc. use semantic names; letters/digits use the character itself (lowercase).
 fn key_action(event: &KeyEvent) -> Option<String> {
     if let PhysicalKey::Code(code) = event.physical_key {
         let named = match code {
@@ -401,9 +422,11 @@ impl ApplicationHandler for WindowedGame {
         if self.window.is_some() {
             return;
         }
-        // 默认无边框全屏:真机上手玩,UI 按 1920x1080 参考视口铺满屏幕才看得清。
-        // F11 仍可切回窗口(兜底窗口化尺寸 1920x1080,而非以前的 960x540)。
-        // (远程/录屏不走这条窗口路径,用 render/screenshot 离屏渲染,不受影响。)
+        // Default borderless fullscreen: for real-machine play, UI needs to fill the
+        // screen at the 1920x1080 reference viewport to be readable.
+        // F11 still toggles windowed (fallback windowed size is 1920x1080, not the old 960x540).
+        // (Remote desktop / recording doesn't use this window path - they use render/screenshot
+        // offscreen rendering, unaffected.)
         let attrs = Window::default_attributes()
             .with_title(self.title.as_str())
             .with_active(true)
@@ -417,8 +440,9 @@ impl ApplicationHandler for WindowedGame {
                 return;
             }
         };
-        // 启动即抢键盘焦点:从 cmd/bat 拉起时,焦点常留在那个控制台窗口上,
-        // 全屏游戏盖在上面却收不到按键 —— 这里主动 focus 一次,免得玩家先手点一下。
+        // Grab keyboard focus on startup: when launched from cmd/bat, focus often stays
+        // on that console window, and the fullscreen game on top can't receive key presses
+        // -- here we actively focus once, so the player doesn't have to click first.
         window.focus_window();
         match self.renderer {
             Renderer::Cpu => {
@@ -440,7 +464,7 @@ impl ApplicationHandler for WindowedGame {
                 }
             }
             Renderer::Gpu => {
-                // 失败 = 退出并明说出路，绝不静默换 CPU 路径跑（行为变了用户却不知道）
+                // Failure = exit and state the way out explicitly; never silently switch to the CPU path (behavior would change without the user knowing)
                 match GpuPresenter::new(
                     window.clone(),
                     self.dispatcher.assets(),
@@ -466,7 +490,8 @@ impl ApplicationHandler for WindowedGame {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } => {
-                // Esc:有选中先取消选中;没选中则退出游戏(真机上手玩要能一键退出)。
+                // Esc: if something is selected, deselect first; otherwise quit the game
+                // (real-machine play needs one-key exit).
                 if matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
                     && event.state == ElementState::Pressed
                 {
@@ -481,7 +506,7 @@ impl ApplicationHandler for WindowedGame {
                 self.handle_key(event)
             }
             WindowEvent::CursorMoved { position, .. } => {
-                // 光标存进 1920×1080 参照空间（与渲染/拾取一致）：按窗口实际尺寸缩放
+                // Store the cursor in 1920x1080 reference space (consistent with render/pick): scale by the actual window size.
                 self.cursor = match self.window.as_ref().map(|w| w.inner_size()) {
                     Some(s) if s.width > 0 && s.height > 0 => (
                         position.x * REF_W as f64 / s.width as f64,
@@ -503,7 +528,7 @@ impl ApplicationHandler for WindowedGame {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // 帧边界：处理控制面请求（窗口模式下 AI 照样全权操作）
+        // Frame boundary: handle control plane requests (in window mode the AI still has full authority)
         for req in self.server.drain() {
             let resp = self.dispatcher.handle(&req.request, &mut self.sim, &mut self.rt);
             req.respond(resp);

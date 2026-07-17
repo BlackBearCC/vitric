@@ -30,7 +30,7 @@ UI_LABELS = {
 
 entities = []
 
-# ---- 瓦片 ----
+# ---- Tiles ----
 for gy in range(H):
     for gx in range(W):
         p = (gx, gy)
@@ -57,7 +57,7 @@ for gy in range(H):
             comps["Text"] = {"content": NODE_LABELS[nk], "size": 0.3, "color": "#ffffff", "screen": False}
         entities.append({"name": "t_%d_%d" % (gx, gy), "components": comps})
 
-# ---- 游戏实体 ----
+# ---- Game entities ----
 entities.append({"name": "player", "components": {
     "Player": {}, "Position": {"x": PLAYER[0], "y": PLAYER[1]},
     "Velocity": {"x": 0, "y": 0}, "Collider": {"w": 0.8, "h": 0.8},
@@ -70,7 +70,7 @@ entities.append({"name": "ui", "components": {"UiRoot": {}}})
 entities.append({"name": "uistate", "components": {"Mode": {"value": "build"}, "Build": {"kind": "floor"}}})
 entities.append({"name": "cmd", "components": {"Cmd": {}}})
 
-# @colony:Colony + Census + Clock + day 镜像字段
+# @colony:Colony + Census + Clock + day mirror fields
 entities.append({"name": "colony", "components": {
     "Colony": {"stage": "起步", "day": 1, "next_drifter_day": 3, "drifters_invited": 0, "drifters_spawned": 1, "monument_built": 0},
     "Census": {"count": 0, "is_hub": 1},
@@ -78,7 +78,7 @@ entities.append({"name": "colony", "components": {
 }})
 entities.append({"name": "quest", "components": {"QuestLog": {"step": 1}}})
 
-# ---- @companion(Pip, 已在家园) ----
+# ---- @companion(Pip, already at home base) ----
 entities.append({"name": "companion", "components": {
     "Companion": {},
     "Persona": {"name": "Pip", "archetype": "话痨技工", "traits": "热心,藏不住话,爱倒腾机器",
@@ -92,7 +92,7 @@ entities.append({"name": "companion", "components": {
     "Text": {"content": "", "size": 0.7, "color": "#ffe9b0"},
 }})
 
-# ---- @drifter(Lio, 野外漂泊旅人,arrival_day=1 即开局就在) ----
+# ---- @drifter(Lio, wild roaming drifter, arrival_day=1 means present from the start) ----
 entities.append({"name": "drifter", "components": {
     "Drifter": {"arrival_day": 1},
     "Persona": {"name": "Lio", "archetype": "乐天厨子", "traits": "贪吃,爱张罗,记仇又健忘",
@@ -103,7 +103,7 @@ entities.append({"name": "drifter", "components": {
     "Text": {"content": "", "size": 0.7, "color": "#ffe9b0"},
 }})
 
-# ---- UI 外壳 ----
+# ---- UI shell ----
 def ui_entity(name, ui, extra=None):
     comps = {"Ui": ui}
     if extra:
@@ -115,7 +115,7 @@ ui_entity("hud_bar", {"anchor": "top-center", "parent": "ui", "oy": 12, "w": 118
 ui_entity("hud_res", {"anchor": "stretch", "parent": "hud_bar"},
           {"UiLabel": {"size": 26, "color": "#e8e8ee", "align": "center"}})
 
-# 时间 HUD:右下角小牌,显 Day N · 时段
+# Time HUD: small plate at bottom-right, shows Day N · time-of-day
 ui_entity("hud_time", {"anchor": "bottom-right", "parent": "ui", "ox": -16, "oy": -16, "w": 240, "h": 44},
           {"Panel": {"color": "#161a24"}})
 ui_entity("hud_time_lbl", {"anchor": "stretch", "parent": "hud_time"},
@@ -130,7 +130,7 @@ for a in ["build", "craft", "interact"]:
     ui_entity(f"mode_{a}_lbl", {"anchor": "stretch", "parent": f"mode_{a}"},
               {"UiLabel": {"content": UI_LABELS[f"mode_{a}_lbl"], "size": 28, "color": "#ffffff", "align": "center"}})
 
-# 建造菜单:加 plot2 + monument 两个新选项
+# Build menu: add plot2 + monument as two new options
 ui_entity("build_menu", {"anchor": "top-left", "parent": "ui", "ox": 16, "oy": 236, "w": 152, "h": 360},
           {"Container": {"kind": "VBox", "gap": 6, "pad": 6, "main": "start", "cross": "center"}})
 for b in ["plot", "conduit", "extractor", "quarters", "wall", "beacon", "plot2", "monument"]:
@@ -139,7 +139,7 @@ for b in ["plot", "conduit", "extractor", "quarters", "wall", "beacon", "plot2",
     ui_entity(f"build_{b}_lbl", {"anchor": "stretch", "parent": f"build_{b}"},
               {"UiLabel": {"content": UI_LABELS[f"build_{b}_lbl"] if f"build_{b}_lbl" in UI_LABELS else b, "size": 24, "color": "#ffffff", "align": "center"}})
 
-# 制作菜单
+# Craft menu
 ui_entity("craft_menu", {"anchor": "top-left", "parent": "ui", "ox": 16, "oy": 236, "w": 152, "h": 156},
           {"Container": {"kind": "VBox", "gap": 8, "pad": 6, "main": "start", "cross": "center"}})
 for c in ["plank", "chair", "lamp"]:
@@ -148,7 +148,7 @@ for c in ["plank", "chair", "lamp"]:
     ui_entity(f"craft_{c}_lbl", {"anchor": "stretch", "parent": f"craft_{c}"},
               {"UiLabel": {"content": UI_LABELS[f"craft_{c}_lbl"], "size": 26, "color": "#ffffff", "align": "center"}})
 
-# 背包网格
+# Inventory grid
 ui_entity("inv_grid", {"anchor": "bottom-left", "parent": "ui", "ox": 16, "oy": -16, "w": 392, "h": 150},
           {"Container": {"kind": "Grid", "gap": 6, "pad": 6, "columns": 4, "main": "start", "cross": "start"},
            "Panel": {"color": "#14171f"}})
@@ -158,7 +158,7 @@ for item in ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp"]:
     ui_entity(f"inv-{item}_lbl", {"anchor": "stretch", "parent": f"inv-{item}"},
               {"UiLabel": {"size": 24, "color": "#ffd24a", "align": "center"}})
 
-# 任务栏
+# Quest banner
 ui_entity("quest_banner", {"anchor": "top-right", "parent": "ui", "ox": 16, "oy": 12, "w": 520, "h": 52},
           {"Panel": {"color": "#161a24"}})
 ui_entity("quest_banner_lbl", {"anchor": "stretch", "parent": "quest_banner"},

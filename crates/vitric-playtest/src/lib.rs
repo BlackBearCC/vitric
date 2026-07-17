@@ -1,24 +1,24 @@
-//! vitric-playtest — agent 集群试玩的进程内地基（设计稿第 1 阶段）。
+//! vitric-playtest — the in-process foundation for agent swarm playtests (design draft stage 1).
 //!
-//! 三块拼起来 = 一局可重放的自动试玩：
-//! - [`scene_view`]：从世界/规则自动派生一份「代理所见」（观测/动作/终止），纯投影；
-//! - [`strategy`]：消费视图、产出动作的纯逻辑策略（random/greedy/coverage/scripted），PCG 播种 = 确定；
-//! - [`session`]：循环「派生视图 → 选动作 → 注入 → 步进」直到通关/死亡/超时，出录像。
+//! Three pieces compose a replayable automated playtest session:
+//! - [`scene_view`]: derives an "agent view" (observation/action/terminate) from the world/rules, a pure projection;
+//! - [`strategy`]: pure-logic strategies that consume the view and produce actions (random/greedy/coverage/scripted), PCG-seeded = deterministic;
+//! - [`session`]: loops "derive view → choose action → inject → step" until clear/death/timeout, producing a recording.
 //!
-//! 第 3 阶段又拼上**种子式探索**（设计稿三节）：
-//! - [`seed`]：拿 gate 证书录像当种子，受控扰动它的输入序列生成一组变异脚本；
-//! - [`strategy::ScriptedStrategy`]：按脚本在录制 tick 注入（可接 random 截断发散）；
-//! - [`report`] 新增 `ending_coverage`：哪些声明的结局被触达、哪些 0 局可达（不可达结局）。
+//! Stage 3 adds **seed-based exploration** (design draft section 3):
+//! - [`seed`]: takes a gate-certificate recording as a seed and perturbs its input sequence to generate a set of mutated scripts;
+//! - [`strategy::ScriptedStrategy`]: injects at recorded ticks per the script (can be spliced with random for truncation divergence);
+//! - [`report`] adds `ending_coverage`: which declared endings were reached, and which are reachable in 0 sessions (unreachable endings).
 //!
-//! 第 5 阶段拼上 **LLM 档**（设计稿二节/十一节第 5 条）：
-//! - [`llm_agent::LlmStrategy`]：少量 LLM 代理读同一份 Scene View 拟人玩 + 吐定性 note
-//!   （清晰度/连续性/选择有效性）。LLM 推理不确定，但它选的输入照样录进录像→可重放复现；
-//! - [`strategy::PlaytestNote`] + `Strategy::drain_notes`：note 通道（默认空，只 LLM 产）；
-//! - [`session::SessionResult`] 收 note（不进哈希/录像），[`report`] 汇成 `qualitative_notes`
-//!   （按 kind 分组去重，诚实标「LLM 主观提示，待人复核」）。
+//! Stage 5 adds the **LLM tier** (design draft section 2 / section 11 item 5):
+//! - [`llm_agent::LlmStrategy`]: a few LLM agents read the same Scene View to play human-likely + emit qualitative notes
+//!   (clarity/continuity/choice validity). LLM inference is non-deterministic, but the inputs it picks are still recorded → replayable;
+//! - [`strategy::PlaytestNote`] + `Strategy::drain_notes`: the note channel (empty by default, only produced by LLM);
+//! - [`session::SessionResult`] collects notes (not hashed/recorded), and [`report`] aggregates them into `qualitative_notes`
+//!   (grouped and deduped by kind, honestly labeled "LLM subjective hint, awaits human review").
 //!
-//! 装配运行时（`Runtime::boot`）住在 vitric-cli，依赖方向是 cli → playtest，所以本 crate
-//! 不 boot 项目，由调用方 boot 好再把 `(Sim, GameLogic, Engine)` 交给 [`session::run_session`]。
+//! The assembly runtime (`Runtime::boot`) lives in vitric-cli; the dependency direction is cli → playtest, so this crate
+//! does not boot the project — the caller boots it and hands `(Sim, GameLogic, Engine)` to [`session::run_session`].
 
 pub mod config;
 pub mod html;

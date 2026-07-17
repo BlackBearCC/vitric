@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # build_replay.py <raw_snapshot.json> <out.html>
-# 原始 sim/snapshot 状态流 -> 精简增量渲染流 -> 自包含 HTML canvas 播放器(带操作日志/玩家高亮/图例)。
+# Raw sim/snapshot state stream -> slim incremental render stream -> self-contained HTML canvas player (with operation log / player highlight / legend).
 import json, sys, gzip, re
 
 raw_path, out_path = sys.argv[1], sys.argv[2]
 raw = json.load(open(raw_path, encoding='utf-8-sig'))
-# 新格式 {"snaps":[...],"acts":[...]};兼容旧的纯列表
+# New format {"snaps":[...],"acts":[...]}; backward compatible with old plain list
 if isinstance(raw, dict):
     snaps = raw.get('snaps', []); acts = raw.get('acts', [])
 else:
     snaps = raw; acts = ['' for _ in raw]
-# 剥离 emoji/符号(部分浏览器缺 emoji 字体会渲成方框),保留 … 等常用标点
+# Strip emoji/symbols (some browsers lack emoji fonts and render them as tofu boxes), keep … and other common punctuation
 _EMO = re.compile('[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002300-\U000023FF\U00002B00-\U00002BFF\U00002190-\U000021FF\U0000FE00-\U0000FE0F]')
 acts = [_EMO.sub('', a).strip() for a in acts]
 

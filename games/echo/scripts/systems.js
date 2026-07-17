@@ -1,102 +1,102 @@
-// 回响 echo — 战斗大脑（玩法层）
+// echo — combat brain (gameplay layer)
 //
-// 架构（脚本算账 + 规则执行 + 指令寄存器，spire 验证过的路子）：
-// - 输入规则只写 ctl 实体上的寄存器字段（指令/点击坐标/选牌槽位），不做逻辑。
-// - battle-brain 系统每 tick 读寄存器算账：出牌结算、影怪 AI、光照判定、胜负。
-//   落写自己 query 内的组件（Shade/Cell/Position/Card），query 外的落写
-//   一律 emit sync-* 事件（载荷全是绝对值，幂等），由规则收事件后写回。
-// - 脚本零私藏状态：所有跨 tick 状态都在组件里，快照/回放安全。
+// Architecture (script does the math + rules apply + command register; the path validated in spire):
+// - Input rules only write register fields on the ctl entity (command / click coords / chosen card slot); no logic.
+// - The battle-brain system reads the registers each tick to do the math: card settlement, shade AI, lighting checks, win/loss.
+//   It writes back to components inside its own query (Shade/Cell/Position/Card); writes outside the query
+//   always go via emit sync-* events (payloads are all absolute values, idempotent), which rules apply after receiving them.
+// - Scripts keep zero hidden state: all cross-tick state lives in components, snapshot/replay safe.
 //
-// 【棋子档案 = Shade 组件】战斗里所有逻辑实体（提灯人/影怪/灯/遮板/寄存器）
-// 共用一套组件档案 {Shade, Cell, Position, Card}，Shade.kind 区分身份：
-//   "hero"     提灯人：Shade.hp=心 Shade.n=灯油（Player 组件是只读镜像，见 hero-player-sync）
-//   "stalker" / "lurker" / "devourer"  影怪（怪表三种）：hp=命 n=行动序号 stunned=僵直
-//   "lamp"     灯：Card.name="point"|"spot"（棱镜化） Card.slot=聚光朝向（度）
-//   "blocker"  遮板（另带 Solid+Collider，挡光挡路由引擎承担）
-//   "ctl"      指令寄存器（每个战斗场景一只，详见下面寄存器表）
-//   "fx"       反馈计时寄存器（每个战斗场景一只）：Cell.cx=油不足红闪倒计时(tick)
-//              Cell.cy=SAVED 存档提示倒计时(tick)；脑每 tick 递减，到 0 发恢复事件
-//   "node"     节点标签：Shade.n = 本战斗的节点号（1/2/3）
-//   "tutor"    教学寄存器（仅 battle-1 有）：Card.slot=已达教学步(0..5,只增不减,由规则推进)
-//              Cell.cx=已显示步(脑每 tick 对账,不等就 emit sync-hint 刷 HUD,场景初值 -1=强制首发)
-// 这是查询机制的要求：脚本系统按组件 AND 匹配，只有同档案才能在一个系统里互见。
-// ⚠ 所以「Shade 组件 ≠ 影怪」，数影怪要按 kind 过滤——QA 断言别直接数 Shade 实体。
+// [Piece profile = Shade component] All logical entities in combat (lantern-bearer / shades / lamps / blockers / registers)
+// share one component profile {Shade, Cell, Position, Card}; Shade.kind distinguishes identity:
+//   "hero"     lantern-bearer: Shade.hp=hearts Shade.n=lamp oil (Player component is a read-only mirror, see hero-player-sync)
+//   "stalker" / "lurker" / "devourer"  shades (three entries in the monster table): hp=HP n=action order stunned=stun
+//   "lamp"     lamp: Card.name="point"|"spot" (prismed) Card.slot=spotlight direction (degrees)
+//   "blocker"  blocker (also has Solid+Collider; blocking light and routing is handled by the engine)
+//   "ctl"      command register (one per battle scene; see the register table below)
+//   "fx"       feedback timer register (one per battle scene): Cell.cx=red-flash countdown when oil is insufficient (ticks)
+//              Cell.cy=SAVED save-toast countdown (ticks); the brain decrements every tick and emits a restore event at 0
+//   "node"     node tag: Shade.n = node number of this battle (1/2/3)
+//   "tutor"    tutorial register (only battle-1): Card.slot=reached tutorial step (0..5, only increases, advanced by rules)
+//              Cell.cx=displayed step (the brain reconciles every tick; if unequal it emits sync-hint to refresh the HUD; scene initial -1=force first emit)
+// This is a requirement of the query mechanism: script systems match by component AND, so only entities sharing a profile can see each other in one system.
+// ⚠ Therefore "Shade component != shade"; counting shades must filter by kind — QA assertions must not count Shade entities directly.
 //
-// 【ctl 寄存器表】（战斗场景必须包含名为 ctl 的实体）
-//   Shade.hp   = 阶段：0 玩家回合 / 1 影怪回合 / 2 胜 / 3 负
-//   Shade.n    = 回合数（从 1 起）
-//   Shade.stunned = 暂停标志（true = 暂停：脑整体冻结，只听指令 3 解除）
-//   Card.name  = 手牌寄存器：4 槽逗号串，如 "lamp,flash,," ；"" = 尚未发牌（开战哨兵）
-//   Card.slot  = 当前选中的手牌槽（0=未选，1..4）
-//   Cell.cx    = 指令：0 空闲 / 1 棋盘点击 / 2 结束回合 / 3 暂停开关(ESC/R)
-//                / 11..14 切换选中第 N 张牌
-//                / 20 右键空地(恢复默认提示) / 21..24 右键第 N 张牌(HUD 显示该牌说明)
-//   Cell.cy    = 阶段内进度：影怪回合=下一个行动的影怪序、胜负阶段=退场倒计时
-//   Position   = 最近一次点击的世界坐标（棋盘点击用）
+// [ctl register table] (a battle scene must contain an entity named ctl)
+//   Shade.hp   = phase: 0 player turn / 1 shade turn / 2 win / 3 loss
+//   Shade.n    = turn count (starts at 1)
+//   Shade.stunned = pause flag (true = paused: the whole brain freezes, only command 3 releases it)
+//   Card.name  = hand register: comma-separated string of 4 slots, e.g. "lamp,flash,," ; "" = not yet dealt (battle-start sentinel)
+//   Card.slot  = currently selected hand slot (0=none, 1..4)
+//   Cell.cx    = command: 0 idle / 1 board click / 2 end turn / 3 pause toggle (ESC/R)
+//                / 11..14 select the Nth card
+//                / 20 right-click empty cell (restore default hint) / 21..24 right-click Nth card (HUD shows that card's description)
+//   Cell.cy    = intra-phase progress: shade turn = next acting shade index, win/loss phase = exit countdown
+//   Position   = world coords of the most recent click (used for board clicks)
 //
-// 【光照判定 = 镜像引擎公式】isLit() 在脚本里按引擎同一套公式算格中心照度，
-// 与引擎渲染的已知偏差（v1，调参/排查都先看这里）：
-//   1. 只采样格中心一点（引擎逐像素）；
-//   2. 灯色按标量亮度近似：luma(#ffb060)=0.689 乘进贡献（引擎逐通道）；
-//   3. 环境光 Ambient 不计入（GDD：『被任意灯照到』只看灯的贡献）；
-//   4. 格中心恰为灯心时聚光角度衰减按 1 处理（引擎像素几乎不会正好踩灯心）；
-//   5. 阈值 LIT_THRESH=0.05 是玩法参数：放灯(r4.5)约照亮自身周围 3×3 格。
-//   遮板硬影与自遮挡规则（中心在遮板内不被它自己挡）与引擎逐字一致。
-//   ⚠ 因此提灯人/美术装饰实体不要挂 Light——会造成「看着亮、判定暗」的错位。
+// [Lighting check = mirrors the engine formula] isLit() computes cell-center illumination in the script using the same formula as the engine,
+// with the known discrepancies vs the engine's rendering (v1; tuning/debugging starts here):
+//   1. Only the cell center is sampled (the engine goes pixel-by-pixel);
+//   2. Lamp color is approximated by scalar luminance: luma(#ffb060)=0.689 multiplied into the contribution (the engine works channel-by-channel);
+//   3. Ambient light is not counted (GDD: "lit by any lamp" only considers lamp contributions);
+//   4. When the cell center coincides with the lamp center, spotlight angular attenuation is treated as 1 (engine pixels almost never land exactly on the lamp center);
+//   5. The threshold LIT_THRESH=0.05 is a gameplay parameter: placing a lamp (r4.5) lights up about a 3×3 cell area around itself.
+//   Blocker hard shadows and self-occlusion rules (a center inside a blocker is not blocked by that blocker itself) match the engine verbatim.
+//   ⚠ Therefore the lantern-bearer / art decoration entities must not carry Light — it would cause a "looks bright, judged dark" mismatch.
 
 "use strict";
 
-// ---- 牌表（GDD 第1期合同定死；help = 右键牌说明行，DejaVu 无 CJK 故全 ASCII） ----
+// ---- Card table (locked by the GDD phase-1 contract; help = right-click card description line; DejaVu has no CJK so it's all ASCII) ----
 const CARDS = {
-  lamp:    { cost: 1, label: "LAMP", help: "LAMP 1 OIL - LIGHT A CELL" },        // 放灯：目标格放一盏灯 r=4.5 暖光
-  move:    { cost: 1, label: "MOVE", help: "MOVE 1 OIL - MOVE NEAREST LAMP" },   // 移灯：离目标格最近的一盏己灯移过去（v1 简化：不二段选灯）
-  snuff:   { cost: 0, label: "SNUFF", help: "SNUFF 0 OIL - REMOVE LAMP +1 OIL" },// 熄灯：收回目标格的灯，+1 油
-  prism:   { cost: 2, label: "PRISM", help: "PRISM 2 OIL - FOCUS LAMP AT FOE" }, // 棱镜：目标格的灯变 60° 聚光锥 r=7，朝向最近影怪（重打可转向）
-  blocker: { cost: 1, label: "BLOCK", help: "BLOCK 1 OIL - WALL STOPS LIGHT" },  // 遮板：目标格立遮光板（Solid 2×2，尺寸表为准）
-  flash:   { cost: 2, label: "FLASH", help: "FLASH 2 OIL - STUN SHADES NEAR" },  // 闪光：目标格瞬间强光 r=3，照到的影怪 -1 命并僵直，灯不留场
+  lamp:    { cost: 1, label: "LAMP", help: "LAMP 1 OIL - LIGHT A CELL" },        // Place lamp: drop a lamp on the target cell, r=4.5 warm light
+  move:    { cost: 1, label: "MOVE", help: "MOVE 1 OIL - MOVE NEAREST LAMP" },   // Move lamp: move the nearest friendly lamp to the target cell (v1 simplification: no two-stage lamp selection)
+  snuff:   { cost: 0, label: "SNUFF", help: "SNUFF 0 OIL - REMOVE LAMP +1 OIL" },// Snuff lamp: remove the lamp on the target cell, +1 oil
+  prism:   { cost: 2, label: "PRISM", help: "PRISM 2 OIL - FOCUS LAMP AT FOE" }, // Prism: the lamp on the target cell becomes a 60° spotlight cone r=7 facing the nearest shade (re-casting rotates it)
+  blocker: { cost: 1, label: "BLOCK", help: "BLOCK 1 OIL - WALL STOPS LIGHT" },  // Blocker: place a blocker on the target cell (Solid 2×2; the size table is authoritative)
+  flash:   { cost: 2, label: "FLASH", help: "FLASH 2 OIL - STUN SHADES NEAR" },  // Flash: instant intense light r=3 on the target cell; shades hit lose 1 HP and get stunned; the lamp does not stay on the field
 };
 
-// ---- 教学文案（battle-1 引导步；步号即 tutor.Card.slot，规则只增不减） ----
+// ---- Tutorial text (battle-1 guide steps; step number = tutor.Card.slot, only increased by rules) ----
 const HINT_DEFAULT = "E - END TURN";
 const TUT_TEXT = [
-  "CLICK A CARD",                          // 0 开场
-  "CLICK A CELL TO PLAY IT",               // 1 选中了牌
-  "SHADES FEAR LIGHT - TRAP THEM",         // 2 出过第一张牌
-  "PRESS E TO END TURN",                   // 3 油耗尽还没结束回合（回合状态驱动，非墙钟）
-  "STUNNED SHADES LOSE HP - END THEM",     // 4 第一次僵直（≤33 字符：hud-hint 居中锚在 x=10.6，再长出右框）
-  HINT_DEFAULT,                            // 5 第一杀，毕业回常驻提示
+  "CLICK A CARD",                          // 0 opening
+  "CLICK A CELL TO PLAY IT",               // 1 a card was selected
+  "SHADES FEAR LIGHT - TRAP THEM",         // 2 first card played
+  "PRESS E TO END TURN",                   // 3 oil exhausted but turn not ended (turn-state-driven, not wall-clock)
+  "STUNNED SHADES LOSE HP - END THEM",     // 4 first stun (≤33 chars: hud-hint is centered on x=10.6; longer overflows the right frame)
+  HINT_DEFAULT,                            // 5 first kill; graduate back to the standing hint
 ];
-const DRAW_POOL = ["lamp", "move", "snuff", "prism", "blocker", "flash"]; // 无限牌库均匀抽
+const DRAW_POOL = ["lamp", "move", "snuff", "prism", "blocker", "flash"]; // uniform draw from an infinite deck
 const HAND_SIZE = 4;
 
-// ---- 棋盘（8×6 格，每格 2×2，左下格中心 (-7,-5)） ----
+// ---- Board (8×6 cells, each 2×2, lower-left cell center at (-7,-5)) ----
 const GRID_W = 8, GRID_H = 6, CELL = 2;
 const ORIGIN_X = -7, ORIGIN_Y = -5;
 
-// ---- 光照参数 ----
-const LIT_THRESH = 0.05;                // 亮格阈值（玩法参数，调难度动这里）
+// ---- Lighting parameters ----
+const LIT_THRESH = 0.05;                // lit-cell threshold (gameplay parameter; tune difficulty here)
 const LAMP_R = 4.5, LAMP_INT = 1.2, LAMP_COLOR = "#ffb060";
-const LAMP_LUMA = (0xff + 0xb0 + 0x60) / (3 * 255); // 0.689，标量亮度近似
+const LAMP_LUMA = (0xff + 0xb0 + 0x60) / (3 * 255); // 0.689, scalar luminance approximation
 const SPOT_R = 7, SPOT_ANGLE = 60;
-const FLASH_R = 3, FLASH_INT = 2.0;     // 闪光按白光 luma=1
+const FLASH_R = 3, FLASH_INT = 2.0;     // flash treated as white light, luma=1
 
-// ---- 节奏参数（手感表） ----
-const ACT_PERIOD = 24;   // 影怪行动间隔（tick，24 = 0.4s 一只）
-const EXIT_DELAY = 90;   // 胜/负横幅停留（tick）后切场景
-const SHAKE_BLOCK = 2;   // 遮板尺寸（2×2，尺寸表为准；牌面文案的 1×2 以尺寸表覆盖）
-const OIL_FLASH_TICKS = 18; // 无效出牌时 OIL 文字红闪时长（0.3s）
-const TOAST_TICKS = 90;     // SAVED 存档提示停留时长（1.5s）
+// ---- Pacing parameters (game-feel table) ----
+const ACT_PERIOD = 24;   // shade action interval (ticks; 24 = one shade every 0.4s)
+const EXIT_DELAY = 90;   // win/loss banner dwell time (ticks) before switching scenes
+const SHAKE_BLOCK = 2;   // blocker size (2×2; the size table is authoritative and overrides the 1×2 on the card face)
+const OIL_FLASH_TICKS = 18; // OIL text red-flash duration on an invalid play (0.3s)
+const TOAST_TICKS = 90;     // SAVED save-toast dwell time (1.5s)
 
-// ---- 暂停文案（发行清单：暂停/继续/退出到菜单；引擎无规则可达的退进程口，诚实提示关窗） ----
-// ESC=暂停开关 R=继续 M=回主菜单（仅暂停时生效）。M 不丢全局进度：progress 挂
-// Persist 跟去菜单（menu 场景不再预置 progress，开局由 start 规则 spawn、通关由
-// victory-back-to-menu 字段重置）——丢的只是本场战斗；再点 START 从地图续打本节点。
+// ---- Pause text (shipping checklist: pause/resume/exit-to-menu; the engine has no rule-reachable exit-process hook, so we honestly tell the player to close the window) ----
+// ESC=pause toggle R=resume M=back to main menu (only effective while paused). M does not drop global progress: progress is on
+// Persist and follows to the menu (the menu scene no longer pre-places progress; on startup it's spawned by the start rule, and on victory
+// it's reset by the victory-back-to-menu field) — only the current battle is lost; clicking START again resumes the node from the map.
 const PAUSE_BANNER = "PAUSED - [R]ESUME [M]ENU";
 const PAUSE_HINT = "CLOSE WINDOW TO QUIT";
-const OIL_COLOR = "#ffe9a8";      // hud-oil 常态色（场景初值同款）
-const OIL_FLASH_COLOR = "#ff6055"; // 红闪色
+const OIL_COLOR = "#ffe9a8";      // hud-oil default color (matches the scene initial)
+const OIL_FLASH_COLOR = "#ff6055"; // red-flash color
 
-// ---- 纯函数工具 ----
+// ---- Pure function utilities ----
 function cellCenter(cx, cy) { return [ORIGIN_X + cx * CELL, ORIGIN_Y + cy * CELL]; }
 function cellFromPoint(x, y) {
   const cx = Math.floor((x - (ORIGIN_X - CELL / 2)) / CELL);
@@ -107,7 +107,7 @@ function cellFromPoint(x, y) {
 function inBounds(cx, cy) { return cx >= 0 && cx < GRID_W && cy >= 0 && cy < GRID_H; }
 function manh(ax, ay, bx, by) { return Math.abs(ax - bx) + Math.abs(ay - by); }
 
-// 线段 (x0,y0)-(x1,y1) 是否穿过 AABB（slab 法，端点在框内也算穿过）
+// Does segment (x0,y0)-(x1,y1) cross an AABB (slab method; endpoints inside the box also count as crossing)
 function segHitsBox(x0, y0, x1, y1, bx, by, hw, hh) {
   const dx = x1 - x0, dy = y1 - y0;
   let tmin = 0, tmax = 1;
@@ -128,7 +128,7 @@ function pointInBox(x, y, bx, by, hw, hh) {
   return x >= bx - hw && x <= bx + hw && y >= by - hh && y <= by + hh;
 }
 
-// 单灯对点 (px,py) 的贡献（镜像引擎：灯色luma·intensity·(1-d/r)²，spot 再乘 t²，遮板硬影）
+// Contribution of a single lamp to point (px,py) (mirrors the engine: lamp color luma · intensity · (1-d/r)², spotlight multiplies by t², blocker hard shadow)
 function lampContrib(lamp, px, py, blockers) {
   const lx = lamp.Position.x, ly = lamp.Position.y;
   const spot = lamp.Card.name === "spot";
@@ -137,16 +137,16 @@ function lampContrib(lamp, px, py, blockers) {
   if (d >= r) return 0;
   let c = LAMP_INT * LAMP_LUMA * (1 - d / r) * (1 - d / r);
   if (spot) {
-    let t = 1; // d=0 时方向未定义，按锥心处理（已知偏差④）
+    let t = 1; // d=0 direction undefined, treat as cone center (known discrepancy ④)
     if (d > 0) {
-      const dir = lamp.Card.slot; // 朝向（度，0=+x 逆时针，与引擎同约定）
+      const dir = lamp.Card.slot; // direction (degrees; 0=+x counterclockwise, same convention as the engine)
       let dth = Math.abs((Math.atan2(py - ly, px - lx) * 180 / Math.PI - dir) % 360);
       if (dth > 180) dth = 360 - dth;
       t = Math.max(0, Math.min(1, 1 - dth / (SPOT_ANGLE / 2)));
     }
     c *= t * t;
   }
-  // 遮板硬影：点到灯心的线段穿过任何遮板碰撞盒贡献清零；点在遮板内部时该遮板不挡它（自遮挡豁免，与引擎一致）
+  // Blocker hard shadow: if the segment from the point to the lamp center crosses any blocker collider, the contribution is zeroed; if the point is inside a blocker, that blocker doesn't block it (self-occlusion exemption, matching the engine)
   for (const b of blockers) {
     const hw = SHAKE_BLOCK / 2, hh = SHAKE_BLOCK / 2;
     if (pointInBox(px, py, b.Position.x, b.Position.y, hw, hh)) continue;
@@ -161,12 +161,12 @@ function isLit(cx, cy, lamps, blockers) {
   return total > LIT_THRESH;
 }
 
-// ---- 战斗大脑 ----
+// ---- Combat brain ----
 vitric.system(
   "battle-brain",
   { query: ["Shade", "Cell", "Position", "Card"], writes: ["Shade", "Cell", "Position", "Card"] },
   (entities, ctx) => {
-    // 1) 按 kind 分拣棋子
+    // 1) Sort pieces by kind
     let ctl = null, hero = null, tag = null, tut = null, fx = null;
     const shades = [], lamps = [], blockers = [];
     for (const e of entities) {
@@ -180,18 +180,18 @@ vitric.system(
       else if (k === "blocker") blockers.push(e);
       else if (k === "stalker" || k === "lurker" || k === "devourer") shades.push(e);
     }
-    if (!ctl || !hero) return; // 非战斗场景（menu/map/victory）：空转
+    if (!ctl || !hero) return; // non-battle scene (menu/map/victory): no-op
     const node = tag ? tag.Shade.n : 0;
     const alive = () => shades.filter((s) => s.Shade.hp > 0);
 
-    // ---- 教学提示对账（battle-1 才有 tutor）：实际步(Card.slot,规则推进)≠已显示步(Cell.cx)
-    // 就刷一次 HUD。寄存器模式：幂等、零私藏状态、重放安全。
+    // ---- Tutorial hint reconciliation (only battle-1 has tutor): if the actual step (Card.slot, advanced by rules) != the displayed step (Cell.cx)
+    // refresh the HUD once. Register pattern: idempotent, zero hidden state, replay safe.
     if (tut && tut.Cell.cx !== tut.Card.slot) {
       tut.Cell.cx = tut.Card.slot;
       ctx.emit("sync-hint", { text: TUT_TEXT[tut.Card.slot] || HINT_DEFAULT });
     }
 
-    // ---- 工具（闭包仅在本 tick 内用，不跨 tick 存东西） ----
+    // ---- Utilities (closures are used only within this tick; nothing is stored across ticks) ----
     const parseHand = () => {
       const parts = ctl.Card.name.split(",");
       while (parts.length < HAND_SIZE) parts.push("");
@@ -249,16 +249,16 @@ vitric.system(
     };
     const killShade = (s) => {
       const [x, y] = cellCenter(s.Cell.cx, s.Cell.cy);
-      ctx.emit("shade-died", { n: s.Shade.n, x, y }); // 事件表名；x/y 为扩展字段（粒子规则用）
+      ctx.emit("shade-died", { n: s.Shade.n, x, y }); // event-table name; x/y are extension fields (used by the particle rule)
       ctx.despawn(s.id);
-      s.Shade.hp = 0; // 本 tick 本地视图同步（alive() 过滤靠它）
+      s.Shade.hp = 0; // local-view sync within this tick (alive() filters on this)
     };
     const win = () => {
       ctl.Shade.hp = 2;
-      ctl.Cell.cy = 0; // 退场倒计时
+      ctl.Cell.cy = 0; // exit countdown
       ctx.emit("battle-won", { node });
-      ctx.emit("node-cleared", { node }); // → 规则 autosave-on-clear 落盘
-      if (fx) { fx.Cell.cy = TOAST_TICKS; ctx.emit("sync-toast", { text: "SAVED" }); } // 存档明示
+      ctx.emit("node-cleared", { node }); // → the autosave-on-clear rule writes to disk
+      if (fx) { fx.Cell.cy = TOAST_TICKS; ctx.emit("sync-toast", { text: "SAVED" }); } // make the save explicit
       syncBattle(); syncHud();
     };
     const lose = () => {
@@ -267,7 +267,7 @@ vitric.system(
       ctx.emit("battle-lost", {});
       syncBattle(); syncHud();
     };
-    // 无效操作统一出口：reject 音效（规则 card-rejected-sound）+ OIL 文字红闪（计时在 fx 寄存器）
+    // Unified exit for invalid ops: reject sound (rule card-rejected-sound) + OIL text red-flash (timer in the fx register)
     const reject = (name, reason) => {
       ctx.emit("card-rejected", { name, reason });
       if (fx) { fx.Cell.cx = OIL_FLASH_TICKS; ctx.emit("sync-oil-flash", { color: OIL_FLASH_COLOR }); }
@@ -284,7 +284,7 @@ vitric.system(
       s.Position.x = x; s.Position.y = y;
     };
     const adjacentToHero = (s) => manh(s.Cell.cx, s.Cell.cy, hero.Cell.cx, hero.Cell.cy) === 1;
-    // 贪心走一步：四邻里选 暗格+界内+无人占+曼哈顿距离严格变小 的格（固定枚举序保证确定性）
+    // Greedy single step: among the 4 neighbors, pick a dark + in-bounds + unoccupied + strictly smaller Manhattan-distance cell (fixed enumeration order guarantees determinism)
     const bestStep = (s) => {
       const cur = manh(s.Cell.cx, s.Cell.cy, hero.Cell.cx, hero.Cell.cy);
       let best = null, bestD = cur;
@@ -297,9 +297,9 @@ vitric.system(
       return best;
     };
 
-    // ---- 1.5) 暂停（指令 3，任意阶段可用）：toggle 后整个脑冻结/解冻 ----
-    // 暂停标志在 ctl.Shade.stunned（组件里，快照/回放安全）。冻结 = 影怪行动、
-    // 回合处理、胜负倒计时、反馈计时全停；恢复时横幅/提示从阶段真值重算（幂等）。
+    // ---- 1.5) Pause (command 3, available in any phase): toggle to freeze/unfreeze the whole brain ----
+    // Pause flag lives in ctl.Shade.stunned (in a component, snapshot/replay safe). Frozen = shade actions,
+    // turn processing, win/loss countdown, feedback timers all stop; on resume the banner/hint are recomputed from the phase truth (idempotent).
     if (ctl.Cell.cx === 3) {
       ctl.Cell.cx = 0;
       ctl.Shade.stunned = !ctl.Shade.stunned;
@@ -307,9 +307,9 @@ vitric.system(
         ? { banner: PAUSE_BANNER, hint: PAUSE_HINT }
         : { banner: banner(), hint: tut ? (TUT_TEXT[tut.Card.slot] || HINT_DEFAULT) : HINT_DEFAULT });
     }
-    if (ctl.Shade.stunned) return; // 暂停冻结
+    if (ctl.Shade.stunned) return; // pause freeze
 
-    // ---- 1.6) 反馈计时寄存器递减（红闪/SAVED 提示，到 0 发恢复事件） ----
+    // ---- 1.6) Feedback timer register decrement (red-flash / SAVED toast; emit a restore event at 0) ----
     if (fx) {
       if (fx.Cell.cx > 0) {
         fx.Cell.cx -= 1;
@@ -321,7 +321,7 @@ vitric.system(
       }
     }
 
-    // ---- 2) 开战哨兵：手牌寄存器为空 = 第一次进场，发起手 4 张 ----
+    // ---- 2) Battle-start sentinel: hand register empty = first entry; deal a hand of 4 ----
     if (ctl.Card.name === "") {
       writeHand(refill(["", "", "", ""]));
       ctl.Cell.cy = 1;
@@ -329,13 +329,13 @@ vitric.system(
       return;
     }
 
-    // ---- 3) 胜负检测（每 tick，进行中阶段才查） ----
+    // ---- 3) Win/loss check (every tick; only checked in in-progress phases) ----
     if (ctl.Shade.hp <= 1) {
       if (alive().length === 0) { win(); return; }
       if (hero.Shade.hp <= 0) { lose(); return; }
     }
 
-    // ---- 4) 胜/负阶段：横幅停留后发退场事件（计时器在组件里，读档恢复后照样会走到） ----
+    // ---- 4) Win/loss phase: after the banner dwells, emit the exit event (timer in a component; on save load it'll still reach this) ----
     if (ctl.Shade.hp >= 2) {
       ctl.Cell.cy += 1;
       if (ctl.Cell.cy === EXIT_DELAY) {
@@ -345,13 +345,13 @@ vitric.system(
       return;
     }
 
-    // ---- 5) 玩家阶段：消化指令寄存器 ----
+    // ---- 5) Player phase: consume the command register ----
     if (ctl.Shade.hp === 0) {
       const cmd = ctl.Cell.cx;
       if (cmd === 0) return;
       ctl.Cell.cx = 0;
 
-      if (cmd >= 11 && cmd <= 14) { // 点牌：切换选中；点空槽 = 无效操作给反馈
+      if (cmd >= 11 && cmd <= 14) { // Click card: toggle selection; clicking an empty slot = invalid op, give feedback
         const slot = cmd - 10;
         if (!parseHand()[slot - 1]) { reject("", "empty"); return; }
         ctl.Card.slot = ctl.Card.slot === slot ? 0 : slot;
@@ -359,8 +359,8 @@ vitric.system(
         return;
       }
 
-      if (cmd >= 20 && cmd <= 24) { // 右键牌说明：21..24 显示第 N 张牌的费用/效果，20/空槽恢复默认
-        let text = tut ? (TUT_TEXT[tut.Card.slot] || HINT_DEFAULT) : HINT_DEFAULT; // 默认 = 教学当前步（battle-1）或常驻提示
+      if (cmd >= 20 && cmd <= 24) { // Right-click card description: 21..24 show the cost/effect of the Nth card; 20/empty slot restores the default
+        let text = tut ? (TUT_TEXT[tut.Card.slot] || HINT_DEFAULT) : HINT_DEFAULT; // default = current tutorial step (battle-1) or the standing hint
         if (cmd >= 21) {
           const name = parseHand()[cmd - 21];
           if (name) text = CARDS[name].help;
@@ -369,7 +369,7 @@ vitric.system(
         return;
       }
 
-      if (cmd === 2) { // E 结束回合 → 影怪阶段开场：亮格僵直 -1 命（回合开始判定）
+      if (cmd === 2) { // E to end turn → shade-phase opener: lit-cell stun loses 1 HP (checked at turn start)
         for (const s of alive()) {
           if (isLit(s.Cell.cx, s.Cell.cy, lamps, blockers)) {
             s.Shade.stunned = true;
@@ -381,19 +381,19 @@ vitric.system(
           }
         }
         ctl.Shade.hp = 1;
-        ctl.Cell.cy = 0; // 下一个行动的影怪序
+        ctl.Cell.cy = 0; // next acting shade index
         syncBattle(); syncHud();
         return;
       }
 
-      if (cmd === 1) { // 棋盘点击：有选牌就结算出牌
+      if (cmd === 1) { // Board click: if a card is selected, settle the play
         const cell = cellFromPoint(ctl.Position.x, ctl.Position.y);
-        if (!cell) return; // 点在棋盘外（含点牌时连带触发的坐标）：忽略，选中保留
+        if (!cell) return; // click outside the board (including coords triggered alongside a card click): ignore, keep selection
         const sel = ctl.Card.slot;
-        if (sel < 1) return; // 没选牌：忽略棋盘点击
+        if (sel < 1) return; // no card selected: ignore board clicks
         const hand = parseHand();
         const name = hand[sel - 1];
-        if (!name) { ctl.Card.slot = 0; syncHand(); return; } // 选中了空槽：清选中
+        if (!name) { ctl.Card.slot = 0; syncHand(); return; } // selected an empty slot: clear selection
         const card = CARDS[name];
         if (card.cost > hero.Shade.n) { reject(name, "oil"); return; }
 
@@ -406,7 +406,7 @@ vitric.system(
               const seq = lamps.reduce((m, l) => Math.max(m, l.Shade.n), 0) + 1;
               ctx.spawn({
                 Shade: { kind: "lamp", hp: 0, n: seq, stunned: false },
-                Lamp: {}, // 合同标记组件，和场景预置灯保持同一档案
+                Lamp: {}, // contract marker component; keeps the same profile as scene-preset lamps
                 Cell: { cx, cy },
                 Card: { name: "point", slot: 0 },
                 Position: { x: px, y: py },
@@ -418,7 +418,7 @@ vitric.system(
             }
             case "move": {
               if (!lamps.length || occupiedBy(cx, cy)) return false;
-              let pick = null, pd = Infinity; // 离目标格最近的灯（并列取 n 小，确定性）
+              let pick = null, pd = Infinity; // nearest lamp to the target cell (ties broken by smaller n, deterministic)
               for (const l of lamps) {
                 const d = Math.hypot(l.Position.x - px, l.Position.y - py);
                 if (d < pd - 1e-9 || (Math.abs(d - pd) <= 1e-9 && pick && l.Shade.n < pick.Shade.n)) { pd = d; pick = l; }
@@ -432,14 +432,14 @@ vitric.system(
               if (!l) return false;
               ctx.despawn(l.id);
               lamps.splice(lamps.indexOf(l), 1);
-              hero.Shade.n += 1; // +1 油
+              hero.Shade.n += 1; // +1 oil
               return true;
             }
             case "prism": {
               const l = lampAt(cx, cy);
               if (!l) return false;
               const liv = alive();
-              let tgt = null, td = Infinity; // 朝向最近影怪（重打同一盏 = 转向）
+              let tgt = null, td = Infinity; // face the nearest shade (re-casting the same lamp = rotate)
               for (const s of liv) {
                 const d = Math.hypot(s.Position.x - l.Position.x, s.Position.y - l.Position.y);
                 if (d < td) { td = d; tgt = s; }
@@ -447,7 +447,7 @@ vitric.system(
               let deg = tgt ? Math.round(Math.atan2(tgt.Position.y - l.Position.y, tgt.Position.x - l.Position.x) * 180 / Math.PI) : 0;
               deg = ((deg % 360) + 360) % 360;
               l.Card.name = "spot";
-              l.Card.slot = deg; // lamp-light-sync 系统据此改 Light
+              l.Card.slot = deg; // the lamp-light-sync system uses this to update Light
               return true;
             }
             case "blocker": {
@@ -464,7 +464,7 @@ vitric.system(
               return true;
             }
             case "flash": {
-              // 瞬间强光：照得到（白光 r=3 公式，遮板有效）的影怪 -1 命并僵直
+              // Instant intense light: shades hit by it (white r=3 formula; blockers apply) lose 1 HP and get stunned
               for (const s of alive()) {
                 const [sx, sy] = cellCenter(s.Cell.cx, s.Cell.cy);
                 const d = Math.hypot(sx - px, sy - py);
@@ -481,7 +481,7 @@ vitric.system(
                 ctx.emit("shade-stunned", { n: s.Shade.n, x: sx, y: sy });
                 if (s.Shade.hp <= 0) killShade(s);
               }
-              ctx.spawn({ // 纯视觉残光，灯不留场
+              ctx.spawn({ // pure visual afterglow; the lamp doesn't stay on the field
                 Position: { x: px, y: py },
                 Sprite: { w: 0.5, h: 0.5, color: "#fff6dc" },
                 Light: { radius: FLASH_R, color: "#fff6dc", intensity: FLASH_INT, kind: "point" },
@@ -498,19 +498,19 @@ vitric.system(
         hand[sel - 1] = "";
         ctl.Card.slot = 0;
         writeHand(hand);
-        ctx.emit("card-played", { name, cell: cx + "," + cy }); // 事件表：card-played{name,cell}
+        ctx.emit("card-played", { name, cell: cx + "," + cy }); // event table: card-played{name,cell}
         syncHand(); syncHud();
         return;
       }
       return;
     }
 
-    // ---- 6) 影怪阶段：每 ACT_PERIOD tick 行动一只（按 Shade.n 升序） ----
+    // ---- 6) Shade phase: one shade acts every ACT_PERIOD ticks (sorted by Shade.n ascending) ----
     if (ctl.Shade.hp === 1) {
       if (ctx.tick % ACT_PERIOD !== 0) return;
       const order = alive().sort((a, b) => a.Shade.n - b.Shade.n);
       const idx = ctl.Cell.cy;
-      if (idx >= order.length) { // 全部行动完 → 新玩家回合：回 3 油、补牌至 4
+      if (idx >= order.length) { // all shades acted → new player turn: restore 3 oil, refill hand up to 4
         ctl.Shade.n += 1;
         hero.Shade.n = 3;
         writeHand(refill(parseHand()));
@@ -522,10 +522,10 @@ vitric.system(
       const s = order[idx];
       ctl.Cell.cy = idx + 1;
 
-      if (s.Shade.stunned) { // 僵直：跳过本回合行动
+      if (s.Shade.stunned) { // stun: skip this turn's action
         s.Shade.stunned = false;
       } else if (s.Shade.kind === "stalker") {
-        // 潜行者：沿暗格向玩家走 2 格；已相邻则直接攻击（『进入相邻格攻击』的退化情形，v1 约定：相邻即每回合咬一口）
+        // Stalker: walk 2 cells along dark cells toward the player; if already adjacent, attack directly (degenerate case of "move into adjacent cell and attack"; v1 convention: adjacency = one bite per turn)
         if (adjacentToHero(s)) hitHero(1);
         else {
           for (let step = 0; step < 2; step++) {
@@ -536,10 +536,10 @@ vitric.system(
           }
         }
       } else if (s.Shade.kind === "lurker") {
-        // 潜伏者：不动；身处暗格且与玩家相邻 → -2 心
+        // Lurker: doesn't move; if in a dark cell and adjacent to the player → -2 hearts
         if (!isLit(s.Cell.cx, s.Cell.cy, lamps, blockers) && adjacentToHero(s)) hitHero(2);
       } else if (s.Shade.kind === "devourer") {
-        // 吞灯者（Boss）：每 2 回合吞最近一盏灯，走 1 格；僵直时不吞（上面 stunned 分支已拦）
+        // Devourer (Boss): every 2 turns devours the nearest lamp, walks 1 cell; doesn't devour while stunned (the stunned branch above already handles it)
         if (ctl.Shade.n % 2 === 0 && lamps.length) {
           let pick = null, pd = Infinity;
           for (const l of lamps) {
@@ -561,14 +561,14 @@ vitric.system(
         }
       }
       const [ax, ay] = cellCenter(s.Cell.cx, s.Cell.cy);
-      ctx.emit("shade-acted", { n: s.Shade.n, x: ax, y: ay }); // 事件表：shade-acted{n}；x/y 扩展字段
+      ctx.emit("shade-acted", { n: s.Shade.n, x: ax, y: ay }); // event table: shade-acted{n}; x/y are extension fields
       return;
     }
   }
 );
 
-// ---- 灯具光学同步：Light 组件永远从 Card 寄存的灯形态推导（幂等，每 tick 覆写） ----
-// 棱镜把 Card.name 改成 "spot"、Card.slot 写朝向后，这里负责把引擎的 Light 跟上。
+// ---- Lamp optics sync: the Light component is always derived from the lamp form registered in Card (idempotent; overwritten every tick) ----
+// After prism changes Card.name to "spot" and writes Card.slot for direction, this system keeps the engine's Light in sync.
 vitric.system("lamp-light-sync", { query: ["Shade", "Card", "Light"], writes: ["Light"] }, (entities) => {
   for (const e of entities) {
     if (e.Shade.kind !== "lamp") continue;
@@ -586,7 +586,7 @@ vitric.system("lamp-light-sync", { query: ["Shade", "Card", "Light"], writes: ["
   }
 });
 
-// ---- 提灯人镜像：Player{hearts,oil} 是合同组件，从 Shade 真值单向同步（QA 断言友好） ----
+// ---- Lantern-bearer mirror: Player{hearts,oil} is the contract component, one-way synced from the Shade truth (QA-friendly) ----
 vitric.system("hero-player-sync", { query: ["Shade", "Player"], writes: ["Player"] }, (entities) => {
   for (const e of entities) {
     if (e.Shade.kind !== "hero") continue;
@@ -595,7 +595,7 @@ vitric.system("hero-player-sync", { query: ["Shade", "Player"], writes: ["Player
   }
 });
 
-// ---- 通关彩带（battle-won 规则 call） ----
+// ---- Victory confetti (called by the battle-won rule) ----
 vitric.fn("burst", (args, ctx) => {
   const colors = ["#ffd75e", "#ff9a3c", "#fff2b0", "#9a7fb8"];
   for (let i = 0; i < args.n; i++) {

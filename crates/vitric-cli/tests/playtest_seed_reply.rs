@@ -1,14 +1,18 @@
-//! 种子式探索重放外部回复（reply）的真 boot 集成验收。
+//! Seed-based exploration replays external replies: real-boot integration acceptance.
 //!
-//! Bug：`vitric playtest --seed-recording` 种子探索只重放种子录像的 **inputs**，不重放它的
-//! **replies**（LLM 等外部内容）。结果：靠 reply 才走到的结局连**基线**（未扰动的种子，本该原样
-//! 复现通关）都复现不出来——和 `Sim::replay` 不同口径。
+//! Bug: `vitric playtest --seed-recording` seed exploration only replays the seed recording's
+//! **inputs**, not its **replies** (external content such as LLM). Result: an ending reachable
+//! only via a reply cannot be reproduced even by the **baseline** (the un-perturbed seed,
+//! which should reproduce the clear verbatim) — a different channel from `Sim::replay`.
 //!
-//! 这里用 `reply-gated` 极简项目（仿 jump 结构、过 vitric check）验证修复：它**只有**收到一条
-//! `oracle-says {answer:"open"}` 外部回复才会 emit `game-won`，光按 input（`ask`）通不了关。
-//! 构造一条「到 win」的种子录像（含那条 reply）→ 种子探索 N 局 → 断言**基线那局（perturbation #0）
-//! 复现到 Win**（证明 replies 被按原 tick 注回去了，和 Sim::replay 同口径）。
-//! 反证：同一计划不传种子回复 → 基线 Timeout（reply 确实是通关的唯一来源）。
+//! Here we use the minimal `reply-gated` project (mimics jump structure, passes vitric check)
+//! to verify the fix: it emits `game-won` **only** when it receives an `oracle-says
+//! {answer:"open"}` external reply; pressing the input (`ask`) alone cannot clear. Construct a
+//! seed recording "to win" (containing that reply) → run N sessions of seed exploration →
+//! assert **the baseline session (perturbation #0) reproduces the Win** (proving replies were
+//! re-injected at their original ticks, same channel as Sim::replay).
+//! Counter-evidence: the same plan without passing the seed replies → baseline Timeout (the
+//! reply is indeed the sole source of the clear).
 
 use std::path::PathBuf;
 
@@ -21,8 +25,8 @@ fn reply_gated_dir() -> PathBuf {
         .join("../vitric-playtest/tests/fixtures/reply-gated")
 }
 
-/// 一条到 win 的种子录像：tick 1 按 `ask`（自身通不了关），tick 3 收一条
-/// `oracle-says {answer:"open"}` 外部回复——靠它才 emit game-won。
+/// A seed recording to win: tick 1 presses `ask` (alone cannot clear), tick 3 receives an
+/// `oracle-says {answer:"open"}` external reply — game-won is emitted thanks to it.
 fn seed_to_win() -> Recording {
     Recording {
         inputs: vec![InputRecord {
@@ -40,7 +44,8 @@ fn seed_to_win() -> Recording {
     }
 }
 
-/// 工厂：每线程自己 boot 一份运行时 + 复制只读 Engine（QuickJS 非 Send 同款约束）。
+/// Factory: each thread boots its own runtime + clones the read-only Engine (same QuickJS
+/// non-Send constraint).
 fn factory(
     dir: PathBuf,
 ) -> impl Fn() -> Result<(vitric_sim::Sim, Runtime, vitric_rules::Engine), String> + Sync {
@@ -55,11 +60,13 @@ fn factory(
 fn seed_exploration_replays_reply_so_baseline_reaches_win() {
     let dir = reply_gated_dir();
     let seed = seed_to_win();
-    // N 条扰动（含基线=第 0 条）。扰动只动 input，回复跟着种子走。
+    // N perturbations (including the baseline = #0). Perturbation only touches inputs; replies
+    // follow the seed.
     let plan = perturb_plan(&seed, 8, 12345);
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
 
-    // 带种子回复跑：基线（#0）该复现到 Win（回复被按原 tick 注回去了）
+    // Run with the seed replies: the baseline (#0) should reproduce the Win (replies were
+    // re-injected at their original ticks)
     let results = run_seed_swarm(
         factory(dir.clone()),
         &plan,
@@ -81,7 +88,8 @@ fn seed_exploration_replays_reply_so_baseline_reaches_win() {
         results[0].outcome()
     );
 
-    // 反证：同一计划不传种子回复 → 没有 oracle-says → game-won 永不 emit → 基线 Timeout
+    // Counter-evidence: the same plan without passing the seed replies → no oracle-says →
+    // game-won never emits → baseline Timeout
     let no_reply = run_seed_swarm(
         factory(dir.clone()),
         &plan,

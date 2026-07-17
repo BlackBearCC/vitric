@@ -1,15 +1,19 @@
-//! `vitric team` — 多 agent 班子的协同黑板。
+//! `vitric team` — the collaboration board for a multi-agent team.
 //!
-//! 立场：班子里每个角色（美术/关卡/玩法/音频/文案/QA）的交付物都是项目目录里的
-//! 文件，所以"谁交了什么、还卡在哪"可以从文件**机械地**读出来，不靠各角色自述。
-//! 本命令只读不判：报告每个角色交付物的在场/健康度 + 合同（GDD/schema）+ 门禁声明
-//! 状态，结尾给"卡点提示"（blocking）。它是状态工具不是门——**永远退出 0**；
-//! 真正的交付裁决归 `vitric gate`（这里只报门禁声明了没有、录像文件在不在，
-//! 不重放录像——重复裁决会让两边打架）。
+//! Stance: each role in the team (art/level/gameplay/audio/narrative/QA) delivers files
+//! in the project directory, so "who delivered what, what's still stuck" can be read
+//! **mechanically** from files, not from each role's self-report. This command only reads
+//! and does not judge: it reports each role's deliverables' presence/health + contract
+//! (GDD/schema) + gate declaration status, ending with "blocking" hints. It's a status
+//! tool, not a gate — **always exits 0**; the actual delivery verdict belongs to
+//! `vitric gate` (here we only report whether the gate declaration exists and whether the
+//! recording files are present — we don't replay recordings, because double-judging would
+//! cause the two sides to disagree).
 //!
-//! 约束：黑板必须在项目残缺时也能用（立项第一天 vitric.json 都没有也要能报状态），
-//! 所以一切计数从文件直接派生、解析失败降级成显式的 *_error 字段进报告，
-//! 不会因为某个角色交了坏文件就整个命令报错。
+//! Constraint: the board must work even when the project is incomplete (day one, before
+//! vitric.json even exists, it must still report status), so all counts derive directly
+//! from files; parse failures degrade into explicit *_error fields in the report — a bad
+//! file from one role never makes the whole command error out.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -21,8 +25,8 @@ use vitric_data::{Project, Schema};
 
 use crate::runtime::Runtime;
 
-/// 出黑板报告。Err 只用于"项目目录本身不存在"——黑板可以面对残缺项目，
-/// 但不能面对不存在的目录。
+/// Produce the board report. Err is only used for "project directory itself doesn't exist" —
+/// the board can face an incomplete project, but not a nonexistent directory.
 pub fn run(dir: &Path) -> Result<Value, String> {
     if !dir.is_dir() {
         return Err(format!(
@@ -33,7 +37,7 @@ pub fn run(dir: &Path) -> Result<Value, String> {
 
     let mut blocking: Vec<String> = Vec::new();
 
-    // ---- 合同：GDD + 清单 + schema ----
+    // ---- Contract: GDD + manifest + schema ----
     let gdd = dir.join("GDD.md").is_file();
     if !gdd {
         blocking.push("缺 GDD.md——全队没有合同，先由导演立项（骨架在引擎仓库 team/templates/GDD-template.md）".to_string());
@@ -47,7 +51,7 @@ pub fn run(dir: &Path) -> Result<Value, String> {
         blocking.push(format!("vitric.json 不可用（{e}）——项目跑不起来，归导演"));
     }
 
-    // schema 路径以清单为准（清单不可用时按惯例 schema.json）
+    // Schema path follows the manifest (when manifest is unusable, fall back to schema.json by convention)
     let schema_rel = manifest_doc
         .as_ref()
         .and_then(|m| m.get("schema"))
@@ -73,7 +77,7 @@ pub fn run(dir: &Path) -> Result<Value, String> {
         contract["schema_error"] = json!(e);
     }
 
-    // ---- 美术：素材数 / 色板 / 法线 ----
+    // ---- Art: asset count / palette / normals ----
     let asset_files = files_under(&dir.join("assets"));
     let normals = asset_files
         .iter()
@@ -95,7 +99,7 @@ pub fn run(dir: &Path) -> Result<Value, String> {
         blocking.push("美术缺 palette.json，其他角色的视觉基调悬空（vitric assets <项目目录> --colors N 生成）".to_string());
     }
 
-    // ---- 关卡 + 文案：场景实体数 / Text 实体数（两个角色共享 scenes/，黑板分开报）----
+    // ---- Level + Narrative: scene entity count / Text entity count (two roles share scenes/, the board reports separately) ----
     let mut scene_files = 0usize;
     let mut entities = 0usize;
     let mut text_entities = 0usize;
@@ -122,7 +126,7 @@ pub fn run(dir: &Path) -> Result<Value, String> {
         blocking.push("关卡为空（scenes/ 里没有实体）——没有可玩骨架，灰盒先立起来".to_string());
     }
 
-    // ---- 玩法：规则条数（文件直读）+ 脚本 systems/fns（复用 check 的装配内核）----
+    // ---- Gameplay: rule count (direct file read) + script systems/fns (reuse check's assembly kernel) ----
     let mut rule_count = 0usize;
     let mut rule_errors: Vec<String> = Vec::new();
     let mut rule_docs: Vec<Value> = Vec::new();
@@ -139,14 +143,17 @@ pub fn run(dir: &Path) -> Result<Value, String> {
             Err(e) => rule_errors.push(format!("{rel}: {e}")),
         }
     }
-    // systems/fns 必须真的求值脚本才知道（vitric.system 注册发生在执行期），
-    // 所以这里复用 check 同款装配：Project::load + Runtime::build。
-    // 装配失败不挡黑板——记成 load_error，计数置 null（未知，不是 0）。
+    // systems/fns can only be known by actually evaluating the script (vitric.system
+    // registration happens at execution time), so reuse the same assembly as check:
+    // Project::load + Runtime::build.
+    // Assembly failure doesn't block the board — recorded as load_error, counts set to
+    // null (unknown, not 0).
     let (systems, fns, load_error) = match Project::load(dir)
         .map_err(|r| r.to_string())
         .and_then(|p| Runtime::build(&p))
     {
-        // fns 只数作者写的玩法函数，排除 `__` 开头的引擎内置（如 ctx.ask 的回复分发器 __onReply）
+        // fns only counts author-written gameplay functions, excluding `__`-prefixed
+        // engine built-ins (like the reply dispatcher __onReply for ctx.ask)
         Ok(rt) => (
             json!(rt.scripts.systems.len()),
             json!(rt.scripts.fns.iter().filter(|f| !f.starts_with("__")).count()),
@@ -165,7 +172,7 @@ pub fn run(dir: &Path) -> Result<Value, String> {
         gameplay["load_error"] = json!(e);
     }
 
-    // ---- 音频：在场文件 vs 规则字面引用 ----
+    // ---- Audio: present files vs literal references in rules ----
     let sounds_dir = dir.join("sounds");
     let sounds = files_under(&sounds_dir).len();
     let mut referenced: BTreeSet<String> = BTreeSet::new();
@@ -182,7 +189,7 @@ pub fn run(dir: &Path) -> Result<Value, String> {
         ));
     }
 
-    // ---- QA：断言集 + 录像库（qa/ 里除 asserts.json 外的 .json 都按录像计）----
+    // ---- QA: assertion set + recording library (every .json in qa/ except asserts.json counts as a recording) ----
     let asserts = dir.join("qa/asserts.json").is_file();
     let recordings = files_under(&dir.join("qa"))
         .iter()
@@ -196,7 +203,7 @@ pub fn run(dir: &Path) -> Result<Value, String> {
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
             .count();
 
-    // ---- 门禁声明（只报声明与录像文件在场——重放裁决是 vitric gate 的事）----
+    // ---- Gate declaration (only reports declaration presence and recording file presence — replay verdict is vitric gate's job) ----
     let gates_doc = manifest_doc.as_ref().and_then(|m| m.get("gates")).cloned();
     let gates = match gates_doc {
         Some(g) => {
@@ -259,7 +266,8 @@ pub fn run(dir: &Path) -> Result<Value, String> {
     }))
 }
 
-/// 递归列目录下全部文件（目录不存在 = 空，不是错——立项早期大半目录都还没有）。
+/// Recursively list all files under a directory (nonexistent directory = empty, not an error —
+/// most directories don't exist yet early in a project).
 fn files_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(dir) else { return out };
@@ -283,8 +291,8 @@ fn read_json(path: &Path) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("JSON 解析失败: {e}"))
 }
 
-/// 收集规则文档里 play-sound / play-music 的字面音效引用（运行时引用
-/// self./other./event./@ 不算——和 check 的扫描豁免同一条规则）。
+/// Collect literal sound references to play-sound / play-music in rule documents (runtime
+/// references self./other./event./@ don't count — same scan exemption rule as check).
 fn collect_sound_refs(doc: &Value, out: &mut BTreeSet<String>) {
     match doc {
         Value::Object(map) => {

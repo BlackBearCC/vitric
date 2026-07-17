@@ -1,12 +1,12 @@
-//! vitric-sim — 确定性模拟核心：固定步长、种子随机、输入录制与重放。
+//! vitric-sim — deterministic simulation core: fixed timestep, seeded random, input recording and replay.
 //!
-//! 确定性是 Vitric 最硬的差异化：**同种子 + 同输入序列 = 逐帧相同的世界**。
-//! 任何 bug 都能拿录像精确重放到出错前一帧。为此：
-//! - 时间步长固定（1/60 秒），不吃墙钟；
-//! - 随机数自实现 PCG32，状态可快照；
-//! - 一切迭代顺序确定（依赖 vitric-ecs 的有序存储）；
-//! - 录像存输入 + 外部回复（LLM 等异步内容，见 [`Sim::inject_reply`]）
-//!   + 周期性状态哈希，重放时逐点校验，跑偏立刻定位。
+//! Determinism is Vitric's hardest differentiator: **same seed + same input sequence = same world frame by frame**.
+//! Any bug can be reproduced precisely via a recording to the frame before the error. To achieve this:
+//! - The timestep is fixed (1/60 second); wall-clock time never enters the simulation;
+//! - Random numbers are implemented in-house as PCG32, and the state is snapshotable;
+//! - All iteration orders are deterministic (relies on vitric-ecs's ordered storage);
+//! - Recordings store inputs + external replies (async content such as LLM, see [`Sim::inject_reply`])
+//!   + periodic state hashes, verified point by point during replay; divergence is located immediately.
 
 mod pcg;
 mod recording;

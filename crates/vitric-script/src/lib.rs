@@ -1,12 +1,12 @@
-//! vitric-script — 嵌入式 JS 脚本层（QuickJS）。
+//! vitric-script — an embedded JS scripting layer (QuickJS).
 //!
-//! 规则写不动的 20% 复杂逻辑落到这里，但**戴着安全带**：
-//! - 系统注册时声明 `query`（读哪些组件）和 `writes`（写哪些组件），
-//!   越权写入直接报错，引擎因此永远知道每段逻辑碰了什么；
-//! - `Math.random` / `Date.now` 被禁用并指路 `ctx.random()` / `ctx.tick`，
-//!   随机数与 Rust 侧共用同一条 PCG32 流（JS 侧 BigInt 实现同一算法），
-//!   脚本不破坏确定性回放；
-//! - 数据进出全是 JSON：脚本看到的实体和场景文件、控制面是同一种语言。
+//! The 20% of complex logic that rules can't express lands here, but **with a seatbelt on**:
+//! - Systems declare `query` (which components they read) and `writes` (which they write) at registration;
+//!   out-of-scope writes error immediately, so the engine always knows what each piece of logic touches;
+//! - `Math.random` / `Date.now` are disabled with a pointer to `ctx.random()` / `ctx.tick`;
+//!   the random source shares the same PCG32 stream as the Rust side (JS reimplements the same algorithm with BigInt),
+//!   so scripts don't break deterministic replay;
+//! - All data crossing the boundary is JSON: the entities scripts see speak the same language as scene files and the control plane.
 
 use std::fmt;
 
@@ -21,12 +21,12 @@ use vitric_sim::Pcg32;
 const PRELUDE: &str = include_str!("prelude.js");
 
 thread_local! {
-    /// 当前 call_js 期间可读的 World 裸指针。run_one_system/call_fn 调 JS 前设、调完清,
-    /// 窗口外恒为 null。QuickJS 单线程同步执行,__getFieldRaw 只在这窗口内读它。
+    /// Bare pointer to the World readable during the current call_js. Set before run_one_system/call_fn calls into JS, cleared after;
+    /// null outside that window. QuickJS is single-threaded and synchronous; __getFieldRaw only reads it within the window.
     static WORLD_PTR: std::cell::Cell<*const World> = std::cell::Cell::new(std::ptr::null());
 }
 
-/// ctx.getField 的解析:句柄(可带 @ 前缀)或实体名 → 该字段值;实体/字段缺失返回 None。
+/// Resolution for ctx.getField: handle (may carry an @ prefix) or entity name → that field's value; returns None if entity/field is missing.
 fn resolve_field(world: &World, reference: &str, path: &str) -> Option<Value> {
     let stripped = reference.strip_prefix('@').unwrap_or(reference);
     let id = match stripped.parse::<EntityId>() {
@@ -36,32 +36,32 @@ fn resolve_field(world: &World, reference: &str, path: &str) -> Option<Value> {
     world.get_field(id, path).ok().cloned()
 }
 
-/// 一个已注册系统的声明。
+/// Declaration of a registered system.
 #[derive(Debug, Clone)]
 pub struct SystemDecl {
     pub name: String,
-    /// 实体筛选 + 可读组件集合。
+    /// Entity filter + the set of readable components.
     pub query: Vec<String>,
-    /// 可写组件集合（⊆ query）。
+    /// Set of writable components (⊆ query).
     pub writes: Vec<String>,
 }
 
-/// 脚本执行产出。
+/// Script execution output.
 #[derive(Debug, Default)]
 pub struct ScriptOutput {
-    /// 脚本 emit 的事件，由运行时层送回规则引擎。
+    /// Events emitted by the script; the runtime layer feeds them back to the rule engine.
     pub events: Vec<Event>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScriptError {
-    /// 脚本加载/求值失败（语法错误、注册参数不对……）。
+    /// Script loading/evaluation failed (syntax error, bad registration args, ...).
     Load { file: String, message: String },
-    /// 系统/函数运行中抛异常。
+    /// Exception thrown while a system/function was running.
     Runtime { location: String, message: String },
-    /// 改了未声明 writes 的组件。
+    /// Wrote a component not declared in writes.
     UndeclaredWrite { system: String, entity: String, component: String },
-    /// 产出的操作（spawn/despawn/写回）不合法。
+    /// A produced operation (spawn/despawn/write-back) is invalid.
     Op { location: String, message: String },
 }
 
@@ -89,7 +89,7 @@ impl fmt::Display for ScriptError {
 
 impl std::error::Error for ScriptError {}
 
-/// 脚本引擎。持有一个 QuickJS 上下文；热重载 = 换源码重建上下文。
+/// Script engine. Holds one QuickJS context; hot reload = rebuild the context with new source.
 pub struct ScriptEngine {
     _runtime: Runtime,
     context: Context,
@@ -122,8 +122,8 @@ impl ScriptEngine {
         Ok(engine)
     }
 
-    /// 注册给脚本用的原生函数。目前只有 __getFieldRaw(ref, path)→JSON 串,供 prelude 的
-    /// ctx.getField 调:直接查 live World 的单个字段,缺失返回字面量 "undefined"。
+    /// Register native functions for the script. Currently only __getFieldRaw(ref, path) → JSON string, called by prelude's
+    /// ctx.getField: looks up a single field on the live World directly; missing returns the literal "undefined".
     fn register_natives(&self) -> Result<(), ScriptError> {
         self.context.with(|ctx| {
             let make_err = |e: rquickjs::Error| ScriptError::Load {
@@ -136,8 +136,8 @@ impl ScriptEngine {
                     if ptr.is_null() {
                         return "undefined".to_string();
                     }
-                    // 安全性:指针仅在 run_one_system/call_fn 调 JS 的同步窗口内非空,
-                    // 那期间 world 的 &mut 不被使用,QuickJS 单线程,无并发与读写别名。
+                    // Safety: the pointer is only non-null within the synchronous window when run_one_system/call_fn calls JS,
+                    // during which world's &mut is not used; QuickJS is single-threaded, so there is no concurrency or read/write aliasing.
                     let world: &World = unsafe { &*ptr };
                     match resolve_field(world, &reference, &path) {
                         Some(v) => {
@@ -152,14 +152,14 @@ impl ScriptEngine {
         })
     }
 
-    /// 加载一个脚本文件（按调用顺序求值，系统按注册顺序执行）。
+    /// Load a script file (evaluated in call order; systems execute in registration order).
     pub fn load(&mut self, file: &str, source: &str) -> Result<(), ScriptError> {
         self.eval_file(file, source)?;
         self.sources.push((file.to_string(), source.to_string()));
         self.refresh_decls()
     }
 
-    /// 热重载：用新源码整体重建（注册表清零重来，世界状态不动）。
+    /// Hot reload: rebuild wholesale with new source (registry reset from scratch; world state untouched).
     pub fn reload(&mut self, sources: Vec<(String, String)>) -> Result<(), ScriptError> {
         let mut fresh = ScriptEngine::new(self.schema.clone())?;
         for (file, src) in &sources {
@@ -169,7 +169,7 @@ impl ScriptEngine {
         Ok(())
     }
 
-    /// 跑全部系统（注册顺序）。
+    /// Run all systems (in registration order).
     pub fn run_systems(
         &mut self,
         world: &mut World,
@@ -195,7 +195,7 @@ impl ScriptEngine {
         let location = format!("系统 {:?}", decl.name);
         let query: Vec<&str> = decl.query.iter().map(|s| s.as_str()).collect();
 
-        // 进：实体快照（只带 query 声明的组件）
+        // In: entity snapshot (carrying only the components declared in query)
         let ids = world.query(&query);
         let mut entities = Vec::with_capacity(ids.len());
         for &id in &ids {
@@ -216,7 +216,7 @@ impl ScriptEngine {
             "rng": rng_to_json(rng),
         });
 
-        // 给本次 JS 调用开 getField 读 live World 的窗口,调完立刻关。
+        // Open the getField read-live-World window for this JS call, close it immediately after.
         WORLD_PTR.with(|p| p.set(world as *const World));
         let call = self.call_js("__runSystem", (idx as i32, payload.to_string()), &location);
         WORLD_PTR.with(|p| p.set(std::ptr::null()));
@@ -227,10 +227,10 @@ impl ScriptEngine {
         })?;
         revive_f64(&mut result, &location)?;
 
-        // 随机数状态写回（脚本抽过几次就推进几步）
+        // Write the RNG state back (it advances by however many draws the script took)
         *rng = rng_from_json(result.get("rng"), &location)?;
 
-        // 出：写回实体（强制 writes 声明）
+        // Out: write entities back (writes declaration enforced)
         let returned = result
             .get("entities")
             .and_then(|v| v.as_array())
@@ -249,15 +249,15 @@ impl ScriptEngine {
                 ),
             });
         }
-        // 两遍走：先全量校验攒齐变更，确认整批合法再落地。
-        // 第 N 个实体非法时世界保持原样，不留半改状态（commit-on-success）。
+        // Two passes: first validate everything and collect changes, then commit only if the whole batch is legal.
+        // When the Nth entity is illegal the world stays untouched, no half-applied state (commit-on-success).
         let mut pending: Vec<(vitric_ecs::EntityId, String, Value)> = Vec::new();
         for (i, (&id, ret)) in ids.iter().zip(returned).enumerate() {
             let ret_obj = ret.as_object().ok_or_else(|| ScriptError::Op {
                 location: location.clone(),
                 message: format!("entities[{i}] 被改成了非对象"),
             })?;
-            // 不许夹带 query 之外的组件
+            // no components outside query allowed
             for key in ret_obj.keys() {
                 if key != "id" && !decl.query.contains(key) {
                     return Err(ScriptError::UndeclaredWrite {
@@ -270,8 +270,8 @@ impl ScriptEngine {
             for comp in &decl.query {
                 let before = world.get_component(id, comp).expect("query 已筛选").clone();
                 let after = ret_obj.get(comp).cloned().unwrap_or(Value::Null);
-                // JSON 经 JS 往返会丢小数点形态（0.0 → 0），必须按数值语义比，
-                // 否则只读系统会被误判成越权写
+                // JSON round-tripped through JS loses decimal-point shape (0.0 → 0); comparison must be by numeric semantics,
+                // otherwise a read-only system would be misjudged as an out-of-scope write
                 if json_semantic_eq(&before, &after) {
                     continue;
                 }
@@ -282,7 +282,7 @@ impl ScriptEngine {
                         component: comp.clone(),
                     });
                 }
-                // 写回也过 schema：脚本和场景文件遵守同一套法律
+                // write-back also goes through schema: scripts and scene files follow the same law
                 let normalized = self.normalize(comp, &after, &location)?;
                 pending.push((id, comp.clone(), normalized));
             }
@@ -296,11 +296,11 @@ impl ScriptEngine {
                 })?;
         }
 
-        // 出：操作流
+        // Out: operation stream
         self.apply_ops(result.get("ops"), world, out, &location)
     }
 
-    /// 执行规则 `call` 动作指向的脚本函数。
+    /// Execute the script function targeted by a rule's `call` action.
     pub fn call_fn(
         &mut self,
         function: &str,
@@ -333,7 +333,7 @@ impl ScriptEngine {
         Ok(out)
     }
 
-    // ---- 内部 ----
+    // ---- internals ----
 
     fn apply_ops(
         &self,
@@ -381,8 +381,8 @@ impl ScriptEngine {
                     let r = op.get("ref").and_then(|v| v.as_str()).expect("prelude 已校验");
                     let path = op.get("path").and_then(|v| v.as_str()).expect("prelude 已校验");
                     let value = op.get("value").cloned().unwrap_or(Value::Null);
-                    // ref 是句柄文本(如 "e3v0")或实体名字——句柄优先,解析不了再当名字查。
-                    // 名字容许带 @ 前缀(规则里 "@名字" 是惯例),这里统一剥掉。
+                    // ref is handle text (e.g. "e3v0") or entity name — handle first, fall back to name lookup on parse failure.
+                    // Names may carry an @ prefix (in rules "@name" is the convention); strip it uniformly here.
                     let stripped = r.strip_prefix('@').unwrap_or(r);
                     let id: EntityId = match stripped.parse::<EntityId>() {
                         Ok(id) => id,
@@ -462,8 +462,8 @@ impl ScriptEngine {
     }
 }
 
-/// 还原 prelude 的位串浮点：`{"$f64":"<16hex>"}` → f64。
-/// QuickJS 的 dtoa 不是最短往返，非整数浮点跨边界只能走 IEEE754 位串。
+/// Restore prelude's bit-string floats: `{"$f64":"<16hex>"}` → f64.
+/// QuickJS's dtoa is not shortest-round-trip, so non-integer floats crossing the boundary must go through IEEE754 bit strings.
 fn revive_f64(v: &mut Value, location: &str) -> Result<(), ScriptError> {
     match v {
         Value::Object(map) => {
@@ -497,8 +497,8 @@ fn revive_f64(v: &mut Value, location: &str) -> Result<(), ScriptError> {
     }
 }
 
-/// 数值按语义比（5.0 == 5），其余结构递归。JS 的 JSON.stringify 不保留
-/// 整值浮点的小数点，往返后表示必然漂移，按表示比会满屏假阳性。
+/// Compare numbers by semantics (5.0 == 5); recurse through other structures. JS's JSON.stringify doesn't preserve
+/// the decimal point on integer-valued floats, so the representation always drifts on round-trip; comparing by representation would yield a screenful of false positives.
 fn json_semantic_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => {
@@ -530,7 +530,7 @@ fn to_string_vec(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Pcg32 → {"state": "u64串", "inc": "u64串"}（JSON number 装不下 u64，走字符串）。
+/// Pcg32 → {"state": "u64-string", "inc": "u64-string"} (JSON number can't hold u64, go through strings).
 fn rng_to_json(rng: &Pcg32) -> Value {
     let v = serde_json::to_value(rng).expect("Pcg32 可序列化");
     json!({
@@ -601,7 +601,7 @@ mod tests {
         w.set_component(e, "Velocity", json!({"x": 10.0, "y": 0.0})).unwrap();
         let mut rng = Pcg32::new(1);
         eng.run_systems(&mut w, &mut rng, 0).unwrap();
-        // JS 的 5.0 序列化成 5（JSON 不区分），按数值比较
+        // JS's 5.0 serializes as 5 (JSON doesn't distinguish); compare by numeric value
         assert_eq!(w.get_field(e, "Velocity.x").unwrap().as_f64(), Some(5.0));
     }
 
@@ -688,14 +688,14 @@ mod tests {
             }
             other => panic!("错误类型不对: {other}"),
         }
-        // 世界没被污染
+        // the world was not poisoned
         assert_eq!(w.get_field(e, "Position.x").unwrap(), &json!(0.0));
     }
 
     #[test]
     fn readonly_system_with_whole_valued_floats_is_not_a_write() {
-        // 回归：世界里存 0.0/5.0，JS 往返变成 0/5，表示不同但语义相同。
-        // 一个什么都不改的系统绝不能被误判成越权写（曾导致正常项目随机停机）。
+        // Regression: world holds 0.0/5.0, JS round-trip becomes 0/5 — different representation, same semantics.
+        // A system that changes nothing must never be misjudged as an out-of-scope write (this once caused random stalls in a normal project).
         let mut eng = engine_with(
             r#"
             vitric.system("observer", {query: ["Position", "Velocity"], writes: ["Velocity"]}, () => {});
@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn failed_validation_leaves_world_untouched_even_with_earlier_valid_writes() {
-        // 写回必须整批成功才落地：第二个实体越权时，第一个实体的合法写也不能漏进世界
+        // write-back must commit only when the whole batch succeeds: when the second entity is out-of-scope, the first entity's legal write must not leak into the world either
         let mut eng = engine_with(
             r#"
             vitric.system("mixed", {query: ["Position", "Velocity"], writes: ["Velocity"]}, (entities) => {
@@ -736,14 +736,14 @@ mod tests {
 
     #[test]
     fn js_boundary_preserves_f64_precision_exactly() {
-        // 回归：QuickJS 的 JSON.stringify 不是最短往返（-7.3666666666666645 截成
-        // -7.366666666666664，差 1 ULP）。prelude 的 __numStr 必须精确还原，
-        // 否则只读系统被误判越权写、读写系统静默丢精度。
+        // Regression: QuickJS's JSON.stringify is not shortest-round-trip (-7.3666666666666645 gets truncated to
+        // -7.366666666666664, off by 1 ULP). prelude's __numStr must restore it exactly,
+        // otherwise read-only systems get misjudged as out-of-scope writes and read-write systems silently lose precision.
         let tricky = -7.366_666_666_666_664_5_f64;
         let mut eng = engine_with(
             r#"
             vitric.system("mover", {query: ["Position", "Velocity"], writes: ["Velocity"]}, (entities) => {
-                for (const e of entities) { e.Velocity.x = e.Position.y; } // 刁钻值原样搬运
+                for (const e of entities) { e.Velocity.x = e.Position.y; } // copy the tricky value verbatim
             });
             "#,
         );
@@ -752,7 +752,7 @@ mod tests {
         w.set_component(e, "Position", json!({"x": 0.0, "y": tricky})).unwrap();
         w.set_component(e, "Velocity", json!({"x": 0.0, "y": tricky})).unwrap();
         let mut rng = Pcg32::new(1);
-        eng.run_systems(&mut w, &mut rng, 0).unwrap(); // Velocity.y 只读：不得误判越权
+        eng.run_systems(&mut w, &mut rng, 0).unwrap(); // Velocity.y is read-only: must not be misjudged as out-of-scope
         assert_eq!(w.get_field(e, "Velocity.x").unwrap().as_f64(), Some(tricky), "精度丢了");
     }
 
@@ -787,7 +787,7 @@ mod tests {
 
     #[test]
     fn new_date_is_poisoned_but_explicit_date_is_allowed() {
-        // 回归：曾只毒化 Date.now，new Date().getTime() 照样泄漏墙钟进世界状态
+        // Regression: only Date.now was once poisoned, but new Date().getTime() still leaked wall-clock into world state
         let mut eng = engine_with(
             r#"
             vitric.system("clock", {query: ["Position"], writes: ["Position"]}, (entities) => {
@@ -802,7 +802,7 @@ mod tests {
         let err = eng.run_systems(&mut w, &mut rng, 0).unwrap_err();
         assert!(err.to_string().contains("ctx.tick"), "要指路正确用法: {err}");
 
-        // 显式传参是纯计算，必须放行
+        // Explicit argument passing is pure computation; it must be allowed through
         let mut eng2 = ScriptEngine::new(schema()).unwrap();
         eng2.load(
             "ok.js",
@@ -817,7 +817,7 @@ mod tests {
 
     #[test]
     fn ctx_random_continues_the_rust_stream() {
-        // JS 抽两个 f64 后，Rust 侧继续抽，必须和纯 Rust 连续抽四个完全一致
+        // After JS draws two f64s, the Rust side keeps drawing; the four consecutive draws must exactly match four pure-Rust draws
         let mut pure = Pcg32::new(42);
         let expected: Vec<f64> = (0..4).map(|_| pure.next_f64()).collect();
 
@@ -870,8 +870,8 @@ mod tests {
 
     #[test]
     fn system_despawn_of_named_entity_fully_removes_it() {
-        // 复现 frontier 记的"疑似引擎 bug":系统里 ctx.despawn(命名实体) 到底是
-        // 彻底删除(名字+实体都没),还是只注销名字、实体留在查询里。
+        // Reproduce the "suspected engine bug" logged in frontier: when a system calls ctx.despawn(named entity),
+        // does it fully remove (both name and entity gone) or just unregister the name and leave the entity in queries?
         let mut eng = engine_with(
             r#"
             vitric.system("reaper", {query: ["Coin"], writes: []}, (entities, ctx) => {
@@ -893,12 +893,12 @@ mod tests {
 
     #[test]
     fn ctx_set_field_writes_by_name_and_handle() {
-        // "点中一个东西就对它做事"的底座:ctx.setField 按名字或句柄写任意实体的一个字段。
+        // The foundation of "do something to whatever you point at": ctx.setField writes one field of any entity, by name or handle.
         let mut eng = engine_with(
             r#"
             vitric.system("poke", {query: ["Coin"], writes: []}, (entities, ctx) => {
-                ctx.setField("target", "Velocity.x", 7);                    // 按名字写别的实体
-                for (const e of entities) ctx.setField(e.id, "Coin.value", 9); // 按句柄写被查实体
+                ctx.setField("target", "Velocity.x", 7);                    // write another entity by name
+                for (const e of entities) ctx.setField(e.id, "Coin.value", 9); // write a queried entity by handle
             });
             "#,
         );
@@ -942,7 +942,7 @@ mod tests {
             });
             "#,
         );
-        // __onReply 是 prelude 内置的 ctx.ask 回复分发器，永远在册（排在用户函数前）
+        // __onReply is prelude's built-in ctx.ask reply dispatcher; always registered (listed before user functions)
         assert_eq!(eng.fns, vec!["__onReply", "explode"]);
         let mut w = World::new();
         let mut rng = Pcg32::new(1);
@@ -951,7 +951,7 @@ mod tests {
             .unwrap();
         assert_eq!(w.query(&["Coin"]).len(), 3);
         assert_eq!(out.events[0].data["at"], json!("here"));
-        // 未注册的函数报错并列出已注册的
+        // unknown function errors and lists the registered ones
         let err = eng.call_fn("nope", &json!({}), None, &mut w, &mut rng, 5).unwrap_err();
         assert!(err.to_string().contains("explode"), "{err}");
     }
@@ -980,7 +980,7 @@ mod tests {
         .unwrap();
         eng.run_systems(&mut w, &mut rng, 1).unwrap();
         assert_eq!(w.get_field(c, "Coin.value").unwrap(), &json!(77));
-        // 坏脚本重载失败 → 报错，旧行为不能半死不活
+        // A bad script failing to reload → error; the old behavior must not be left half-dead
         let err = eng.reload(vec![("bad.js".into(), "syntax error (".into())]).unwrap_err();
         assert!(matches!(err, ScriptError::Load { .. }), "{err}");
     }

@@ -50,7 +50,7 @@ def goto_companion(max_iter=20):
         if not best or bd <= 2.5 * 2.5:
             return
         dx, dy = best["x"] - px, best["y"] - py
-        # 本作坐标:"up" 键 = +y(实测玩家按 up 后 y 增大)。
+        # In this game's coordinate system: the "up" key = +y (measured: after pressing up, player y increases).
         d = ("right" if dx > 0 else "left") if abs(dx) >= abs(dy) else ("up" if dy > 0 else "down")
         inp(d); step(20); inp(d, "released"); step(2)
 
@@ -113,7 +113,7 @@ def wait_quest(stage_at_least, max_cycles=20, advance=21600):
     for i in range(max_cycles):
         s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
         if s >= stage_at_least: return s
-        # 推进一段时间 + 重种重收
+        # Advance time a bit + replant and reharvest
         big_step(advance // 2)
         for (px, py) in PLOTS:
             harvest(px, py)
@@ -122,7 +122,7 @@ def wait_quest(stage_at_least, max_cycles=20, advance=21600):
     return wget("@quest")["result"]["components"]["QuestLog"]["step"]
 
 PLOTS = [(9, 6), (9, 7), (9, 8), (9, 9)]
-PLOT_CYCLE = 1500  # 一茬成熟 ~12 sim sec,留余量
+PLOT_CYCLE = 1500  # one crop matures in ~12 sim sec, leave margin
 
 print("=== frontier 多日通关录像 ===")
 proc = subprocess.Popen(
@@ -137,7 +137,7 @@ try:
     rpc("sim/pause")
     step(3)
 
-    # === Day 1: 修信标 + 建 4 块田 + 种麦 ===
+    # === Day 1: fix beacon + build 4 plots + plant wheat ===
     print("\n--- Day 1: 修信标 + 建田 + 收第一茬 ---")
     build_beacon(9, 5)
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
@@ -155,7 +155,7 @@ try:
     print(f"  After first harvest: wheat={inv['wheat']} seed={inv['seed']} step={s}")
     check("step==3 (首收)", s == 3, f"actual={s}")
 
-    # === 走到 Lio 邀请 ===
+    # === Walk to Lio and invite ===
     print("\n--- Day 1 末尾: 邀请 Lio ---")
     inp("right"); step(250)
     inp("right", "released"); step(5)
@@ -163,12 +163,12 @@ try:
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
     check("step==4 (Lio 入住)", s == 4, f"actual={s}")
 
-    # 先走回家:Lio 入住后住在聚落(home 5~9),玩家此刻还在野外(x~23),在野外 gift/talk 打不到他。
-    # 回到聚落两人同处家园,互动才落得到。
+    # Walk home first: after Lio joins he lives in the colony (home 5~9), but the player is still out in the wild (x~23); gift/talk can't reach him in the wild.
+    # Back at the colony both are at the home base, so interactions can land.
     inp("left"); step(250)
     inp("left", "released"); step(5)
-    # iter2:在家把 Lio 养到 happy(affinity>=50)。送偏好(wheat/seed)+12×2 + 对话 +3×3 = +33(25→58)。
-    # 每次互动后 step 拉开:+affinity 走 setField 延迟落地,挨太近会读到旧值互相覆盖、累加不上。
+    # iter2: at home, raise Lio to happy (affinity>=50). Gift preferred (wheat/seed) +12×2 + talk +3×3 = +33 (25→58).
+    # After each interaction, step forward: +affinity goes through setField with delayed landing; too close in time reads stale values and they overwrite each other, so the bonus doesn't accumulate.
     print("    iter2 关系:在家 gift×2 + talk×3 把 Lio 养到 happy(>=50)")
     goto_companion()
     for _ in range(2):
@@ -178,19 +178,19 @@ try:
     step(10)
     dump_companions("Day1-after-care")
 
-    # === 等到 Day 3 (立足) ===
+    # === Wait until Day 3 (foothold) ===
     print("\n--- 等到 Day 3 (立足) ---")
     for cycle in range(8):
         s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
         if s >= 5: break
-        # 重种重收
+        # replant and reharvest
         big_step(PLOT_CYCLE)
         for (px, py) in PLOTS:
             harvest(px, py)
         for (px, py) in PLOTS:
             plant(px, py)
         c = wget("@colony")["result"]["components"]["Colony"]
-        # 缺结构就补墙
+        # if short on structures, build walls
         if c["struct_count"] < 3:
             for (wx, wy) in [(10, 5), (10, 6), (10, 7)]:
                 build_wall(wx, wy)
@@ -200,7 +200,7 @@ try:
     print(f"  day={c['day']} struct={c['struct_count']} wheat={inv['wheat']} step={s}")
     check("step>=5 (立足)", s >= 5, f"actual={s}")
 
-    # === 等到 Day 4 (温饱) ===
+    # === Wait until Day 4 (food & shelter) ===
     print("\n--- 等到 Day 4 (温饱) ---")
     for cycle in range(8):
         s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
@@ -214,7 +214,7 @@ try:
     print(f"  wheat={inv['wheat']} step={s}")
     check("step>=6 (温饱)", s >= 6, f"actual={s}")
 
-    # === 等到 Day 5 (成群) ===
+    # === Wait until Day 5 (a crowd) ===
     print("\n--- 等到 Day 5 (成群) ---")
     invites_done = 0
     for cycle in range(10):
@@ -225,7 +225,7 @@ try:
             harvest(px, py)
         for (px, py) in PLOTS:
             plant(px, py)
-        # 邀请现有旅人
+        # invite existing drifters
         ents = rpc("world/entities", {"components": ["Drifter"]})["result"]
         target_e = None
         for e in ents:
@@ -233,22 +233,22 @@ try:
                 target_e = e; break
         if target_e:
             pos = target_e["components"]["Position"]
-            goto_xy(pos["x"], pos["y"], near=2.0)   # 读旅人真实位置导航过去(不再硬走固定路径)
+            goto_xy(pos["x"], pos["y"], near=2.0)   # read drifter's real position and navigate there (no longer hard-coding a fixed path)
             invite()
             invites_done += 1
-            goto_xy(8, 7, near=2.5)                  # 回聚落中心,便于下一轮种收
+            goto_xy(8, 7, near=2.5)                  # return to colony center for the next plant/harvest round
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
     c = wget("@colony")["result"]["components"]["Colony"]
     print(f"  pop={c['pop']} step={s}")
     dump_companions("Day5-成群-check")
     check("step>=7 (成群)", s >= 7, f"actual={s}")
 
-    # === Day 6: 立丰碑 → game-won ===
+    # === Day 6: raise monument → game-won ===
     print("\n--- Day 6: 立丰碑 → game-won ---")
     inv = wget("@player")["result"]["components"]["Inventory"]
     print(f"  Resources: ore={inv['ore']} plank={inv['plank']} lamp={inv['lamp']} wheat={inv['wheat']}")
 
-    # 等下一茬确保 wheat>=4
+    # wait one more crop to ensure wheat>=4
     for cycle in range(4):
         inv = wget("@player")["result"]["components"]["Inventory"]
         if inv["wheat"] >= 4 and inv["plank"] >= 4: break

@@ -1,25 +1,31 @@
-//! playtest LLM 档的真实客户端（设计稿十一节第 5 阶段）——把 vitric-playtest 定义的抽象
-//! [`LlmClient`] 接到真 LLM 端点（OpenAI 兼容 chat/completions）。
+//! Real client for the playtest LLM tier (design doc §11 phase 5) — connects the abstract
+//! [`LlmClient`] defined by vitric-playtest to a real LLM endpoint (OpenAI-compatible
+//! chat/completions).
 //!
-//! **依赖方向**：抽象 trait 在 vitric-playtest，真实现住这儿（vitric-cli 已依赖 playtest，
-//! 不成环）。装配只认 `VITRIC_LLM_*` 环境变量（和运行时 LLM 同一套，密钥不落盘）；没配齐
-//! 就**报明确错误**，由 `cmd_playtest` 的 `--llm` 拒绝运行——不静默跳过（设计稿「失败显式暴露」）。
+//! **Dependency direction**: the abstract trait lives in vitric-playtest; the real
+//! implementation lives here (vitric-cli already depends on playtest, no cycle). Assembly
+//! reads only `VITRIC_LLM_*` environment variables (same set as the runtime LLM, no secrets
+//! on disk); if not fully configured, it **returns an explicit error** and `cmd_playtest`'s
+//! `--llm` refuses to run — no silent skip (design doc: "failures surface explicitly").
 //!
-//! 同步阻塞调用（复用 `llm::complete_sync`）：LLM 档本就慢、单独限流、不在游戏帧里
-//! （设计稿九节），同步最直白。无 `--llm` 时这模块根本不构造，普通 playtest 不碰网络。
+//! Synchronous blocking call (reuses `llm::complete_sync`): the LLM tier is inherently slow,
+//! separately rate-limited, and not in the game frame loop (design doc §9), so synchronous
+//! is the most straightforward. Without `--llm` this module is never constructed; ordinary
+//! playtests don't touch the network.
 
 use vitric_playtest::LlmClient;
 
 use crate::llm::{complete_sync, LlmConfig};
 
-/// 真 LLM 客户端：持有端点配置，每次 `complete` 同步发一次 HTTP。
+/// Real LLM client: holds endpoint configuration; each `complete` sends one synchronous HTTP call.
 pub struct PlaytestLlmClient {
     cfg: LlmConfig,
 }
 
 impl PlaytestLlmClient {
-    /// 按 `VITRIC_LLM_*` 环境变量装配。三个变量缺任一 → 返明确错误
-    /// （拿去给 `--llm` 当「未配 VITRIC_LLM_URL/KEY/MODEL」的报错，不静默跳过）。
+    /// Assemble from `VITRIC_LLM_*` environment variables. Any of the three missing → explicit
+    /// error (used by `--llm` as the "VITRIC_LLM_URL/KEY/MODEL not configured" message; no
+    /// silent skip).
     pub fn from_env() -> Result<PlaytestLlmClient, String> {
         let cfg = LlmConfig::from_env()
             .map_err(|_| "未配 VITRIC_LLM_URL/KEY/MODEL：playtest --llm 需要这三个环境变量配齐才能跑 LLM 档".to_string())?;

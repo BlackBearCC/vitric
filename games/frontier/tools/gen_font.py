@@ -12,8 +12,8 @@ CANDIDATES = [
     "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
 ]
 OUT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "fonts", "cjk.otf"))
-# 子集:ASCII + 拉丁补充 + 常用标点/全角 + CJK 统一汉字。覆盖游戏里的中文;
-# 真实 LLM 偶尔生僻字超出范围会缺字(白模可接受)。
+# Subset: ASCII + Latin Supplement + common punctuation/fullwidth + CJK unified Han characters. Covers the in-game Chinese;
+# real LLM may occasionally emit rare characters outside the range (missing glyphs — acceptable for the white-model stage).
 RANGES = "U+0020-007E,U+00A0-00FF,U+2000-206F,U+3000-303F,U+4E00-9FFF,U+FF00-FFEF"
 
 src = next((p for p in CANDIDATES if os.path.exists(p)), None)

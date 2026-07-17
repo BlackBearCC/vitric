@@ -1,4 +1,4 @@
-//! vitric-cli 的库部分：运行时装配（给二进制和集成测试共用）。
+//! Library portion of vitric-cli: runtime assembly (shared by binary and integration tests).
 
 pub mod assets_cmd;
 pub mod balance;

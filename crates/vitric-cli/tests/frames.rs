@@ -1,6 +1,7 @@
-//! vitric assets --frames（帧进口流水线）端到端锁定：
-//! 去重 + trim + atlas + 统一色板 + 动画配置，全程确定性；配置喂
-//! advance_animations 播放正确；BC7 字节数压缩比；check 校验坏产物。
+//! vitric assets --frames (frame import pipeline) end-to-end lock:
+//! dedup + trim + atlas + unified palette + animation config, deterministic throughout; the
+//! config fed to advance_animations plays correctly; BC7 byte-count compression ratio; check
+//! verifies bad artifacts.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +13,7 @@ use vitric_cli::runtime::advance_animations;
 use vitric_data::Clip;
 use vitric_ecs::World;
 
-/// 每个测试一个独立临时项目，含空 assets/。
+/// One independent temp project per test, with an empty assets/.
 fn temp_project(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vitric-frames-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -29,12 +30,12 @@ fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) {
     enc.write_header().unwrap().write_image_data(rgba).unwrap();
 }
 
-/// 纯色帧。
+/// Solid-color frame.
 fn solid(w: u32, h: u32, c: [u8; 4]) -> Vec<u8> {
     c.to_vec().repeat((w * h) as usize)
 }
 
-/// 在透明背景上画一个不透明色块（用来测 trim）。
+/// Draw an opaque color block on a transparent background (used to test trim).
 fn boxed(w: u32, h: u32, bx: u32, by: u32, bw: u32, bh: u32, c: [u8; 4]) -> Vec<u8> {
     let mut px = solid(w, h, [0, 0, 0, 0]);
     for y in by..by + bh {
@@ -46,7 +47,7 @@ fn boxed(w: u32, h: u32, bx: u32, by: u32, bw: u32, bh: u32, c: [u8; 4]) -> Vec<
     px
 }
 
-/// 写一组序列帧到 <project>/seq/<name>/frameNNN.png，返回序列目录。
+/// Write a sequence of frames to <project>/seq/<name>/frameNNN.png; return the sequence dir.
 fn write_sequence(project: &Path, name: &str, frames: &[(u32, u32, Vec<u8>)]) -> PathBuf {
     let dir = project.join("seq").join(name);
     std::fs::create_dir_all(&dir).unwrap();
@@ -67,11 +68,12 @@ fn read_animations(project: &Path) -> serde_json::Value {
     serde_json::from_str(&text).unwrap()
 }
 
-/// 去重：含重复相邻帧的序列，去重后帧数 + 停留计数对。
+/// Dedup: a sequence with repeated adjacent frames — after dedup the frame count + stay counts
+/// match.
 #[test]
 fn dedup_collapses_and_counts_stays() {
     let project = temp_project("dedup");
-    // A A A B A —— 三张 A 相邻塌成一张（停留 3），B 一张，末尾 A 一张
+    // A A A B A — three adjacent A's collapse into one (stay 3), B is one, the trailing A is one
     let a = solid(8, 8, [200, 30, 30, 255]);
     let b = solid(8, 8, [30, 30, 200, 255]);
     let seq = write_sequence(
@@ -87,11 +89,11 @@ fn dedup_collapses_and_counts_stays() {
     assert_eq!(stays, vec![3, 1, 1], "停留计数 3,1,1");
 }
 
-/// trim：带透明边的帧裁切 + 偏移记录正确。
+/// trim: frames with transparent borders are cropped + offsets recorded correctly.
 #[test]
 fn trim_records_offset() {
     let project = temp_project("trim");
-    // 16x16 透明，内容块在 (5,4) 大小 3x6
+    // 16x16 transparent, content block at (5,4) size 3x6
     let f = boxed(16, 16, 5, 4, 3, 6, [10, 200, 50, 255]);
     let seq = write_sequence(&project, "blob", &[(16, 16, f)]);
     let opts = FramesOptions { colors: 0, compress: false };
@@ -102,12 +104,14 @@ fn trim_records_offset() {
     assert_eq!(rec.atlas_rect.3, 6, "裁后高 = 内容高");
 }
 
-/// atlas：每帧 uv 矩形不越界，sidecar 帧表能还原每帧位置。
-/// 同尺寸输入帧 + 不同位置/大小的内容块 → trim 后尺寸不同，考验装箱。
+/// atlas: each frame's uv rect is in-bounds, the sidecar frame table can reconstruct each
+/// frame's position.
+/// Same-size input frames + content blocks at different positions/sizes → different sizes after
+/// trim, a real packing test.
 #[test]
 fn atlas_uv_rects_valid() {
     let project = temp_project("atlas");
-    // 都是 16x16 输入，内容块不同 → trim 后 6x4 与 4x8
+    // Both 16x16 input, different content blocks → 6x4 and 4x8 after trim
     let f0 = boxed(16, 16, 1, 1, 6, 4, [255, 0, 0, 255]);
     let f1 = boxed(16, 16, 2, 2, 4, 8, [0, 255, 0, 255]);
     let seq = write_sequence(&project, "two", &[(16, 16, f0), (16, 16, f1)]);
@@ -134,19 +138,19 @@ fn atlas_uv_rects_valid() {
     }
 }
 
-/// 确定性：同输入跑两次，全部产物逐字节一致。
+/// Determinism: same input run twice, all artifacts byte-identical.
 #[test]
 fn deterministic_byte_for_byte() {
     let frames_set: Vec<(u32, u32, Vec<u8>)> = vec![
         (12, 12, boxed(12, 12, 2, 2, 5, 5, [180, 60, 200, 255])),
-        (12, 12, boxed(12, 12, 2, 2, 5, 5, [180, 60, 200, 255])), // 重复（测去重也确定）
+        (12, 12, boxed(12, 12, 2, 2, 5, 5, [180, 60, 200, 255])), // repeated (tests dedup is also deterministic)
         (12, 12, boxed(12, 12, 4, 3, 6, 4, [60, 200, 90, 255])),
     ];
     let run_once = |tag: &str| -> BTreeMap<String, Vec<u8>> {
         let project = temp_project(tag);
         let seq = write_sequence(&project, "fx", &frames_set);
         frames::run(&project, &seq, &FramesOptions::default()).unwrap();
-        // 收集所有产物字节（assets/ 下全部文件 + animations.json）
+        // Collect all artifact bytes (all files under assets/ + animations.json)
         let mut out = BTreeMap::new();
         collect_files(&project.join("assets"), &project, &mut out);
         out.insert(
@@ -175,29 +179,31 @@ fn collect_files(dir: &Path, root: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
     }
 }
 
-/// 配置喂 advance_animations 播放正确：帧序 + 停留（重复帧名）确定推进。
+/// Config fed to advance_animations plays correctly: frame order + stay (repeated frame name)
+/// advance deterministically.
 #[test]
 fn animations_config_plays_with_stays() {
     let project = temp_project("play");
     let a = solid(8, 8, [200, 30, 30, 255]);
     let b = solid(8, 8, [30, 200, 30, 255]);
-    // A A B —— A 停留 2，B 停留 1
+    // A A B — A stay 2, B stay 1
     let seq = write_sequence(&project, "anim", &[(8, 8, a.clone()), (8, 8, a.clone()), (8, 8, b)]);
     frames::run(&project, &seq, &FramesOptions { colors: 0, compress: false }).unwrap();
 
-    // 读回生成的 clip，喂 advance_animations
+    // Read back the generated clip, feed to advance_animations
     let anims = read_animations(&project);
     let clip_val = &anims["clips"]["anim"];
     let clip: Clip = serde_json::from_value(clip_val.clone()).unwrap();
     assert_eq!(clip.fps, 60, "fps=60 → 每 tick 一帧");
-    // frames 列表：A 重复 2 次（停留 2）+ B 1 次
+    // frames list: A repeated 2 times (stay 2) + B 1 time
     let frame_names: Vec<String> =
         clip_val["frames"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
     assert_eq!(frame_names.len(), 3, "停留展开后总帧 = 2+1");
     assert_eq!(frame_names[0], frame_names[1], "前两帧同名（A 停留）");
     assert_ne!(frame_names[1], frame_names[2], "第三帧是 B");
 
-    // 真喂引擎播放：逐 tick 推进 Sprite.image，序列应等于展开后的帧名
+    // Feed to engine for real: advance Sprite.image tick by tick, the sequence should equal the
+    // expanded frame names
     let clips = BTreeMap::from([("anim".to_string(), clip)]);
     let mut w = World::new();
     let e = w.spawn();
@@ -211,11 +217,13 @@ fn animations_config_plays_with_stays() {
     assert_eq!(played, frame_names, "引擎逐 tick 播放序列 = 配置展开的帧序（含停留）");
 }
 
-/// BC7 字节数对比：压缩产物 ≈ 图集 RGBA8 raw 的 1/4（4×），加去重额外省。
+/// BC7 byte-count comparison: the compressed artifact is ≈ 1/4 (4×) of the atlas RGBA8 raw, plus
+/// extra savings from dedup.
 #[test]
 fn bc7_compression_ratio_4x_plus_dedup() {
     let project = temp_project("bc7");
-    // 10 帧，其中 8 帧相同（大量静止段）→ 去重砍到 3 帧，atlas 更小
+    // 10 frames, 8 of which are identical (lots of stationary segments) → dedup brings it down to
+    // 3 frames, smaller atlas
     let a = solid(16, 16, [120, 80, 200, 255]);
     let b = solid(16, 16, [200, 120, 80, 255]);
     let c = solid(16, 16, [80, 200, 120, 255]);
@@ -233,11 +241,13 @@ fn bc7_compression_ratio_4x_plus_dedup() {
     assert_eq!(report.input_frames, 9);
     assert_eq!(report.kept_frames, 3, "去重 9→3（静止段砍掉）");
     let bc7 = report.bc7_bytes.expect("compress=true 应有 BC7 字节");
-    // BC7 块数据（去掉 20 字节头）= 图集 RGBA8 raw 的 1/4（atlas 48x16，4 的倍数 → 精确 4×）
+    // BC7 block data (minus the 20-byte header) = 1/4 of the atlas RGBA8 raw (atlas 48x16, a
+    // multiple of 4 → exactly 4×)
     const HEADER: u64 = 20;
     let block_bytes = bc7 - HEADER;
     assert_eq!(report.atlas_raw_bytes, block_bytes * 4, "BC7 块数据 = RGBA8 raw 的 1/4（4×）");
-    // 去重额外省：原始 9 帧不去重的 raw 显存（桌宠那种全驻留）vs 去重 3 帧 atlas 的 BC7
+    // Dedup extra savings: original 9 frames without dedup raw VRAM (the desktop-pet style
+    // all-resident) vs deduped 3-frame atlas BC7
     let raw_all_frames = 9u64 * 16 * 16 * 4;
     assert!(
         bc7 * 4 < raw_all_frames,
@@ -245,7 +255,7 @@ fn bc7_compression_ratio_4x_plus_dedup() {
     );
 }
 
-/// 没有 PNG（视频文件）→ 明确提示先用 ffmpeg 转，不静默失败。
+/// No PNG (video file) → explicit hint to convert with ffmpeg first, not silent failure.
 #[test]
 fn video_input_errors_with_ffmpeg_hint() {
     let project = temp_project("video");
@@ -257,7 +267,7 @@ fn video_input_errors_with_ffmpeg_hint() {
     assert!(err.contains("VD092"), "应带错误码: {err}");
 }
 
-/// 尺寸不一致的序列 → 显式报错（不静默）。
+/// Sequence with mismatched sizes → explicit error (not silent).
 #[test]
 fn mismatched_frame_size_errors() {
     let project = temp_project("mismatch");

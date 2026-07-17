@@ -1,6 +1,6 @@
-//! 端到端测试：用 coin-run 示例游戏验证整条链路——
-//! 数据加载 → 规则 → 脚本 → 模拟 → 控制面 → 录像重放。
-//! 这就是「AI 自主闭环」的最小可信证明。
+//! End-to-end test: verify the entire pipeline with the coin-run example game —
+//! data loading → rules → scripts → simulation → control plane → recording replay.
+//! This is the minimal credible proof of an "autonomous AI closed loop".
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -21,7 +21,7 @@ fn play_coin_run_to_victory() {
     let (mut sim, mut rt) = Runtime::boot(&example_dir()).unwrap();
     sim.start_recording();
 
-    // 按住右键跑 1 秒：速度 60/s，金币在 x=10/20/30，全部吃到
+    // Hold right arrow for 1 second: speed 60/s, coins at x=10/20/30, eat them all
     sim.inject_input("right", "pressed");
     let mut all_events = Vec::new();
     for _ in 0..60 {
@@ -36,7 +36,7 @@ fn play_coin_run_to_victory() {
         "三枚金币都该被吃掉"
     );
     assert!(sim.world.query(&["Coin"]).is_empty(), "金币实体应已销毁");
-    // win-check 规则 → celebrate 脚本函数 → game-won 事件 + 5 个彩带实体
+    // win-check rule → celebrate script function → game-won event + 5 confetti entities
     assert!(
         all_events.iter().any(|e| e.name == "game-won"),
         "应观测到 game-won 事件，实际: {:?}",
@@ -47,13 +47,13 @@ fn play_coin_run_to_victory() {
         1 + 5,
         "玩家 + 5 个彩带粒子"
     );
-    // 通关后玩家被规则停下
+    // After clearing, the player is stopped by the rule
     assert_eq!(sim.world.get_field(player, "Velocity.x").unwrap().as_f64(), Some(0.0));
-    // HUD 文字被 format 模板更新到终局文案
+    // HUD text is updated to the end-game copy via the format template
     let hud = sim.world.entity("hud").unwrap();
     assert_eq!(sim.world.get_field(hud, "Text.content").unwrap(), &json!("YOU WIN!"));
 
-    // 录像重放：从头再来必须逐校验点一致
+    // Recording replay: running again from scratch must match checkpoint by checkpoint
     let rec = sim.stop_recording().unwrap();
     let (mut sim2, mut rt2) = Runtime::boot(&example_dir()).unwrap();
     sim2.replay(&rec, &mut rt2).expect("重放必须逐帧一致");
@@ -61,7 +61,7 @@ fn play_coin_run_to_victory() {
 
 #[test]
 fn determinism_across_full_stack() {
-    // 整条链路（规则+脚本+随机数）跑两遍，哈希必须一致
+    // Run the whole stack (rules + scripts + RNG) twice; hashes must match
     let run = || {
         let (mut sim, mut rt) = Runtime::boot(&example_dir()).unwrap();
         sim.inject_input("right", "pressed");
@@ -93,7 +93,7 @@ fn check_command_reports_project_shape() {
 
 #[test]
 fn check_command_reports_broken_project_with_paths() {
-    // 用一个坏项目验证报错质量：路径 + 错误码 + 修复提示一次给全
+    // Verify error-reporting quality with a broken project: path + error code + fix hint all at once
     let dir = std::env::temp_dir().join(format!("vitric-e2e-bad-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("scenes")).unwrap();
@@ -125,7 +125,7 @@ fn check_command_reports_broken_project_with_paths() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-// ---- 控制面 HTTP 闭环：跑真二进制，像 AI agent 一样通过 HTTP 操作 ----
+// ---- Control-plane HTTP closed loop: run the real binary, drive it over HTTP like an AI agent ----
 
 struct RunningGame {
     child: Child,
@@ -148,7 +148,7 @@ fn spawn_game() -> RunningGame {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    // 第一行 stdout 是启动横幅 JSON，含控制面地址
+    // First stdout line is the startup banner JSON, containing the control-plane address
     let stdout = child.stdout.as_mut().unwrap();
     let mut banner = Vec::new();
     let mut byte = [0u8; 1];
@@ -185,23 +185,23 @@ fn agent_drives_game_over_http() {
     let game = spawn_game();
     let port = game.port;
 
-    // 看：ping + 初始世界
+    // Observe: ping + initial world
     let pong = rpc(port, "ping", json!({}));
     assert_eq!(pong["ok"], json!(true), "{pong}");
     let entities = rpc(port, "world/entities", json!({"components": ["Coin"]}));
     assert_eq!(entities["result"].as_array().unwrap().len(), 3);
 
-    // 测：注册断言「分数不超过 3」
+    // Test: register the assertion "score no greater than 3"
     let r = rpc(port, "assert/add", json!({"id": "score-cap", "if": [["@player.Score.value", "<=", 3]]}));
     assert_eq!(r["ok"], json!(true), "{r}");
 
-    // 控时间：暂停 → 注入输入 → 单步推进（确定性的逐帧控制）
+    // Control time: pause → inject input → step forward (deterministic per-frame control)
     rpc(port, "sim/pause", json!({}));
     rpc(port, "input/inject", json!({"action": "right", "phase": "pressed"}));
     let r = rpc(port, "sim/step", json!({"ticks": 60}));
     assert_eq!(r["ok"], json!(true), "{r}");
 
-    // 验证结果：分数 3、金币清零、game-won 事件可见
+    // Verify the result: score 3, coins cleared, game-won event visible
     let player = rpc(port, "world/get", json!({"entity": "@player"}));
     assert_eq!(player["result"]["components"]["Score"]["value"], json!(3));
     let coins = rpc(port, "world/entities", json!({"components": ["Coin"]}));
@@ -217,16 +217,16 @@ fn agent_drives_game_over_http() {
     assert!(names.contains(&"coin-collected"), "{names:?}");
     assert!(names.contains(&"game-won"), "{names:?}");
 
-    // 改：直接改世界状态（过 schema），再读回来
+    // Mutate: change world state directly (through schema), then read it back
     rpc(port, "world/set", json!({"entity": "@player", "path": "Score.value", "value": 0}));
     let player = rpc(port, "world/get", json!({"entity": "@player"}));
     assert_eq!(player["result"]["components"]["Score"]["value"], json!(0));
 
-    // 断言一直健康
+    // Assertions stay healthy
     let failures = rpc(port, "assert/failures", json!({}));
     assert_eq!(failures["result"].as_array().unwrap().len(), 0, "{failures}");
 
-    // 看（语义级，主通道）：画面翻译成精确描述
+    // Observe (semantic level, main channel): the frame is translated into a precise description
     let desc = rpc(port, "render/describe", json!({}));
     assert_eq!(desc["ok"], json!(true), "{desc}");
     let visible = desc["result"]["visible"].as_array().unwrap();
@@ -236,7 +236,7 @@ fn agent_drives_game_over_http() {
     );
     assert!(desc["result"]["text"].as_str().unwrap().contains("相机"));
 
-    // 看（像素级）：无头截图，PNG 直接回传 base64
+    // Observe (pixel level): headless screenshot, PNG returned inline as base64
     let shot = rpc(port, "render/screenshot", json!({"width": 320, "height": 240, "inline": true}));
     assert_eq!(shot["ok"], json!(true), "{shot}");
     assert_eq!(shot["result"]["width"], json!(320));
@@ -251,7 +251,7 @@ fn record_and_replay_via_cli() {
     let dir = example_dir();
     let rec_path = std::env::temp_dir().join(format!("vitric-rec-{}.json", std::process::id()));
 
-    // 跑 120 tick 录像（无输入纯模拟也有金币漂浮的脚本运动）
+    // Run a 120-tick recording (even pure simulation with no input has script-driven coin floating)
     let out = Command::new(env!("CARGO_BIN_EXE_vitric"))
         .arg("run")
         .arg(&dir)
@@ -263,7 +263,7 @@ fn record_and_replay_via_cli() {
     let rec: Recording = serde_json::from_str(&std::fs::read_to_string(&rec_path).unwrap()).unwrap();
     assert_eq!(rec.ticks, 120);
 
-    // 重放校验
+    // Replay verification
     let out = Command::new(env!("CARGO_BIN_EXE_vitric"))
         .arg("replay")
         .arg(&dir)

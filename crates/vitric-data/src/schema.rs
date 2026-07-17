@@ -4,22 +4,22 @@ use serde_json::{json, Map, Value};
 
 use crate::ValidationReport;
 
-/// 字段类型。刻意保持很小：够描述 2D 游戏数据，又让每个值都能被精确校验。
+/// Field types. Deliberately kept small: enough to describe 2D game data, while every value can be precisely validated.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldType {
-    /// 浮点数
+    /// Floating-point number
     Number,
-    /// 整数
+    /// Integer
     Int,
     Bool,
     Text,
     /// {"x": f64, "y": f64}
     Vec2,
-    /// 实体引用，值是实体名（场景内）或 "e<i>v<g>" 句柄（运行时）
+    /// Entity reference; the value is an entity name (within a scene) or an "e<i>v<g>" handle (at runtime)
     Entity,
-    /// 枚举：值必须是 variants 之一
+    /// Enum: the value must be one of variants
     Enum(Vec<String>),
-    /// 同质列表
+    /// Homogeneous list
     List(Box<FieldType>),
 }
 
@@ -101,7 +101,7 @@ impl FieldType {
         }
     }
 
-    /// 该类型的零值（字段没写 default 时用）。
+    /// The zero value of this type (used when the field has no default).
     pub fn zero(&self) -> Value {
         match self {
             FieldType::Number | FieldType::Int => json!(0),
@@ -114,7 +114,7 @@ impl FieldType {
         }
     }
 
-    /// 校验一个值是否符合本类型。
+    /// Validate whether a value conforms to this type.
     pub fn check(&self, value: &Value, path: &str, report: &mut ValidationReport) {
         let ok = match self {
             FieldType::Number => value.is_number(),
@@ -127,7 +127,7 @@ impl FieldType {
                     && value.get("y").is_some_and(Value::is_number)
                     && value.as_object().map(|o| o.len()) == Some(2)
             }
-            // entity 引用允许 null（"还没指向谁"），实体名存在性由场景校验做
+            // entity reference allows null ("not pointing at anyone yet"); entity name existence is checked by scene validation
             FieldType::Entity => value.is_null() || value.is_string(),
             FieldType::Enum(variants) => {
                 if let Some(s) = value.as_str() {
@@ -168,9 +168,9 @@ impl FieldType {
 }
 
 impl FieldType {
-    /// 统一数值表示：number 字段一律存成浮点形态（5 → 5.0）。
-    /// 没有这一步，同一个值会因写入方不同（场景 JSON / JS 往返 / 规则动作）
-    /// 在世界里出现 int/float 两种形态，状态哈希和相等判断都会被表示差异干扰。
+    /// Unify numeric representation: number fields are always stored in floating-point form (5 -> 5.0).
+    /// Without this step, the same value would appear in the world in both int/float forms depending on the writer (scene JSON / JS round-trip / rule actions),
+    /// and state hashing and equality checks would be disturbed by the representational difference.
     pub fn canonicalize(&self, value: &Value) -> Value {
         match self {
             FieldType::Number => match value.as_f64() {
@@ -216,13 +216,13 @@ fn expect_hint(t: &FieldType) -> String {
     }
 }
 
-/// 一个字段的完整定义。
+/// Complete definition of a field.
 #[derive(Debug, Clone)]
 pub struct FieldDef {
     pub ty: FieldType,
-    /// 实例化时缺省用的值；None 则用类型零值。
+    /// Value used as default at instantiation; None means use the type's zero value.
     pub default: Option<Value>,
-    /// true = 场景里必须显式给值。
+    /// true = the scene must explicitly provide a value.
     pub required: bool,
     pub min: Option<f64>,
     pub max: Option<f64>,
@@ -260,7 +260,7 @@ impl FieldDef {
     }
 }
 
-/// 一个组件的 schema。
+/// Schema of a component.
 #[derive(Debug, Clone)]
 pub struct ComponentSchema {
     pub name: String,
@@ -268,8 +268,8 @@ pub struct ComponentSchema {
 }
 
 impl ComponentSchema {
-    /// 校验并归一化一个组件值：填默认值、查未知字段、查类型和范围。
-    /// 返回归一化后的值（即使有错也尽量归一化，让错误一次全暴露）。
+    /// Validate and normalize a component value: fill defaults, check unknown fields, check types and ranges.
+    /// Returns the normalized value (normalizes as much as possible even on error, so all errors surface at once).
     pub fn normalize(&self, value: &Value, path: &str, report: &mut ValidationReport) -> Value {
         let Some(obj) = value.as_object() else {
             report.push(
@@ -280,7 +280,7 @@ impl ComponentSchema {
             );
             return value.clone();
         };
-        // 未知字段
+        // Unknown fields
         for key in obj.keys() {
             if !self.fields.contains_key(key) {
                 report.push(
@@ -294,7 +294,7 @@ impl ComponentSchema {
                 );
             }
         }
-        // 逐字段：缺失补默认 / required 报错；存在则查类型范围
+        // Per field: fill default on missing / report error for required; if present, check type and range
         let mut out = Map::new();
         for (fname, fdef) in &self.fields {
             let fpath = format!("{path}/{fname}");
@@ -322,14 +322,14 @@ impl ComponentSchema {
     }
 }
 
-/// 整个项目的组件 schema 集合。
+/// The project's full set of component schemas.
 #[derive(Debug, Clone, Default)]
 pub struct Schema {
     pub components: BTreeMap<String, ComponentSchema>,
 }
 
 impl Schema {
-    /// 从 JSON 解析 schema 文件。格式:
+    /// Parse a schema file from JSON. Format:
     /// ```json
     /// { "components": { "Position": { "fields": { "x": {"type":"number"} } } } }
     /// ```
@@ -366,7 +366,7 @@ impl Schema {
                 };
                 let default = fspec.get("default").cloned();
                 if let Some(d) = &default {
-                    // 默认值本身必须通过类型校验
+                    // The default value itself must pass type validation
                     ty.check(d, &format!("{fpath}/default"), &mut report);
                 }
                 fields.insert(
@@ -426,7 +426,7 @@ mod tests {
         let mut report = ValidationReport::default();
         let v = s.component("Position").unwrap().normalize(&json!({"x": 5}), "p", &mut report);
         assert!(report.ok(), "{report}");
-        // number 字段统一存浮点形态：表示唯一，状态哈希不受写入方影响
+        // number fields are uniformly stored in floating-point form: representation is unique, state hash is unaffected by the writer
         assert_eq!(v, json!({"x": 5.0, "y": 0.0}));
     }
 

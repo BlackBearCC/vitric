@@ -9,11 +9,11 @@ use vitric_sim::{GameLogic, Sim};
 
 use crate::saves::SaveStore;
 
-/// 主循环节奏控制（dispatcher 改，主循环读）。
+/// Main loop pacing control (written by dispatcher, read by main loop).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopCtl {
     pub paused: bool,
-    /// 倍速（1.0 = 实时，0 上限不设——无头模式 AI 随便开快进）。
+    /// Speed multiplier (1.0 = realtime, 0 = no upper limit — headless AI can fast-forward freely).
     pub speed: f64,
     pub quit: bool,
 }
@@ -26,37 +26,38 @@ impl Default for LoopCtl {
 
 const EVENT_LOG_CAP: usize = 10_000;
 
-/// 控制面命令执行器。主循环每帧调用 `handle` 处理积压请求。
+/// Control plane command executor. The main loop calls `handle` each frame to drain pending requests.
 pub struct Dispatcher {
-    /// 只用于断言条件求值和 spawn 校验（空规则集 + 项目 schema）。
+    /// Used only for assertion condition evaluation and spawn validation (empty rule set + project schema).
     checker: Engine,
-    /// 断言：id -> 条件三元组列表（全部成立 = 健康）。
+    /// Assertions: id -> list of condition triples (all hold = healthy).
     assertions: BTreeMap<String, Vec<(String, String, Value)>>,
-    /// 当前正在违反中的断言（去抖：从成立变违反才记一条）。
+    /// Assertions currently being violated (debounced: only recorded when flipping from holding to violating).
     failing: BTreeSet<String>,
-    /// 断言失败记录。
+    /// Assertion failure records.
     failures: Vec<Value>,
-    /// 最近事件环形缓冲。
+    /// Ring buffer of recent events.
     events: VecDeque<(u64, Event)>,
-    /// 素材仓库（render 方法用；项目无素材则为空仓库）。
+    /// Asset store (used by render methods; an empty store if the project has no assets).
     assets: vitric_render::Assets,
-    /// 素材代次：每次（重新）加载 +1。GPU 呈现路径靠它判断图集是否需要重建——
-    /// 比较内容太贵，比较 count 又抓不住"同名换图"。
+    /// Asset generation: incremented on each (re)load. The GPU presentation path uses it to decide
+    /// whether the atlas needs rebuilding — comparing contents is too expensive and comparing count
+    /// misses the "same name, swapped image" case.
     assets_generation: u64,
-    /// 检查器选中的实体——人点的和 AI 设的是同一个状态，双向可见。
+    /// Inspector-selected entity — human click and AI set share the same state, visible both ways.
     selection: Option<EntityId>,
-    /// 性能预算（0=不限）。
+    /// Performance budgets (0 = no limit).
     budgets: vitric_data::Budgets,
-    /// 最近一次 step 的事件数（预算检查用）。
+    /// Event count from the most recent step (used for budget checks).
     last_tick_events: u64,
-    /// 事件计数对应的 tick。
+    /// Tick corresponding to the event counter.
     events_count_tick: u64,
-    /// 玩家存档仓库（vitric run 挂 `<项目>/saves/`；嵌入式/测试装配可以不挂，
-    /// 此时存档相关方法显式报错而不是悄悄写到不知道哪里）。
+    /// Player save store (`vitric run` mounts `<project>/saves/`; embedded/test harnesses may skip it,
+    /// in which case save-related methods explicitly error instead of silently writing to nowhere).
     saves: Option<SaveStore>,
-    /// 上一次 render/describe 服务出去的场景视图（不含 actions/changes 这两个增量包，
-    /// 只存原始 visible/offscreen/… 主体，diff 才稳定）。下一次 describe 据它算「变了啥」。
-    /// 按本 dispatcher 实例存一份即可（一个连接/会话一个 dispatcher）。
+    /// The last scene view served by render/describe (does NOT include the actions/changes delta packages;
+    /// only the raw visible/offscreen/… body is stored, so the diff is stable). The next describe computes
+    /// "what changed" against this. Stored per dispatcher instance (one connection/session = one dispatcher).
     last_describe: Option<Value>,
     pub ctl: LoopCtl,
 }
@@ -81,7 +82,7 @@ impl Dispatcher {
         }
     }
 
-    /// 挂载玩家存档仓库（save-game/load-game 约定事件与 save/* RPC 的执行端）。
+    /// Mount the player save store (execution end for save-game/load-game convention events and save/* RPCs).
     pub fn set_save_store(&mut self, store: SaveStore) {
         self.saves = Some(store);
     }
@@ -90,7 +91,7 @@ impl Dispatcher {
         self.budgets = budgets;
     }
 
-    /// 检查器选中态（窗口点选写、AI inspect/select 写，双方都读这里）。
+    /// Inspector selection state (written by window click and AI inspect/select; both sides read here).
     pub fn selection(&self) -> Option<EntityId> {
         self.selection
     }
@@ -99,33 +100,34 @@ impl Dispatcher {
         self.selection = selection;
     }
 
-    /// 挂载项目素材目录（加载即校验，坏图/超预算立刻报错）。
+    /// Mount the project asset directory (load validates; bad images / over-budget fail immediately).
     pub fn load_assets(&mut self, dir: &std::path::Path) -> Result<(), String> {
         self.assets = vitric_render::Assets::load_dir(dir)?;
         self.assets_generation += 1;
         Ok(())
     }
 
-    /// 挂载清单 `font` 字段的 TTF 字体（缺失/损坏立刻报错——启动期失败，
-    /// 不是跑起来文字消失）。挂上后所有 Text 走矢量路径。
+    /// Mount the TTF font from the manifest `font` field (missing/corrupt fails immediately — a startup-time
+    /// failure, not text silently disappearing at runtime). Once mounted, all Text goes through the vector path.
     pub fn load_font(&mut self, path: &std::path::Path) -> Result<(), String> {
         self.assets.load_font(path)?;
-        // 字体变化也要触发 GPU 侧重建（字形图集按字体栅格化）
+        // Font changes must also trigger GPU-side rebuild (the glyph atlas is rasterized per font)
         self.assets_generation += 1;
         Ok(())
     }
 
-    /// 素材仓库只读访问（窗口呈现共用同一份）。
+    /// Read-only access to the asset store (shared with the window presentation).
     pub fn assets(&self) -> &vitric_render::Assets {
         &self.assets
     }
 
-    /// 素材代次（见字段注释）。
+    /// Asset generation (see field comment).
     pub fn assets_generation(&self) -> u64 {
         self.assets_generation
     }
 
-    /// 主循环每 step 后调用：记录事件进环形缓冲（顺带按 tick 计数给预算用）。
+    /// Called by the main loop after each step: records events into the ring buffer
+    /// (also counts per tick for budget use).
     pub fn record_events(&mut self, tick: u64, events: &[Event]) {
         if tick != self.events_count_tick {
             self.events_count_tick = tick;
@@ -140,15 +142,16 @@ impl Dispatcher {
         }
     }
 
-    /// 主循环每 step 后调用：检查全部断言。
-    /// 返回新发生的失败（从成立翻到违反的那一帧记录一条）。
+    /// Called by the main loop after each step: checks all assertions.
+    /// Returns newly occurring failures (one record on the frame flipping from holding to violating).
     pub fn check_assertions(&mut self, sim: &Sim) -> Vec<Value> {
         let mut fresh = Vec::new();
         for (id, conds) in &self.assertions {
             let healthy = match self.checker.check(&sim.world, conds) {
                 Ok(ok) => ok,
                 Err(e) => {
-                    // 断言本身求值失败（比如引用的实体没了）也算违反，但要说清原因
+                    // An assertion failing to evaluate (e.g. the referenced entity is gone) also counts
+                    // as a violation, but the reason must be made clear.
                     let record = json!({
                         "id": id, "tick": sim.tick,
                         "kind": "eval-error", "detail": e.to_string(),
@@ -173,7 +176,8 @@ impl Dispatcher {
             }
         }
 
-        // 性能预算：超了不是默默卡顿，是和断言同级的显式失败
+        // Performance budget: going over isn't silent slowdown — it's an explicit failure
+        // on the same level as an assertion violation.
         let entities = sim.world.entities().len() as u64;
         let budget_checks = [
             ("budget:max_entities", self.budgets.max_entities, entities,
@@ -199,17 +203,21 @@ impl Dispatcher {
         fresh
     }
 
-    /// 运行循环每个 tick 调用：执行本 tick 规则/脚本 emit 的存档约定事件。
+    /// Called by the run loop each tick: executes the save convention events emitted
+    /// by this tick's rules/scripts.
     ///
-    /// 约束（与确定性的关系）：
-    /// - `save-game` 是纯输出副作用（同 play-sound）：写盘不回流进模拟，放在哪个
-    ///   时机执行都不影响轨迹；
-    /// - `load-game` 会改写模拟，必须在帧边界（两个 tick 之间）执行；它是"会话
-    ///   边界"操作——不进录像、回放不复现它，所以录像期间显式拒绝（同 sim/restore
-    ///   的 RPC 守卫，时间线断裂后录像必然不可重放）。
+    /// Constraints (relationship with determinism):
+    /// - `save-game` is a pure output side effect (like play-sound): writing to disk does
+    ///   not flow back into the simulation, so when it runs has no impact on the trajectory;
+    /// - `load-game` rewrites the simulation and must execute at a frame boundary (between
+    ///   two ticks); it is a "session boundary" operation — it does not enter the recording
+    ///   and replays do not reproduce it, so during recording it is explicitly rejected
+    ///   (same guard as the sim/restore RPC: after a timeline break, the recording is
+    ///   necessarily unreplayable).
     ///
-    /// 返回结构化错误记录（槽名不合法/文件缺失/版本不符/录像互斥），调用方负责
-    /// 打到 stderr——存档失败不崩游戏，但绝不静默。
+    /// Returns structured error records (illegal slot name / missing file / version mismatch /
+    /// recording mutex); the caller is responsible for writing them to stderr — a save failure
+    /// does not crash the game, but it is never silent.
     pub fn handle_save_load_events(
         &mut self,
         observed: &[Event],
@@ -232,7 +240,8 @@ impl Dispatcher {
         errors
     }
 
-    /// 单个 save-game / load-game 事件的执行（错误统一收口给上面包装）。
+    /// Execution of a single save-game / load-game event (errors are centralized here
+    /// for the caller above to wrap).
     fn run_save_event(
         &mut self,
         e: &Event,
@@ -261,12 +270,13 @@ impl Dispatcher {
         }
         let snap = store.read(slot)?;
         sim.restore(&snap, logic)?;
-        // 旧世界的实体句柄随 restore 全部失效，选中态一并清掉（不留幽灵选中）
+        // Entity handles from the old world all become invalid on restore; clear the selection
+        // too (no ghost selection left behind).
         self.selection = None;
         Ok(())
     }
 
-    /// 处理一条控制请求，返回响应 JSON。
+    /// Handle one control request, returning the response JSON.
     pub fn handle(&mut self, request: &Value, sim: &mut Sim, logic: &mut dyn GameLogic) -> Value {
         let method = match request.get("method").and_then(|v| v.as_str()) {
             Some(m) => m,
@@ -286,8 +296,10 @@ impl Dispatcher {
         sim: &mut Sim,
         logic: &mut dyn GameLogic,
     ) -> Result<Value, String> {
-        // 录像只记输入流。这些方法绕过输入直接改世界/规则，录制中放行的话
-        // 录出来的录像必然重放分歧，还会把排查方向误导到"非确定性"上——明确拒绝。
+        // The recording only captures the input stream. These methods bypass input and mutate the
+        // world/rules directly; allowing them during recording would produce a recording that
+        // necessarily diverges on replay, and would also mislead debugging toward "non-determinism"
+        // — explicitly reject.
         const BREAKS_RECORDING: &[&str] =
             &["world/set", "world/spawn", "world/despawn", "project/reload", "sim/restore", "save/load"];
         if sim.is_recording() && BREAKS_RECORDING.contains(&method) {
@@ -303,7 +315,7 @@ impl Dispatcher {
                 "speed": self.ctl.speed,
             })),
 
-            // ---- 看 ----
+            // ---- See ----
             "world/entities" => {
                 let comps: Vec<String> = params
                     .get("components")
@@ -322,12 +334,13 @@ impl Dispatcher {
                 Ok(entity_json(&sim.world, id))
             }
 
-            // ---- 动 ----
+            // ---- Act ----
             "world/set" => {
                 let id = entity_param(&sim.world, params, "entity")?;
                 let path = str_param(params, "path")?;
                 let value = params.get("value").cloned().ok_or("缺少 value 参数")?;
-                // 改状态也过 schema：先改副本、整组件校验，再落地
+                // Mutating state also goes through schema: mutate a copy first, validate the whole
+                // component, then commit.
                 let comp = path.split('.').next().expect("split 至少一段");
                 let mut after = sim.world.get_component(id, comp).map_err(|e| e.to_string())?.clone();
                 if comp == path {
@@ -335,7 +348,8 @@ impl Dispatcher {
                 } else {
                     set_in_value(&mut after, &path[comp.len() + 1..], value)?;
                 }
-                // 和 world/spawn 同一部法律：schema 外的组件直接拒，不存在静默跳过校验的后门
+                // Same law as world/spawn: components outside the schema are rejected outright —
+                // there is no back door that silently skips validation.
                 let cschema = self.checker.schema.component(comp).ok_or_else(|| {
                     format!(
                         "未知组件 {comp:?}。schema 定义的组件: [{}]",
@@ -391,8 +405,9 @@ impl Dispatcher {
                 Ok(json!({}))
             }
             "input/click" => {
-                // 无头 agent 的"鼠标"：世界坐标点击，拾取解析和窗口点选同一条路径。
-                // 走回复通道所以录制中照常放行——点击会被录进录像、重放原样注入。
+                // Headless agent's "mouse": world-coordinate click, with pick resolution on the
+                // same path as window clicking. Goes through the reply channel, so it is allowed
+                // during recording — the click is recorded into the recording and replayed as-is.
                 let x = params
                     .get("x")
                     .and_then(|v| v.as_f64())
@@ -405,8 +420,9 @@ impl Dispatcher {
                 inject_click(sim, x, y, button)
             }
             "input/ui-click" => {
-                // 无头 agent 的"UI 点击"：屏幕归一化坐标（0..1），拾取推迟到 tick 内的
-                // UI 交互系统（换算到参照系 1920×1080 再比 UI 矩形）。走回复通道，录制中放行。
+                // Headless agent's "UI click": screen-normalized coordinates (0..1); picking is
+                // deferred to the in-tick UI interaction system (converted to the 1920×1080 reference
+                // frame then compared against UI rects). Goes through the reply channel, allowed during recording.
                 let nx = params
                     .get("nx")
                     .and_then(|v| v.as_f64())
@@ -419,7 +435,7 @@ impl Dispatcher {
                 inject_ui_click(sim, nx, ny, button)
             }
 
-            // ---- 控时间 ----
+            // ---- Control time ----
             "sim/pause" => {
                 self.ctl.paused = true;
                 Ok(json!({"tick": sim.tick}))
@@ -456,13 +472,15 @@ impl Dispatcher {
                 Ok(json!({}))
             }
 
-            // ---- 热重载（AI 改完规则/脚本/素材，毫秒级生效，世界状态不动）----
+            // ---- Hot reload (after AI edits rules/scripts/assets, takes effect in milliseconds;
+            //      world state is untouched) ----
             "project/reload" => {
                 let mut summary = logic.reload()?;
-                // 挂了素材目录就一起重载；失败要单独说清（规则/脚本已经换新了）
+                // If an asset directory is mounted, reload it too; on failure explain separately
+                // (the rules/scripts have already been swapped in).
                 match self.assets.reload() {
                     Ok(()) => self.assets_generation += 1,
-                    Err(e) if e.contains("没有目录") => {} // 没挂素材目录，合法跳过
+                    Err(e) if e.contains("没有目录") => {} // no asset directory mounted, legal skip
                     Err(e) => {
                         return Err(format!("规则/脚本已重载，但素材重载失败: {e}"));
                     }
@@ -471,7 +489,7 @@ impl Dispatcher {
                 Ok(summary)
             }
 
-            // ---- 快照 / 哈希 ----
+            // ---- Snapshot / hash ----
             "sim/snapshot" => Ok(sim.snapshot(logic)),
             "sim/restore" => {
                 let snap = params.get("snapshot").ok_or("缺少 snapshot 参数")?;
@@ -480,8 +498,9 @@ impl Dispatcher {
             }
             "sim/hash" => Ok(json!(format!("{:#018x}", sim.world.state_hash()))),
 
-            // ---- 玩家存档（saves/<slot>.json；与 save-game/load-game 约定事件同一条代码路径。
-            //      save/write 是纯输出副作用录像期间放行；save/load 等价 sim/restore 受同一守卫）----
+            // ---- Player saves (saves/<slot>.json; same code path as the save-game/load-game
+            //      convention events. save/write is a pure output side effect, allowed during recording;
+            //      save/load is equivalent to sim/restore and is subject to the same guard) ----
             "save/write" => {
                 let slot = str_param(params, "slot")?;
                 let store = self.saves.as_ref().ok_or(NO_SAVE_STORE)?;
@@ -492,7 +511,7 @@ impl Dispatcher {
                 let store = self.saves.as_ref().ok_or(NO_SAVE_STORE)?;
                 let snap = store.read(&slot)?;
                 sim.restore(&snap, logic)?;
-                // 旧世界的实体句柄随 restore 全部失效，选中态一并清掉
+                // Entity handles from the old world all become invalid on restore; clear the selection too.
                 self.selection = None;
                 Ok(json!({"slot": slot, "tick": sim.tick}))
             }
@@ -501,30 +520,35 @@ impl Dispatcher {
                 Ok(json!(store.list()?))
             }
 
-            // ---- 观察（语义描述是主通道，截图是兜底验证）----
+            // ---- Observation (semantic description is the main channel; screenshot is fallback verification) ----
             "render/describe" => {
                 let width = params.get("width").and_then(|v| v.as_u64()).unwrap_or(320) as u32;
                 let height = params.get("height").and_then(|v| v.as_u64()).unwrap_or(240) as u32;
-                // 带上素材仓库：文字对比度测量按真贴图渲底色（缺图才退纯色近似）
+                // Carry the asset store: text contrast measurement renders the background against the
+                // real texture (falls back to a solid-color approximation only when the image is missing).
                 let mut out =
                     vitric_render::describe_world_with_assets(&sim.world, width, height, &self.assets)?;
 
-                // 帧间差量：相对上一次 describe 服务出去的那帧，只说「变了啥」。
-                // 默认就带（交互式取数最想知道「自上次以来变没变」）；第一次没有上一帧 → 不加
-                // changes 键（向后兼容：原有 visible/offscreen/… 字段不变）。算 changes 用的是
-                // 上一帧的原始主体（不含 actions/changes），存当前帧主体也只存原始主体——增量包
-                // 不进 diff，diff 才稳定。
+                // Inter-frame delta: relative to the last frame served by describe, only describe
+                // "what changed". Included by default (interactive consumption mostly wants "did anything
+                // change since last time"); on the first call there is no previous frame, so the changes
+                // key is not added (backward compatible: existing visible/offscreen/… fields unchanged).
+                // The changes are computed against the previous frame's raw body (without actions/changes),
+                // and the current frame body is also stored as the raw body only — delta packages do not
+                // enter the diff, so the diff stays stable.
                 if let Some(prev) = &self.last_describe {
                     out["changes"] = vitric_ecs::scene_delta(prev, &out);
                 }
                 self.last_describe = Some(out.clone());
 
-                // 可选动作并进 describe：让 describe 不只说「画面里有啥/在哪」，还说「你能干啥」
-                // ——和试玩 SceneView 的 affordance 合一。dispatcher 持 dyn GameLogic 够不到规则，
-                // 动作词汇靠 GameLogic::available_actions 递出来（纯规则逻辑非空，其它默认空）。
-                // 形态对齐 SceneView 的 actions：每个动作 ×{pressed,released} 平铺。
-                // goal 是 playtest.json 的概念、控制面没加载它，这里不强塞——goal 仍只在
-                // SceneView/playtest 侧；不为了 goal 让控制面去耦合 playtest 配置。
+                // Optionally fold actions into describe: describe doesn't just say "what's on screen /
+                // where", it also says "what can you do" — unified with the playtest SceneView affordance.
+                // The dispatcher holds a dyn GameLogic and cannot reach the rules, so the action vocabulary
+                // is handed up via GameLogic::available_actions (non-empty for pure-rule logic, empty by
+                // default otherwise). Shape aligns with SceneView's actions: each action × {pressed, released}
+                // is flattened out. goal is a playtest.json concept and the control plane does not load it,
+                // so it is not force-injected here — goal stays only on the SceneView/playtest side; the
+                // control plane is not coupled to playtest config just for goal.
                 let mut actions = Vec::new();
                 for (action, _phases) in logic.available_actions() {
                     actions.push(json!({"action": action, "phase": "pressed"}));
@@ -553,7 +577,7 @@ impl Dispatcher {
                 Ok(Value::Object(result))
             }
 
-            // ---- 性能观测 ----
+            // ---- Performance observation ----
             "perf/stats" => Ok(json!({
                 "tick": sim.tick,
                 "entities": sim.world.entities().len(),
@@ -565,7 +589,7 @@ impl Dispatcher {
                 },
             })),
 
-            // ---- 检查器（人指哪 AI 看哪，反向也行）----
+            // ---- Inspector (human points, AI sees; and vice versa) ----
             "inspect/selection" => match self.selection.filter(|&id| sim.world.is_alive(id)) {
                 Some(id) => Ok(json!({"selected": entity_json(&sim.world, id)})),
                 None => Ok(json!({"selected": null})),
@@ -580,7 +604,7 @@ impl Dispatcher {
                 Ok(json!({"selected": entity_json(&sim.world, id)}))
             }
 
-            // ---- 事件 ----
+            // ---- Events ----
             "events/recent" => {
                 let since = params.get("since").and_then(|v| v.as_u64()).unwrap_or(0);
                 Ok(json!(self
@@ -591,7 +615,7 @@ impl Dispatcher {
                     .collect::<Vec<_>>()))
             }
 
-            // ---- 测 ----
+            // ---- Test ----
             "assert/add" => {
                 let id = str_param(params, "id")?;
                 let conds = parse_conditions(params.get("if").ok_or("缺少 if 条件数组")?)?;
@@ -633,16 +657,19 @@ impl Dispatcher {
     }
 }
 
-/// 把一次鼠标点击注入模拟——窗口点击和 `input/click` RPC 共用的唯一路径。
+/// Inject a mouse click into the simulation — the single shared path used by both
+/// window clicks and the `input/click` RPC.
 ///
-/// 坐标是**世界坐标**；在 (x,y) 做拾取（同窗口点选的命中规则，见
-/// `vitric_render::pick_world`），注入事件 data 为 `{x, y, entity}`：
-/// entity = 命中实体的名字（无名实体用句柄文本），没命中 = null。
-/// `button`: "left" → 事件 `mouse`，"right" → 事件 `mouse-alt`。
+/// Coordinates are **world coordinates**; picking happens at (x,y) (same hit rules as
+/// window clicking, see `vitric_render::pick_world`); the injected event data is
+/// `{x, y, entity}`: entity = the hit entity's name (handle text for unnamed entities),
+/// or null if nothing was hit. `button`: "left" → event `mouse`, "right" → event `mouse-alt`.
 ///
-/// 走回复通道（`Sim::inject_reply`）：与 LLM 回复同级的录制通道——点击连同
-/// tick、拾取结果一起进录像（`Recording.replies`）、重放原 tick 原样注入、
-/// 快照含未消化的点击。所以点击驱动的游戏录像离线重放逐位一致，零新机制。
+/// Goes through the reply channel (`Sim::inject_reply`): the recording channel on the same
+/// level as LLM replies — the click together with the tick and pick result enter the recording
+/// (`Recording.replies`), replays inject it at the original tick as-is, and the snapshot includes
+/// undigested clicks. So recordings of click-driven games replay bit-for-bit offline, with zero
+/// new machinery.
 pub fn inject_click(sim: &mut Sim, x: f64, y: f64, button: &str) -> Result<Value, String> {
     let event = match button {
         "left" => "mouse",
@@ -655,8 +682,9 @@ pub fn inject_click(sim: &mut Sim, x: f64, y: f64, button: &str) -> Result<Value
                 Some(name) => json!(name),
                 None => json!(id.to_string()),
             };
-            // 把命中实体的组件一并带进事件——脚本据此知道点中的是什么（是不是 plot、有没有 Crop），
-            // 再用 ctx.setField(event.entity, ...) 对它做事。匿名实体 entity 即句柄文本，照样可寻址。
+            // Also carry the hit entity's components into the event — scripts use this to know what was
+            // hit (is it a plot, does it have Crop), then act on it via ctx.setField(event.entity, ...).
+            // For anonymous entities the entity is the handle text, still addressable.
             let mut comps = serde_json::Map::new();
             for name in sim.world.components_of(id) {
                 comps.insert(
@@ -672,17 +700,21 @@ pub fn inject_click(sim: &mut Sim, x: f64, y: f64, button: &str) -> Result<Value
     Ok(json!({"event": event, "entity": entity}))
 }
 
-/// 把一次 **UI 点击**注入模拟（屏幕空间叠加层拾取，1.2）——窗口 UI 点击和
-/// `input/ui-click` RPC 共用的唯一路径。
+/// Inject a **UI click** into the simulation (screen-space overlay picking) — the single
+/// shared path used by both window UI clicks and the `input/ui-click` RPC.
 ///
-/// 和 [`inject_click`]（世界坐标拾取 Sprite）是**两套坐标系**：UI 锚定视口、布局矩形
-/// 在参照系 1920×1080（不经相机）。所以这里注入的是**屏幕归一化坐标** `(nx, ny) ∈ [0,1]`
-/// （= 物理像素 / 视口尺寸），拾取**不在注入端做**——推迟到确定性 tick 内的 UI 交互系统
-/// （[`vitric_cli` 的 `advance_ui_interaction`]）把 (nx,ny) 乘回参照系 1920×1080 再比 UI 矩形。
-/// 这样命中判定永远对的是同一份参照系矩形，与真实分辨率解耦，重放逐位一致。
+/// Unlike [`inject_click`] (world-coordinate Sprite picking), this is a **different coordinate
+/// system**: UI is anchored to the viewport, with layout rects in the 1920×1080 reference frame
+/// (not through the camera). So what is injected here are **screen-normalized coordinates**
+/// `(nx, ny) ∈ [0,1]` (= physical pixels / viewport size); picking is **not done at injection
+/// time** — it is deferred to the deterministic in-tick UI interaction system
+/// ([`vitric_cli`'s `advance_ui_interaction`]) which multiplies (nx,ny) back to the 1920×1080
+/// reference frame and compares against UI rects. This way hit testing always targets the same
+/// reference-frame rects, decoupled from the real resolution, and replays are bit-for-bit identical.
 ///
-/// 走回复通道（`Sim::inject_reply`）：点击连同 tick 进录像（`Recording.replies`）、
-/// 重放原 tick 原样注入——UI 点击驱动的录像离线重放逐位一致，零新机制（同 [`inject_click`]）。
+/// Goes through the reply channel (`Sim::inject_reply`): the click together with the tick enters
+/// the recording (`Recording.replies`) and replays inject it at the original tick as-is — recordings
+/// of UI-click-driven games replay bit-for-bit offline, with zero new machinery (same as [`inject_click`]).
 pub fn inject_ui_click(sim: &mut Sim, nx: f64, ny: f64, button: &str) -> Result<Value, String> {
     if !matches!(button, "left" | "right") {
         return Err(format!("button 必须是 left 或 right，拿到 {button:?}"));
@@ -691,7 +723,7 @@ pub fn inject_ui_click(sim: &mut Sim, nx: f64, ny: f64, button: &str) -> Result<
     Ok(json!({"event": "ui-click", "nx": nx, "ny": ny, "button": button}))
 }
 
-/// 没挂存档仓库时的统一报错（嵌入式/测试装配可能不挂；`vitric run` 一定会挂）。
+/// Unified error when no save store is mounted (embedded/test harnesses may skip it; `vitric run` always mounts one).
 const NO_SAVE_STORE: &str =
     "该运行时没有挂存档目录（嵌入式/测试装配）。vitric run 会自动挂 <项目>/saves/";
 
@@ -699,7 +731,7 @@ fn err_response(message: &str) -> Value {
     json!({"ok": false, "error": message})
 }
 
-/// 标准 base64（无填充依赖，20 行自实现省一个 crate）。
+/// Standard base64 (padding-free dependency, 20 lines of self-implementation saves a crate).
 fn base64(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -732,7 +764,7 @@ fn to_string_vec(v: &Value) -> Result<Vec<String>, String> {
         .ok_or("components 必须是字符串数组")?
 }
 
-/// 实体参数解析："e3v1" 句柄或 "@名字"。
+/// Entity parameter parsing: "e3v1" handle or "@name".
 fn entity_param(world: &World, params: &Value, key: &str) -> Result<EntityId, String> {
     let s = str_param(params, key)?;
     let id = if let Some(name) = s.strip_prefix('@') {
@@ -758,7 +790,7 @@ fn entity_json(world: &World, id: EntityId) -> Value {
     obj
 }
 
-/// 条件数组解析（同规则格式: [[左, 操作符, 右], ...]）。
+/// Condition array parsing (same format as rules: [[left, operator, right], ...]).
 fn parse_conditions(v: &Value) -> Result<Vec<(String, String, Value)>, String> {
     let arr = v.as_array().ok_or("if 必须是条件数组，如 [[\"@player.Health.hp\", \">=\", 0]]")?;
     let mut out = Vec::new();
@@ -774,7 +806,7 @@ fn parse_conditions(v: &Value) -> Result<Vec<(String, String, Value)>, String> {
     Ok(out)
 }
 
-/// 在组件值内按相对路径写入（中间路径必须存在）。
+/// Write into a component value by relative path (intermediate path must already exist).
 fn set_in_value(root: &mut Value, rel_path: &str, value: Value) -> Result<(), String> {
     let mut cur = root;
     let segs: Vec<&str> = rel_path.split('.').collect();
@@ -863,7 +895,8 @@ mod tests {
 
     #[test]
     fn recording_rejects_out_of_band_mutation() {
-        // 回归：录像只记输入流，录制中放行 world/set 等于产出天生不可重放的录像
+        // Regression: the recording only captures the input stream; allowing world/set during
+        // recording would produce a recording that is non-replayable by construction.
         let (mut d, mut sim) = setup();
         sim.start_recording();
         let e = call_err(&mut d, &mut sim, "world/set", json!({"entity": "@player", "path": "Health.hp", "value": 50}));
@@ -873,12 +906,12 @@ mod tests {
         let snap = sim.snapshot(&());
         let e = call_err(&mut d, &mut sim, "sim/restore", json!({"snapshot": snap}));
         assert!(e.contains("录像"), "{e}");
-        // 输入走录像流，照常放行
+        // Input goes through the recording stream, allowed as usual.
         call(&mut d, &mut sim, "input/inject", json!({"action": "right"}));
-        // 世界没被污染
+        // The world is not polluted.
         let p = sim.world.entity("player").unwrap();
         assert_eq!(sim.world.get_field(p, "Health.hp").unwrap(), &json!(100));
-        // 停止录制后恢复可改
+        // After stopping recording, mutation is available again.
         sim.stop_recording();
         call(&mut d, &mut sim, "world/set", json!({"entity": "@player", "path": "Health.hp", "value": 50}));
     }
@@ -889,11 +922,11 @@ mod tests {
         call(&mut d, &mut sim, "world/set", json!({"entity": "@player", "path": "Health.hp", "value": 50}));
         let p = sim.world.entity("player").unwrap();
         assert_eq!(sim.world.get_field(p, "Health.hp").unwrap(), &json!(50));
-        // 越界写被 schema 拦住，世界不被污染
+        // Out-of-range writes are blocked by schema; the world is not polluted.
         let e = call_err(&mut d, &mut sim, "world/set", json!({"entity": "@player", "path": "Health.hp", "value": 999}));
         assert!(e.contains("schema"), "{e}");
         assert_eq!(sim.world.get_field(p, "Health.hp").unwrap(), &json!(50));
-        // spawn 未知组件报错并列出已知组件
+        // Spawning an unknown component errors and lists known components.
         let e = call_err(&mut d, &mut sim, "world/spawn", json!({"components": {"Ghost": {}}}));
         assert!(e.contains("Health"), "{e}");
     }
@@ -901,7 +934,7 @@ mod tests {
     #[test]
     fn time_control_and_step() {
         let (mut d, mut sim) = setup();
-        // 不暂停就 step → 拒绝
+        // Stepping without pausing → rejected.
         let e = call_err(&mut d, &mut sim, "sim/step", json!({"ticks": 10}));
         assert!(e.contains("sim/pause"), "{e}");
         call(&mut d, &mut sim, "sim/pause", json!({}));
@@ -909,7 +942,7 @@ mod tests {
         let p = sim.world.entity("player").unwrap();
         let x = sim.world.get_field(p, "Position.x").unwrap().as_f64().unwrap();
         assert!((x - 60.0).abs() < 1e-9, "60 tick 后 x 应为 60，实际 {x}");
-        // 倍速参数校验
+        // Speed multiplier parameter validation.
         let e = call_err(&mut d, &mut sim, "sim/speed", json!({"multiplier": -1}));
         assert!(e.contains("> 0"), "{e}");
     }
@@ -934,7 +967,7 @@ mod tests {
             "if": [["@player.Position.x", "<", 30.0]]
         }));
         call(&mut d, &mut sim, "sim/pause", json!({}));
-        // 60 tick 速度 60/s：30 tick 后 x=30 越界
+        // 60 ticks at speed 60/s: after 30 ticks x=30, out of bounds.
         let result = call(&mut d, &mut sim, "sim/step", json!({"ticks": 60}));
         let failures = result["assert_failures"].as_array().unwrap();
         assert_eq!(failures.len(), 1, "持续违反只记一次（去抖）: {failures:?}");
@@ -964,9 +997,9 @@ mod tests {
     fn budget_violation_reports_once_like_assertion() {
         let (mut d, mut sim) = setup();
         d.set_budgets(serde_json::from_value(json!({"max_entities": 2})).unwrap());
-        // 1 个实体：健康
+        // 1 entity: healthy.
         assert!(d.check_assertions(&sim).is_empty());
-        // 撑爆预算
+        // Blow the budget.
         sim.world.spawn();
         sim.world.spawn();
         let fresh = d.check_assertions(&sim);
@@ -974,9 +1007,9 @@ mod tests {
         assert_eq!(fresh[0]["kind"], json!("budget"));
         assert_eq!(fresh[0]["limit"], json!(2));
         assert_eq!(fresh[0]["actual"], json!(3));
-        // 持续超标不重复报（去抖）
+        // Continued overage is not reported again (debounced).
         assert!(d.check_assertions(&sim).is_empty());
-        // perf/stats 可观测
+        // perf/stats is observable.
         let stats = call(&mut d, &mut sim, "perf/stats", json!({}));
         assert_eq!(stats["entities"], json!(3));
         assert_eq!(stats["budgets"]["max_entities"], json!(2));
@@ -985,19 +1018,19 @@ mod tests {
     #[test]
     fn inspect_selection_two_way() {
         let (mut d, mut sim) = setup();
-        // 初始无选中
+        // No selection initially.
         let r = call(&mut d, &mut sim, "inspect/selection", json!({}));
         assert_eq!(r["selected"], json!(null));
-        // AI 设选中（等价于窗口里人点了一下）
+        // AI sets the selection (equivalent to a human clicking in the window).
         let r = call(&mut d, &mut sim, "inspect/select", json!({"entity": "@player"}));
         assert_eq!(r["selected"]["name"], json!("player"));
         assert!(d.selection().is_some());
-        // 实体销毁后选中态自动失效
+        // After the entity is destroyed, the selection auto-invalidates.
         let p = sim.world.entity("player").unwrap();
         sim.world.despawn(p).unwrap();
         let r = call(&mut d, &mut sim, "inspect/selection", json!({}));
         assert_eq!(r["selected"], json!(null));
-        // 清空选中
+        // Clear the selection.
         d.set_selection(None);
         let r = call(&mut d, &mut sim, "inspect/select", json!({"entity": null}));
         assert_eq!(r["selected"], json!(null));
@@ -1022,7 +1055,7 @@ mod tests {
         assert!(root.join("saves/s1.json").exists());
         assert_eq!(call(&mut d, &mut sim, "save/list", json!({})), json!(["s1"]));
 
-        // 改世界 + 选中实体，读档后状态回滚、选中清空
+        // Mutate world + select an entity; after load the state rolls back and selection clears.
         let h0 = call(&mut d, &mut sim, "sim/hash", json!({}));
         call(&mut d, &mut sim, "world/set", json!({"entity": "@player", "path": "Health.hp", "value": 5}));
         call(&mut d, &mut sim, "inspect/select", json!({"entity": "@player"}));
@@ -1041,11 +1074,11 @@ mod tests {
         d.set_save_store(SaveStore::new(&root, "rpc-test"));
         call(&mut d, &mut sim, "save/write", json!({"slot": "s1"}));
         sim.start_recording();
-        // 读档 = 时间线断裂，录像期间拒绝（同 sim/restore 守卫）
+        // Loading = timeline break; rejected during recording (same guard as sim/restore).
         let e = call_err(&mut d, &mut sim, "save/load", json!({"slot": "s1"}));
         assert!(e.contains("录像"), "{e}");
         assert!(sim.is_recording(), "拒绝后录像必须仍然有效");
-        // 写存档是纯输出副作用，录像期间照常放行
+        // Writing a save is a pure output side effect; allowed during recording.
         call(&mut d, &mut sim, "save/write", json!({"slot": "s2"}));
         assert!(root.join("saves/s2.json").exists());
         let _ = std::fs::remove_dir_all(&root);
@@ -1054,15 +1087,15 @@ mod tests {
     #[test]
     fn save_rpcs_explicit_errors() {
         let (mut d, mut sim) = setup();
-        // 没挂存档仓库：显式报错而不是悄悄写到不知道哪里
+        // No save store mounted: explicit error rather than silently writing to nowhere.
         let e = call_err(&mut d, &mut sim, "save/write", json!({"slot": "s1"}));
         assert!(e.contains("存档目录"), "{e}");
         let root = temp_save_root("errors");
         d.set_save_store(SaveStore::new(&root, "rpc-test"));
-        // 槽名路径穿越被拒
+        // Slot-name path traversal is rejected.
         let e = call_err(&mut d, &mut sim, "save/write", json!({"slot": "../evil"}));
         assert!(e.contains("不合法"), "{e}");
-        // 读不存在的槽：报错带现有存档列表
+        // Reading a non-existent slot: error includes the existing save list.
         call(&mut d, &mut sim, "save/write", json!({"slot": "s1"}));
         let e = call_err(&mut d, &mut sim, "save/load", json!({"slot": "ghost"}));
         assert!(e.contains("ghost") && e.contains("s1"), "{e}");
@@ -1072,25 +1105,25 @@ mod tests {
     #[test]
     fn input_click_resolves_pick_and_injects_mouse_event() {
         let (mut d, mut sim) = setup();
-        // 静止的 player 挂 Sprite（2x2，中心 (0,0)），拾取有目标
+        // Stationary player with a Sprite (2x2, centered at (0,0)); picking has a target.
         let p = sim.world.entity("player").unwrap();
         sim.world.set_component(p, "Velocity", json!({"x": 0.0, "y": 0.0})).unwrap();
         sim.world.set_component(p, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000"})).unwrap();
         call(&mut d, &mut sim, "sim/pause", json!({}));
 
-        // 点在 player 身上（世界坐标）：拾取结果直接在返回值里
+        // Click on the player (world coordinates): the pick result is directly in the return value.
         let r = call(&mut d, &mut sim, "input/click", json!({"x": 0.5, "y": 0.5}));
         assert_eq!(r["event"], json!("mouse"));
         assert_eq!(r["entity"], json!("player"));
-        // 点空地：entity = null
+        // Click empty ground: entity = null.
         let r = call(&mut d, &mut sim, "input/click", json!({"x": 100.0, "y": 100.0}));
         assert_eq!(r["entity"], json!(null));
-        // 右键 → mouse-alt，同一套 payload
+        // Right click → mouse-alt, same payload shape.
         let r = call(&mut d, &mut sim, "input/click", json!({"x": 0.0, "y": 0.0, "button": "right"}));
         assert_eq!(r["event"], json!("mouse-alt"));
         assert_eq!(r["entity"], json!("player"));
 
-        // 下一 tick 三个事件都到，payload 是世界坐标 + 拾取结果
+        // Next tick all three events arrive; payload is world coordinates + pick result.
         call(&mut d, &mut sim, "sim/step", json!({}));
         let events = call(&mut d, &mut sim, "events/recent", json!({}));
         let arr = events.as_array().unwrap();
@@ -1100,7 +1133,7 @@ mod tests {
         assert!(arr.iter().any(|e| e["name"] == json!("mouse") && e["data"]["entity"] == json!(null)));
         assert!(arr.iter().any(|e| e["name"] == json!("mouse-alt") && e["data"]["entity"] == json!("player")));
 
-        // 参数校验：缺坐标 / 未知按键都显式报错
+        // Parameter validation: missing coordinates / unknown buttons all explicitly error.
         let e = call_err(&mut d, &mut sim, "input/click", json!({"y": 1.0}));
         assert!(e.contains('x'), "{e}");
         let e = call_err(&mut d, &mut sim, "input/click", json!({"x": 0.0, "y": 0.0, "button": "middle"}));
@@ -1109,8 +1142,8 @@ mod tests {
 
     #[test]
     fn clicks_ride_reply_channel_recorded_and_replayed() {
-        /// 把 mouse 事件写进世界的逻辑——点击真实影响状态哈希，
-        /// 重放时丢了点击必然分歧（要锁死的不变量）。
+        /// Logic that writes mouse events into the world — clicks really affect the state hash,
+        /// and dropping a click on replay would necessarily diverge (the invariant to lock down).
         struct ApplyClick;
         impl GameLogic for ApplyClick {
             fn on_tick(&mut self, w: &mut World, ev: Vec<Event>, _: &mut vitric_sim::Pcg32, _: u64) -> Result<(), String> {
@@ -1143,13 +1176,13 @@ mod tests {
             sim.step(&mut ApplyClick).unwrap();
         }
         let rec = sim.stop_recording().unwrap();
-        // 点击走回复通道：连同 tick + 拾取结果一起进录像
+        // Clicks ride the reply channel: together with the tick + pick result they enter the recording.
         assert_eq!(rec.replies.len(), 2);
         assert_eq!((rec.replies[0].tick, rec.replies[0].name.as_str()), (30, "mouse"));
         assert_eq!(rec.replies[0].data["entity"], json!("player"));
         assert_eq!((rec.replies[1].tick, rec.replies[1].name.as_str()), (60, "mouse-alt"));
         assert_eq!(rec.replies[1].data["entity"], json!(null));
-        // 重放：点击从录像注入，逐校验点 + 终态哈希逐位一致
+        // Replay: clicks are injected from the recording; check points + final hash match bit-for-bit.
         let mut sim2 = build();
         sim2.replay(&rec, &mut ApplyClick).unwrap();
         assert_eq!(sim2.world.state_hash(), rec.final_hash);
@@ -1171,10 +1204,11 @@ mod tests {
         assert!(e.contains("不存在"), "{e}");
     }
 
-    // ---- describe 并进 actions + 帧间差量 ----
+    // ---- describe folds in actions + inter-frame delta ----
 
-    /// 测试逻辑：available_actions 返一份固定动作词汇（模拟 Runtime 从规则自省的结果）。
-    /// 控制面持 dyn GameLogic 够不到规则，靠这条钩子把动作递进 describe。
+    /// Test logic: available_actions returns a fixed action vocabulary (simulating the Runtime
+    /// introspecting the rules). The control plane holds a dyn GameLogic and cannot reach the
+    /// rules, so this hook hands the actions into describe.
     struct WithActions;
     impl GameLogic for WithActions {
         fn on_tick(&mut self, _: &mut World, _: Vec<Event>, _: &mut vitric_sim::Pcg32, _: u64) -> Result<(), String> {
@@ -1199,12 +1233,12 @@ mod tests {
 
     #[test]
     fn describe_carries_actions_from_logic() {
-        // describe 顶层带 actions = 逻辑的动作词汇 ×{pressed,released} 平铺。
+        // describe top level carries actions = the logic's action vocabulary × {pressed, released} flattened.
         let (mut d, mut sim) = setup();
         let mut logic = WithActions;
         let out = call_with(&mut d, &mut sim, &mut logic, "render/describe", json!({}));
         let acts = out["actions"].as_array().expect("describe 应有 actions");
-        // 2 个动作 ×2 phase = 4 条；动作名来自逻辑
+        // 2 actions × 2 phases = 4 entries; action names come from the logic.
         assert_eq!(acts.len(), 4, "{acts:?}");
         assert_eq!(acts[0], json!({"action": "left", "phase": "pressed"}));
         assert_eq!(acts[1], json!({"action": "left", "phase": "released"}));
@@ -1214,7 +1248,8 @@ mod tests {
 
     #[test]
     fn describe_actions_empty_for_logic_without_rules() {
-        // 默认 GameLogic（()）available_actions 空 → actions 是空数组（仍带键，形态统一）。
+        // The default GameLogic (()) has empty available_actions → actions is an empty array
+        // (the key is still present, shape stays uniform).
         let (mut d, mut sim) = setup();
         let out = call(&mut d, &mut sim, "render/describe", json!({}));
         assert_eq!(out["actions"], json!([]), "纯逻辑无动作: {out}");
@@ -1222,33 +1257,34 @@ mod tests {
 
     #[test]
     fn describe_changes_reflect_movement_across_two_frames() {
-        // 连续两次 describe，中间动了世界：第一次无 changes，第二次的 changes 反映移动/出现。
+        // Two consecutive describes with the world mutated in between: first has no changes,
+        // second's changes reflect the move/appearance.
         let (mut d, mut sim) = setup();
-        // 给 player 加 Sprite 让它进 describe 的 visible
+        // Give player a Sprite so it enters describe's visible.
         let p = sim.world.entity("player").unwrap();
         sim.world.set_component(p, "Sprite", json!({"w": 1.0, "h": 1.0})).unwrap();
 
-        // 第一帧：没有上一帧 → 不带 changes 键（向后兼容）
+        // First frame: no previous frame → no changes key (backward compatible).
         let first = call(&mut d, &mut sim, "render/describe", json!({}));
         assert!(first.get("changes").is_none(), "第一帧不该有 changes: {first}");
-        // 原有主体字段照常在
+        // The original body fields are still present.
         assert!(first.get("visible").is_some() && first.get("camera").is_some());
 
-        // 改世界：player 右移 + 新 spawn 一个带 Sprite 的实体
+        // Mutate the world: player moves right + spawn a new entity with a Sprite.
         sim.world.set_field(p, "Position.x", json!(50.0)).unwrap();
         let star = sim.world.spawn_named("star").unwrap();
         sim.world.set_component(star, "Position", json!({"x": 10.0, "y": 0.0})).unwrap();
         sim.world.set_component(star, "Sprite", json!({"w": 1.0, "h": 1.0})).unwrap();
 
-        // 第二帧：带 changes，反映 player 移动 + star 出现
+        // Second frame: has changes, reflecting the player's move + star's appearance.
         let second = call(&mut d, &mut sim, "render/describe", json!({}));
         let changes = second.get("changes").expect("第二帧应有 changes");
-        // player 的 world 变了（id 用句柄字符串）
+        // The player's world changed (id is the handle string).
         let pid = p.to_string();
         let pchg = &changes["changed"][&pid];
         assert!(!pchg.is_null(), "player 应在 changed: {changes}");
         assert_eq!(pchg["world"][1], json!({"x": 50.0, "y": 0.0}), "新位置");
-        // star 出现在 appeared
+        // star appears in appeared.
         let appeared = changes["appeared"].as_array().unwrap();
         assert!(
             appeared.iter().any(|e| e["name"] == json!("star")),

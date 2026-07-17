@@ -1,6 +1,8 @@
-//! 运行时 LLM 端到端：规则 emit llm-ask → 桩 HTTP 端点 → 回复经 inject_reply
-//! 变成 llm-reply 事件 → 规则把 event.text 写进世界；全程录像，离线重放逐位一致。
-//! 不碰真实网络（桩服务器在本进程），不碰环境变量（配置直接构造，测试间不串）。
+//! Runtime LLM end-to-end: rule emits llm-ask → stub HTTP endpoint → reply goes through
+//! inject_reply to become an llm-reply event → rule writes event.text into the world; recorded
+//! throughout, offline replay bit-identical.
+//! No real network touched (stub server is in-process), no env vars touched (config constructed
+//! directly, no cross-test bleed).
 
 use std::fs;
 use std::path::PathBuf;
@@ -12,7 +14,8 @@ use vitric_cli::llm::{self, Llm, LlmConfig};
 use vitric_cli::runtime::Runtime;
 use vitric_sim::GameLogic;
 
-/// 最小 NPC 对话项目：start 时提问，llm-reply 写进 Text，llm-error 也写进 Text（显式可见）。
+/// Minimal NPC dialogue project: ask on start, llm-reply writes into Text, llm-error also writes
+/// into Text (explicitly visible).
 fn write_project(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vitric-llm-{}-{tag}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -80,7 +83,8 @@ fn write_project(tag: &str) -> PathBuf {
     dir
 }
 
-/// 模拟主循环的一个 tick（与 main.rs 的 step_once 同序：step → 观测事件 → ask → pump）。
+/// Simulate one tick of the main loop (same order as main.rs's step_once: step → observe events
+/// → ask → pump).
 fn tick_once(sim: &mut vitric_sim::Sim, rt: &mut Runtime, llm: &mut Llm) {
     sim.step(rt).unwrap();
     let observed = rt.drain_observed();
@@ -95,7 +99,7 @@ fn npc_text(sim: &vitric_sim::Sim) -> String {
 
 #[test]
 fn llm_reply_drives_rules_and_recording_replays_offline() {
-    // 桩端点：回一份 canned 的 chat/completions
+    // Stub endpoint: returns a canned chat/completions
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1/chat/completions", server.server_addr());
     let stub = std::thread::spawn(move || {
@@ -117,7 +121,8 @@ fn llm_reply_drives_rules_and_recording_replays_offline() {
         model: "stub-model".to_string(),
     });
 
-    // 录像从 tick 0 开始：llm-ask 的发起和回复的注入全程被录
+    // Recording starts at tick 0: the llm-ask dispatch and reply injection are recorded
+    // throughout
     sim.start_recording();
     let deadline = Instant::now() + Duration::from_secs(5);
     while npc_text(&sim).is_empty() {
@@ -126,7 +131,7 @@ fn llm_reply_drives_rules_and_recording_replays_offline() {
         std::thread::sleep(Duration::from_millis(2));
     }
     assert_eq!(npc_text(&sim), "旅人，欢迎来到玻璃镇");
-    // 回复落地后再跑一段，让录像里有回复之后的轨迹
+    // After the reply lands, run a bit more so the recording has the post-reply trajectory
     for _ in 0..30 {
         tick_once(&mut sim, &mut rt, &mut llm);
     }
@@ -135,7 +140,8 @@ fn llm_reply_drives_rules_and_recording_replays_offline() {
     assert_eq!(rec.replies[0].name, "llm-reply");
     assert_eq!(rec.replies[0].data.get("text"), Some(&json!("旅人，欢迎来到玻璃镇")));
 
-    // 离线重放：不装配 LLM、桩服务器已收摊——回复全部来自录像，逐校验点一致
+    // Offline replay: no LLM assembled, the stub server has packed up — replies all come from
+    // the recording, every checkpoint consistent
     stub.join().unwrap();
     let (mut sim2, mut rt2) = Runtime::boot(&dir).unwrap();
     sim2.replay(&rec, &mut rt2).expect("带 LLM 内容的录像必须离线逐位重放");
@@ -151,7 +157,7 @@ fn disabled_llm_injects_explicit_error_reply() {
     let (mut sim, mut rt) = Runtime::boot(&dir).unwrap();
     let mut llm = Llm::disabled("未配置 VITRIC_LLM_URL/KEY/MODEL".to_string());
 
-    // tick 0 规则发问 → 立刻注入 llm-error → tick 1 规则消化、写进 Text
+    // tick 0 rule asks → immediately injects llm-error → tick 1 rule digests, writes into Text
     tick_once(&mut sim, &mut rt, &mut llm);
     tick_once(&mut sim, &mut rt, &mut llm);
     let text = npc_text(&sim);

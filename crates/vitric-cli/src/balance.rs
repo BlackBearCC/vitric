@@ -1,20 +1,27 @@
-//! `vitric balance`：自动配平。调一个数值旋钮，用 agent 集群试玩反复跑，二分搜索到
-//! 让通关率落进目标区间的旋钮值——把"试玩报告"从只报问题升级成**闭环配平**。
+//! `vitric balance`: auto-balancing. Tweak one numeric knob, run playtests repeatedly with an
+//! agent swarm, and binary-search for the knob value that lands the clear rate in the target
+//! band — upgrading the "playtest report" from merely flagging problems to **closed-loop balancing**.
 //!
-//! 三块拼起来：
-//! - **旋钮寻址**（[`KnobAddr`]）：`<相对文件路径>#<json-pointer>` 指向项目某文件里的一个数字
-//!   （RFC6901 JSON Pointer）。解析时把该文件读成 JSON、按 pointer 取到那个 number。
-//! - **应用旋钮**（[`apply_knob_to_temp`]）：每个候选值，**把整个项目拷到临时目录**、只改那一个
-//!   文件的那一个 pointer、对临时副本跑试玩。**绝不写用户项目目录**；临时副本用完即删
-//!   （[`TempProject`] 的 Drop 负责清理）。
-//! - **搜索**（[`search`]）：先在 range 两端各跑一次定方向（通关率随旋钮是升是降），假设单调
-//!   做二分；两端方向不一致 / 中点不符合单调预期就退化成**粗线扫**，报最接近目标的值 + 整条曲线，
-//!   并诚实标注"通关率对这个旋钮不单调"。
+//! Three pieces fit together:
+//! - **Knob addressing** ([`KnobAddr`]): `<relative file path>#<json-pointer>` points at a number
+//!   in some project file (RFC6901 JSON Pointer). Parsing reads that file as JSON and resolves the
+//!   pointer to that number.
+//! - **Applying the knob** ([`apply_knob_to_temp`]): for each candidate value, **copy the whole
+//!   project to a temp directory**, change only that one pointer in that one file, then run a
+//!   playtest on the temp copy. **Never writes the user's project directory**; the temp copy is
+//!   deleted after use ([`TempProject`]'s Drop handles cleanup).
+//! - **Search** ([`search`]): first run each end of the range once to determine direction (does
+//!   clear rate rise or fall with the knob), assume monotonic and binary-search; if the two ends
+//!   disagree in direction / the midpoint violates the monotonic assumption, fall back to a
+//!   **coarse line scan**, reporting the value closest to the target + the entire curve, and
+//!   honestly noting "clear rate is non-monotonic for this knob".
 //!
-//! **确定性**：试玩本就确定（同旋钮值 → 同通关率），搜索路径只由项目+参数决定——同项目同参
-//! 出同 found_value + 同 samples。`search` 把"怎么评估一个候选值"抽象成注入的闭包，纯算法
-//! 部分（二分/线扫）能脱离 boot 单测；真跑时闭包指向 [`evaluate`]（拷临时副本→跑 swarm→拿
-//! win_rate）。
+//! **Determinism**: playtests are already deterministic (same knob value → same clear rate), and
+//! the search path is decided solely by project + parameters — same project, same parameters
+//! yields the same found_value + the same samples. `search` abstracts "how to evaluate a candidate
+//! value" into an injected closure, so the pure-algorithm part (binary search / line scan) can be
+//! unit-tested without boot; in real runs the closure points to [`evaluate`] (copy temp → run
+//! swarm → get win_rate).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,18 +35,20 @@ use vitric_playtest::{
 
 use crate::runtime::Runtime;
 
-/// 旋钮地址：项目里某文件（相对路径）+ 指向一个数字的 JSON Pointer（RFC6901，如 `/rules/3/do/0/to`）。
+/// Knob address: some file in the project (relative path) + a JSON Pointer (RFC6901, e.g.
+/// `/rules/3/do/0/to`) pointing at a number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnobAddr {
-    /// 相对项目根的文件路径（如 `rules/game.json`）。
+    /// File path relative to the project root (e.g. `rules/game.json`).
     pub rel_file: String,
-    /// RFC6901 JSON Pointer（如 `/rules/3/do/0/to`），指向该文件里的一个 number。
+    /// RFC6901 JSON Pointer (e.g. `/rules/3/do/0/to`) pointing at a number in that file.
     pub pointer: String,
 }
 
 impl KnobAddr {
-    /// 解析 `--knob` 参数：`<相对文件路径>#<json-pointer>`。`#` 只切第一个（pointer 里不会有 `#`，
-    /// 但文件名理论上可能有 `#`——按"第一个 # 之后全是 pointer"约定，简单可预测）。
+    /// Parse the `--knob` argument: `<relative file path>#<json-pointer>`. `#` splits only on the
+    /// first occurrence (the pointer will not contain `#`, but a filename theoretically could — by
+    /// convention "everything after the first # is the pointer", simple and predictable).
     pub fn parse(spec: &str) -> Result<KnobAddr, String> {
         let (rel_file, pointer) = spec.split_once('#').ok_or_else(|| {
             format!(
@@ -51,7 +60,8 @@ impl KnobAddr {
             return Err(format!("--knob 缺少文件路径：{spec:?}"));
         }
         if pointer.is_empty() {
-            // 空 pointer（RFC6901 里指整个文档）对配平没意义——必须指到一个数字。
+            // An empty pointer (which in RFC6901 refers to the whole document) is meaningless for
+            // balancing — it must point at a number.
             return Err(format!("--knob 缺少 JSON Pointer（# 后为空）：{spec:?}"));
         }
         if !pointer.starts_with('/') {
@@ -63,8 +73,9 @@ impl KnobAddr {
     }
 }
 
-/// 读出旋钮当前值：把 `rel_file` 读成 JSON，按 pointer 取到那个数字。
-/// pointer 解析不到 / 指到的不是数字都明确报错（带路径，vitric check 风格）。
+/// Read the knob's current value: read `rel_file` as JSON and resolve the pointer to that number.
+/// Pointer unresolvable / pointing at a non-number both explicitly error (with the path,
+/// vitric check style).
 pub fn read_knob(root: &Path, addr: &KnobAddr) -> Result<f64, String> {
     let path = root.join(&addr.rel_file);
     let doc = load_json(&path)?;
@@ -72,10 +83,12 @@ pub fn read_knob(root: &Path, addr: &KnobAddr) -> Result<f64, String> {
         .ok_or_else(|| format!("{} 里 pointer {} 没指到一个数字（越界或非 number）", addr.rel_file, addr.pointer))
 }
 
-/// 在内存的 JSON 文档里把 pointer 指向的数字改成 `value`。pointer 解析不到 / 原值不是数字
-/// 都明确报错——配平只改"本来就是数字"的旋钮，不凭空建字段、不覆盖非数字。
+/// Change the number at the pointer to `value` in an in-memory JSON document. Pointer unresolvable
+/// / original value not a number both explicitly error — balancing only tweaks knobs that "are
+/// already numbers"; it never creates fields out of thin air or overwrites non-numbers.
 pub fn set_pointer_number(doc: &mut Value, pointer: &str, value: f64) -> Result<(), String> {
-    // 先确认原值存在且是数字（越界/非数字立刻报错，不静默新建）。
+    // First confirm the original value exists and is a number (out-of-bounds / non-number errors
+    // immediately, no silent creation).
     let cur = doc
         .pointer(pointer)
         .ok_or_else(|| format!("JSON Pointer {pointer} 越界（指不到任何值）"))?;
@@ -89,18 +102,20 @@ pub fn set_pointer_number(doc: &mut Value, pointer: &str, value: f64) -> Result<
     Ok(())
 }
 
-/// 把候选值落成 JSON 数字：整数值（如 8.0）写成整数 `8`（不写 `8.0`），其余写浮点。
-/// 旋钮多半是整数阈值（"敌人攻击=8"），写整数能让临时副本的 JSON 跟用户原文同形、好对账。
+/// Render a candidate value as a JSON number: integral values (e.g. 8.0) are written as integer
+/// `8` (not `8.0`), the rest as floats. Knobs are mostly integer thresholds ("enemy attack = 8"),
+/// so writing integers keeps the temp copy's JSON identical in shape to the user's original, easy
+/// to reconcile.
 fn number_value(value: f64) -> Value {
     if value.fract() == 0.0 && value.abs() < 9.007_199_254_740_992e15 {
-        // 落进 i64 安全整数范围的整数值写成整数字面
+        // Integral values falling within the i64 safe-integer range are written as integer literals
         Value::from(value as i64)
     } else {
         Value::from(value)
     }
 }
 
-/// 取 pointer 指向的数字（不存在或非数字返回 None）。
+/// Get the number at the pointer (returns None if absent or not a number).
 fn pointer_get_number(doc: &Value, pointer: &str) -> Option<f64> {
     doc.pointer(pointer).and_then(|v| v.as_f64())
 }
@@ -111,20 +126,24 @@ fn load_json(path: &Path) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("{} 解析 JSON 失败: {e}", path.display()))
 }
 
-/// 一个临时项目副本：拷整个项目目录到系统临时区（按进程 id + 计数隔离），
-/// Drop 时整目录删掉。**绝不动用户项目目录**——配平的所有改写都落在这份副本里。
+/// A temporary project copy: copies the whole project directory to the system temp area (isolated
+/// by process id + counter). On Drop the entire directory is deleted. **Never touches the user's
+/// project directory** — all balancing writes land in this copy.
 struct TempProject {
     dir: PathBuf,
 }
 
-/// 进程内全局递增计数：保证每份临时副本目录名**全局唯一**——即便多个评估/多个测试在同进程
-/// 并发跑（同 pid），也绝不撞目录（撞了会互相清掉对方的副本，读到半成品）。`n` 只是调用方传来
-/// 的对账编号，不参与唯一性。
+/// In-process global increasing counter: guarantees each temp copy directory name is **globally
+/// unique** — even if multiple evaluations / multiple tests run concurrently in the same process
+/// (same pid), they never collide on a directory (a collision would wipe each other's copies and
+/// read half-finished data). `n` is just a reconciliation number passed in by the caller; it does
+/// not participate in uniqueness.
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 impl TempProject {
-    /// 把 `src` 项目整树拷到 `temp_dir()/vitric-balance-<pid>-<全局序号>-<n>/`。
-    /// 全局序号保证唯一，所以不需要"先删旧目录"（每次都是全新路径）。
+    /// Copy the whole `src` project tree to
+    /// `temp_dir()/vitric-balance-<pid>-<global sequence>-<n>/`. The global sequence guarantees
+    /// uniqueness, so there is no need to "delete the old directory first" (every run is a fresh path).
     fn clone_from(src: &Path, n: u64) -> Result<TempProject, String> {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir()
@@ -136,12 +155,14 @@ impl TempProject {
 
 impl Drop for TempProject {
     fn drop(&mut self) {
-        // 尽力删除；删不掉不 panic（析构里 panic 会掩盖真错），临时目录残留无害。
+        // Best-effort delete; don't panic on failure (a panic in a destructor would mask the real
+        // error), leftover temp directories are harmless.
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
-/// 递归拷贝目录（只拷文件和子目录，符号链接按其指向当普通文件拷——项目里不该有链接）。
+/// Recursively copy a directory (only copies files and subdirectories; symlinks are copied as
+/// ordinary files pointing to their target — a project should not contain links).
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| format!("建临时目录 {} 失败: {e}", dst.display()))?;
     for entry in std::fs::read_dir(src).map_err(|e| format!("读目录 {} 失败: {e}", src.display()))? {
@@ -159,7 +180,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 一次评估的参数（怎么跑 swarm 拿通关率）。
+/// Parameters for one evaluation (how to run the swarm to get the clear rate).
 #[derive(Debug, Clone)]
 pub struct EvalParams {
     pub sessions: u64,
@@ -167,15 +188,17 @@ pub struct EvalParams {
     pub seed: u64,
 }
 
-/// 评估一个候选旋钮值 → 通关率（0..1）。
+/// Evaluate a candidate knob value → clear rate (0..1).
 ///
-/// 流程：把项目拷到临时副本 → 改副本里 knob 指向的那个数字为 `value` → boot 临时副本跑
-/// swarm（default_plan 默认策略组）→ 聚合拿 `outcome_distribution.win_rate` → 临时副本 Drop 删掉。
-/// `n` 用于临时目录命名隔离（同进程多次评估不撞目录）。**绝不写用户项目目录**。
+/// Flow: copy the project to a temp copy → change the number at the knob pointer in the copy to
+/// `value` → boot the temp copy and run a swarm (default_plan default strategy group) → aggregate
+/// to get `outcome_distribution.win_rate` → the temp copy is dropped and deleted.
+/// `n` is used for temp directory name isolation (multiple evaluations in the same process do not
+/// collide on directories). **Never writes the user's project directory**.
 pub fn evaluate(src: &Path, addr: &KnobAddr, value: f64, params: &EvalParams, n: u64) -> Result<f64, String> {
     let temp = TempProject::clone_from(src, n)?;
 
-    // 改临时副本里那一个文件的那一个 pointer
+    // Change that one pointer in that one file in the temp copy
     let target_file = temp.dir.join(&addr.rel_file);
     let mut doc = load_json(&target_file)?;
     set_pointer_number(&mut doc, &addr.pointer, value)?;
@@ -183,15 +206,17 @@ pub fn evaluate(src: &Path, addr: &KnobAddr, value: f64, params: &EvalParams, n:
     std::fs::write(&target_file, serialized)
         .map_err(|e| format!("写临时旋钮文件 {} 失败: {e}", target_file.display()))?;
 
-    // 跑 swarm 拿通关率（和 gate 的 playtest 门同口径：default_plan 默认策略组 + config + 清单 must_emit）
+    // Run the swarm to get the clear rate (same calibration as gate's playtest gate:
+    // default_plan default strategy group + config + manifest must_emit)
     let win_rate = run_swarm_win_rate(&temp.dir, params)?;
-    // temp 在这里 Drop，临时副本删掉
+    // temp is dropped here, the temp copy is deleted
     Ok(win_rate)
 }
 
-/// 对一个（临时）项目目录跑 default_plan swarm，聚合出通关率。
-/// 口径对齐 cmd_playtest / gate 的 playtest 门：playtest.json 覆盖视图、清单 must_emit 并进 win 集合、
-/// 声明了 goal 自动掺前瞻。每局自己 boot（QuickJS 非 Send，运行时不跨线程）。
+/// Run a default_plan swarm on a (temp) project directory and aggregate the clear rate.
+/// Calibration aligns with cmd_playtest / gate's playtest gate: playtest.json overrides the view,
+/// manifest must_emit joins the win set, and a declared goal auto-injects lookahead. Each session
+/// boots its own runtime (QuickJS is not Send, the runtime does not cross threads).
 fn run_swarm_win_rate(dir: &Path, params: &EvalParams) -> Result<f64, String> {
     let config = PlaytestConfig::load(dir)?.unwrap_or_default();
     let manifest_must_emit: Vec<String> = match Project::load(dir) {
@@ -209,7 +234,8 @@ fn run_swarm_win_rate(dir: &Path, params: &EvalParams) -> Result<f64, String> {
     }
     .with_manifest_must_emit(&manifest_must_emit);
 
-    // 默认策略组 swarm（声明了 goal 自动掺前瞻；没声明完全不变）——任务要求的"默认 swarm 默认组"。
+    // Default strategy group swarm (a declared goal auto-injects lookahead; no declaration leaves
+    // it fully unchanged) — the "default swarm, default group" required by the task.
     let plan = default_plan(params.sessions, params.seed, params.max_ticks, terminal.clone(), config.goal.is_some());
     let factory = || -> Result<(_, _, _), String> {
         let (sim, rt) = Runtime::boot(dir)?;
@@ -223,7 +249,7 @@ fn run_swarm_win_rate(dir: &Path, params: &EvalParams) -> Result<f64, String> {
     Ok(report.outcome_distribution.win_rate)
 }
 
-/// 目标通关率区间 [lo, hi]（闭区间）。
+/// Target clear-rate band [lo, hi] (closed interval).
 #[derive(Debug, Clone, Copy)]
 pub struct TargetBand {
     pub lo: f64,
@@ -231,7 +257,7 @@ pub struct TargetBand {
 }
 
 impl TargetBand {
-    /// 解析 `lo:hi`（如 `0.4:0.7`）。
+    /// Parse `lo:hi` (e.g. `0.4:0.7`).
     pub fn parse(s: &str) -> Result<TargetBand, String> {
         let (lo, hi) = parse_pair(s, "--target-clear-rate")?;
         if lo > hi {
@@ -242,11 +268,12 @@ impl TargetBand {
         }
         Ok(TargetBand { lo, hi })
     }
-    /// 命中：通关率落进 [lo,hi]（含端点）。
+    /// Hit: the clear rate falls within [lo,hi] (endpoints included).
     pub fn contains(&self, rate: f64) -> bool {
         rate >= self.lo && rate <= self.hi
     }
-    /// 区间中点（线扫"最接近"用它当距离参照——离带子越近越好；带内距离 0）。
+    /// Distance from the band (the line scan's "closest" uses this as the distance reference —
+    /// the closer to the band the better; inside the band the distance is 0).
     fn distance(&self, rate: f64) -> f64 {
         if self.contains(rate) {
             0.0
@@ -258,7 +285,7 @@ impl TargetBand {
     }
 }
 
-/// 旋钮搜索区间 [min, max]。
+/// Knob search range [min, max].
 #[derive(Debug, Clone, Copy)]
 pub struct KnobRange {
     pub min: f64,
@@ -266,7 +293,7 @@ pub struct KnobRange {
 }
 
 impl KnobRange {
-    /// 解析 `min:max`（如 `0:50`）。
+    /// Parse `min:max` (e.g. `0:50`).
     pub fn parse(s: &str) -> Result<KnobRange, String> {
         let (min, max) = parse_pair(s, "--range")?;
         if min >= max {
@@ -285,8 +312,9 @@ fn parse_pair(s: &str, flag: &str) -> Result<(f64, f64), String> {
     Ok((a, b))
 }
 
-/// 一个采样点：旋钮值 → 通关率。
-/// （vitric-cli 不直接依赖 serde derive，输出时用 [`Sample::to_json`] 手工序列化进 json! 报告。）
+/// A sample point: knob value → clear rate.
+/// (vitric-cli does not directly depend on serde derive; output uses [`Sample::to_json`] to
+/// hand-serialize into the json! report.)
 #[derive(Debug, Clone, Copy)]
 pub struct Sample {
     pub value: f64,
@@ -294,44 +322,54 @@ pub struct Sample {
 }
 
 impl Sample {
-    /// 序列化成 `{"value":.., "clear_rate":..}`（喂 json! 报告的 samples 数组）。
+    /// Serialize to `{"value":.., "clear_rate":..}` (feeds the json! report's samples array).
     fn to_json(self) -> Value {
         serde_json::json!({ "value": self.value, "clear_rate": self.clear_rate })
     }
 }
 
-/// 搜索结果（喂 JSON 输出）。
+/// Search outcome (feeds JSON output).
 #[derive(Debug, Clone)]
 pub struct SearchOutcome {
-    /// 报出来的旋钮值（命中=落进目标带的值；没命中=线扫里最接近目标带的值）。
+    /// The reported knob value (hit = a value landing in the target band; miss = the value closest
+    /// to the target band in the line scan).
     pub found_value: f64,
-    /// 该值对应的通关率。
+    /// The clear rate corresponding to that value.
     pub found_clear_rate: f64,
-    /// 是否命中目标带。
+    /// Whether the target band was hit.
     pub in_target: bool,
-    /// 评估次数（每次 = 一轮 swarm 试玩）。
+    /// Number of evaluations (each = one swarm playtest round).
     pub iterations: usize,
-    /// 所有采样点（按评估顺序，确定可复现）。
+    /// All sample points (in evaluation order, deterministic and reproducible).
     pub samples: Vec<Sample>,
-    /// 一句人话/诚实标注（如"通关率对这个旋钮不单调，给的是线扫最优"）。
+    /// A plain-language / honest note (e.g. "clear rate is non-monotonic for this knob, the line
+    /// scan optimum is given").
     pub note: String,
 }
 
-/// 收敛阈值：二分区间宽度缩到 range 跨度的这个比例以下仍没命中，就停（避免无限二分）。
+/// Convergence threshold: if the binary-search interval width shrinks below this fraction of the
+/// range span without a hit, stop (avoids infinite binary search).
 const CONVERGE_FRAC: f64 = 1e-3;
 
-/// 二分 + 非单调线扫兜底的配平搜索。
+/// Balancing search: binary search + non-monotonic line scan fallback.
 ///
-/// `eval(value, n) -> clear_rate`：评估一个候选旋钮值的通关率（`n` 是第几次评估，用于临时目录隔离/对账）。
-/// 把评估抽象成闭包，让纯算法（方向判定/二分/线扫）能脱离 boot 单测；真跑时闭包指向 [`evaluate`]。
+/// `eval(value, n) -> clear_rate`: evaluates the clear rate for a candidate knob value (`n` is the
+/// evaluation index, used for temp directory isolation / reconciliation). Abstracting evaluation
+/// into a closure lets the pure algorithm (direction check / binary search / line scan) be
+/// unit-tested without boot; in real runs the closure points to [`evaluate`].
 ///
-/// 算法：
-/// 1. 先评估 range 两端 `min`、`max` 定方向：通关率随旋钮增大是升（rate(max) > rate(min)）还是降。
-///    端点本身命中目标带就直接返回（少跑一轮）。
-/// 2. **两端方向明确**（一端在带上方、另一端在带下方，按单调假设目标带夹在中间）：二分。
-///    每步取中点评估，命中即停；按方向收窄区间；区间宽度缩到很小仍没命中也停（报最接近的端点采样）。
-/// 3. **两端方向不一致 / 都在带同侧**（单调假设不成立或区间不含解）：退化**粗线扫**——在 range 上
-///    等距采 `max_iters` 个点，报最接近目标带的那个值 + 整条曲线，note 诚实标注。
+/// Algorithm:
+/// 1. First evaluate both ends of the range `min`, `max` to determine direction: does the clear
+///    rate rise (rate(max) > rate(min)) or fall as the knob increases. If an endpoint itself hits
+///    the target band, return immediately (saves one round).
+/// 2. **Both ends have a clear direction** (one above the band, the other below; under the
+///    monotonic assumption the target band is bracketed between them): binary search. Each step
+///    evaluates the midpoint, stops on a hit, narrows the interval by direction; if the interval
+///    width shrinks very small without a hit, also stop (report the closest endpoint sample).
+/// 3. **The two ends disagree in direction / are on the same side of the band** (the monotonic
+///    assumption does not hold, or the interval contains no solution): fall back to a **coarse line
+///    scan** — sample `max_iters` evenly spaced points across the range, report the value closest
+///    to the target band + the entire curve, with an honest note.
 pub fn search<F>(
     range: KnobRange,
     target: TargetBand,
@@ -343,8 +381,10 @@ where
 {
     let mut samples: Vec<Sample> = Vec::new();
     let mut n: u64 = 0;
-    // 评估一个值，记进 samples（去重：同值不重复评估，复用已记结果——确定性下同值同率）。
-    // 闭包借不动 samples（要可变），所以用函数式手写：先查缓存，没有再 eval。
+    // Evaluate a value and record it in samples (dedup: the same value is not re-evaluated, the
+    // recorded result is reused — under determinism, same value means same rate). The closure
+    // cannot borrow samples (it needs to be mutable), so this is hand-written functionally: check
+    // the cache first, then eval if absent.
     macro_rules! eval_cached {
         ($val:expr) => {{
             let v: f64 = $val;
@@ -368,8 +408,9 @@ where
         return Ok(finish(range.max, rate_max, true, samples, "range 上端即命中目标带".to_string()));
     }
 
-    // 单调假设下能二分的前提：两端把目标带"夹住"——一端的通关率在带上方、另一端在带下方。
-    // band 中点当参照：哪端 rate 高、哪端低，且二者分居 target 两侧。
+    // Precondition for binary search under the monotonic assumption: the two ends "bracket" the
+    // target band — one end's clear rate is above the band, the other below. The band midpoint is
+    // the reference: which end is higher / lower, and the two straddle the target.
     let min_above = rate_min > target.hi;
     let max_above = rate_max > target.hi;
     let min_below = rate_min < target.lo;
@@ -377,17 +418,19 @@ where
     let bracketed = (min_above && max_below) || (min_below && max_above);
 
     if bracketed {
-        // 方向：rate 随旋钮增大是降（min 高 max 低）还是升。
+        // Direction: does the rate fall (min high, max low) or rise as the knob increases.
         let ascending = rate_max > rate_min;
         binary_search(range, target, max_iters, ascending, &mut samples, &mut n, eval)
     } else {
-        // 单调假设不成立或区间不含解：线扫兜底。把已评估的两端也带进去（不浪费）。
+        // Monotonic assumption does not hold or the interval contains no solution: line scan
+        // fallback. The already-evaluated ends are carried along (not wasted).
         line_scan(range, target, max_iters, samples, n, eval)
     }
 }
 
-/// 二分核（已知两端把目标带夹住、方向 = ascending）。命中即停；区间收敛到极小仍没命中也停
-/// （此时报区间内最接近目标带的采样——通常是最后一个中点）。
+/// Binary search core (given that both ends bracket the target band and direction = ascending).
+/// Stops on a hit; also stops when the interval converges to a tiny width without a hit (in that
+/// case reports the sample closest to the target band within the interval — usually the last midpoint).
 #[allow(clippy::too_many_arguments)]
 fn binary_search<F>(
     range: KnobRange,
@@ -404,14 +447,16 @@ where
     let span = range.max - range.min;
     let mut lo = range.min;
     let mut hi = range.max;
-    // 两端已在 samples 里（search 评估过），二分从中点开始。预算扣掉已用的两端评估。
+    // Both ends are already in samples (search evaluated them); binary search starts from the
+    // midpoint. The budget subtracts the two already-used endpoint evaluations.
     let budget = max_iters.saturating_sub(samples.len());
     for _ in 0..budget {
         if (hi - lo).abs() <= span * CONVERGE_FRAC {
             break;
         }
         let mid = lo + (hi - lo) / 2.0;
-        // 同值已评估过就复用（确定性下同值同率），不重复跑一轮 swarm
+        // Reuse an already-evaluated value (under determinism, same value means same rate); don't
+        // repeat a swarm round
         let rate = if let Some(s) = samples.iter().find(|s| s.value == mid) {
             s.clear_rate
         } else {
@@ -423,18 +468,20 @@ where
         if target.contains(rate) {
             return Ok(finish(mid, rate, true, std::mem::take(samples), "二分命中目标带".to_string()));
         }
-        // rate 太高 → 要往"通关率更低"的方向走；太低 → 往更高的方向走。
-        // ascending（rate 随旋钮升）时：rate 高就把 hi 拉到 mid（减小旋钮降低通关率）。
-        // descending 时方向相反。
+        // rate too high → move toward "lower clear rate"; too low → move toward higher. When
+        // ascending (rate rises with the knob): high rate pulls hi to mid (decrease the knob to
+        // lower the clear rate). Descending is the opposite direction.
         let too_high = rate > target.hi;
         if ascending == too_high {
-            // ascending && 太高 → 降旋钮（hi=mid）；descending && 太低 → 也降旋钮（hi=mid）
+            // ascending && too high → decrease the knob (hi=mid); descending && too low → also
+            // decrease the knob (hi=mid)
             hi = mid;
         } else {
             lo = mid;
         }
     }
-    // 没命中：报采样里离目标带最近的那个值（诚实给最优近似）。
+    // No hit: report the value in the samples closest to the target band (honestly give the best
+    // approximation).
     let best = closest(samples, target);
     Ok(finish(
         best.value,
@@ -448,8 +495,10 @@ where
     ))
 }
 
-/// 线扫兜底：在 range 上等距采 `points` 个点（含两端），报最接近目标带的值 + 整条曲线。
-/// 已评估的两端复用（在 samples 里）。诚实标注"通关率对这个旋钮不单调/区间不含解，给的是线扫最优"。
+/// Line scan fallback: sample `points` evenly spaced points across the range (including both
+/// ends), report the value closest to the target band + the entire curve. The already-evaluated
+/// ends are reused (they are in samples). Honestly notes "clear rate is non-monotonic for this
+/// knob / the interval contains no solution, the line scan optimum is given".
 fn line_scan<F>(
     range: KnobRange,
     target: TargetBand,
@@ -466,14 +515,14 @@ where
     for k in 0..points {
         let frac = k as f64 / (points - 1) as f64;
         let v = range.min + span * frac;
-        // 复用已评估值（两端、或浮点上正好相等的点）
+        // Reuse already-evaluated values (the ends, or points that happen to be equal in floating point)
         let already = samples.iter().any(|s| s.value == v);
         if !already {
             let r = eval(v, n)?;
             n += 1;
             samples.push(Sample { value: v, clear_rate: r });
         }
-        // 扫到命中就提前停（线扫也可能撞上目标带）
+        // Stop early on a hit (a line scan can also stumble into the target band)
         if let Some(s) = samples.iter().find(|s| s.value == v) {
             if target.contains(s.clear_rate) {
                 let hit = *s;
@@ -498,7 +547,8 @@ where
     Ok(finish(best.value, best.clear_rate, in_target, samples, note))
 }
 
-/// 采样里离目标带最近的点（带内距离 0；多点同距离取旋钮值小的，确定）。
+/// The point in the samples closest to the target band (distance 0 inside the band; on a tie the
+/// smaller knob value wins, deterministic).
 fn closest(samples: &[Sample], target: TargetBand) -> Sample {
     samples
         .iter()
@@ -517,7 +567,7 @@ fn finish(found_value: f64, found_clear_rate: f64, in_target: bool, samples: Vec
     SearchOutcome { found_value, found_clear_rate, in_target, iterations: samples.len(), samples, note }
 }
 
-/// CLI 入口：`vitric balance <项目> --knob ... --target-clear-rate ... --range ... [选项]`。
+/// CLI entry: `vitric balance <project> --knob ... --target-clear-rate ... --range ... [options]`.
 pub fn run(args: &[String]) -> Result<(), String> {
     let dir = args.first().ok_or("balance 缺少项目目录参数")?;
     let dir = PathBuf::from(dir);
@@ -530,7 +580,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut max_iters: usize = 12;
     let mut seed: u64 = 0;
     let mut out_path: Option<PathBuf> = None;
-    // --strategy 当前只接受 "swarm"（默认组）——保留位，给将来扩展前瞻/经济等专档留口。
+    // --strategy currently only accepts "swarm" (default group) — a reserved slot, leaving room to
+    // add lookahead / economy specialist profiles later.
     let mut strategy = "swarm".to_string();
 
     let mut i = 1;
@@ -598,11 +649,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let target = TargetBand::parse(&target)?;
     let knob_range = KnobRange::parse(&range)?;
 
-    // 旋钮寻址自检：加载期就确认 knob 指到一个数字（越界/非数字立刻报错，不等跑完试玩）。
+    // Knob addressing self-check: confirm at load time that the knob points at a number
+    // (out-of-bounds / non-number errors immediately, without waiting for the playtest to finish).
     let knob_initial = read_knob(&dir, &addr)?;
 
     let params = EvalParams { sessions, max_ticks, seed };
-    // 真跑：每个候选值拷临时副本→改 knob→跑 swarm→拿 win_rate→删副本（evaluate 内部完成）。
+    // Real run: for each candidate value, copy a temp copy → change the knob → run the swarm → get
+    // win_rate → delete the copy (all done inside evaluate).
     let src = dir.clone();
     let addr_eval = addr.clone();
     let params_eval = params.clone();
@@ -610,8 +663,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
         evaluate(&src, &addr_eval, value, &params_eval, n)
     })?;
 
-    // 源项目逐字节不变是配平的硬约束——这里不主动断言（集成测试断言），但临时副本已 Drop 删干净。
-    let _ = strategy; // 当前只 swarm，保留位避免 unused
+    // The source project remaining byte-for-byte unchanged is a hard constraint of balancing — no
+    // active assertion here (integration tests assert it), and the temp copies have been dropped
+    // and cleaned up.
+    let _ = strategy; // currently only swarm; reserved slot to avoid unused
 
     let report = serde_json::json!({
         "knob": {
@@ -634,7 +689,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     println!("{json}");
 
-    // 一句人话总结（stderr，和 JSON 分流；人看总结、脚本读 stdout 的 JSON）。
+    // A plain-language summary (stderr, separate from the JSON; humans read the summary, scripts
+    // read stdout's JSON).
     if outcome.in_target {
         eprintln!(
             "把 {}#{} 调到 {}，通关率 {:.1}%，达标（目标 {:.0}%~{:.0}%）。",
@@ -652,7 +708,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// 旋钮值人话展示：整数值去掉小数尾巴。
+/// Plain-language display of a knob value: integral values drop the decimal tail.
 fn fmt_knob(v: f64) -> String {
     if v.fract() == 0.0 {
         format!("{}", v as i64)
@@ -665,7 +721,7 @@ fn fmt_knob(v: f64) -> String {
 mod tests {
     use super::*;
 
-    // ---- 旋钮寻址：解析 ----
+    // ---- Knob addressing: parsing ----
 
     #[test]
     fn knob_addr_parses_file_and_pointer() {
@@ -689,7 +745,7 @@ mod tests {
         assert!(KnobAddr::parse("rules/game.json#rules/3").is_err());
     }
 
-    // ---- 旋钮寻址：读/改值 + 越界报错 ----
+    // ---- Knob addressing: read/change value + out-of-bounds errors ----
 
     #[test]
     fn set_pointer_changes_the_number() {
@@ -700,7 +756,8 @@ mod tests {
 
     #[test]
     fn set_pointer_writes_integer_for_whole_values() {
-        // 8.0 这种整数值要写成整数 8（不写 8.0），临时副本 JSON 跟用户原文同形
+        // Integral values like 8.0 must be written as integer 8 (not 8.0), so the temp copy's JSON
+        // stays the same shape as the user's original
         let mut doc = serde_json::json!({"x": 1});
         set_pointer_number(&mut doc, "/x", 8.0).unwrap();
         assert!(doc.pointer("/x").unwrap().is_i64(), "整数值应写成整数: {:?}", doc.pointer("/x"));
@@ -710,20 +767,20 @@ mod tests {
     #[test]
     fn set_pointer_out_of_bounds_errors() {
         let mut doc = serde_json::json!({"rules":[{"do":[{"to": 8}]}]});
-        // 下标越界
+        // Index out of bounds
         assert!(set_pointer_number(&mut doc, "/rules/9/do/0/to", 1.0).is_err());
-        // 路径根本不存在
+        // Path does not exist at all
         assert!(set_pointer_number(&mut doc, "/nope/0", 1.0).is_err());
     }
 
     #[test]
     fn set_pointer_non_number_errors() {
-        // pointer 指到的不是数字（是字符串）→ 报错，不覆盖
+        // Pointer points at a non-number (a string) → error, do not overwrite
         let mut doc = serde_json::json!({"name": "hi"});
         assert!(set_pointer_number(&mut doc, "/name", 1.0).is_err());
     }
 
-    // ---- 区间/目标解析 ----
+    // ---- Range/target parsing ----
 
     #[test]
     fn target_band_parse_and_contains() {
@@ -744,9 +801,10 @@ mod tests {
         assert!(KnobRange::parse("0:50").is_ok());
     }
 
-    // ---- 搜索：二分收敛（单调下降的合成函数）----
+    // ---- Search: binary-search convergence (monotonically descending synthetic function) ----
 
-    /// 合成评估器：通关率 = clamp(1 - value/100)，随 value 单调下降。value≈30 → 0.7，value≈60 → 0.4。
+    /// Synthetic evaluator: clear rate = clamp(1 - value/100), monotonically descending with value.
+    /// value≈30 → 0.7, value≈60 → 0.4.
     fn descending_eval(value: f64) -> f64 {
         (1.0 - value / 100.0).clamp(0.0, 1.0)
     }
@@ -754,7 +812,7 @@ mod tests {
     #[test]
     fn binary_search_converges_on_descending() {
         let range = KnobRange { min: 0.0, max: 100.0 };
-        let target = TargetBand { lo: 0.4, hi: 0.7 }; // value ∈ [30,60] 命中
+        let target = TargetBand { lo: 0.4, hi: 0.7 }; // value ∈ [30,60] hits
         let mut calls = 0;
         let out = search(range, target, 20, |v, _| {
             calls += 1;
@@ -764,13 +822,13 @@ mod tests {
         assert!(out.in_target, "单调下降应二分命中: {:?}", out);
         assert!(descending_eval(out.found_value) >= 0.4 && descending_eval(out.found_value) <= 0.7);
         assert!((out.found_clear_rate - descending_eval(out.found_value)).abs() < 1e-12);
-        // 命中后即停，不会跑满预算
+        // Stops on a hit, won't run the full budget
         assert!(out.iterations <= 20);
     }
 
     #[test]
     fn binary_search_converges_on_ascending() {
-        // 通关率随 value 单调上升：rate = clamp(value/100)
+        // Clear rate monotonically ascending with value: rate = clamp(value/100)
         let range = KnobRange { min: 0.0, max: 100.0 };
         let target = TargetBand { lo: 0.4, hi: 0.7 };
         let out = search(range, target, 20, |v, _| Ok((v / 100.0).clamp(0.0, 1.0))).unwrap();
@@ -797,7 +855,8 @@ mod tests {
 
     #[test]
     fn endpoint_hit_returns_immediately() {
-        // range 下端正好命中（descending: value=0 → rate=1.0；改目标带含 1.0）
+        // The range's lower end happens to hit (descending: value=0 → rate=1.0; set the target band
+        // to include 1.0)
         let range = KnobRange { min: 0.0, max: 100.0 };
         let target = TargetBand { lo: 0.9, hi: 1.0 };
         let mut calls = 0;
@@ -811,10 +870,11 @@ mod tests {
         assert_eq!(calls, 1, "下端命中应只评估一次");
     }
 
-    // ---- 搜索：非单调线扫兜底 ----
+    // ---- Search: non-monotonic line scan fallback ----
 
-    /// 非单调评估器：抛物线峰在 value=50（rate 在 50 处最高 1.0，两端低）。
-    /// 两端 rate 都低（同侧），bracketed 不成立 → 走线扫。峰附近能命中高目标带。
+    /// Non-monotonic evaluator: parabolic peak at value=50 (rate is highest 1.0 at 50, low at both
+    /// ends). Both ends have low rate (same side), bracketed does not hold → line scan. Near the
+    /// peak it can hit a high target band.
     fn hump_eval(value: f64) -> f64 {
         let d = (value - 50.0) / 50.0; // value∈[0,100] → d∈[-1,1]
         (1.0 - d * d).clamp(0.0, 1.0)
@@ -823,7 +883,8 @@ mod tests {
     #[test]
     fn nonmonotonic_falls_back_to_line_scan_and_finds_best() {
         let range = KnobRange { min: 0.0, max: 100.0 };
-        // 目标带在峰附近（两端 rate≈0，中间≈1）。线扫应找到接近峰的点命中。
+        // Target band near the peak (rate≈0 at both ends, ≈1 in the middle). The line scan should
+        // find a point near the peak that hits.
         let target = TargetBand { lo: 0.9, hi: 1.0 };
         let out = search(range, target, 11, |v, _| Ok(hump_eval(v))).unwrap();
         assert!(out.note.contains("线扫") || out.note.contains("单调"), "应标注线扫/非单调: {}", out.note);
@@ -833,22 +894,24 @@ mod tests {
 
     #[test]
     fn line_scan_reports_closest_when_unreachable() {
-        // 目标带整体高于该旋钮在 range 内能达到的任何通关率 → 没命中，报最接近 + 诚实 note。
+        // The target band is entirely above any clear rate this knob can reach within the range →
+        // no hit, report the closest + an honest note.
         let range = KnobRange { min: 0.0, max: 100.0 };
         let target = TargetBand { lo: 0.95, hi: 1.0 };
-        // 评估器：rate 最高只到 0.5（永远够不到 0.95）。两端同侧（都在带下方）→ 线扫。
+        // Evaluator: rate tops out at 0.5 (can never reach 0.95). Both ends are on the same side
+        // (below the band) → line scan.
         let out = search(range, target, 8, |v, _| Ok((v / 200.0).clamp(0.0, 0.5))).unwrap();
         assert!(!out.in_target, "够不到的目标带应 in_target=false");
         assert!(out.note.contains("不单调") || out.note.contains("不在 range"), "诚实标注: {}", out.note);
-        // 最接近的是 rate 最高那个点（value=max）
+        // The closest is the point with the highest rate (value=max)
         assert!(out.found_clear_rate > 0.49, "应报最接近目标带（rate 最高）的点: {:?}", out);
     }
 
-    // ---- 临时副本：拷贝 + Drop 清理 ----
+    // ---- Temp copy: clone + Drop cleanup ----
 
     #[test]
     fn temp_project_clones_and_cleans_up() {
-        // 造一个最小"项目"目录
+        // Build a minimal "project" directory
         let src = std::env::temp_dir().join(format!("vitric-balance-srctest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&src);
         std::fs::create_dir_all(src.join("rules")).unwrap();
@@ -860,7 +923,7 @@ mod tests {
             let temp = TempProject::clone_from(&src, 777).unwrap();
             temp_dir = temp.dir.clone();
             assert!(temp.dir.join("rules/game.json").exists(), "副本应含子目录文件");
-            // 改副本不影响源
+            // Modifying the copy does not affect the source
             std::fs::write(temp.dir.join("rules/game.json"), "{\"x\":999}").unwrap();
             assert_eq!(std::fs::read_to_string(src.join("rules/game.json")).unwrap(), "{\"x\":1}", "源文件不被改");
         } // temp Drop

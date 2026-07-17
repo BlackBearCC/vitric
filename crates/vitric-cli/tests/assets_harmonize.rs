@@ -1,12 +1,13 @@
-//! vitric assets（素材和谐化）端到端锁定：
-//! 共享色板上限、确定性、透明度保留、缩放、备份拒绝、--palette-lock 入伙。
+//! vitric assets (asset harmonization) end-to-end lock:
+//! shared palette cap, determinism, transparency preservation, scaling, backup refusal,
+//! --palette-lock joining.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use vitric_cli::assets_cmd::{harmonize, Options};
 
-/// 每个测试一个独立临时项目目录，避免互踩。
+/// One independent temporary project directory per test, to avoid stepping on each other.
 fn temp_project(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("vitric-assets-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -32,7 +33,7 @@ fn read_png(path: &Path) -> (u32, u32, Vec<u8>) {
     (info.width, info.height, buf[..info.buffer_size()].to_vec())
 }
 
-/// 图里所有不透明（alpha>0）像素的去重 RGB 集合。
+/// Deduplicated RGB set of all opaque (alpha>0) pixels in the image.
 fn opaque_colors(rgba: &[u8]) -> BTreeSet<[u8; 3]> {
     rgba.chunks_exact(4).filter(|px| px[3] > 0).map(|px| [px[0], px[1], px[2]]).collect()
 }
@@ -52,7 +53,8 @@ fn read_palette_json(project: &Path) -> BTreeSet<[u8; 3]> {
         .collect()
 }
 
-/// 8x8 渐变图：64 个互不相同的颜色（按 seed 偏移，三张图共 192 个不同色）。
+/// 8x8 gradient image: 64 distinct colors (offset by seed; three images total 192 distinct
+/// colors).
 fn scattered_png(path: &Path, seed: u8) {
     let mut rgba = Vec::with_capacity(8 * 8 * 4);
     for y in 0..8u32 {
@@ -80,7 +82,8 @@ fn shared_palette_caps_union_across_images() {
     assert_eq!(report.images, 3);
     assert!(report.palette.len() <= 16);
 
-    // 全部图共用同一张色板：三张图不透明色的并集 ≤ N，且都是 palette.json 的子集
+    // All images share the same palette: the union of opaque colors across the three images is
+    // ≤ N, and each is a subset of palette.json
     let palette = read_palette_json(&dir);
     assert_eq!(
         palette,
@@ -112,7 +115,7 @@ fn deterministic_same_input_same_bytes() {
         .map(|rel| (rel.to_string(), std::fs::read(dir.join(rel)).unwrap()))
         .collect();
 
-    // 从备份恢复原件，清掉备份目录和色板，再跑一遍
+    // Restore originals from the backup, clear the backup dir and palette, then run again
     for rel in ["a.png", "b.png"] {
         std::fs::copy(dir.join("assets_original").join(rel), dir.join("assets").join(rel))
             .unwrap();
@@ -135,11 +138,11 @@ fn deterministic_same_input_same_bytes() {
 #[test]
 fn transparency_preserved() {
     let dir = temp_project("alpha");
-    // 2x2：全透明（RGB 是垃圾值）/ 半透明 / 两个不透明
+    // 2x2: fully transparent (RGB is garbage) / semi-transparent / two opaque
     #[rustfmt::skip]
     let rgba = [
-        123, 45, 67, 0,    // alpha=0，RGB 无所谓
-        200, 10, 10, 128,  // 半透明红
+        123, 45, 67, 0,    // alpha=0, RGB does not matter
+        200, 10, 10, 128,  // semi-transparent red
         10, 200, 10, 255,
         10, 10, 200, 255,
     ];
@@ -163,7 +166,8 @@ fn transparency_preserved() {
 #[test]
 fn height_downscales_and_keeps_aspect() {
     let dir = temp_project("height");
-    // 4x16 高图（纯色，缩放后内容好验证）+ 一张本来就矮的图（不许动）
+    // 4x16 tall image (solid color, easy to verify content after scaling) + an already-short image
+    // (must not be touched)
     write_png(&dir.join("assets/tall.png"), 4, 16, &[40, 80, 120, 255].repeat(4 * 16));
     write_png(&dir.join("assets/short.png"), 3, 2, &[200, 100, 50, 255].repeat(6));
 
@@ -202,7 +206,8 @@ fn palette_lock_quantizes_to_saved_palette() {
         r##"{"colors": ["#000000", "#ff0000"]}"##,
     )
     .unwrap();
-    // 新素材：偏黑和偏红的颜色各两个，锁定后只许出现色板里那两个色
+    // New assets: two blackish and two reddish colors; after locking only the two colors from the
+    // palette may appear
     #[rustfmt::skip]
     let rgba = [
         10, 0, 0, 255,
@@ -219,7 +224,7 @@ fn palette_lock_quantizes_to_saved_palette() {
     let (_, _, out) = read_png(&dir.join("assets/new.png"));
     let allowed: BTreeSet<[u8; 3]> = [[0, 0, 0], [255, 0, 0]].into_iter().collect();
     assert!(opaque_colors(&out).is_subset(&allowed), "锁定模式下不许出现新颜色");
-    // palette.json 是输入不是输出：锁定模式不重写
+    // palette.json is an input, not an output: in lock mode it is not rewritten
     assert_eq!(
         std::fs::read_to_string(dir.join("palette.json")).unwrap(),
         r##"{"colors": ["#000000", "#ff0000"]}"##,
@@ -247,22 +252,23 @@ fn empty_assets_dir_is_explicit_error() {
 
 #[test]
 fn normal_maps_are_excluded_from_harmonize() {
-    // 法线贴图（_n 配对）编码的是向量不是颜色：必须整个排除在量化之外，
-    // 否则每次重跑和谐化都会把法线数据毁一遍
+    // Normal maps (_n pairing) encode vectors, not colors: they must be entirely excluded from
+    // quantization, otherwise every re-run of harmonization would trash the normal data
     let dir = temp_project("normals-guard");
     scattered_png(&dir.join("assets/hero.png"), 0);
-    // 法线色刻意选成不在 hero.png 里的（量化动了它一眼就能看出）
+    // The normal color is deliberately chosen to not be in hero.png (if quantization touched it,
+    // it would be obvious at a glance)
     write_png(&dir.join("assets/hero_n.png"), 2, 2, &[3, 250, 99, 255].repeat(4));
     let n_before = std::fs::read(dir.join("assets/hero_n.png")).unwrap();
 
     let report = harmonize(&dir, &Options { colors: 4, ..Options::default() }).unwrap();
     assert_eq!(report.images, 1, "_n 不计入处理的图片数");
-    // 字节一个不动、不进备份、法线色不进色板
+    // Not a byte changed, not backed up, the normal color does not enter the palette
     assert_eq!(std::fs::read(dir.join("assets/hero_n.png")).unwrap(), n_before);
     assert!(!dir.join("assets_original/hero_n.png").exists(), "_n 不参与 = 不备份");
     assert!(!read_palette_json(&dir).contains(&[3, 250, 99]), "法线色不许进色板");
 
-    // 只有 _n 文件的项目：显式报错（_n 不算可处理的 PNG）
+    // A project with only _n files: explicit error (_n does not count as a processable PNG)
     let dir2 = temp_project("normals-only");
     write_png(&dir2.join("assets/x_n.png"), 1, 1, &[128, 128, 255, 255]);
     let err = harmonize(&dir2, &Options::default()).unwrap_err();

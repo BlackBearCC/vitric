@@ -1,17 +1,17 @@
-// 经营算账：建造 + 制作。脚本只算账（够不够料、扣完剩多少、摆在哪），
-// 真正的写账（改背包数字、生成结构实体）一部分在这里直接做（spawn 结构），
-// 背包扣减走 emit "inv-set"{绝对值} → rules/economy.json 写回（spire 的幂等回写法：
-// 载荷全是扣完后的绝对值，重复应用/重放都一致）。
+// Economy accounting: building + crafting. Scripts only do accounting (enough materials? how much left after deduction? where to place it?).
+// The actual write-back (modifying inventory numbers, spawning structure entities) is partly done here directly (spawn structure),
+// inventory deduction goes through emit "inv-set"{absolute value} -> rules/economy.json writes back (spire's idempotent write-back:
+// payload is always the absolute value after deduction, identical on repeat application/replay).
 //
-// 为什么背包不在这里直接改：fn 只能 spawn/despawn 整实体 + 写自己 query 到的组件，
-// 够不到 @player.Inventory（它是别的实体）。所以规则把当前背包当参数传进来，
-// 这里算出扣完的新值，emit 回去让规则 set。
+// Why inventory isn't modified directly here: fn can only spawn/despawn whole entities + write to components it queried,
+// it can't reach @player.Inventory (that's another entity). So the rule passes the current inventory in as an argument,
+// here we compute the new value after deduction, emit it back and let the rule set it.
 
-// 建造表（GDD + 纵深）：kind -> 料 + tier + 配色 + label + 视觉尺寸。
-//   尺寸分层（按 _layout_spec.md 第 3 节）：
-//   - 普通结构 plot/wall/conduit/extractor/plot2 = 1.0~1.1（在地块之上微凸）
-//   - quarters 住所 1.1（比墙高一点）
-//   - beacon 信标 1.8 / monument 丰碑 2.0（地标,场上最大最显眼）
+// Build table (GDD + depth): kind -> materials + tier + color + label + visual size.
+//   Size tiers (per _layout_spec.md section 3):
+//   - common structures plot/wall/conduit/extractor/plot2 = 1.0~1.1 (slightly raised above the tile)
+//   - quarters 1.1 (a bit taller than walls)
+//   - beacon 1.8 / monument 2.0 (landmarks, the largest and most visible on the field)
 const BUILD = {
   plot:      { cost: {},                              tier: 1, color: "#6b8f3a", label: "种植台", size: 1.0 },
   wall:      { cost: { wood: 1 },                     tier: 1, color: "#8a7a5c", label: "墙",     size: 1.0 },
@@ -23,24 +23,24 @@ const BUILD = {
   monument:  { cost: { ore: 4, plank: 4, lamp: 2, wheat: 4 }, tier: 3, color: "#ffe066", label: "丰碑", size: 2.0 },
 };
 
-// 制作配方（GDD）：产物 -> 料。
+// Crafting recipes (GDD): output -> materials.
 const CRAFT = {
   plank: { cost: { wood: 2 },            out: "plank" },
   chair: { cost: { plank: 1, fiber: 1 }, out: "chair" },
   lamp:  { cost: { plank: 1, ore: 1 },   out: "lamp" },
 };
 
-// 背包字段全集（与 schema Inventory 对齐）——回写时一律带全集绝对值，规则一条条 set。
+// Full inventory field set (aligned with schema Inventory) — write-back always carries the full set of absolute values, the rule sets them one by one.
 const ITEMS = ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp"];
 
-// 从传进来的 args 取当前背包（每项缺省 0）。
+// Read the current inventory from the incoming args (each item defaults to 0).
 function readInv(a) {
   const inv = {};
   for (const k of ITEMS) inv[k] = a[k] | 0;
   return inv;
 }
 
-// 料够不够。
+// Are materials sufficient?
 function canPay(inv, cost) {
   for (const k in cost) {
     if ((inv[k] | 0) < cost[k]) return false;
@@ -48,61 +48,61 @@ function canPay(inv, cost) {
   return true;
 }
 
-// 扣料（就地改 inv 副本）。
+// Deduct materials (modifies the inv copy in place).
 function pay(inv, cost) {
   for (const k in cost) inv[k] -= cost[k];
 }
 
-// 把背包绝对值 emit 回去（规则写 @player.Inventory.*）。
+// Emit the inventory absolute values back (the rule writes @player.Inventory.*).
 function emitInv(ctx, inv) {
   const d = {};
   for (const k of ITEMS) d[k] = inv[k];
   ctx.emit("inv-set", d);
 }
 
-// ---- 建造：规则在"建造模式 + 左键点地"时调，把点击世界坐标 + 命中实体名 + 选中 kind + 当前背包传进来 ----
-// 只在点中地表瓦片（名字形如 t_<x>_<y>）时建——点中 UI/已有结构/空地一律忽略，
-// 防止点建造菜单按钮时窗口同时注入的世界点击误建（窗口左键会同时发世界 mouse + ui-click）。
-// 够料：扣料 + 在四舍五入到整格的位置 spawn 结构（匿名实体——不用稳定名,避免同格重建撞名崩溃；
-// plot/作物的定位靠规则按取整坐标匹配,不依赖结构名）+ emit built。
-// 不够 / 没点中瓦片：什么都不做（spec：insufficient → no-op）。
+// ---- Build: the rule calls this on "build mode + left-click on ground", passing in the clicked world coords + hit entity name + selected kind + current inventory ----
+// Only builds when a surface tile is clicked (name like t_<x>_<y>) — clicks on UI / existing structures / empty space are all ignored,
+// to prevent accidental builds when the world click injected alongside clicking the build menu button (window left-click fires both world mouse + ui-click).
+// Materials sufficient: deduct materials + spawn the structure at the rounded-to-grid position (anonymous entity — no stable name, to avoid same-grid rebuild name collisions crashing;
+// plot/crop positioning is handled by the rule matching rounded coords, not relying on the structure name) + emit built.
+// Insufficient / didn't click a tile: do nothing (spec: insufficient -> no-op).
 vitric.fn("build", (a, ctx) => {
   const def = BUILD[a.kind];
-  if (!def) return; // 未知 kind（没选）——忽略
-  if (typeof a.entity !== "string" || !/^t_[0-9]+_[0-9]+$/.test(a.entity)) return; // 没点中地表瓦片
+  if (!def) return; // Unknown kind (nothing selected) — ignore
+  if (typeof a.entity !== "string" || !/^t_[0-9]+_[0-9]+$/.test(a.entity)) return; // Didn't click a surface tile
   const inv = readInv(a);
-  if (!canPay(inv, def.cost)) { ctx.emit("build-fail", { kind: a.kind, label: def.label }); return; } // 料不够 → 通知
+  if (!canPay(inv, def.cost)) { ctx.emit("build-fail", { kind: a.kind, label: def.label }); return; } // insufficient materials → notify
   const gx = Math.round(a.x);
   const gy = Math.round(a.y);
   pay(inv, def.cost);
-  // ctx.spawn(组件对象, 可选名字)——组件是扁平第一参数(不是 {components:...})；这里匿名 spawn。
+  // ctx.spawn(component object, optional name) — the components are the flat first parameter (not {components:...}); here we spawn anonymously.
   const comps = {
     Structure: { kind: a.kind, tier: def.tier || 1 },
     Position: { x: gx, y: gy },
     Sprite: { w: def.size, h: def.size, color: def.color },
-    Text: { content: def.label, size: 0.34, color: "#ffffff", screen: false }, // 名字标在结构上
+    Text: { content: def.label, size: 0.34, color: "#ffffff", screen: false }, // Name label on the structure
   };
-  // 种植台建出来就挂一个空 Crop——之后互动点它直接 setField 把作物种在这块地上(原地种,不再 spawn 另一个作物实体)。
+  // A plot carries an empty Crop once built — later interaction clicks directly setField to plant the crop on this tile (in-place, no separate crop entity spawned).
   if (a.kind === "plot") comps.Crop = { kind: "", stage: 0, timer: 0 };
   ctx.spawn(comps);
   emitInv(ctx, inv);
   ctx.emit("built", { kind: a.kind, label: def.label, x: gx, y: gy });
 });
 
-// ---- 互动点击：规则把"点中的实体(a.entity 句柄/名字)+它的组件(a.comp)+当前背包"传进来 ----
-// 点中的若是种植台：空地 + 有种子 → 种(setField Crop.kind=wheat)；熟了(stage>=3) → 收(清空 + 麦子+2)。
-// 点中的若是野外资源点(Node)：采集 ore/wood/fiber 进背包。
-// 直接对"点中的那块地"用 ctx.setField 写——不再要命令寄存器/格子匹配(引擎已支持点击带命中实体 entity+comp)。
+// ---- Interaction click: the rule passes in the "hit entity (a.entity handle/name) + its components (a.comp) + current inventory" ----
+// If the hit is a plot: empty tile + has seed -> plant (setField Crop.kind=wheat); ripe (stage>=3) -> harvest (clear + wheat+2).
+// If the hit is a wild resource node (Node): gather ore/wood/fiber into inventory.
+// Writes directly to "the clicked tile" via ctx.setField — no more command register / tile matching (engine already supports click with hit entity entity+comp).
 vitric.fn("interact", (a, ctx) => {
   const comp = a.comp || {};
   const st = comp.Structure;
   const crop = comp.Crop;
   const node = comp.Node;
-  // ---- 种植台 ----
+  // ---- Plot ----
   if (st && st.kind === "plot" && crop) {
     const inv = readInv(a);
     if (crop.kind === "" && (inv.seed | 0) > 0) {
-      // 种：扣 1 种子 + 把麦子作物挂在这块地上(原地)
+      // Plant: deduct 1 seed + attach the wheat crop to this tile (in place)
       inv.seed -= 1;
       ctx.setField(a.entity, "Crop.kind", "wheat");
       ctx.setField(a.entity, "Crop.stage", 0);
@@ -112,7 +112,7 @@ vitric.fn("interact", (a, ctx) => {
     } else if (crop.kind === "" && (inv.seed | 0) <= 0) {
       ctx.emit("plant-fail", {});
     } else if (crop.kind === "wheat" && (crop.stage | 0) >= 3) {
-      // 收：清空作物 + 麦子 +2
+      // Harvest: clear the crop + wheat +2
       inv.wheat += 2;
       ctx.setField(a.entity, "Crop.kind", "");
       ctx.setField(a.entity, "Crop.stage", 0);
@@ -121,7 +121,7 @@ vitric.fn("interact", (a, ctx) => {
     }
     return;
   }
-  // ---- 野外资源点采集(场景已预铺 6 个节点,left>0 即可采) ----
+  // ---- Wild resource node gathering (scene pre-spawns 6 nodes, left>0 means harvestable) ----
   if (node && (node.left | 0) > 0) {
     const inv = readInv(a);
     const nodeKind = node.kind || "ore";
@@ -135,8 +135,8 @@ vitric.fn("interact", (a, ctx) => {
   }
 });
 
-// ---- 交互可发现性：种植台头顶标签随状态变，让玩家一眼看出"这块能点、现在能干嘛" ----
-// （之前固定显示"种植台"，玩家不知道可交互。现在：空→可种植 / 长→生长中 / 熟→可收获）
+// ---- Interaction discoverability: the plot's overhead label changes with state, so the player can see at a glance "this is clickable, and what I can do now" ----
+// (Previously it always showed "plot", so the player didn't know it was interactive. Now: empty -> plantable / growing -> growing / ripe -> harvestable)
 vitric.system("plot-hint", { query: ["Crop", "Text"], writes: ["Text"] }, (entities, ctx) => {
   for (const e of entities) {
     const k = e.Crop.kind || "";
@@ -146,7 +146,7 @@ vitric.system("plot-hint", { query: ["Crop", "Text"], writes: ["Text"] }, (entit
   }
 });
 
-// ---- 交互可发现性：野外资源点标签补一句"可采"，提示能点采集 ----
+// ---- Interaction discoverability: wild resource node labels append "gatherable" to hint they can be clicked to gather ----
 vitric.system("node-hint", { query: ["Node", "Text"], writes: ["Text"] }, (entities, ctx) => {
   for (const e of entities) {
     const left = e.Node.left | 0;
@@ -156,8 +156,8 @@ vitric.system("node-hint", { query: ["Node", "Text"], writes: ["Text"] }, (entit
   }
 });
 
-// ---- 制作：规则在点配方按钮（craft-<id>）时调，把配方 id + 当前背包传进来 ----
-// 够料：扣料 + 产物 +1 → emit inv-set（产物的 +1 已并进绝对值）+ emit crafted。不够：no-op。
+// ---- Craft: the rule is called when the recipe button (craft-<id>) is clicked, passing the recipe id + current inventory ----
+// Enough materials: deduct materials + product +1 -> emit inv-set (the product's +1 is already merged into the absolute value) + emit crafted. Not enough: no-op.
 vitric.fn("craft", (a, ctx) => {
   const rec = CRAFT[a.id];
   if (!rec) return;

@@ -1,19 +1,19 @@
-//! `vitric gate` — 交付门禁。
+//! `vitric gate` — delivery gate.
 //!
-//! 立场：游戏是 agent（AI）做的，"做完了"不能靠 agent 自述——引擎必须**机械地**
-//! 验证交付质量。门禁的核心是确定性录像：一份能逐校验点逐位重放、且重放过程中
-//! 真的触发了终局事件（默认 game-won）的录像，就是一张**不可伪造的通关证书**——
-//! 想伪造任何一帧，状态哈希必然在下一个校验点跑偏。
+//! Stance: games are made by agents (AI), so "done" cannot rely on agent self-report — the engine must **mechanically**
+//! verify delivery quality. The core of the gate is deterministic recording: a recording that can be replayed bit-by-bit
+//! across checkpoint points, and during replay actually triggered the terminal event (default game-won), is an
+//! **unforgeable clear certificate** — to forge any single frame, the state hash must diverge at the next checkpoint.
 //!
-//! 四道门（清单 `gates` 字段声明，见 vitric-data 的 [`vitric_data::Gates`]）：
-//! 1. check 门：完整项目校验（vitric check 同款），任何错误 = FAIL；
-//! 2. 通关录像门：每条录像独立重放，校验点一致 + must_emit 事件出现 + 长度 ≤ max_ticks；
-//! 3. 断言门（可选）：重放过程中每个 tick 全量求值断言集，任何一刻违反 = FAIL；
-//! 4. playtest 门（可选，声明 `gates.playtest` 才跑）：真跑一遍 playtest swarm（确定可复现），
-//!    聚合出报告，再逐条核对清单声明的契约（能不能通关、软锁数、不可达结局、惰性动作、
-//!    数值崩）——把"自动清地板"变成交付契约，任一条不达标 = FAIL。
+//! Four gates (declared in manifest `gates` field, see [`vitric_data::Gates`] in vitric-data):
+//! 1. check gate: full project verification (same as vitric check), any error = FAIL;
+//! 2. clear recording gate: each recording is independently replayed, checkpoints consistent + must_emit event occurred + length ≤ max_ticks;
+//! 3. assertion gate (optional): assertion set fully evaluated every tick during replay, any moment of violation = FAIL;
+//! 4. playtest gate (optional, runs only when `gates.playtest` is declared): actually runs a playtest swarm (deterministic & reproducible),
+//!    aggregates a report, then checks each contract declared in the manifest (clearable or not, soft-locks, unreachable endings, inert actions,
+//!    numeric collapse) — turns "auto-clearing the floor" into a delivery contract, any failure = FAIL.
 //!
-//! 没有声明 gates 的项目直接拒绝——无门禁项目不出证书，空门禁放行就是后门。
+//! Projects that don't declare gates are rejected outright — no gate, no certificate; an empty gate is a backdoor.
 
 use std::path::Path;
 
@@ -30,15 +30,15 @@ use vitric_sim::Recording;
 
 use crate::runtime::{self, Runtime};
 
-/// 一条断言：id + 条件三元组列表（全部成立 = 健康）。格式同控制面 assert/add。
+/// An assertion: id + list of condition triples (all hold = healthy). Format same as control-plane assert/add.
 type Assertion = (String, Vec<(String, String, Value)>);
 
-/// 跑全部门禁。返回 (JSON 报告, 是否全过)；Err 只用于"门禁本身无法成立"的情况
-/// （目录没有清单 / 清单没声明 gates）——这些必须是显式硬错误，不是一份 pass=false 的报告。
+/// Run all gates. Returns (JSON report, whether all passed); Err is used only when "the gate itself cannot be established"
+/// (directory has no manifest / manifest doesn't declare gates) — these must be explicit hard errors, not a pass=false report.
 pub fn run(dir: &Path) -> Result<(Value, bool), String> {
     let project = Project::load(dir).map_err(|r| r.to_string())?;
-    // 约束：没有门禁声明就没有机器可验的交付标准，gate 拒绝出证书。
-    // 空 playthroughs 同理——证书的本体就是通关录像，没有录像的门禁是空门。
+    // Constraint: without gate declarations there's no machine-verifiable delivery standard, gate refuses to issue a certificate.
+    // Empty playthroughs likewise — the certificate body is the clear recording; a gate without recordings is an empty gate.
     let Some(gates) = project.manifest.gates.clone() else {
         return Err(
             "清单未声明 gates——无门禁项目不出证书。\
@@ -58,7 +58,7 @@ pub fn run(dir: &Path) -> Result<(Value, bool), String> {
 
     let mut results: Vec<Value> = Vec::new();
 
-    // ---- 门 1：check（完整项目校验，vitric check 同款内核）----
+    // ---- Gate 1: check (full project verification, same kernel as vitric check) ----
     if gates.check {
         match runtime::check(dir) {
             Ok(report) => results.push(json!({
@@ -69,21 +69,21 @@ pub fn run(dir: &Path) -> Result<(Value, bool), String> {
         }
     }
 
-    // ---- 断言集加载（求值发生在重放过程中）----
+    // ---- Assertion set loading (evaluation happens during replay) ----
     let mut assertions: Vec<Assertion> = Vec::new();
     let mut assertions_gate_error: Option<String> = None;
     if let Some(rel) = &gates.assertions {
         match load_assertions(dir, rel) {
             Ok(list) => assertions = list,
-            // 声明了断言文件但读不出来：这是断言门自身的失败，不能静默当作"没有断言"
+            // Assertion file declared but unreadable: this is the assertion gate's own failure, cannot silently treat as "no assertions"
             Err(e) => assertions_gate_error = Some(e),
         }
     }
-    // 断言条件求值复用规则引擎的 Engine::check（空规则集 + 项目 schema，和控制面同款）
+    // Assertion condition evaluation reuses the rule engine's Engine::check (empty rule set + project schema, same as control plane)
     let checker = Engine::new(RuleSet::default(), project.schema.clone());
     let mut violations: Vec<Value> = Vec::new();
 
-    // ---- 门 2：通关录像（每条独立重放验证）----
+    // ---- Gate 2: clear recording (each independently replayed and verified) ----
     for entry in &gates.playthroughs {
         let name = format!("playthrough:{}", entry.recording);
         match run_playthrough(dir, entry, &gates, &checker, &assertions, &mut violations) {
@@ -92,7 +92,7 @@ pub fn run(dir: &Path) -> Result<(Value, bool), String> {
         }
     }
 
-    // ---- 门 3：断言（违反明细在重放中收集，这里汇总裁决）----
+    // ---- Gate 3: assertions (violation details collected during replay, aggregated here for verdict) ----
     if gates.assertions.is_some() {
         if let Some(e) = assertions_gate_error {
             results.push(json!({"name": "assertions", "status": "fail", "detail": e}));
@@ -110,9 +110,9 @@ pub fn run(dir: &Path) -> Result<(Value, bool), String> {
         }
     }
 
-    // ---- 门 4：playtest（可选，声明 gates.playtest 才跑）----
-    // 真跑一遍 playtest swarm（确定可复现）→ 聚合出报告 → 逐条核对清单声明的契约。
-    // 没声明就跳过——现有 gate 行为完全不变（向后兼容）。
+    // ---- Gate 4: playtest (optional, runs only when gates.playtest is declared) ----
+    // Actually runs a playtest swarm (deterministic & reproducible) → aggregates a report → checks each contract declared in the manifest.
+    // Skipped if not declared — existing gate behavior unchanged (backward compatible).
     if let Some(pt) = &gates.playtest {
         results.push(run_playtest_gate(dir, pt));
     }
@@ -126,9 +126,9 @@ pub fn run(dir: &Path) -> Result<(Value, bool), String> {
     Ok((report, pass))
 }
 
-/// 重放一条通关录像：文件在、能解析、长度合规、逐校验点一致、must_emit 事件出现。
-/// 同时在每个 tick 上对断言集全量求值，违反记进 `violations`（按 id 去抖：
-/// 从健康翻到违反那一刻记一条，持续违反不刷屏）。
+/// Replay a clear recording: file exists, parseable, length in range, checkpoints consistent, must_emit event occurred.
+/// Also fully evaluates the assertion set on every tick, recording violations into `violations` (debounced by id:
+/// records one entry at the moment of healthy→violated transition, continuous violations don't flood the log).
 fn run_playthrough(
     dir: &Path,
     entry: &vitric_data::PlaythroughGate,
@@ -147,7 +147,7 @@ fn run_playthrough(
     let rec: Recording =
         serde_json::from_str(&text).map_err(|e| format!("录像 {} 解析失败: {e}", entry.recording))?;
 
-    // 长度上限：防"挂机注水"——无限长的录像不是有效率的通关证明
+    // Length upper bound: prevent "AFK inflation" — infinitely long recordings aren't an efficient clear proof
     if let Some(max) = gates.max_ticks {
         if rec.ticks > max {
             return Err(format!(
@@ -158,12 +158,12 @@ fn run_playthrough(
         }
     }
 
-    // 全新世界重放：证书必须从项目数据冷启动可复现，不依赖任何现场状态
+    // Replay in a fresh world: the certificate must be reproducible from a cold start of project data, not depending on any live state
     let (mut sim, mut rt) = Runtime::boot(dir)?;
     let mut emitted = false;
     let mut failing = std::collections::BTreeSet::new();
     sim.replay_observed(&rec, &mut rt, |tick, world, step_events, observed| {
-        // 事件收集：step 喂进逻辑的（输入/碰撞/start）+ 规则脚本 emit 的，两路都算观测
+        // Event collection: step-fed (input/collision/start) + rule-script-emitted, both paths count as observed
         emitted = emitted
             || step_events.iter().any(|e| e.name == entry.must_emit)
             || observed.iter().any(|e| e.name == entry.must_emit);
@@ -180,7 +180,7 @@ fn run_playthrough(
                         }));
                     }
                 }
-                // 求值失败（引用的实体没了等）也算违反，但要说清原因
+                // Evaluation failure (referenced entity gone, etc.) also counts as a violation, but the cause must be clear
                 Err(e) => {
                     if failing.insert(id.clone()) {
                         violations.push(json!({
@@ -192,7 +192,7 @@ fn run_playthrough(
             }
         }
     })
-    // 跑偏 = 录像被篡改或逻辑混入非确定性，原样透出 SimError 的定位信息
+    // Divergence = recording tampered or non-determinism leaked into logic; pass through SimError's localization info as-is
     .map_err(|e| e.to_string())?;
 
     if !emitted {
@@ -210,14 +210,14 @@ fn run_playthrough(
     }))
 }
 
-/// playtest 门：按清单 `gates.playtest` 配置真跑一遍 playtest（swarm / lookahead / 种子探索），
-/// 聚合出报告，再逐条核对声明的断言。返回一条 `{"name":"playtest","status":..,"detail":..}`。
+/// playtest gate: per manifest `gates.playtest` config, actually runs a playtest (swarm / lookahead / seed exploration),
+/// aggregates a report, then checks each declared assertion. Returns one `{"name":"playtest","status":..,"detail":..}` entry.
 ///
-/// 复用 cmd_playtest 同款 boot/工厂/聚合写法（不重写 swarm）：每条 spec 在调用线程内 boot 一份
-/// 全新运行时，结果可复现（确定性铁律）。pass 时 detail 给关键指标；fail 时 detail 列出违反的
-/// 断言名 + 实际值（带可对账的代表 strategy/seed），不内联整坨录像。
+/// Reuses the same boot/factory/aggregation code as cmd_playtest (no swarm rewrite): each spec boots a fresh
+/// runtime in the calling thread, results are reproducible (determinism hard rule). On pass, detail gives key metrics; on fail, detail lists violated
+/// assertion names + actual values (with representative strategy/seed for reconciliation), without inlining the entire recording blob.
 ///
-/// 任何一步出错（boot / 跑批 / 读种子录像）都按门失败处理（detail 给错误原因），不 panic。
+/// Any step error (boot / batch run / seed recording read) is treated as gate failure (detail gives the error cause), no panic.
 fn run_playtest_gate(dir: &Path, pt: &PlaytestGate) -> Value {
     match playtest_report(dir, pt) {
         Ok(report) => judge_playtest(pt, &report),
@@ -225,12 +225,12 @@ fn run_playtest_gate(dir: &Path, pt: &PlaytestGate) -> Value {
     }
 }
 
-/// 按 pt 配置跑 playtest 出报告（boot/工厂/聚合照搬 cmd_playtest）。
+/// Run a playtest per pt config and produce a report (boot/factory/aggregation copied from cmd_playtest).
 fn playtest_report(dir: &Path, pt: &PlaytestGate) -> Result<Report, String> {
-    // 项目根 playtest.json（存在即用，否则默认配置=自动推视图）——和 cmd_playtest 同口径。
+    // Project-root playtest.json (used if present, else default config = auto-inferred view) — same caliber as cmd_playtest.
     let config = PlaytestConfig::load(dir)?.unwrap_or_default();
-    // 清单声明的权威通关事件（gates.playthroughs[].must_emit）：脚本/LLM 游戏的胜利事件
-    // 不在通用默认 TerminalSpec 里，靠它并进 win 集合，否则会被误判"谁也通不了"。
+    // Manifest-declared authoritative clear event (gates.playthroughs[].must_emit): win events of scripted/LLM games
+    // are not in the generic default TerminalSpec, so they're merged into the win set, otherwise it's misjudged as "nobody can clear".
     let manifest_must_emit: Vec<String> = match Project::load(dir) {
         Ok(project) => project
             .manifest
@@ -246,7 +246,7 @@ fn playtest_report(dir: &Path, pt: &PlaytestGate) -> Result<Report, String> {
     }
     .with_manifest_must_emit(&manifest_must_emit);
 
-    // 工厂闭包：每个工作线程在自己线程内 boot 一份全新运行时（QuickJS 非 Send，运行时不跨线程）。
+    // Factory closure: each worker thread boots a fresh runtime in its own thread (QuickJS is not Send, runtime does not cross threads).
     let factory = || -> Result<(_, _, _), String> {
         let (sim, rt) = Runtime::boot(dir)?;
         let engine = rt.rules.clone();
@@ -254,9 +254,9 @@ fn playtest_report(dir: &Path, pt: &PlaytestGate) -> Result<Report, String> {
     };
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
 
-    // 跑法分流：种子录像 > lookahead > 默认策略组 swarm。
+    // Run-mode branching: seed recording > lookahead > default strategy-group swarm.
     let results = if let Some(seed_rel) = &pt.seed_recording {
-        // 种子式探索：以这条录像为基线，扰动出 sessions 条变异并行跑。
+        // Seed-based exploration: uses this recording as baseline, perturbs `sessions` variants and runs in parallel.
         let seed_path = dir.join(seed_rel);
         let rec_text = std::fs::read_to_string(&seed_path)
             .map_err(|e| format!("读取种子录像 {seed_rel} 失败: {e}"))?;
@@ -269,12 +269,12 @@ fn playtest_report(dir: &Path, pt: &PlaytestGate) -> Result<Report, String> {
             &seed_rec.replies,
             pt.max_ticks,
             terminal.clone(),
-            1, // explore_seed：截断脚本的 random 发散播种（与扰动 PCG 错开）
+            1, // explore_seed: seeding for the truncated script's random divergence (offset from perturbation PCG)
             threads,
         )?
     } else if pt.strategy.as_deref() == Some("lookahead") {
-        // lookahead：跑 sessions 局束搜索规划器（每局 seed 递增）。前瞻贵，不进 swarm 轮换，
-        // 这里按声明显式跑——每局自己 boot，串行（束搜索本身已是重计算）。
+        // lookahead: runs `sessions` game-tree search planners (seed increments per game). Lookahead is expensive, not in swarm rotation,
+        // explicitly runs per declaration here — each game boots itself, serial (tree search is already heavy compute).
         let mut out = Vec::with_capacity(pt.sessions);
         for k in 0..pt.sessions {
             let (mut sim, mut rt) = Runtime::boot(dir)?;
@@ -291,17 +291,17 @@ fn playtest_report(dir: &Path, pt: &PlaytestGate) -> Result<Report, String> {
                 &mut rt,
                 &engine,
                 &cfg,
-                // 清单 horizon 字段语义已是「搜索深度」，beam 是束宽（都向后兼容默认值）。
+                // Manifest horizon field semantics is already "search depth", beam is beam-width (both backward compatible with defaults).
                 &LookaheadConfig { depth: pt.horizon, beam_width: pt.beam },
             )?;
-            // lookahead 局贴 Coverage 标签只是占位（spec 仅用于聚合分组/对账，不影响结果）。
+            // lookahead games tag Coverage just as a placeholder (spec is only for aggregation grouping/reconciliation, doesn't affect results).
             let spec =
                 SessionSpec::new(StrategyKind::Coverage, k as u64, pt.max_ticks);
             out.push(LabeledResult { spec, result });
         }
         out
     } else {
-        // 默认策略组 swarm：四策略轮换 × 递增 seed 凑够 sessions 局。
+        // Default strategy-group swarm: four-strategy rotation × incrementing seed to fill `sessions` games.
         let mut plan: Vec<SessionSpec> = Vec::with_capacity(pt.sessions);
         for k in 0..pt.sessions {
             let kind = StrategyKind::ALL[k % StrategyKind::ALL.len()];
@@ -315,13 +315,13 @@ fn playtest_report(dir: &Path, pt: &PlaytestGate) -> Result<Report, String> {
         run_swarm_with_config(factory, &plan, &config, threads)?
     };
 
-    // 结局覆盖要扫规则声明的结局集合，单独 boot 一份只读 Engine 喂聚合器（同 cmd_playtest）。
+    // Ending coverage needs to scan the rule-declared ending set, separately boot a read-only Engine to feed the aggregator (same as cmd_playtest).
     let (_, rt) = Runtime::boot(dir)?;
     Ok(aggregate_with_endings_and_declared(&results, &rt.rules, &terminal, &manifest_must_emit))
 }
 
-/// 逐条核对声明的断言：每条只有在 pt 里填了才查（没填的维度不参与裁决）。
-/// 全过 push pass（detail 给关键指标）；任一不达标 push fail（detail 列违反项 + 实际值）。
+/// Check each declared assertion one by one: each is checked only if filled in pt (unfilled dimensions don't participate in the verdict).
+/// All pass → push pass (detail gives key metrics); any failure → push fail (detail lists violation items + actual values).
 fn judge_playtest(pt: &PlaytestGate, report: &Report) -> Value {
     let dist = &report.outcome_distribution;
     let unreachable = report
@@ -333,7 +333,7 @@ fn judge_playtest(pt: &PlaytestGate, report: &Report) -> Value {
 
     let mut violations: Vec<Value> = Vec::new();
 
-    // 能通关：通关率必须 > 0
+    // Clearable: clear rate must be > 0
     if pt.require_clearable == Some(true) && dist.win == 0 {
         violations.push(json!({
             "assertion": "require_clearable",
@@ -341,7 +341,7 @@ fn judge_playtest(pt: &PlaytestGate, report: &Report) -> Value {
             "actual": {"win": dist.win, "win_rate": dist.win_rate},
         }));
     }
-    // 通关率下限
+    // Clear rate lower bound
     if let Some(min) = pt.min_clear_rate {
         if dist.win_rate < min {
             violations.push(json!({
@@ -350,7 +350,7 @@ fn judge_playtest(pt: &PlaytestGate, report: &Report) -> Value {
             }));
         }
     }
-    // 软锁簇数上限
+    // Upper bound on soft-lock cluster count
     if let Some(max) = pt.max_soft_locks {
         let n = report.stuck_clusters.len();
         if n > max {
@@ -360,7 +360,7 @@ fn judge_playtest(pt: &PlaytestGate, report: &Report) -> Value {
             }));
         }
     }
-    // 不可达结局数上限
+    // Upper bound on unreachable ending count
     if let Some(max) = pt.max_unreachable_endings {
         if unreachable > max {
             violations.push(json!({
@@ -370,7 +370,7 @@ fn judge_playtest(pt: &PlaytestGate, report: &Report) -> Value {
             }));
         }
     }
-    // 惰性动作数上限
+    // Upper bound on inert action count
     if let Some(max) = pt.max_inert_actions {
         let n = report.inert_actions.len();
         if n > max {
@@ -380,7 +380,7 @@ fn judge_playtest(pt: &PlaytestGate, report: &Report) -> Value {
             }));
         }
     }
-    // 数值崩必须全空
+    // Numeric breakage must all be empty
     if pt.forbid_numeric_breakage == Some(true) {
         let total = nb.runaway.len() + nb.collapse.len() + nb.non_finite.len();
         if total > 0 {
@@ -396,7 +396,7 @@ fn judge_playtest(pt: &PlaytestGate, report: &Report) -> Value {
         }
     }
 
-    // 关键指标摘要（pass/fail 都带，便于对账与复现）。
+    // Key metrics summary (included for both pass/fail, for reconciliation and reproducibility).
     let metrics = json!({
         "sessions": report.sessions,
         "win_rate": dist.win_rate,
@@ -421,8 +421,9 @@ fn judge_playtest(pt: &PlaytestGate, report: &Report) -> Value {
     }
 }
 
-/// 读断言集文件：`[{"id": "...", "if": [[左, op, 右], ...]}, ...]`。
-/// 格式错误显式报到条目级，不静默丢弃——丢一条断言 = 门禁悄悄变松。
+/// Read assertion set file: `[{"id": "...", "if": [[left, op, right], ...]}, ...]`.
+/// Format errors are explicitly reported at the entry level, never silently dropped —
+/// dropping one assertion = silently loosening the gate.
 fn load_assertions(dir: &Path, rel: &str) -> Result<Vec<Assertion>, String> {
     let text = std::fs::read_to_string(dir.join(rel))
         .map_err(|e| format!("断言集 {rel} 读取失败: {e}。提示：gates.assertions 路径相对项目根目录"))?;
@@ -444,7 +445,8 @@ fn load_assertions(dir: &Path, rel: &str) -> Result<Vec<Assertion>, String> {
     Ok(out)
 }
 
-/// 条件数组解析（同控制面 assert/add：[[左, 操作符, 右], ...]，exists/!exists 可两元）。
+/// Parse condition array (same as control plane assert/add: [[left, operator, right], ...],
+/// exists/!exists may be two-element).
 fn parse_conditions(v: &Value) -> Result<Vec<(String, String, Value)>, String> {
     let arr = v
         .as_array()

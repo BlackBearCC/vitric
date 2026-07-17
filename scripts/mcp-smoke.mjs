@@ -1,5 +1,5 @@
-// MCP server 冒烟测试：用真实 stdio 协议驱动一遍核心工具链。
-// 用法：node scripts/mcp-smoke.mjs（在 mcp/ 目录下跑则用 ../，CI 也这么调）
+// MCP server smoke test: drives the core tool chain once via the real stdio protocol.
+// Usage: node scripts/mcp-smoke.mjs (run from mcp/ dir uses ../, CI calls it the same way)
 
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -58,13 +58,13 @@ const example = path.join(repo, "examples/coin-run");
 const check = await send("tools/call", { name: "vitric_check", arguments: { project_dir: example } });
 assert(t(check).project === "coin-run", "check");
 
-// 班子工具：vitric_role 取美术工单（非空 + 真的是带地盘纪律的工单 + 占位符已替换）
+// Team tool: vitric_role fetches the art workorder (non-empty + really a workorder with territory discipline + placeholders replaced)
 const role = await send("tools/call", { name: "vitric_role", arguments: { role: "art", project_dir: example } });
 const roleText = role.result.content[0].text;
 assert(roleText.length > 0 && roleText.includes("地盘"), "vitric_role 工单缺地盘节");
 assert(!roleText.includes("{PROJECT_DIR}") && roleText.includes(example), "vitric_role 占位符未替换");
 
-// vitric_team 协同黑板：JSON 可解析且各角色计数在场
+// vitric_team collaboration blackboard: JSON parseable and per-role counts present
 const team = await send("tools/call", { name: "vitric_team", arguments: { project_dir: example } });
 assert(t(team).roles.art.assets > 0 && t(team).roles.gameplay.rules > 0, "vitric_team 计数");
 

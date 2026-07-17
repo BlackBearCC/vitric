@@ -1,11 +1,11 @@
-//! 序列（时间轴）静态数据：声明式动作轨道 + 校验。
+//! Sequence (timeline) static data: declarative action track + validation.
 //!
-//! 定位：引擎的通用时间轴原语，对标 Unity Timeline / Godot AnimationPlayer——
-//! 一条按相对 tick 推进的动作轨道，在指定时刻发动**引擎已有的通用动词**。
-//! 引擎里没有"过场""漫画页""卡牌"这类题材专属概念；漫画过场是用这套积木在
-//! 游戏项目里拼出来的**用法**（见 examples/intro 的 sequences/opening.json）。
+//! Positioning: the engine's generic timeline primitive, comparable to Unity Timeline / Godot AnimationPlayer —
+//! an action track that advances by relative ticks and triggers **existing generic verbs of the engine** at specified moments.
+//! The engine has no theme-specific concepts like "cutscene", "comic page", or "card"; comic-style cutscenes are **usages** built from these blocks
+//! within a game project (see examples/intro's sequences/opening.json).
 //!
-//! 文件形态（`sequences/<名>.json`）：
+//! File form (`sequences/<name>.json`):
 //! ```json
 //! {
 //!   "id": "intro",
@@ -13,53 +13,53 @@
 //!     { "at": 0,   "do": { "spawn": { "name": "panel", "components": { ... } } } },
 //!     { "at": 0,   "do": { "tween": { "target": "panel", "field": "Sprite.color_a",
 //!                                       "from": 0, "to": 1, "duration": 30 } } },
-//!     { "at": 30,  "do": { "set": "@subtitle.Text.content", "to": "他走进长廊" } },
+//!     { "at": 30,  "do": { "set": "@subtitle.Text.content", "to": "He walks into the corridor" } },
 //!     { "at": 150, "do": { "wait": "player-confirm" } },
 //!     { "at": 151, "do": { "emit": "intro-done" } }
 //!   ]
 //! }
 //! ```
 //!
-//! `at` 是相对序列起跑点的 tick（同一序列任何时刻起跑都从自己的 t=0 放）。
-//! 动作集 v1 固定（不图灵完备、不嵌脚本），全部镜像引擎已有动词：
-//! `tween` / `set` / `spawn` / `despawn` / `emit` / `sound` / `wait`。
-//! 切场景不内置——序列靠 `emit "load-scene"` 解耦，由项目规则接去 load-scene。
+//! `at` is the tick relative to the sequence's start point (no matter when the same sequence starts, it always plays from its own t=0).
+//! The action set is fixed in v1 (not Turing-complete, no embedded scripts), all mirroring existing engine verbs:
+//! `tween` / `set` / `spawn` / `despawn` / `emit` / `sound` / `wait`.
+//! Scene switching is not built in — sequences decouple via `emit "load-scene"`, which project rules pick up to load-scene.
 
 use serde_json::{Map, Value};
 
 use crate::{Schema, ValidationReport};
 
-/// 序列里固定动作集（v1）。每个都镜像引擎已有通用动词，不新造语义。
+/// Fixed action set in a sequence (v1). Each mirrors an existing generic engine verb, introducing no new semantics.
 pub const SEQ_ACTION_KINDS: &[&str] =
     &["tween", "set", "spawn", "despawn", "emit", "sound", "wait"];
 
-/// 一个序列里的一条动作（已解析为引擎认得的形态）。
+/// One action in a sequence (already parsed into a form the engine recognizes).
 #[derive(Debug, Clone)]
 pub struct SeqStep {
-    /// 相对序列起跑点的 tick（单调不减）。
+    /// Tick relative to the sequence's start point (monotonically non-decreasing).
     pub at: u64,
-    /// 动作类型名（在 [`SEQ_ACTION_KINDS`] 内）。
+    /// Action type name (within [`SEQ_ACTION_KINDS`]).
     pub kind: String,
-    /// 动作原始 JSON 对象（执行端按 kind 取字段）。
+    /// Raw action JSON object (the execution end reads fields by kind).
     pub action: Value,
 }
 
-/// 一条序列（解析 + 校验后的静态轨道）。运行时一个 `Sequence` 组件引用它的名字、
-/// 只持有最小播放状态（游标 + 起跑 tick + barrier 标志），静态轨道不进任何快照。
+/// A sequence (a static track after parsing + validation). At runtime a `Sequence` component references it by name and
+/// holds only minimal playback state (cursor + start tick + barrier flag); the static track does not enter any snapshot.
 #[derive(Debug, Clone)]
 pub struct Sequence {
-    /// 序列名（清单/组件 `track` 字段按它引用，默认取文件 id）。
+    /// Sequence name (referenced by the manifest / the component's `track` field; defaults to the file id).
     pub id: String,
-    /// 来源文件相对路径（错误定位用）。
+    /// Source file relative path (for error localization).
     pub file: String,
-    /// 有序动作条目（`at` 单调不减）。
+    /// Ordered action entries (`at` monotonically non-decreasing).
     pub steps: Vec<SeqStep>,
 }
 
 impl Sequence {
-    /// 解析 + 按 schema 校验一条序列文件。
-    /// 校验项：`at` 单调不减、动作名在固定集合内、动作字段过 schema、
-    /// 引用的实体/贴图/事件名形态合法。所有问题一次报全（不在第一个错误就停）。
+    /// Parse + validate a sequence file against the schema.
+    /// Validation items: `at` is monotonically non-decreasing, action name is in the fixed set, action fields pass schema,
+    /// and referenced entity / texture / event names are well-formed. All problems are reported at once (does not stop at the first error).
     pub fn parse(doc: &Value, file: &str, schema: &Schema) -> Result<Sequence, ValidationReport> {
         let mut report = ValidationReport::default();
         let id = doc
@@ -72,7 +72,7 @@ impl Sequence {
     }
 }
 
-/// 从文件相对路径取默认序列名（`sequences/intro.json` → `intro`）。
+/// Take the default sequence name from the file's relative path (`sequences/intro.json` -> `intro`).
 fn derive_name(file: &str) -> String {
     file.rsplit('/')
         .next()
@@ -96,7 +96,7 @@ fn parse_steps(doc: &Value, file: &str, schema: &Schema, report: &mut Validation
     let mut last_at: Option<u64> = None;
     for (i, step) in steps.iter().enumerate() {
         let spath = format!("{file}#/steps/{i}");
-        // at：非负整数，单调不减（序列是有序轨道，乱序无法定义播放顺序）
+        // at: non-negative integer, monotonically non-decreasing (a sequence is an ordered track; out-of-order entries have no defined playback order)
         let at = match step.get("at").and_then(|v| v.as_i64()) {
             Some(a) if a >= 0 => a as u64,
             _ => {
@@ -120,7 +120,7 @@ fn parse_steps(doc: &Value, file: &str, schema: &Schema, report: &mut Validation
             }
         }
         last_at = Some(at);
-        // do：动作对象，类型在固定集合内，字段过对应 schema
+        // do: action object, type is in the fixed set, fields pass the corresponding schema
         let Some(action) = step.get("do") else {
             report.push(
                 "VD063",
@@ -138,7 +138,7 @@ fn parse_steps(doc: &Value, file: &str, schema: &Schema, report: &mut Validation
     out
 }
 
-/// 校验一条动作对象，返回它的类型名。未知类型 / 字段非法都进 report。
+/// Validate an action object and return its type name. Unknown type / illegal fields all go into report.
 fn validate_action(
     action: &Value,
     path: &str,
@@ -176,7 +176,7 @@ fn validate_action(
     Some(kind.to_string())
 }
 
-/// tween：起一个补间组件（复用已落地的 Tween）。镜头推拉/淡入淡出/位移缩放变色全靠它。
+/// tween: starts a tween component (reuses the already-shipped Tween). Camera pushes/pulls, fade in/out, translation, scaling, and color changes all rely on it.
 fn validate_tween(obj: &Map<String, Value>, path: &str, report: &mut ValidationReport) {
     let spec = &obj["tween"];
     let Some(t) = spec.as_object() else {
@@ -206,8 +206,8 @@ fn validate_tween(obj: &Map<String, Value>, path: &str, report: &mut ValidationR
             tween_hint(),
         ),
     }
-    // ease 可选，给了就必须是文本（具体曲线名的合法性由补间系统在运行时报，
-    // 这里只挡明显的类型错——和补间组件本身的解析口径一致）
+    // ease is optional; if given, it must be text (the legality of the specific curve name is reported by the tween system at runtime;
+    // here we only catch obvious type errors — same scope as the tween component's own parsing)
     if let Some(e) = t.get("ease") {
         if !e.is_string() {
             report.push("VD065", format!("{path}/ease"), "ease 必须是文本（缓动曲线名）", tween_hint());
@@ -219,7 +219,7 @@ fn tween_hint() -> String {
     "写法: {\"tween\": {\"target\": \"实体名\", \"field\": \"Sprite.color_a\", \"from\": 0, \"to\": 1, \"duration\": 30, \"ease\": \"ease-out\"}}".to_string()
 }
 
-/// set：瞬时设字段（镜像规则 set）。target = "实体.字段路径" 引用，to = 值。
+/// set: instantaneously set a field (mirrors the rule set). target = "entity.field path" reference, to = value.
 fn validate_set(obj: &Map<String, Value>, path: &str, report: &mut ValidationReport) {
     match obj.get("set").and_then(|v| v.as_str()) {
         Some(t) if t.contains('.') => {}
@@ -246,7 +246,7 @@ fn validate_set(obj: &Map<String, Value>, path: &str, report: &mut ValidationRep
     }
 }
 
-/// spawn：生成实体（镜像规则 spawn）。组件值过 schema。
+/// spawn: spawn an entity (mirrors the rule spawn). Component values pass schema.
 fn validate_spawn(obj: &Map<String, Value>, path: &str, schema: &Schema, report: &mut ValidationReport) {
     let Some(comps) = obj.get("spawn").and_then(|s| s.get("components")).and_then(|v| v.as_object())
     else {
@@ -272,15 +272,15 @@ fn validate_spawn(obj: &Map<String, Value>, path: &str, schema: &Schema, report:
             );
             continue;
         };
-        // 引用值（@/event. 等运行时路径）跳过 schema 严格校验，与规则 spawn 同口径：
-        // 只在没有任何引用字符串时整体过 schema（含引用的留给运行时解析后再校验）
+        // Reference values (@/event. etc. runtime paths) skip strict schema validation, same scope as rule spawn:
+        // only run the whole thing through schema when there are no reference strings (those with references are left for runtime parsing and then validation)
         if !contains_ref(cval) {
             cschema.normalize(cval, &cpath, report);
         }
     }
 }
 
-/// despawn：销毁实体（镜像规则 despawn）。值 = 实体引用文本。
+/// despawn: destroy an entity (mirrors the rule despawn). Value = entity reference text.
 fn validate_despawn(obj: &Map<String, Value>, path: &str, report: &mut ValidationReport) {
     if obj.get("despawn").and_then(|v| v.as_str()).is_none() {
         report.push(
@@ -292,7 +292,7 @@ fn validate_despawn(obj: &Map<String, Value>, path: &str, report: &mut Validatio
     }
 }
 
-/// emit：发事件让规则接龙（序列与场景解耦的正门）。值 = 事件名。
+/// emit: emit an event for rules to chain on (the front door for sequence/scene decoupling). Value = event name.
 fn validate_emit(obj: &Map<String, Value>, path: &str, report: &mut ValidationReport) {
     match obj.get("emit").and_then(|v| v.as_str()) {
         Some(name) if !name.is_empty() => {}
@@ -305,7 +305,7 @@ fn validate_emit(obj: &Map<String, Value>, path: &str, report: &mut ValidationRe
     }
 }
 
-/// sound：播音效（镜像音频；运行时翻成 play-sound 事件）。值 = 音效文件名。
+/// sound: play a sound effect (mirrors audio; translated into a play-sound event at runtime). Value = sound file name.
 fn validate_sound(obj: &Map<String, Value>, path: &str, report: &mut ValidationReport) {
     match obj.get("sound").and_then(|v| v.as_str()) {
         Some(name) if !name.is_empty() => {}
@@ -318,7 +318,7 @@ fn validate_sound(obj: &Map<String, Value>, path: &str, report: &mut ValidationR
     }
 }
 
-/// wait：barrier——游标停住直到某命名事件触发 / skip 输入到达。值 = 等待的事件名。
+/// wait: barrier — the cursor stops until a named event fires / skip input arrives. Value = the event name to wait for.
 fn validate_wait(obj: &Map<String, Value>, path: &str, report: &mut ValidationReport) {
     match obj.get("wait").and_then(|v| v.as_str()) {
         Some(name) if !name.is_empty() => {}
@@ -359,8 +359,8 @@ fn require_number(
     }
 }
 
-/// 组件值里是否含运行时引用字符串（@/self./other./event. 开头）——含引用的留给
-/// 运行时解析后再校验，静态 schema 校验对它放行（与规则 spawn 同口径）。
+/// Whether the component value contains a runtime reference string (starting with @/self./other./event.) — those with references are left for
+/// runtime parsing and then validation; static schema validation lets them through (same scope as rule spawn).
 fn contains_ref(v: &Value) -> bool {
     match v {
         Value::String(s) => {

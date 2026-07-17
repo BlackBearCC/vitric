@@ -1,12 +1,12 @@
-// 生存底盘 + 阶段里程碑:
-//   殖民地 氧/电/食/水 随时间掉,靠结构产出续上;消耗随人口涨。
-//   阶段从结构数升级为"靠天数 + 多维度达成"驱动,让游戏是 5-7 天的纵切。
+// Survival baseline + stage milestones:
+//   Colony oxygen/power/food/water decay over time, sustained by structure output; consumption scales with population.
+//   Stages upgrade from structure-count to "days + multi-dimensional achievements" driven, making the game a 5-7 day vertical slice.
 //
-// 系统:
-//   tally       数产出结构 → emit "tally" 速率 → rules/colony.json 落 @colony.*_rate
-//   census      数伙伴 → emit "census-tick" → rules 落 @colony.Colony.pop
-//   stage       阶段里程碑:起步 → 立足 → 成形 → 温饱 → 成群 → 兴旺
-//   colony      每帧按 (产出 - 基础消耗) 调库存,夹在 [0,100],不死人
+// Systems:
+//   tally       count output structures -> emit "tally" rate -> rules/colony.json writes @colony.*_rate
+//   census      count companions -> emit "census-tick" -> rules writes @colony.Colony.pop
+//   stage       stage milestones: startup -> foothold -> taking shape -> warmth -> crowd -> prosperity
+//   colony      each frame adjust stockpile by (output - base consumption), clamped to [0,100], no death
 
 const BASE_USE = 1.4;
 const PER = 3.0;
@@ -43,12 +43,12 @@ vitric.system("census", { query: ["Census"], writes: [] }, (entities, ctx) => {
   ctx.emit("census-tick", { pop: pop });
 });
 
-// 阶段:天数 + 多维度判定。
-//   起步    (默认,day 1)
-//   立足    (day≥3 且 结构≥3)
-//   成形    (day≥4 且 结构≥5)
-//   成群    (day≥5 且 人手≥3)
-//   兴旺    (day≥6 且 丰碑已立)
+// Stages: days + multi-dimensional judgment.
+//   startup         (default, day 1)
+//   foothold        (day>=3 and structures>=3)
+//   taking shape    (day>=4 and structures>=5)
+//   crowd           (day>=5 and hands>=3)
+//   prosperity      (day>=6 and monument built)
 vitric.system("stage", { query: ["Colony", "Clock"], writes: ["Colony"] }, (entities, ctx) => {
   const c = entities[0];
   if (!c) return;
@@ -63,7 +63,7 @@ vitric.system("stage", { query: ["Colony", "Clock"], writes: ["Colony"] }, (enti
   if (c.Colony.stage !== stage) c.Colony.stage = stage;
 });
 
-// 殖民地库存：每帧按 (产出 - 基础消耗) 调库存。
+// Colony stockpile: each frame adjust stockpile by (output - base consumption).
 vitric.system("colony", { query: ["Colony"], writes: ["Colony"] }, (entities, ctx) => {
   for (const e of entities) {
     const c = e.Colony;
@@ -79,7 +79,7 @@ vitric.system("colony", { query: ["Colony"], writes: ["Colony"] }, (entities, ct
   }
 });
 
-// 丰碑标记:任何时候场上存在 monument 结构 → @colony.Colony.monument_built = 1
+// Monument flag: at any time if a monument structure exists on the field -> @colony.Colony.monument_built = 1
 vitric.system("monument-watch", { query: ["Structure"], writes: [] }, (entities, ctx) => {
   let monument = 0;
   for (const e of entities) if (e.Structure.kind === "monument") monument += 1;

@@ -1,14 +1,17 @@
-//! 音频输出 — 约定事件驱动：
-//! - `play-sound`（data: {"sound": "coin.wav", "volume": 0.6}）播一次音效；
-//! - `play-music`（data: {"sound": "bgm.ogg", "volume": 0.4}）循环播放背景音乐，
-//!   全局只有一个音乐槽，新歌顶掉旧歌（旧的先停再放新的）；
-//! - `stop-music`（data: {}）停掉当前背景音乐。
+//! Audio output — convention-driven events:
+//! - `play-sound` (data: {"sound": "coin.wav", "volume": 0.6}) plays a sound effect once;
+//! - `play-music` (data: {"sound": "bgm.ogg", "volume": 0.4}) loops background music; there is a
+//!   single global music slot, and a new track displaces the old one (the old one is stopped
+//!   before the new one plays);
+//! - `stop-music` (data: {}) stops the current background music.
 //!
-//! volume 可选，0..=1，默认 1.0；越界/非数字是显式错误（结构化 stderr 行），不静默截断。
+//! volume is optional, 0..=1, default 1.0; out-of-range / non-number is an explicit error (a
+//! structured stderr line), not a silent clamp.
 //!
-//! 音频是纯输出副作用，不进模拟状态——确定性回放不受影响。
-//! 无声卡环境（容器/CI/无头服务器）打不开设备是合法状态：
-//! 启动横幅明说 audio disabled，事件照常流动只是没声。
+//! Audio is a pure output side effect and does not enter simulation state — deterministic replay
+//! is unaffected. Failing to open a device in a soundless environment (container / CI / headless
+//! server) is a legal state: the startup banner says audio disabled, and events keep flowing
+//! with no sound.
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -18,18 +21,20 @@ use std::sync::Arc;
 use serde_json::Value;
 use vitric_rules::Event;
 
-/// 从事件解析出的音频指令。纯数据不碰设备——解析/校验逻辑在无声卡环境也能测。
+/// An audio command parsed from an event. Pure data, does not touch devices — the parse / verify
+/// logic can be tested in a soundless environment.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SoundCmd {
-    /// play-sound：播一次音效。
+    /// play-sound: play a sound effect once.
     Play { sound: String, volume: f32 },
-    /// play-music：循环播放背景音乐（单槽位，新歌顶掉旧歌）。
+    /// play-music: loop background music (single slot, new track displaces the old one).
     PlayMusic { sound: String, volume: f32 },
-    /// stop-music：停掉当前背景音乐。
+    /// stop-music: stop the current background music.
     StopMusic,
 }
 
-/// 解析音频约定事件。非音频事件返回 None；音频事件但参数不合法返回 Some(Err)。
+/// Parse an audio convention event. Non-audio events return None; an audio event with invalid
+/// parameters returns Some(Err).
 pub fn parse_sound_cmd(event: &Event) -> Option<Result<SoundCmd, String>> {
     match event.name.as_str() {
         "stop-music" => return Some(Ok(SoundCmd::StopMusic)),
@@ -50,7 +55,8 @@ pub fn parse_sound_cmd(event: &Event) -> Option<Result<SoundCmd, String>> {
     }))
 }
 
-/// volume 可选，默认 1.0；必须是 0..=1 的数字。越界/非数字显式报错，不静默 clamp。
+/// volume is optional, default 1.0; must be a number in 0..=1. Out-of-range / non-number
+/// explicitly errors, no silent clamp.
 fn parse_volume(event: &str, sound: &str, v: Option<&Value>) -> Result<f32, String> {
     let Some(v) = v else { return Ok(1.0) };
     let Some(n) = v.as_f64() else {
@@ -64,8 +70,9 @@ fn parse_volume(event: &str, sound: &str, v: Option<&Value>) -> Result<f32, Stri
     Ok(n as f32)
 }
 
-/// 单一音乐槽：同一时刻最多一首背景音乐。换歌 = 先停旧的再放新的，所以
-/// put/take 都把旧值交还调用方，由调用方负责 stop——槽本身只管"只有一个"。
+/// Single music slot: at most one background music track at a time. Switching tracks = stop the
+/// old one then play the new one, so put/take both hand the old value back to the caller, who is
+/// responsible for stop — the slot itself only enforces "there is only one".
 pub(crate) struct MusicSlot<T> {
     current: Option<T>,
 }
@@ -75,12 +82,12 @@ impl<T> MusicSlot<T> {
         MusicSlot { current: None }
     }
 
-    /// 放入新音乐，交还被顶掉的旧音乐（没有则 None）。
+    /// Put in new music, returning the displaced old music (None if there was none).
     pub(crate) fn put(&mut self, new: T) -> Option<T> {
         self.current.replace(new)
     }
 
-    /// 取出当前音乐（用于 stop-music），槽变空。
+    /// Take out the current music (for stop-music); the slot becomes empty.
     pub(crate) fn take(&mut self) -> Option<T> {
         self.current.take()
     }
@@ -89,22 +96,24 @@ impl<T> MusicSlot<T> {
 pub struct Audio {
     device: rodio::MixerDeviceSink,
     sounds_dir: PathBuf,
-    /// 文件名 -> 原始字节（解码每次播放时做，文件读取缓存住）。
+    /// Filename -> raw bytes (decoding happens on each play; file reads are cached).
     cache: HashMap<String, Arc<[u8]>>,
-    /// 背景音乐槽：音乐要跨 tick 持续播，所以 Player 不 detach、存在这里。
+    /// Background music slot: music must keep playing across ticks, so the Player is not detached
+    /// and is held here.
     music: MusicSlot<rodio::Player>,
 }
 
 impl Audio {
-    /// 打开默认音频设备。失败（无声卡）返回错误，调用方决定降级。
+    /// Open the default audio device. On failure (no sound card) returns an error; the caller
+    /// decides whether to degrade.
     pub fn open(sounds_dir: PathBuf) -> Result<Audio, String> {
         let device = rodio::DeviceSinkBuilder::open_default_sink()
             .map_err(|e| format!("音频设备打开失败: {e}"))?;
         Ok(Audio { device, sounds_dir, cache: HashMap::new(), music: MusicSlot::empty() })
     }
 
-    /// 读取（带缓存）一个音频文件的原始字节。
-    /// 文件名来自事件 data（运行时可拼接），不许逃出 sounds/ 目录。
+    /// Read (with caching) the raw bytes of an audio file. The filename comes from event data
+    /// (may be assembled at runtime) and must not escape the sounds/ directory.
     fn load(&mut self, name: &str) -> Result<Arc<[u8]>, String> {
         if name.contains("..") || name.starts_with('/') || name.contains('\\') {
             return Err(format!("音效名 {name:?} 不合法：只能是 sounds/ 目录内的相对文件名"));
@@ -124,21 +133,24 @@ impl Audio {
         Ok(arc)
     }
 
-    /// 播放一个音效（项目 sounds/ 目录下的 wav/ogg/mp3/flac），volume 已校验过 0..=1。
+    /// Play a sound effect (a wav/ogg/mp3/flac under the project's sounds/ directory); volume is
+    /// already verified to be 0..=1.
     pub fn play(&mut self, name: &str, volume: f32) -> Result<(), String> {
         let bytes = self.load(name)?;
         let player = rodio::play(self.device.mixer(), Cursor::new(bytes.to_vec()))
             .map_err(|e| format!("音效 {name:?} 播放失败: {e}。支持 wav/ogg/mp3/flac"))?;
         player.set_volume(volume);
-        player.detach(); // 播完自停，不跟随本帧生命周期
+        player.detach(); // stops on its own when done; does not follow this frame's lifetime
         Ok(())
     }
 
-    /// 循环播放背景音乐。单槽位：先停掉旧的再起新的，不会两首叠着响。
-    /// 解码先于换槽——新文件坏了旧音乐继续播，不留无声空槽。
+    /// Loop background music. Single slot: the old one is stopped before the new one starts, so
+    /// two tracks never overlap. Decoding happens before swapping the slot — if the new file is
+    /// broken the old music keeps playing, leaving no silent empty slot.
     pub fn play_music(&mut self, name: &str, volume: f32) -> Result<(), String> {
         let bytes = self.load(name)?;
-        // new_looped：解码器自带无限循环，播完一遍 seek 回头接着放
+        // new_looped: the decoder has a built-in infinite loop; after one pass it seeks back and
+        // keeps playing
         let source = rodio::Decoder::new_looped(Cursor::new(bytes.to_vec()))
             .map_err(|e| format!("音乐 {name:?} 解码失败: {e}。支持 wav/ogg/mp3/flac"))?;
         if let Some(old) = self.music.take() {
@@ -151,7 +163,7 @@ impl Audio {
         Ok(())
     }
 
-    /// 停掉当前背景音乐。没在播也合法（幂等）。
+    /// Stop the current background music. Legal even when nothing is playing (idempotent).
     pub fn stop_music(&mut self) {
         if let Some(old) = self.music.take() {
             old.stop();
@@ -159,8 +171,9 @@ impl Audio {
     }
 }
 
-/// 从一帧的事件流里挑出音频约定事件并执行；错误以结构化行上报 stderr（不崩游戏）。
-/// audio 为 None（无声卡）时静默消费——事件照常流动只是没声。
+/// Pick out audio convention events from a frame's event stream and execute them; errors are
+/// reported to stderr as structured lines (do not crash the game). When audio is None (no sound
+/// card) they are silently consumed — events keep flowing with no sound.
 pub fn handle_sound_events(audio: &mut Option<Audio>, events: &[Event]) {
     let Some(audio) = audio else { return };
     for e in events {
@@ -202,7 +215,7 @@ mod tests {
     fn parse_play_sound_with_volume() {
         let cmd = parse_sound_cmd(&ev("play-sound", json!({"sound": "x.wav", "volume": 0.6})));
         assert_eq!(cmd, Some(Ok(SoundCmd::Play { sound: "x.wav".into(), volume: 0.6 })));
-        // 整数 0/1 也是合法数字
+        // Integer 0/1 is also a legal number
         let cmd = parse_sound_cmd(&ev("play-sound", json!({"sound": "x.wav", "volume": 0})));
         assert_eq!(cmd, Some(Ok(SoundCmd::Play { sound: "x.wav".into(), volume: 0.0 })));
     }
@@ -245,7 +258,7 @@ mod tests {
             cmd,
             Some(Ok(SoundCmd::PlayMusic { sound: "bgm.ogg".into(), volume: 0.4 }))
         );
-        // stop-music 不需要任何字段
+        // stop-music needs no fields
         assert_eq!(
             parse_sound_cmd(&ev("stop-music", json!({}))),
             Some(Ok(SoundCmd::StopMusic))
@@ -260,18 +273,19 @@ mod tests {
 
     #[test]
     fn music_slot_replaces_and_returns_old() {
-        // 单槽语义：第一次放没有旧值；第二次放交还旧值（调用方负责 stop）
+        // Single-slot semantics: first put has no old value; second put returns the old value
+        // (caller is responsible for stop)
         let mut slot: MusicSlot<&str> = MusicSlot::empty();
         assert_eq!(slot.put("bgm1.ogg"), None);
         assert_eq!(slot.put("bgm2.ogg"), Some("bgm1.ogg"));
-        // take 取出当前并清空，再 take 是 None（stop-music 幂等）
+        // take removes the current and empties the slot; a second take is None (stop-music idempotent)
         assert_eq!(slot.take(), Some("bgm2.ogg"));
         assert_eq!(slot.take(), None);
     }
 
     #[test]
     fn handle_sound_events_without_device_consumes_gracefully() {
-        // 无声卡（audio = None）时事件照常流动，坏数据也不崩
+        // With no sound card (audio = None) events keep flowing, and bad data does not crash
         let mut audio: Option<Audio> = None;
         let events = vec![
             ev("play-sound", json!({"sound": "x.wav", "volume": "loud"})),

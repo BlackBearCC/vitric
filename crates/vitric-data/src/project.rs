@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::{Scene, Schema, Sequence, ValidationReport};
 
-/// 项目清单 `vitric.json`。
+/// Project manifest `vitric.json`.
 ///
 /// ```json
 /// {
@@ -24,7 +24,7 @@ use crate::{Scene, Schema, Sequence, ValidationReport};
 pub struct ProjectManifest {
     pub name: String,
     pub schema: String,
-    /// 启动场景，必须出现在 scenes 列表里。
+    /// Entry scene; must appear in the scenes list.
     pub entry: String,
     #[serde(default)]
     pub scenes: Vec<String>,
@@ -32,36 +32,36 @@ pub struct ProjectManifest {
     pub rules: Vec<String>,
     #[serde(default)]
     pub scripts: Vec<String>,
-    /// 序列（时间轴）定义文件（可选，每个文件一条序列，`sequences/<名>.json`）。
-    /// 序列是通用演出原语，运行时由 `Sequence` 组件实例化播放；不声明 = 项目不用序列。
+    /// Sequence (timeline) definition files (optional; one sequence per file, `sequences/<name>.json`).
+    /// A sequence is a generic presentation primitive, instantiated and played at runtime by the `Sequence` component; not declared = the project does not use sequences.
     #[serde(default)]
     pub sequences: Vec<String>,
-    /// 动画定义文件（可选）。
+    /// Animation definition file (optional).
     #[serde(default)]
     pub animations: Option<String>,
-    /// 主题定义文件（可选，每个文件一份主题，`themes/<名>.json`）。
-    /// UI 控件按名字引用主题取样式（check 校验名存在）；不声明 = 项目不用主题。
+    /// Theme definition files (optional; one theme per file, `themes/<name>.json`).
+    /// UI controls reference themes by name to fetch styles (check validates name existence); not declared = the project does not use themes.
     #[serde(default)]
     pub themes: Vec<String>,
-    /// TTF 矢量字体（可选，路径相对项目根目录，如 "fonts/myfont.ttf"）。
-    /// 设了它，所有 Text 组件改用该字体渲染（比例字距 + 抗锯齿，支持字体里有的
-    /// 任意字形——含 CJK）；不设 = 维持内嵌 8x8 点阵字体的旧行为（输出字节不变）。
-    /// 文件不存在在加载期报错（VD040）；文件损坏在 check/启动时显式报错。
+    /// TTF vector font (optional; path relative to the project root, e.g. "fonts/myfont.ttf").
+    /// If set, all Text components are rendered with this font (proportional spacing + anti-aliasing, supporting any
+    /// glyph in the font — including CJK); if not set = the old behavior with the embedded 8x8 bitmap font is kept (output bytes unchanged).
+    /// A missing file is reported at load time (VD040); a corrupt file is explicitly reported at check/startup.
     #[serde(default)]
     pub font: Option<String>,
-    /// 性能预算（可选）。超了不是默默卡顿，是显式上报。
+    /// Performance budgets (optional). Exceeding them is not silent stutter; it is explicitly reported.
     #[serde(default)]
     pub budgets: Budgets,
-    /// 交付门禁（可选）。声明了它，`vitric gate` 才会出（或拒发）通关证书；
-    /// 不声明 = 项目没有机器可验的交付标准，gate 直接拒绝（无门禁不出证书）。
+    /// Delivery gates (optional). Declaring this is what makes `vitric gate` issue (or refuse) a clearance certificate;
+    /// not declared = the project has no machine-verifiable delivery standard, and gate refuses outright (no gates, no certificate).
     #[serde(default)]
     pub gates: Option<Gates>,
-    /// 世界随机种子；同种子同输入 = 同结果。
+    /// World random seed; same seed + same input = same result.
     #[serde(default = "default_seed")]
     pub seed: u64,
 }
 
-/// 交付门禁声明（清单 `gates` 字段）。
+/// Delivery gate declaration (the manifest's `gates` field).
 ///
 /// ```json
 /// "gates": {
@@ -72,35 +72,35 @@ pub struct ProjectManifest {
 /// }
 /// ```
 ///
-/// 核心约束：通关录像是**不可伪造的交付证书**——重放必须逐校验点逐位一致，
-/// 且重放过程中真的观测到 `must_emit` 事件。伪造任何一帧，状态哈希必然跑偏。
+/// Core constraint: a clearance recording is an **unforgeable delivery certificate** — the replay must be bit-identical at every checkpoint,
+/// and the `must_emit` event must actually be observed during replay. Forge any frame and the state hash will diverge.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Gates {
-    /// 通关录像门。每条录像独立重放验证；列表为空 = 没有证书可发，gate 拒绝。
+    /// Clearance recording gate. Each recording is independently replayed and verified; an empty list = no certificate can be issued, gate refuses.
     #[serde(default)]
     pub playthroughs: Vec<PlaythroughGate>,
-    /// 断言集文件（相对项目根，格式 `[{"id", "if": [[左,op,右]...]}, ...]`）。
-    /// 声明了就在每条录像重放的**每个 tick** 全量求值，任何一刻违反都拒发证书。
+    /// Assertion set file (relative to the project root; format `[{"id", "if": [[left,op,right]...]}, ...]`).
+    /// If declared, it is fully evaluated on **every tick** of each recording's replay; any violation at any moment refuses the certificate.
     #[serde(default)]
     pub assertions: Option<String>,
-    /// 是否先过完整项目校验（vitric check 同款）。默认 true——数据都不合法谈不上交付。
+    /// Whether to run the full project validation first (same as vitric check). Defaults to true — if the data isn't even legal, delivery is out of the question.
     #[serde(default = "default_true")]
     pub check: bool,
-    /// 录像 tick 数上限（不设 = 不限）。防"挂机一百万 tick 总会赢"式注水证书。
+    /// Recording tick count cap (not set = unlimited). Prevents water-injection certificates of the "idle a million ticks and eventually win" variety.
     #[serde(default)]
     pub max_ticks: Option<u64>,
-    /// playtest 门（可选）。声明了它，`vitric gate` 多跑一道 playtest 门：按这里的配置
-    /// 跑一遍 swarm/lookahead/种子探索、聚合出报告，再逐条核对声明的断言（通关率/软锁数/
-    /// 不可达结局/惰性动作/数值崩）。不声明 = 不跑这道门（现有 gate 行为不变）。
+    /// Playtest gate (optional). If declared, `vitric gate` runs an extra playtest gate: it runs a swarm/lookahead/seed-exploration pass per this config,
+    /// aggregates a report, and then checks each declared assertion one by one (clear rate / soft-lock count /
+    /// unreachable endings / inert actions / numeric breakage). Not declared = this gate is not run (existing gate behavior unchanged).
     #[serde(default)]
     pub playtest: Option<PlaytestGate>,
 }
 
-/// playtest 门声明（清单 `gates.playtest` 字段）。
+/// Playtest gate declaration (the manifest's `gates.playtest` field).
 ///
-/// 把"自动清地板"变成交付契约：项目声明它必须达到的 playtest 门槛（多少局、能不能通关、
-/// 软锁上限等），`vitric gate` 真跑一遍 playtest swarm 断言达标才放行。playtest swarm 是
-/// 确定的（同种子同输入 = 同结果），所以这道门可复现。
+/// Turns "auto-clearing the floor" into a delivery contract: the project declares the playtest threshold it must meet (how many sessions, whether it can be cleared,
+/// soft-lock cap, etc.), and `vitric gate` actually runs a playtest swarm and asserts the threshold is met before letting it through. The playtest swarm is
+/// deterministic (same seed + same input = same result), so this gate is reproducible.
 ///
 /// ```json
 /// "playtest": {
@@ -111,48 +111,48 @@ pub struct Gates {
 /// }
 /// ```
 ///
-/// 跑法字段（sessions/max_ticks/strategy/horizon/seed_recording）决定怎么跑；断言字段
-/// （require_clearable/min_clear_rate/max_soft_locks/...）都可选，**填了才查**——没填的
-/// 维度不参与裁决，只把关心的契约写进清单。
+/// Run-mode fields (sessions/max_ticks/strategy/horizon/seed_recording) decide how to run; assertion fields
+/// (require_clearable/min_clear_rate/max_soft_locks/...) are all optional, **checked only if filled in** — dimensions left blank
+/// do not participate in the verdict; only the contracts you care about are written into the manifest.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlaytestGate {
-    /// 跑多少局（默认 16）。strategy=lookahead 时是跑多少局 lookahead。
+    /// How many sessions to run (default 16). When strategy=lookahead, this is how many lookahead sessions to run.
     #[serde(default = "default_sessions")]
     pub sessions: usize,
-    /// 每局 tick 上限（默认 600）。
+    /// Per-session tick cap (default 600).
     #[serde(default = "default_pt_max_ticks")]
     pub max_ticks: u64,
-    /// 跑法策略（不填=默认策略组 swarm 轮换四策略；可填 "lookahead" 走前瞻搜索跑 sessions 局）。
+    /// Run-mode strategy (blank = default strategy group swarm rotating four strategies; can be set to "lookahead" to run a lookahead search for sessions sessions).
     #[serde(default)]
     pub strategy: Option<String>,
-    /// lookahead 束搜索的**深度**（往前规划几帧；仅 strategy=lookahead 用，默认 8，1=单步前瞻）。
-    /// 字段名沿用 `horizon` 向后兼容旧清单（语义已并入「搜索深度」）。
+    /// **Depth** of the lookahead beam search (how many frames to plan ahead; only used when strategy=lookahead, default 8, 1 = single-step lookahead).
+    /// The field name keeps `horizon` for backward compatibility with old manifests (the semantics have been folded into "search depth").
     #[serde(default = "default_horizon")]
     pub horizon: u64,
-    /// lookahead 束搜索的**束宽**（每层保留多少最优节点继续展开；仅 strategy=lookahead 用，默认 4）。
+    /// **Beam width** of the lookahead beam search (how many optimal nodes to keep per layer for expansion; only used when strategy=lookahead, default 4).
     #[serde(default = "default_beam")]
     pub beam: usize,
-    /// 种子录像（相对项目根）。填了走种子式探索：以这条录像为基线扰动出 sessions 条变异跑。
+    /// Seed recording (relative to the project root). If filled in, runs seed-style exploration: perturbs this recording as a baseline into sessions variant runs.
     #[serde(default)]
     pub seed_recording: Option<String>,
 
-    // ---- 断言（都可选，填了才查；没填的维度不参与裁决）----
-    /// true = 通关率必须 > 0（swarm 至少通关一次）。
+    // ---- Assertions (all optional, checked only if filled in; blank dimensions do not participate in the verdict) ----
+    /// true = clear rate must be > 0 (swarm clears at least once).
     #[serde(default)]
     pub require_clearable: Option<bool>,
-    /// 通关率下限（0..1）。实际通关率 < 这个值就 fail。
+    /// Clear rate lower bound (0..1). If the actual clear rate < this value, fail.
     #[serde(default)]
     pub min_clear_rate: Option<f64>,
-    /// 软锁簇（stuck_clusters）数上限。超了 fail。
+    /// Upper bound on the number of soft-lock clusters (stuck_clusters). Exceeding it fails.
     #[serde(default)]
     pub max_soft_locks: Option<usize>,
-    /// 不可达结局（ending_coverage.unreachable_endings）数上限。超了 fail。
+    /// Upper bound on the number of unreachable endings (ending_coverage.unreachable_endings). Exceeding it fails.
     #[serde(default)]
     pub max_unreachable_endings: Option<usize>,
-    /// 惰性动作（inert_actions）数上限。超了 fail。
+    /// Upper bound on the number of inert actions (inert_actions). Exceeding it fails.
     #[serde(default)]
     pub max_inert_actions: Option<usize>,
-    /// true = 数值崩（runaway/collapse/non_finite）必须全空，任一非空就 fail。
+    /// true = numeric breakage (runaway/collapse/non_finite) must all be empty; any non-empty one fails.
     #[serde(default)]
     pub forbid_numeric_breakage: Option<bool>,
 }
@@ -173,12 +173,12 @@ fn default_beam() -> usize {
     4
 }
 
-/// 一条通关录像门。
+/// One clearance recording gate.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlaythroughGate {
-    /// 录像文件（相对项目根），来自 `vitric run --record`。
+    /// Recording file (relative to the project root), produced by `vitric run --record`.
     pub recording: String,
-    /// 重放过程中必须观测到的事件（终局信号）。默认 "game-won"。
+    /// Event that must be observed during replay (the end-game signal). Defaults to "game-won".
     #[serde(default = "default_must_emit")]
     pub must_emit: String,
 }
@@ -191,28 +191,28 @@ fn default_must_emit() -> String {
     "game-won".to_string()
 }
 
-/// 性能预算。0 = 不限。
+/// Performance budgets. 0 = unlimited.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Budgets {
-    /// 存活实体数上限。
+    /// Upper bound on the number of live entities.
     #[serde(default)]
     pub max_entities: u64,
-    /// 单 tick 事件数上限（事件风暴探测）。
+    /// Upper bound on the number of events per tick (event-storm detection).
     #[serde(default)]
     pub max_events_per_tick: u64,
 }
 
-/// 一个动画片段：帧图序列 + 播放速率。
+/// One animation clip: a frame-image sequence + playback rate.
 ///
 /// ```json
 /// { "clips": { "coin-spin": { "frames": ["coin1.png", "coin2.png"], "fps": 8, "loop": true } } }
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct Clip {
-    /// 帧图（素材仓库里的路径）。
+    /// Frame images (paths in the asset repository).
     pub frames: Vec<String>,
     pub fps: u32,
-    /// true 循环播放；false 播完停在末帧并发 anim-finished 事件。
+    /// true = loop playback; false = stop on the last frame when done and emit an anim-finished event.
     #[serde(default, rename = "loop")]
     pub looping: bool,
 }
@@ -221,8 +221,8 @@ fn default_seed() -> u64 {
     0
 }
 
-/// 主题名 = 文件名去掉目录和 `.json` 后缀（`themes/dark.json` → `dark`）。
-/// 控件引用主题用这个名字。
+/// Theme name = file name with the directory and `.json` suffix stripped (`themes/dark.json` -> `dark`).
+/// Controls reference themes by this name.
 fn theme_name(rel: &str) -> String {
     rel.rsplit('/')
         .next()
@@ -232,36 +232,36 @@ fn theme_name(rel: &str) -> String {
         .to_string()
 }
 
-/// 加载完成的项目：清单 + schema + 全部场景（已校验）+ 规则/脚本原文。
+/// A fully loaded project: manifest + schema + all scenes (validated) + raw rules/scripts.
 ///
-/// 规则的语义校验在 vitric-rules（它认识触发器/动作的结构）；
-/// 这里只保证 JSON 能解析，职责分明。
+/// Semantic validation of rules happens in vitric-rules (it knows the structure of triggers/actions);
+/// here we only guarantee the JSON can be parsed — responsibilities are kept separate.
 #[derive(Debug)]
 pub struct Project {
     pub root: PathBuf,
     pub manifest: ProjectManifest,
     pub schema: Schema,
-    /// 相对路径 -> 场景
+    /// Relative path -> scene
     pub scenes: BTreeMap<String, Scene>,
-    /// (相对路径, 规则文档)
+    /// (relative path, rule document)
     pub rules: Vec<(String, Value)>,
-    /// (相对路径, 脚本源码)
+    /// (relative path, script source)
     pub scripts: Vec<(String, String)>,
-    /// 序列（名字 -> 已校验的静态轨道）。
+    /// Sequences (name -> validated static track).
     pub sequences: BTreeMap<String, Sequence>,
-    /// 动画片段（名字 -> 定义）。
+    /// Animation clips (name -> definition).
     pub animations: BTreeMap<String, Clip>,
-    /// 主题（名字 -> 已校验的样式卷）。装配期常量，不进世界状态。
+    /// Themes (name -> validated style roll). Assembly-time constants; do not enter world state.
     pub themes: BTreeMap<String, crate::Theme>,
 }
 
 impl Project {
-    /// 从目录加载整个项目。所有问题（IO/解析/校验）汇总成一份报告一次给全。
+    /// Load the entire project from a directory. All problems (IO / parse / validation) are aggregated into one report and given all at once.
     pub fn load(root: impl AsRef<Path>) -> Result<Project, ValidationReport> {
         let root = root.as_ref().to_path_buf();
         let mut report = ValidationReport::default();
 
-        // 清单
+        // Manifest
         let manifest_path = root.join("vitric.json");
         let manifest_doc = match read_json(&manifest_path) {
             Ok(v) => v,
@@ -306,7 +306,7 @@ impl Project {
             }
         };
 
-        // 场景
+        // Scenes
         let mut scenes = BTreeMap::new();
         for rel in &manifest.scenes {
             match read_json(&root.join(rel)) {
@@ -320,7 +320,7 @@ impl Project {
             }
         }
 
-        // 规则（仅解析 JSON，语义校验归 vitric-rules）
+        // Rules (only parse JSON; semantic validation belongs to vitric-rules)
         let mut rules = Vec::new();
         for rel in &manifest.rules {
             match read_json(&root.join(rel)) {
@@ -329,7 +329,7 @@ impl Project {
             }
         }
 
-        // 脚本（源码原文，执行归 vitric-script）
+        // Scripts (raw source; execution belongs to vitric-script)
         let mut scripts = Vec::new();
         for rel in &manifest.scripts {
             match fs::read_to_string(root.join(rel)) {
@@ -338,8 +338,8 @@ impl Project {
             }
         }
 
-        // 序列（时间轴）：每个文件一条，按 schema 校验（动作名/字段/at 单调等）。
-        // 序列名冲突显式报错——运行时 Sequence 组件按名字引用，重名无法消歧。
+        // Sequences (timelines): one per file, validated against the schema (action names / fields / at monotonicity etc.).
+        // Sequence name conflicts are reported explicitly — the runtime Sequence component references by name, and duplicates cannot be disambiguated.
         let mut sequences = BTreeMap::new();
         for rel in &manifest.sequences {
             match read_json(&root.join(rel)) {
@@ -361,8 +361,8 @@ impl Project {
             }
         }
 
-        // 字体：只查文件存在（解析/损坏校验在 vitric-render 的 FontStore::load，
-        // 那边认识 TTF；这里和 scenes/rules 一样只管"清单指的文件必须在"）
+        // Font: only check file existence (parsing / corruption validation is in vitric-render's FontStore::load,
+        // which knows TTF; here, like scenes/rules, we only care that "the file the manifest points to must exist")
         if let Some(rel) = &manifest.font {
             if !root.join(rel).is_file() {
                 report.push(
@@ -374,7 +374,7 @@ impl Project {
             }
         }
 
-        // 动画
+        // Animations
         let mut animations = BTreeMap::new();
         if let Some(rel) = &manifest.animations {
             match read_json(&root.join(rel)) {
@@ -383,8 +383,8 @@ impl Project {
             }
         }
 
-        // 主题：每个文件一份，名字取文件名（去 themes/ 前缀和 .json 后缀）。
-        // 重名显式报错——控件按名字引用，重名无法消歧（和序列同口径）。
+        // Themes: one per file, name taken from the file name (stripping the themes/ prefix and .json suffix).
+        // Duplicate names are reported explicitly — controls reference by name, and duplicates cannot be disambiguated (same scope as sequences).
         let mut themes = BTreeMap::new();
         for rel in &manifest.themes {
             let name = theme_name(rel);
@@ -514,7 +514,7 @@ mod tests {
         let err = Project::load(&dir).unwrap_err();
         let text = err.to_string();
         assert!(text.contains("VD040") && text.contains("fonts/ghost.ttf"), "{text}");
-        // 不写 font 字段 = 合法（点阵字体旧行为）
+        // Not writing the font field = legal (old bitmap-font behavior)
         write(
             &dir.join("vitric.json"),
             r#"{"name":"demo","schema":"schema.json","entry":"scenes/main.json",

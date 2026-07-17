@@ -1,16 +1,16 @@
-// 时间/日夜循环:整个游戏的节奏骨架。
-//   @colony 挂 Clock 组件 → day/time/tod 三个字段持续推进,每天 emit day-start。
-//   dt 来自引擎,1 单位 = 1 秒游戏时间(60 tick/sec 下 tick 是 1/60 秒)。
-//   1 个游戏日 = DAY_SEC 秒;本版 DAY_SEC = 60 — 实测约 1 分钟/天,
-//   10–15 分钟一场对 5–7 天的纵切刚好够玩。
+// Time / day-night cycle: the pacing backbone of the whole game.
+//   @colony carries a Clock component -> day/time/tod three fields keep advancing, emitting day-start each day.
+//   dt comes from the engine, 1 unit = 1 second of game time (at 60 tick/sec, one tick is 1/60 second).
+//   1 game day = DAY_SEC seconds; in this version DAY_SEC = 60 — measured at about 1 minute/day,
+//   10-15 minutes per session fits a 5-7 day vertical slice nicely.
 //
-// 时段:
-//   晨  0% – 25%   醒来、种田、采集、建房
-//   午 25% – 50%   阳光最强、作物快速生长、旅人活跃
-//   昏 50% – 75%   收工、回家、聚居氛围浓
-//   夜 75% – 100%  伙伴须在住所休息;作物休眠
+// Time of day:
+//   morning    0% – 25%   wake up, farm, gather, build
+//   noon      25% – 50%   strongest sunlight, crops grow fast, drifters active
+//   dusk      50% – 75%   wrap up work, head home, strong community vibe
+//   night     75% – 100%  companions must rest in quarters; crops dormant
 //
-// 每个 tick 末 emit time-tick{day, time, tod} — 规则/脚本可监听(作物休眠就用这里)。
+// At the end of each tick emit time-tick{day, time, tod} — rules/scripts can listen (crop dormancy hooks in here).
 
 const CLOCK_DAY_SEC = 60.0;
 
@@ -23,14 +23,14 @@ vitric.system("clock-advance", { query: ["Clock"], writes: ["Clock"] }, (entitie
       e.Clock.day += 1;
       dayJustWrapped = true;
     }
-    // 时段标签
+    // Time-of-day label
     const frac = e.Clock.time / CLOCK_DAY_SEC;
     let tod = "晨";
     if (frac >= 0.75) tod = "夜";
     else if (frac >= 0.50) tod = "昏";
     else if (frac >= 0.25) tod = "午";
     if (e.Clock.tod !== tod) e.Clock.tod = tod;
-    // 每天 wrap 那一刻发一次 day-start(每个 Clock 实例一份)
+    // On the wrap moment of each day emit day-start once (one per Clock instance)
     if (dayJustWrapped && e.Clock.last_day_emit !== e.Clock.day) {
       e.Clock.last_day_emit = e.Clock.day;
       ctx.emit("day-start", { day: e.Clock.day });

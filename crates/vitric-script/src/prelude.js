@@ -1,12 +1,12 @@
-// Vitric 脚本运行时 prelude — 在任何用户脚本之前注入。
+// Vitric script runtime prelude — injected before any user script.
 "use strict";
 
 globalThis.__systems = [];
 globalThis.__fns = {};
 
 globalThis.vitric = {
-  // 注册一个系统：vitric.system("名字", {query: [组件...], writes: [组件...]}, (entities, ctx) => {...})
-  // query 是实体筛选（系统能读这些组件），writes 必须是 query 的子集（能改哪些）。
+  // Register a system: vitric.system("name", {query: [components...], writes: [components...]}, (entities, ctx) => {...})
+  // query is the entity filter (the system can read these components); writes must be a subset of query (which it can change).
   system(name, decl, fn) {
     if (typeof name !== "string" || !name) {
       throw new Error("vitric.system: 第一个参数必须是非空系统名");
@@ -28,7 +28,7 @@ globalThis.vitric = {
     }
     __systems.push({ name, query: decl.query, writes, fn });
   },
-  // 注册一个可被规则 call 动作调用的函数：vitric.fn("名字", (args, ctx) => {...})
+  // Register a function callable by the rule `call` action: vitric.fn("name", (args, ctx) => {...})
   fn(name, f) {
     if (typeof name !== "string" || !name) {
       throw new Error("vitric.fn: 第一个参数必须是非空函数名");
@@ -40,10 +40,10 @@ globalThis.vitric = {
   },
 };
 
-// 内置分发器：ctx.ask 把回调名编进 id 前段，<service>-reply 事件经此转发到对应 vitric.fn。
-// 接通方式 = 游戏在规则里加一条，把回复事件的 data 当 args 传进来（务必带 with，否则没 id）：
+// Built-in dispatcher: ctx.ask encodes the callback name into the id prefix; <service>-reply events are forwarded here to the matching vitric.fn.
+// Wiring = the game adds a rule that passes the reply event's data as args (must include `with`, otherwise no id):
 //   { "on": {"event": "llm-reply"}, "do": [{ "call": "__onReply", "with": { "id": "event.id", "text": "event.text" } }] }
-// 回调拿到的 reply 就是 { id, text }（出错时 llm-error 事件的 data 是 { id, message }，另接一条规则）。
+// The reply the callback receives is { id, text } (on error the llm-error event's data is { id, message }, wire up a separate rule).
 vitric.fn("__onReply", (args, ctx) => {
   const id = (args && args.id) || "";
   const cb = id.split("#")[0];
@@ -57,12 +57,12 @@ vitric.fn("__onReply", (args, ctx) => {
   f(args, ctx);
 });
 
-// ---- 确定性铁律：禁掉一切非确定性入口 ----
+// ---- Determinism law: disable every non-deterministic entry point ----
 Math.random = function () {
   throw new Error("Math.random 在 Vitric 里禁用（会破坏确定性回放）。改用系统/函数回调里的 ctx.random()");
 };
-// Date 整体替换：无参构造 = 读墙钟，和 Date.now 一样会击穿确定性回放。
-// 显式传参的构造（new Date(0)）是纯计算，放行。
+// Date is replaced wholesale: parameterless construction reads the wall clock and breaks deterministic replay just like Date.now.
+// Construction with explicit arguments (new Date(0)) is pure computation; allowed through.
 const __RealDate = Date;
 function __clockError(what) {
   return new Error(what + " 在 Vitric 里禁用（会破坏确定性回放）。改用 ctx.tick（60 tick = 1 秒）");
@@ -79,7 +79,7 @@ globalThis.Date.now = function () {
   throw __clockError("Date.now");
 };
 
-// ---- PCG32（与 Rust 侧 vitric_sim::Pcg32 完全同一算法，随机流跨语言连续）----
+// ---- PCG32 (same algorithm as Rust's vitric_sim::Pcg32; the random stream is continuous across languages) ----
 const __MULT = 6364136223846793005n;
 const __MASK = 0xffffffffffffffffn;
 
@@ -116,33 +116,33 @@ function __makeCtx(payload, ops, rng) {
       if (typeof id !== "string") throw new Error("ctx.despawn: 参数必须是实体句柄字符串（实体对象上的 e.id）");
       ops.push({ op: "despawn", id });
     },
-    // 按"名字或句柄"写任意实体的一个字段——"点中一个东西就对它做事"靠这个：
-    // mouse 事件带 entity(名字或句柄)+comp，脚本判断点中的是什么后用 setField 写它。
-    // 句柄文本(如 "e3v0")或实体名字都行；和 spawn/despawn 一样在确定性 ops 阶段顺序应用，回放逐位一致。
-    // 组件/字段须已存在（写子字段不隐式建结构）。写是延迟的：同一回合内 setField 后立刻读读不到。
+    // Write one field of any entity "by name or handle" — "do something to whatever you point at" depends on this:
+    // mouse events carry entity (name or handle) + comp; the script decides what was pointed at then writes it via setField.
+    // Handle text (e.g. "e3v0") or entity name both work; like spawn/despawn, applied in order during the deterministic ops phase — replays are bit-identical.
+    // The component/field must already exist (writing a sub-field does not implicitly create structure). Writes are deferred: a setField in the same round is not visible to a subsequent read.
     setField: (ref, path, value) => {
       if (typeof ref !== "string" || !ref) throw new Error("ctx.setField: 第一个参数必须是实体名字或句柄字符串");
       if (typeof path !== "string" || path.indexOf(".") < 0) throw new Error("ctx.setField: path 必须是 \"组件.字段\" 形式");
       ops.push({ op: "setField", ref: ref, path: path, value: value });
     },
-    // 读一个实体的字段值(同 setField 的 ref 解析规则:句柄或名字)。
-    // 原生 __getFieldRaw 直接查 live World 的单个字段(O(1)),不再每次调用全量打包世界快照。
-    // 字段/实体缺失返回 undefined;读到的值反映本次调用开始时的世界(与 setField 延迟落地语义一致)。
+    // Read one field value of an entity (same ref resolution as setField: handle or name).
+    // The native __getFieldRaw looks up a single field on the live World directly (O(1)); no longer packs a full world snapshot on every call.
+    // Returns undefined when the field/entity is missing; the value read reflects the world at the start of this call (consistent with setField's deferred-commit semantics).
     getField: (ref, path) => {
       if (typeof ref !== "string" || !ref) throw new Error("ctx.getField: 第一个参数必须是实体名字或句柄字符串");
       if (typeof path !== "string" || path.indexOf(".") < 0) throw new Error("ctx.getField: path 必须是 \"组件.字段\" 形式");
       const raw = __getFieldRaw(ref, path);
       return raw === "undefined" ? undefined : JSON.parse(raw);
     },
-    // 对外问话的薄封装：发一条 <service>-ask 事件，回复回来时由内置分发器 __onReply
-    // 转给名为 onReply 的 vitric.fn。底层仍是裸的 ask/reply 事件 + 自动录回放，确定性不变。
-    // “收”那半要游戏在规则里加一条把 <service>-reply 转进 __onReply（见 prelude 顶部 __onReply 注释）。
+    // Thin wrapper for outbound questions: emits a <service>-ask event; on reply, the built-in dispatcher __onReply
+    // forwards it to the vitric.fn named onReply. Underneath it's still raw ask/reply events + automatic replay recording; determinism is preserved.
+    // The "receive" half requires the game to add a rule that routes <service>-reply into __onReply (see the __onReply comment at the top of the prelude).
     ask: (service, prompt, onReply) => {
       if (typeof service !== "string" || !service) throw new Error("ctx.ask: service 必须是非空字符串，如 'llm'");
       if (typeof prompt !== "string") throw new Error("ctx.ask: prompt 必须是字符串");
       if (typeof onReply !== "string" || !onReply) throw new Error("ctx.ask: 第三个参数必须是回复回调的函数名（用 vitric.fn 注册它）");
       if (onReply.indexOf("#") !== -1) throw new Error("ctx.ask: 回调名不能含 '#'（用作 id 分隔符）");
-      // 确定性 id：回调名#tick#本次系统内的发射序号。不用 Math.random（已禁）、不依赖跨快照的全局计数。
+      // Deterministic id: callbackName#tick#emit-index-within-this-system. Doesn't use Math.random (disabled) and doesn't depend on a cross-snapshot global counter.
       const id = onReply + "#" + payload.tick + "#" + ops.length;
       ops.push({ op: "emit", name: service + "-ask", data: { id: id, prompt: prompt } });
       return id;
@@ -150,21 +150,21 @@ function __makeCtx(payload, ops, rng) {
   };
 }
 
-// ---- 字段读取:ctx.getField 走原生 __getFieldRaw(直接查 live World,见 Rust 侧) ----
-// 不再有 JS 侧的世界快照解析:Rust 注册的 __getFieldRaw(ref, path) 返回该字段的 JSON 串,
-// 实体/字段缺失返回字面量 "undefined"。这样每次读是单字段 O(1),不用每个 system/fn 全量打包世界。
+// ---- Field reads: ctx.getField goes through the native __getFieldRaw (directly queries the live World, see Rust side) ----
+// No more world-snapshot parsing on the JS side: the Rust-registered __getFieldRaw(ref, path) returns that field's JSON string,
+// or the literal "undefined" when the entity/field is missing. This way each read is single-field O(1), no full world packing per system/fn.
 
-// ---- 数字保真序列化 ----
-// QuickJS 的 JSON.stringify 打印 f64 不是最短往返（-7.3666666666666645 会
-// 被截成 -7.366666666666664，差一个 ULP），跨边界一来一回精度静默漂移，
-// 写检测也会把只读系统误判成越权写。读方向（JSON.parse/strtod）是正确舍入的，
-// 打印方向 toString/toPrecision 同源同病，文本路线修不干净——非整数直接走位串。
+// ---- Lossless number serialization ----
+// QuickJS's JSON.stringify printing of f64 is not shortest-round-trip (-7.3666666666666645 gets
+// truncated to -7.366666666666664, off by one ULP); a round trip across the boundary silently drifts precision,
+// and write detection would misjudge read-only systems as out-of-scope writes. The read direction (JSON.parse/strtod) is correctly rounded;
+// the print direction toString/toPrecision share the same root cause and the text route can't be fully fixed — non-integers go through bit strings directly.
 const __f64view = new DataView(new ArrayBuffer(8));
 function __numStr(x) {
   if (!isFinite(x)) throw new Error("数值 " + x + " 无法写进世界（JSON 不支持 NaN/Infinity）");
   if (Number.isInteger(x) && Math.abs(x) < 9007199254740992) return String(x);
-  // 非整数不走文本：QuickJS 的 dtoa（toString/toPrecision 同源）不是最短往返，
-  // 文本化必丢 ULP。直接导出 IEEE754 位串，Rust 侧逐位还原。
+  // Non-integers don't go through text: QuickJS's dtoa (toString/toPrecision share the same source) is not shortest-round-trip,
+  // textualization always loses a ULP. Export the IEEE754 bit string directly; the Rust side restores it bit-by-bit.
   __f64view.setFloat64(0, x);
   const hi = __f64view.getUint32(0).toString(16).padStart(8, "0");
   const lo = __f64view.getUint32(4).toString(16).padStart(8, "0");
@@ -191,7 +191,7 @@ function __jsonStr(v) {
   }
 }
 
-// Rust 侧入口：跑第 idx 个系统
+// Rust-side entry: run the idx-th system
 globalThis.__runSystem = function (idx, payloadJson) {
   const sys = __systems[idx];
   const payload = JSON.parse(payloadJson);
@@ -206,7 +206,7 @@ globalThis.__runSystem = function (idx, payloadJson) {
   });
 };
 
-// Rust 侧入口：跑规则 call 动作指向的函数
+// Rust-side entry: run the function targeted by a rule's `call` action
 globalThis.__callFn = function (name, payloadJson) {
   const f = __fns[name];
   if (!f) {
@@ -219,12 +219,12 @@ globalThis.__callFn = function (name, payloadJson) {
   const rng = { state: BigInt(payload.rng.state), inc: BigInt(payload.rng.inc) };
   const ops = [];
   const ctx = __makeCtx(payload, ops, rng);
-  ctx.self = payload.self; // 触发规则时绑定的实体句柄（可能为 null）
+  ctx.self = payload.self; // entity handle bound at rule trigger time (may be null)
   f(payload.args, ctx);
   return __jsonStr({ ops, rng: { state: rng.state.toString(), inc: rng.inc.toString() } });
 };
 
-// Rust 侧入口：枚举注册结果
+// Rust-side entry: enumerate registration results
 globalThis.__list = function () {
   return JSON.stringify({
     systems: __systems.map((s) => ({ name: s.name, query: s.query, writes: s.writes })),

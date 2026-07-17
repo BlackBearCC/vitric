@@ -1,7 +1,8 @@
-//! `vitric bundle` 端到端：发行打包的全部裁决路径。
+//! `vitric bundle` end-to-end: all decision paths of release packaging.
 //!
-//! 立场锁定：无证书不发行——gate 不 PASS 不出包；发行包是自包含单文件：
-//! 无参数即玩（开窗），`run-embedded` 透传选项可无头冒烟，带参数仍是完整 CLI。
+//! Stance locked: no certificate, no release — gate must PASS to ship; the release package is a
+//! self-contained single file: play with no args (opens a window), `run-embedded` passes through
+//! options for headless smoke, with args it is still a full CLI.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -14,7 +15,8 @@ use vitric_cli::bundle;
 use vitric_cli::runtime::Runtime;
 use vitric_sim::Recording;
 
-// ---- 测试夹具（同 tests/gate.rs 的套路：复制 coin-run，程序化录通关）----
+// ---- Test fixtures (same pattern as tests/gate.rs: copy coin-run, programmatically record a
+// clear) ----
 
 fn copy_example(tag: &str) -> PathBuf {
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/coin-run");
@@ -41,7 +43,8 @@ fn copy_example(tag: &str) -> PathBuf {
     dst
 }
 
-/// 程序化录一局通关：按住右键 60 tick 吃满三枚金币 → game-won。
+/// Programmatically record a clear run: hold right for 60 ticks to eat all three coins →
+/// game-won.
 fn record_win(dir: &Path) -> Recording {
     let (mut sim, mut rt) = Runtime::boot(dir).unwrap();
     sim.start_recording();
@@ -52,7 +55,7 @@ fn record_win(dir: &Path) -> Recording {
     sim.stop_recording().unwrap()
 }
 
-/// 录一局没赢的：纯挂机 10 tick——gate 必拒，bundle 必须跟着拒。
+/// Record a non-winning run: pure idle for 10 ticks — gate must reject, bundle must follow.
 fn record_idle(dir: &Path) -> Recording {
     let (mut sim, mut rt) = Runtime::boot(dir).unwrap();
     sim.start_recording();
@@ -69,7 +72,7 @@ fn set_gates(dir: &Path, gates: Value) {
     fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
 }
 
-/// 把项目调成 gate 全绿（录通关 + 声明门禁）。
+/// Make the project all-green on gate (record a clear + declare the gate).
 fn make_gated(dir: &Path) {
     fs::write(dir.join("qa/clear.json"), serde_json::to_string(&record_win(dir)).unwrap())
         .unwrap();
@@ -91,11 +94,13 @@ fn last_stdout_json(out: &Output) -> Value {
     serde_json::from_str(line).unwrap_or_else(|e| panic!("stdout 末行应是 JSON: {e}\n{text}"))
 }
 
-// ---- 容器格式：纯函数级（pack/unpack/seal/open 互逆，损坏显式报错）----
+// ---- Container format: pure-function level (pack/unpack/seal/open are inverse, corruption
+// reports explicitly) ----
 
 #[test]
 fn container_roundtrip_is_byte_identical() {
-    // 含二进制内容（全 256 字节值）、空文件、嵌套路径——发行包里就是这些形态
+    // Contains binary content (all 256 byte values), an empty file, nested paths — these are the
+    // shapes inside a release package
     let mut files = BTreeMap::new();
     files.insert("vitric.json".to_string(), br#"{"name":"x"}"#.to_vec());
     files.insert("assets/bin.png".to_string(), (0..=255u8).cycle().take(4096).collect());
@@ -103,16 +108,17 @@ fn container_roundtrip_is_byte_identical() {
 
     let engine = b"\x7fELF-fake-engine-bytes".to_vec();
     let bundle_bytes = bundle::seal(engine.clone(), &files).unwrap();
-    // 引擎字节原样在前（发行包同时仍是那个引擎）
+    // Engine bytes verbatim at the front (the release package is also still that engine)
     assert_eq!(&bundle_bytes[..engine.len()], &engine[..]);
 
     let (hash, unpacked) = bundle::open(&bundle_bytes).unwrap().expect("应检出尾标");
     assert_eq!(unpacked, files, "解包必须逐字节还原");
     assert_ne!(hash, 0);
 
-    // 无尾标 = 普通引擎，不是错误
+    // No trailer = a plain engine, not an error
     assert_eq!(bundle::open(&engine).unwrap(), None);
-    // 截断的包：有魔数但长度对不上，必须显式报损坏，不能静默当普通引擎
+    // A truncated package: has the magic but length mismatches; must explicitly report corruption,
+    // not silently treat it as a plain engine
     let truncated = [&bundle_bytes[engine.len() + 3..]].concat();
     let err = bundle::open(&truncated).unwrap_err();
     assert!(err.contains("损坏"), "{err}");
@@ -120,7 +126,8 @@ fn container_roundtrip_is_byte_identical() {
 
 #[test]
 fn archive_rejects_unsafe_paths_and_trailing_garbage() {
-    // 解包按路径写文件——越界路径必须拒（被篡改的发行包不能写到目录外）
+    // Unpacking writes files by path — out-of-bounds paths must be rejected (a tampered release
+    // package must not write outside the directory)
     for bad in ["../evil", "/abs", "a/../b", "a//b", "a\\b", ""] {
         let mut files = BTreeMap::new();
         files.insert(bad.to_string(), vec![1u8]);
@@ -128,13 +135,13 @@ fn archive_rejects_unsafe_paths_and_trailing_garbage() {
         let err = bundle::unpack_archive(&archive).unwrap_err();
         assert!(err.contains("安全相对路径"), "{bad:?} 应被拒: {err}");
     }
-    // 尾部多余字节 = 包损坏，不能半解
+    // Trailing extra bytes = corrupted package, must not partially unpack
     let archive = bundle::pack_archive(&BTreeMap::new()).unwrap();
     let err = bundle::unpack_archive(&[archive, vec![0u8; 3]].concat()).unwrap_err();
     assert!(err.contains("多余"), "{err}");
 }
 
-// ---- 门禁裁决：无证书不发行 ----
+// ---- Gate decision: no certificate, no release ----
 
 #[test]
 fn bundle_refuses_project_without_gates() {
@@ -149,30 +156,33 @@ fn bundle_refuses_project_without_gates() {
 #[test]
 fn bundle_refuses_failing_gate_with_the_gate_report() {
     let dir = copy_example("idle");
-    // 没赢的录像：gate 的 must_emit 门必 fail
+    // Non-winning recording: the gate's must_emit gate must fail
     fs::write(dir.join("qa/idle.json"), serde_json::to_string(&record_idle(&dir)).unwrap())
         .unwrap();
     set_gates(&dir, json!({"playthroughs": [{"recording": "qa/idle.json"}]}));
 
     let out = vitric(&["bundle", dir.to_str().unwrap()]);
     assert!(!out.status.success(), "gate 不过不出包");
-    // 拒绝时把 gate 报告原样给出来（差在哪看得见），结论在 stderr
+    // On rejection, the gate report is given verbatim (visible where it fell short); the verdict
+    // is in stderr
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["pass"], json!(false));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("无证书不发行"), "{stderr}");
-    // 没出包文件
+    // No package file produced
     assert!(!Path::new("coin-run-linux").exists());
     fs::remove_dir_all(&dir).unwrap();
 }
 
-// ---- 出包 + 发行包行为（解包运行/选项透传/仍是完整 CLI/拒套娃）----
+// ---- Packaging + release package behavior (unpack-run / option passthrough / still full CLI /
+// refuse nesting) ----
 
 #[test]
 fn gated_project_bundles_into_a_self_contained_player() {
     let dir = copy_example("ship");
     make_gated(&dir);
-    // 排除项就位：玩家存档、隐藏文件、以及同名旧包（重打包覆盖自己时不能把旧包打进新包）
+    // Exclusions in place: player saves, hidden files, and a same-name previous package (when
+    // re-packaging over itself, the old package must not be packed into the new one)
     fs::create_dir_all(dir.join("saves")).unwrap();
     fs::write(dir.join("saves/slot1.json"), "{}").unwrap();
     fs::write(dir.join(".hidden"), "x").unwrap();
@@ -193,7 +203,7 @@ fn gated_project_bundles_into_a_self_contained_player() {
     let bytes = result["bytes"].as_u64().unwrap();
     assert_eq!(bytes, fs::metadata(&out_file).unwrap().len(), "报告的字节数要对账");
 
-    // 包内容：通关录像（证书）在，saves/ 不在
+    // Package contents: the clear recording (certificate) is in, saves/ is not
     let bundle_bytes = fs::read(&out_file).unwrap();
     let (hash, files) = bundle::open(&bundle_bytes).unwrap().expect("出的包必须带尾标");
     assert!(files.contains_key("vitric.json"), "清单必须在包里");
@@ -205,7 +215,7 @@ fn gated_project_bundles_into_a_self_contained_player() {
         files.keys().collect::<Vec<_>>()
     );
 
-    // run-embedded 透传 --ticks：无头冒烟，横幅项目名 = 内嵌项目
+    // run-embedded passes through --ticks: headless smoke, banner project name = embedded project
     let play = Command::new(&out_file).args(["run-embedded", "--ticks", "5"]).output().unwrap();
     assert!(
         play.status.success(),
@@ -219,16 +229,17 @@ fn gated_project_bundles_into_a_self_contained_player() {
     assert_eq!(banner["vitric"], json!("running"));
     assert_eq!(banner["project"], json!("coin-run"), "跑的必须是内嵌项目");
 
-    // 解包目录按包哈希唯一，项目落了地（saves 将来也长在这里随包持久）
+    // The unpack directory is unique by package hash; the project has landed (saves will later
+    // live here too, persisted with the package)
     let extracted = std::env::temp_dir().join(format!("vitric-{hash:016x}"));
     assert!(extracted.join("vitric.json").is_file(), "{}", extracted.display());
 
-    // 带参数 = 正常 CLI：发行包同时也是完整引擎（能 gate 别的项目）
+    // With args = normal CLI: the release package is also a full engine (can gate other projects)
     let as_cli = Command::new(&out_file).args(["gate", dir.to_str().unwrap()]).output().unwrap();
     assert!(as_cli.status.success(), "发行包带参数应是完整 CLI: {}",
         String::from_utf8_lossy(&as_cli.stderr));
 
-    // 套娃打包必须拒：发行包不能再当 bundle 的引擎
+    // Nested packaging must be refused: a release package cannot be reused as bundle's engine
     let nested = Command::new(&out_file)
         .args(["bundle", dir.to_str().unwrap(), "--out", dir.join("dist/n2").to_str().unwrap()])
         .output()
@@ -244,7 +255,8 @@ fn gated_project_bundles_into_a_self_contained_player() {
 fn default_output_name_is_project_platform_and_engine_flag_targets_cross() {
     let dir = copy_example("name");
     make_gated(&dir);
-    // 缺省输出名写进当前目录：把 cwd 钉在临时项目目录里验证
+    // Default output name is written to the current directory: pin cwd inside the temp project
+    // directory to verify
     let out = Command::new(env!("CARGO_BIN_EXE_vitric"))
         .args(["bundle", dir.to_str().unwrap()])
         .current_dir(&dir)
@@ -254,10 +266,12 @@ fn default_output_name_is_project_platform_and_engine_flag_targets_cross() {
     let expected = format!("coin-run-{}{}", std::env::consts::OS, std::env::consts::EXE_SUFFIX);
     assert_eq!(last_stdout_json(&out)["out"], json!(expected));
     assert!(dir.join(&expected).is_file());
-    // 第一份产物先清掉：它不该被第二次打包卷进去（排除只认"本次输出"）
+    // Clear the first artifact first: it must not be swept into a second packaging (exclusion
+    // only recognizes "this run's output")
     fs::remove_file(dir.join(&expected)).unwrap();
 
-    // --engine 指定 .exe 引擎：缺省名跟引擎平台走（windows），尾标附在给定引擎字节后
+    // --engine specifies a .exe engine: the default name follows the engine platform (windows);
+    // the trailer is appended after the given engine bytes
     let fake_engine = dir.join("engine-stub.exe");
     fs::write(&fake_engine, b"MZ-fake-windows-engine").unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_vitric"))
@@ -271,7 +285,8 @@ fn default_output_name_is_project_platform_and_engine_flag_targets_cross() {
     assert!(bytes.starts_with(b"MZ-fake-windows-engine"), "引擎字节原样在前");
     assert!(bundle::open(&bytes).unwrap().is_some());
 
-    // 普通引擎（非发行包）跑 run-embedded：显式报"不是发行包"，不静默
+    // A plain engine (not a release package) running run-embedded: explicitly reports "not a
+    // release package", not silent
     let plain = vitric(&["run-embedded", "--ticks", "1"]);
     assert!(!plain.status.success());
     assert!(String::from_utf8_lossy(&plain.stderr).contains("不是发行包"));

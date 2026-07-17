@@ -1,135 +1,169 @@
-//! vitric-render — 2D 光栅化。
+//! vitric-render — 2D rasterization.
 //!
-//! v0 是纯 CPU 渲染器：world → RGBA 像素 → PNG。
-//! 看似保守，实则是闭环的关键一环：**截图不需要 GPU、不需要窗口、
-//! 不需要图形会话**——agent 在任何无头环境都能「亲眼看到」游戏画面，
-//! 而且同一世界状态渲出的像素逐字节相同（截图也可以进断言）。
-//! GPU（wgpu）走的是同一个组件约定，后续替换呈现层不动游戏数据。
+//! v0 is a pure-CPU renderer: world → RGBA pixels → PNG.
+//! It looks conservative, but it is a key link in the closed loop: **screenshots need no GPU,
+//! no window, no graphics session** — an agent can "see with its own eyes" the game frame in
+//! any headless environment, and the pixels rendered from the same world state are byte-for-byte
+//! identical (screenshots can go into assertions too).
+//! The GPU (wgpu) path follows the same component conventions; swapping the presentation layer
+//! later does not touch game data.
 //!
-//! 组件约定：
-//! - `Sprite`  {"w": 数字, "h": 数字, "color": "#rrggbb", "rot": 度数} — 有它才会被画。
-//!   rot 可选：绕 Position（精灵中心）旋转，**世界空间逆时针为正**——屏幕 y 翻转后
-//!   画面上看同样是逆时针。缺省/0 走原始快路径，输出字节与没有该字段时逐位相同
-//!   （向后兼容由测试锁死）。只转精灵：Text 永远直立；describe 的 overlaps 仍用
-//!   未旋转尺寸的 AABB（近似，见 [`describe_world`] 内注释）
-//! - `Position` {"x", "y"} — 世界坐标，y 向上
-//! - `Camera` {"x", "y", "scale"} — 可选；取第一个，没有则原点、8 像素/单位
-//! - `Shake` {"amplitude", "decay"} — 挂在相机实体上的屏幕抖动；amplitude > 0 时
-//!   取景叠加确定性伪随机偏移（(tick, amplitude) 的纯函数，见 [`shake_offset`]）。
-//!   偏移只作用于画面（render_world / GPU 路径 / 选中描边）——describe / pick /
-//!   screen_to_world 读不抖的相机：语义观察和点选对的是世界本体，不是抖动后的画面
-//! - `Text` {"content", "size", "color"} — 屏上文字，画在精灵之上、整串横向居中于
-//!   Position。两条路径，由清单 `font` 字段二选一：
-//!   * 默认（无 font）：内嵌 8x8 点阵（ASCII），每字符 size×size 世界单位、等宽、
-//!     无抗锯齿——旧行为，输出字节由测试锁死不变；
-//!   * 清单设了 `font`（TTF）：**所有** Text 改走矢量字体（[`font::FontStore`]），
-//!     size = 字形总高（ascent-descent）的世界单位数，比例字距 + 字距调整，
-//!     字体里有的字形都能画（含 CJK）。矢量文字是引擎里**唯一刻意平滑**的元素：
-//!     覆盖率抗锯齿（像素风全程最近邻不变）。竖向把字身带居中到 Position。
-//!     同平台同二进制仍逐字节确定（ab_glyph 纯 Rust 栅格化）
-//! - `Ambient` {"color": "#rrggbb", "shadows": bool} — 场景环境光，挂任意实体（取第一个）。
-//!   **光照的总开关**：场上没有 Ambient 实体 = 完全不跑光照（旧行为、零开销）；
-//!   有 = 整帧（精灵/文字/背景一视同仁）按下面公式打光。
-//!   `shadows` 可选（缺省 false）：**2D 投影的开关**——false/缺省时输出字节与该
-//!   功能出现之前逐位相同（向后兼容由测试锁死）；true 时见下面"投影"一节
-//! - `Light` {"radius", "color", "intensity", "kind", "angle", "dir"} — 光源，三种 kind
-//!   （缺省 "point"，未知值显式报错）：
-//!   * `"point"`（点光源，需要 `Position`）：radius 世界单位（到 radius 处衰减为零），
-//!     color 缺省 "#ffffff"，intensity 缺省 1.0。**不写 kind 字段 = 点光源 = 旧行为，
-//!     输出字节逐位不变（向后兼容由测试锁死）**
-//!   * `"spot"`（聚光灯，需要 `Position`）：点光源的全部字段，外加必填 `angle`
-//!     （锥角全宽，度数，1..=360）和必填 `dir`（朝向，度数，世界空间，0 = +x、
-//!     逆时针为正——和 Sprite.rot 同一个角度约定）
-//!   * `"directional"`（平行光）：必填 `dir`（光**行进**的方向，度数，约定同上）+
-//!     color/intensity。不读 Position/radius——太阳在无穷远，处处同亮。没有法线的
-//!     像素贡献处处均匀 = color·intensity（字节锁死的旧行为）；有法线的像素按 dir
-//!     算方向（见下面"法线贴图"一节）。三种合计上限 64 盏
-//! - `Bloom` {"threshold", "strength"} — 全屏泛光后效，挂任意实体（取第一个，同 Ambient）。
-//!   **泛光的总开关**：场上没有 Bloom 实体 = 完全不跑泛光（旧行为字节不变、零开销）。
-//!   threshold ∈ [0,1]：通道值超过 threshold·255 的部分才进泛光；strength ≥ 0：叠加倍率。
-//!   两个字段都必填（缺了/不是数字显式报错，不静默给缺省值）
-//! - `Emitter` — 粒子发射器（需要 `Position`）。**粒子是纯渲染层产物，不进模拟状态**：
-//!   每个粒子在第 T tick 的位置/颜色/大小是
-//!   `f(发射器字段, 粒子序号, T, 实体id派生的种子)` 的纯函数（[`emitter_particles`]）——
-//!   无积分器（解析式 pos = origin + v0·t + ½g·t²）、无跨帧状态：不进状态哈希、不进存档，
-//!   录像重放/快照回退后粒子画面自动正确。随机数用 SplitMix64 确定性散列
-//!   （种子 = 实体id哈希 ⊕ 粒子序号，见 [`emitter_seed`]），与模拟 RNG 流完全无关。
-//!   字段（语义源头 [`collect_emitters`]，缺/错显式报错）：
-//!   * `kind`：必填，`"stream"`（持续流，按 `rate` 粒子/秒发射，发射时间轴从 tick 0 起算）
-//!     或 `"burst"`（单次爆发：`burst` 字段 = 触发 tick 号，规则往里写当前 tick 即触发，
-//!     `count` 个粒子同时出生；burst < 0 = 未触发。是否在爆发期由字段值纯函数推出，
-//!     不需要记历史）
-//!   * `lifetime`：必填，粒子寿命（tick，整数 ≥ 1）；`size`：必填，起始大小（世界单位 > 0）
-//!   * `rate`（stream 必填 > 0）/ `count` + `burst`（burst 用，count ≥ 1，burst 缺省 -1）
-//!   * `speed_min`/`speed_max`：初速范围（世界单位/秒，缺省 0；speed_max 缺省 = speed_min）
-//!   * `dir`：发射朝向（度数，0 = +x、逆时针为正——和 Sprite.rot 同一约定，缺省 0）；
-//!     `spread`：扩散角全宽（度数 0..=360，缺省 360 = 全方向，此时 dir 无所谓）
-//!   * `gravity`：重力加速度（世界单位/秒²，y 轴，通常负数；缺省 0）
-//!   * `color`/`color_end`：起始/结束颜色（"#rrggbb"；color_end 缺省/空串 = 不渐变）；
-//!     alpha 随寿命线性淡出（内建，255 → 0）
-//!   * `size_end`：结束大小（≥ 0，缺省 = size 不渐变；0 = 缩小到消失）
-//!   * `active`：开关（bool，缺省 true）。false = 一个粒子都不画——**纯函数的取舍**：
-//!     中途关掉会让在途粒子当帧消失（画面只看当前字段值，不记发射历史）
-//!   * 渲染：粒子画成方点（与 GPU 路径的方块顶点几何一致），**自发光**：在光照之后、
-//!     泛光之前画——不被环境光压暗、不被灯衰减、不投影也不受影（简化约定）；
-//!     亮粒子照常进泛光。发射器实体如果移动，所有在途粒子整体跟着移
-//!     （位置相对当前原点——无状态的代价）。场上没有 Emitter = 完全不画
-//!     （旧行为字节不变、零开销）。上限 [`MAX_EMITTERS`] 个发射器、
-//!     单个发射器同屏 [`MAX_PARTICLES_PER_EMITTER`] 粒子，超了显式报错
+//! Component conventions:
+//! - `Sprite`  {"w": number, "h": number, "color": "#rrggbb", "rot": degrees} — drawn only if present.
+//!   rot is optional: rotates around Position (sprite center), **world-space counter-clockwise is
+//!   positive** — after the screen-y flip it still looks counter-clockwise on screen. Default/0
+//!   takes the original fast path; the output bytes are bit-identical to when the field is absent
+//!   (backward compatibility is locked by tests). Only the sprite rotates: Text stays upright;
+//!   describe's overlaps still uses the AABB of the unrotated size (approximation, see the comment
+//!   inside [`describe_world`])
+//! - `Position` {"x", "y"} — world coordinates, y up
+//! - `Camera` {"x", "y", "scale"} — optional; the first one is taken, otherwise origin, 8 px/unit
+//! - `Shake` {"amplitude", "decay"} — screen shake attached to the camera entity; when amplitude > 0
+//!   the framing adds a deterministic pseudo-random offset (a pure function of (tick, amplitude),
+//!   see [`shake_offset`]). The offset only affects the picture (render_world / GPU path /
+//!   selection outline) — describe / pick / screen_to_world read the un-shaken camera: semantic
+//!   observation and picking address the world itself, not the shaken picture
+//! - `Text` {"content", "size", "color"} — on-screen text, drawn above sprites, the whole string
+//!   horizontally centered on Position. Two paths, switched by the manifest `font` field:
+//!   * Default (no font): built-in 8x8 bitmap (ASCII), each character is size×size world units,
+//!     monospace, no anti-aliasing — old behavior, output bytes locked unchanged by tests;
+//!   * Manifest sets `font` (TTF): **all** Text goes through the vector font ([`font::FontStore`]),
+//!     size = total glyph height (ascent-descent) in world units, proportional spacing + kerning,
+//!     and every glyph present in the font can be drawn (including CJK). Vector text is the
+//!     **only deliberately smoothed** element in the engine: coverage anti-aliasing (pixel-art
+//!     stays nearest-neighbor throughout). Vertically the glyph body is centered on Position.
+//!     Same platform + same binary is still byte-deterministic (ab_glyph is pure-Rust rasterization)
+//! - `Ambient` {"color": "#rrggbb", "shadows": bool} — scene ambient light, attached to any entity
+//!   (the first one is taken). **The master switch for lighting**: no Ambient entity in the scene =
+//!   no lighting at all (old behavior, zero overhead); otherwise the whole frame (sprites/text/
+//!   background, all the same) is lit by the formula below.
+//!   `shadows` is optional (default false): **the switch for 2D projection** — false/default makes
+//!   the output bytes bit-identical to before this feature existed (backward compatibility locked
+//!   by tests); true → see the "Projection" section below
+//! - `Light` {"radius", "color", "intensity", "kind", "angle", "dir"} — light source, three kinds
+//!   (default "point", unknown values explicitly error):
+//!   * `"point"` (point light, requires `Position`): radius in world units (attenuates to zero at
+//!     radius), color defaults to "#ffffff", intensity defaults to 1.0. **Omitting the kind field =
+//!     point light = old behavior, output bytes bit-identical (backward compatibility locked by tests)**
+//!   * `"spot"` (spotlight, requires `Position`): all the point-light fields, plus the required
+//!     `angle` (cone full-width, degrees, 1..=360) and the required `dir` (facing, degrees, world
+//!     space, 0 = +x, counter-clockwise positive — same angle convention as Sprite.rot)
+//!   * `"directional"` (directional light): required `dir` (the direction the light **travels**,
+//!     degrees, same convention as above) + color/intensity. Does not read Position/radius — the
+//!     sun is at infinity, equally bright everywhere. The contribution at a pixel without a normal
+//!     is uniform everywhere = color·intensity (byte-locked old behavior); pixels with normals
+//!     compute the direction from dir (see the "Normal map" section below). Combined upper limit
+//!     across the three kinds is 64 lights
+//! - `Bloom` {"threshold", "strength"} — full-screen bloom post-effect, attached to any entity
+//!   (the first one, same as Ambient). **The master switch for bloom**: no Bloom entity in the
+//!   scene = no bloom at all (old bytes unchanged, zero overhead). threshold ∈ [0,1]: only the part
+//!   of a channel value exceeding threshold·255 enters bloom; strength ≥ 0: additive scale.
+//!   Both fields are required (missing / non-numeric explicitly errors, no silent default)
+//! - `Emitter` — particle emitter (requires `Position`). **Particles are a pure render-layer
+//!   product, they do not enter simulation state**: each particle's position/color/size at tick T
+//!   is a pure function `f(emitter fields, particle index, T, seed derived from entity id)`
+//!   ([`emitter_particles`]) — no integrator (analytic pos = origin + v0·t + ½g·t²), no cross-frame
+//!   state: does not enter the state hash, does not enter saves; recording replay / snapshot
+//!   rollback makes the particle picture automatically correct. Random numbers use SplitMix64
+//!   deterministic hashing (seed = entity-id hash ⊕ particle index, see [`emitter_seed`]), fully
+//!   independent of the simulation RNG stream. Fields (semantic source [`collect_emitters`],
+//!   missing/wrong explicitly errors):
+//!   * `kind`: required, `"stream"` (continuous stream, emits at `rate` particles/second, the
+//!     emission timeline starts from tick 0) or `"burst"` (single burst: the `burst` field = the
+//!     trigger tick number; writing the current tick into the rule triggers it, `count` particles
+//!     are born simultaneously; burst < 0 = not triggered. Whether it is in the burst period is
+//!     derived purely from the field value, no history needed)
+//!   * `lifetime`: required, particle lifetime (ticks, integer ≥ 1); `size`: required, starting
+//!     size (world units > 0)
+//!   * `rate` (required for stream, > 0) / `count` + `burst` (for burst, count ≥ 1, burst default -1)
+//!   * `speed_min`/`speed_max`: initial velocity range (world units/second, default 0; speed_max
+//!     default = speed_min)
+//!   * `dir`: emission direction (degrees, 0 = +x, counter-clockwise positive — same convention as
+//!     Sprite.rot, default 0); `spread`: spread full-width (degrees 0..=360, default 360 = omnidirectional,
+//!     in which case dir does not matter)
+//!   * `gravity`: gravitational acceleration (world units/second², y axis, usually negative; default 0)
+//!   * `color`/`color_end`: start/end color ("#rrggbb"; color_end default/empty = no gradient);
+//!     alpha fades linearly with lifetime (built-in, 255 → 0)
+//!   * `size_end`: end size (≥ 0, default = no size gradient; 0 = shrink to nothing)
+//!   * `active`: switch (bool, default true). false = no particles are drawn at all — **a pure-function
+//!     trade-off**: turning it off mid-flight makes in-flight particles disappear on that frame
+//!     (the picture only reads the current field values, no emission history)
+//!   * Rendering: particles are drawn as square dots (matching the GPU path's quad vertex geometry),
+//!     **self-emissive**: drawn after lighting and before bloom — not darkened by ambient light,
+//!     not attenuated by lights, casts no shadow and is not shadowed (simplifying convention);
+//!     bright particles still go into bloom. If the emitter entity moves, all in-flight particles
+//!     move with it (positions are relative to the current origin — the cost of being stateless).
+//!     No Emitter in the scene = nothing drawn (old bytes unchanged, zero overhead). Upper limits:
+//!     [`MAX_EMITTERS`] emitters and [`MAX_PARTICLES_PER_EMITTER`] particles on screen per emitter;
+//!     exceeding them explicitly errors
 //!
-//! 光照公式（CPU 与 GPU 路径必须一致，GPU 侧在 vitric-cli gpu.rs 的 WGSL 里）：
-//!   lit = min(ambient + Σ 各灯贡献, 1.5)
+//! Lighting formula (CPU and GPU paths must match; the GPU side is in vitric-cli gpu.rs's WGSL):
+//!   lit = min(ambient + Σ each light's contribution, 1.5)
 //!   out = min(scene · lit, 1.0)
-//! 各灯贡献：
-//!   point:       color·intensity·(1 - d/r)²                       （d < r 才有贡献）
-//!   spot:        color·intensity·(1 - d/r)²·t²，
-//!                t = clamp(1 - Δθ/(angle/2), 0, 1)                 （角度衰减：锥心 1、锥边 0）
-//!   directional: color·intensity                                    （处处均匀）
-//! d 是像素到灯的距离（像素空间，取景用抖动后的相机——光跟着画面走）；
-//! Δθ 是「灯指向像素的方向」与 dir 的夹角（度数语义，实现里用弧度 acos）。
-//! 角度衰减刻意用 t²（不是 smoothstep 内建公式）——CPU/GPU 两侧必须镜像同一条式子。
-//! 1.5 的上限允许轻微过曝（廉价的"泛光感"），乘回场景色后再夹回 1。
+//! Each light's contribution:
+//!   point:       color·intensity·(1 - d/r)²                       (contributes only when d < r)
+//!   spot:        color·intensity·(1 - d/r)²·t²,
+//!                t = clamp(1 - Δθ/(angle/2), 0, 1)                 (angular falloff: cone center 1, edge 0)
+//!   directional: color·intensity                                    (uniform everywhere)
+//! d is the pixel-to-light distance (pixel space, framing uses the shaken camera — light follows
+//! the picture); Δθ is the angle between "the direction from the light to the pixel" and dir
+//! (degree semantics, implemented with radian acos). The angular falloff deliberately uses t²
+//! (not the smoothstep built-in) — the CPU and GPU sides must mirror the same formula.
+//! The 1.5 cap allows slight overexposure (a cheap "bloom feel"), clamped back to 1 after multiplying
+//! the scene color.
 //!
-//! 投影（`Ambient.shadows: true` 时启用，CPU 与 GPU 同一套几何）：
-//! - 遮光体 = 带 `Solid` + `Position` + `Collider` 的实体——Solid 在物理里就是
-//!   "挡"（挡停身体），开了投影后同一批实体顺便挡光，**零新增授权概念**。
-//!   上限 [`MAX_OCCLUDERS`]（256）个，超了显式报错（不静默截断）。
-//! - 逐像素逐灯：像素→灯心的线段与任何遮光体 AABB 相交（slab 法，
-//!   见 [`segment_hits_aabb`]）就把这盏灯的贡献清零（硬影，无半影）。
-//!   **例外：像素自己所在的遮光体不挡它**——不然每个 Solid 都把自己涂黑；
-//!   规则是"箱子里的像素只被**别的**箱子遮挡"。
-//! - 只有 point/spot 投影；directional 在 v1 不投影（太阳影需要按方向射线
-//!   而不是点对点线段，留给后续版本），平行光贡献照旧处处均匀。
-//! - 已知约束：灯心埋进某个遮光体时，箱外像素全部被那个箱子挡掉——
-//!   灯别放在墙里。线段几何用取景后的像素空间（同灯参数，光跟着画面走）。
-//! - 性能（输出字节不变，由等价性测试锁死）：边缘逐位贴齐的相邻遮光体每帧
-//!   自动合并成大箱（瓦片地板收成一根长条，见 [`build_shadow_boxes`]）、再按
-//!   灯盘逐灯剔除碰不到的箱子（[`cull_shadow_boxes`]）；点/聚光只扫自己灯盘的
-//!   外接方框，贡献为零（锥外/背光面）的像素跳过遮挡测试。GPU 路径共用同一套
-//!   合并/剔除结果，另有 uniform 预算：单灯剔除后 ≤ 64 箱、全部灯合计 ≤ 256 条
-//!   （超了显式报错，见 gpu.rs）。
+//! Projection (enabled when `Ambient.shadows: true`; CPU and GPU share the same geometry):
+//! - Occluders = entities with `Solid` + `Position` + `Collider` — Solid in physics is exactly
+//!   "blocking" (blocks the body); once projection is on, the same set of entities also blocks light,
+//!   **zero new authorization concept**. Upper limit [`MAX_OCCLUDERS`] (256); exceeding it explicitly
+//!   errors (no silent truncation).
+//! - Per pixel per light: if the segment pixel→light-center intersects any occluder AABB (slab
+//!   method, see [`segment_hits_aabb`]) that light's contribution is zeroed (hard shadow, no penumbra).
+//!   **Exception: the occluder the pixel itself is inside does not block it** — otherwise every Solid
+//!   paints itself black; the rule is "a pixel inside a box is only blocked by **other** boxes".
+//! - Only point/spot cast shadows; directional does not in v1 (sun shadows need direction-based rays
+//!   rather than point-to-point segments, left for a later version), and the directional contribution
+//!   stays uniform everywhere.
+//! - Known constraint: when the light center is buried inside some occluder, all out-of-box pixels
+//!   are blocked by that box — do not place lights inside walls. The segment geometry uses the
+//!   post-framing pixel space (same as the light params, light follows the picture).
+//! - Performance (output bytes unchanged, locked by equivalence tests): adjacent occluders whose
+//!   edges are bit-aligned merge into big boxes every frame (a tile floor collapses into one long
+//!   strip, see [`build_shadow_boxes`]); then per light the boxes that cannot be reached are culled
+//!   ([`cull_shadow_boxes`]); point/spot lights only scan their own light-disc bounding box, and
+//!   pixels with zero contribution (outside the cone / on the back face) skip the occlusion test.
+//!   The GPU path shares the same merge/cull results, with an additional uniform budget: ≤ 64 boxes
+//!   per light after culling, ≤ 256 total across all lights (exceeding it explicitly errors, see gpu.rs).
 //!
-//! 法线贴图（零配置命名配对，见 [`normal_map_name`]）：
-//! - 精灵贴图 `hero.png` 在 assets/ 里有 `hero_n.png` 就自动启用——RGB 编码切线空间法线
-//!   `n = rgb/255·2-1`，z 取绝对值（强制朝外）再归一化；零向量退化为平面 (0,0,1)。
-//!   法线的 xy 轴对齐**屏幕像素空间**（x 向右、y 向下——图按 1:1 blit 时图轴即屏轴），
-//!   `Sprite.rot` 旋转精灵时法线 xy 跟着同一矩阵转。
-//! - 有法线的像素各灯贡献额外乘 `max(dot(N, L), 0)`。L 是像素指向灯的方向抬升成 3D：
-//!   xy 取像素→灯心的单位方向乘 [`NORMAL_LIGHT_XY`]（0.8），z 固定 [`NORMAL_LIGHT_Z`]
-//!   （0.6；0.8²+0.6²=1，天然单位长度）——平面法线 (0,0,1) 在灯正下也有 0.6 的贡献，
-//!   不会"开了法线反而全黑"。像素正好在灯心（d=0）方向无定义，约定 L=(0,0,1)。
-//!   平行光同构：L = (−行进方向单位向量·0.8, 0.6)——dir 自此参与计算，平行光有了方向感。
-//! - **没有法线的像素走原公式，输出字节逐位不变**（向后兼容由测试锁死）。实现：光照开启时
-//!   精灵 blit 顺手把法线写进一块每帧法线缓冲（哨兵零向量 = 没有法线；后画的精灵/文字
-//!   覆盖像素时同步覆盖/清掉法线——盖住的像素属于上层那张图）。GPU 侧同一公式
-//!   （法线贴图与普通图同住一张图集，顶点带第二组 UV，见 gpu.rs）。
+//! Normal map (zero-config name pairing, see [`normal_map_name`]):
+//! - If the sprite texture `hero.png` has a `hero_n.png` next to it in assets/, it is auto-enabled —
+//!   RGB encodes a tangent-space normal `n = rgb/255·2-1`, z is taken absolute (forced outward) then
+//!   normalized; a zero vector degrades to the flat normal (0,0,1). The normal's xy axes align with
+//!   **screen pixel space** (x right, y down — when the image is blitted 1:1 the image axes ARE the
+//!   screen axes), and when `Sprite.rot` rotates the sprite the normal's xy rotates by the same matrix.
+//! - Pixels with normals get each light's contribution multiplied by an additional `max(dot(N, L), 0)`.
+//!   L is the pixel-to-light direction lifted to 3D: xy is the pixel→light-center unit direction
+//!   scaled by [`NORMAL_LIGHT_XY`] (0.8), z is fixed at [`NORMAL_LIGHT_Z`] (0.6; 0.8²+0.6²=1, naturally
+//!   unit length) — so a flat normal (0,0,1) directly under a light still gets a 0.6 contribution,
+//!   it does not "go black just because normals are on". A pixel exactly at the light center (d=0)
+//!   has undefined direction, by convention L=(0,0,1). Directional light is isomorphic:
+//!   L = (−unit travel direction·0.8, 0.6) — dir now participates in the computation, giving the
+//!   directional light a sense of direction.
+//! - **Pixels without normals take the original formula, output bytes bit-identical** (backward
+//!   compatibility locked by tests). Implementation: when lighting is on, sprite blit writes the
+//!   normal into a per-frame normal buffer (sentinel zero vector = no normal; later sprites/text
+//!   overwrite/clear the normal when they overwrite the pixel — the covered pixel belongs to the
+//!   upper image). The GPU side uses the same formula (the normal map lives in the same atlas as
+//!   regular images, vertices carry a second UV set, see gpu.rs).
 //!
-//! 泛光公式（CPU 是真相源——截图/断言以这条路径为准；GPU 侧求视觉一致，差异见 gpu.rs）：
-//!   bright = max(scene - threshold·255, 0)       （逐通道提亮部）
-//!   blurred = 盒式模糊(bright) 水平+垂直可分离，迭代 3 次（近似高斯）
-//!   out = min(scene + blurred · strength, 255)    （加法合成）
-//! 模糊半径 = [`bloom_radius_px`]：视口高/90、下限 2 像素——半径跟分辨率成比例，
-//! 同一场景 4K 和 720p 的光晕占画面比例一致。泛光在光照**之后**跑（先打光再发光）。
+//! Bloom formula (CPU is the source of truth — screenshots/assertions go by this path; the GPU side
+//! aims for visual parity, differences are in gpu.rs):
+//!   bright = max(scene - threshold·255, 0)       (lift the bright part per channel)
+//!   blurred = box blur(bright), horizontal + vertical separable, 3 iterations (approximate Gaussian)
+//!   out = min(scene + blurred · strength, 255)    (additive composite)
+//! The blur radius = [`bloom_radius_px`]: viewport height / 90, lower bound 2 px — the radius scales
+//! with resolution so the same scene at 4K and 720p has the same bloom-to-frame ratio. Bloom runs
+//! **after** lighting (light first, then glow).
 
 mod assets;
 mod font;
@@ -151,51 +185,62 @@ use serde_json::Value;
 
 use vitric_ecs::{ascii_map, relate_in_world, AsciiMapOpts, Placement, World};
 
-/// 点光源数量上限。逐像素（CPU）/逐片元（GPU uniform 数组）都要遍历全部灯，
-/// 不设上限会把两条路径同时拖死；超了显式报错，不静默截断。
+/// Upper limit on the number of point lights. Both the per-pixel (CPU) and per-fragment (GPU
+/// uniform array) paths iterate over every light; without a cap both paths would be dragged down.
+/// Exceeding it explicitly errors, no silent truncation.
 pub const MAX_LIGHTS: usize = 64;
 
-/// 光照亮度上限：ambient + 各灯贡献之和每通道夹在这里（见模块文档的公式）。
+/// Lighting brightness cap: ambient + the sum of each light's contribution is clamped per channel
+/// here (see the formula in the module docs).
 pub const LIGHT_CLAMP: f64 = 1.5;
 
-/// 遮光体数量上限（投影开启时）。逐像素逐灯都要扫全部遮光体——CPU 内循环和
-/// GPU uniform 数组（256 × vec4 = 4KB）同时受制于它；超了显式报错，不静默截断。
+/// Upper limit on the number of occluders (when projection is on). Per pixel per light every
+/// occluder is scanned — both the CPU inner loop and the GPU uniform array (256 × vec4 = 4KB) are
+/// bound by it; exceeding it explicitly errors, no silent truncation.
 pub const MAX_OCCLUDERS: usize = 256;
 
-/// 法线光照的光方向 z 抬升（固定值，见模块文档）：L.z = 0.6，xy 占 0.8——
-/// 单位长度由构造保证。0.6 是审美选择：平面像素在灯正下仍有六成贡献，浮雕感和
-/// "别把画面压黑"之间的折中。CPU/GPU 两侧必须同值（gpu.rs WGSL 里硬编码并注明出处）。
+/// z lift of the light direction for normal lighting (fixed value, see module docs): L.z = 0.6, xy
+/// takes 0.8 — unit length is guaranteed by construction. 0.6 is an aesthetic choice: a flat pixel
+/// directly under a light still gets 60% contribution, a trade-off between relief feel and "don't
+/// crush the picture to black". The CPU and GPU sides must use the same value (gpu.rs WGSL hard-
+/// codes it and notes the source).
 pub const NORMAL_LIGHT_Z: f64 = 0.6;
 
-/// 法线光照的光方向 xy 系数：√(1 − 0.6²) = 0.8（与 [`NORMAL_LIGHT_Z`] 配对成单位向量）。
+/// xy coefficient of the light direction for normal lighting: √(1 − 0.6²) = 0.8 (paired with
+/// [`NORMAL_LIGHT_Z`] to form a unit vector).
 pub const NORMAL_LIGHT_XY: f64 = 0.8;
 
-/// 粒子发射器数量上限。每帧每个发射器都要展开粒子，CPU 光栅化和 GPU 顶点流
-/// 同时受制于它；超了显式报错，不静默截断。
+/// Upper limit on the number of particle emitters. Each emitter expands its particles every frame;
+/// both CPU rasterization and the GPU vertex stream are bound by it. Exceeding it explicitly errors,
+/// no silent truncation.
 pub const MAX_EMITTERS: usize = 64;
 
-/// 单个发射器的同屏粒子预算（stream 按 rate·lifetime 估算、burst 按 count）。
-/// 在 [`collect_emitters`] 里校验——超了显式报错（调低 rate/count 或缩短 lifetime），
-/// 不静默丢粒子。
+/// On-screen particle budget for a single emitter (stream is estimated by rate·lifetime, burst by
+/// count). Validated in [`collect_emitters`] — exceeding it explicitly errors (lower rate/count or
+/// shorten lifetime), no silent particle loss.
 pub const MAX_PARTICLES_PER_EMITTER: usize = 1024;
 
-/// 粒子时间换算用的模拟频率（tick/秒）。**必须与 vitric-sim 的 `TICKS_PER_SECOND`
-/// 同值**（render 不依赖 sim，常量各自一份；一致性由 vitric-cli 的跨 crate 测试锁死）。
-/// rate（粒子/秒）和初速/重力（世界单位/秒）都按它换算到 tick。
+/// Simulation frequency (ticks/second) used for particle time conversion. **Must equal
+/// vitric-sim's `TICKS_PER_SECOND`** (render does not depend on sim; each crate keeps its own copy,
+/// consistency is locked by vitric-cli's cross-crate tests). rate (particles/second) and initial
+/// velocity / gravity (world units/second) are both converted to ticks via this.
 pub const PARTICLE_TICKS_PER_SECOND: f64 = 60.0;
 
-/// 清屏背景色：深灰蓝，区别于纯黑（纯黑常被误判为「没渲出来」）。
-/// GPU 路径的清屏/背景方块也用它——两条路径背景同字节。
+/// Clear-screen background color: a dark gray-blue, distinct from pure black (pure black is often
+/// misread as "nothing was rendered"). The GPU path's clear / background quad also uses it — the
+/// two paths share the same background bytes.
 pub const BACKGROUND: [u8; 4] = [24, 26, 33, 255];
 
-/// 文字可读性的对比度下限（WCAG 式比值 `(L1+0.05)/(L2+0.05)`，L 为相对亮度）。
-/// 低于它 describe 给 `low-contrast-text` 警告。WCAG AA 正文要求 4.5、大字 3.0；
-/// 这里取 2.5 是刻意放宽——这是给 AI 开发者的"人眼基本读不出来"红线，
-/// 不是无障碍合规检查（误报会让 agent 学会忽略警告，比漏报更糟）。
+/// Lower bound on text-readability contrast (a WCAG-style ratio `(L1+0.05)/(L2+0.05)`, L is relative
+/// luminance). Below it describe emits a `low-contrast-text` warning. WCAG AA requires 4.5 for body
+/// text and 3.0 for large text; 2.5 here is a deliberate relaxation — this is the "basically
+/// unreadable to the human eye" red line for AI developers, not an accessibility compliance check
+/// (false positives would teach the agent to ignore warnings, which is worse than missing some).
 pub const TEXT_CONTRAST_MIN: f64 = 2.5;
 
-/// 渲染一帧：返回 RGBA8 像素（行优先，左上原点）。
-/// `tick` 只喂给屏幕抖动（[`camera_of`]）——同一世界同一 tick 渲出的字节逐位相同。
+/// Render one frame: returns RGBA8 pixels (row-major, top-left origin).
+/// `tick` is only fed to screen shake ([`camera_of`]) — the bytes rendered from the same world at
+/// the same tick are bit-identical.
 pub fn render_world(
     world: &World,
     width: u32,
@@ -207,22 +252,26 @@ pub fn render_world(
     render_with(world, width, height, assets, cam, tick, &RenderOpts::default())
 }
 
-/// 内部渲染变体的开关（对外不暴露——公开 API 只有一种"正常渲染"）。
-/// 存在的唯一理由是 [`describe_world`] 的文字对比度测量：要拿到"这条文字**不画**时
-/// 它脚下的底色"，又不能因为手头没有素材就整帧报错。
+/// Switches for internal render variants (not exposed externally — the public API has only one
+/// "normal render"). The only reason it exists is [`describe_world`]'s text-contrast measurement:
+/// it needs "the background color under this Text **when it is not drawn**", and must not error
+/// out the whole frame just because some asset is missing on hand.
 #[derive(Default)]
 struct RenderOpts {
-    /// 跳过这一个 Text 实体不画（测它脚下的底色）。`None` = 正常画全部文字。
+    /// Skip drawing this one Text entity (to measure the background under it). `None` = draw all
+    /// text normally.
     skip_text: Option<vitric_ecs::EntityId>,
-    /// 宽容贴图模式：`Sprite.image` 不在素材仓库时退化成 `Sprite.color` 纯色块
-    /// （亮度近似），而不是报错。**只给对比度测量用**——正常渲染（false）保持
-    /// "图不存在直接报错"的约定，缺图绝不静默画占位。
+    /// Lenient image mode: when `Sprite.image` is not in the asset store, degrade to a
+    /// `Sprite.color` solid block (approximate brightness) instead of erroring. **Only for contrast
+    /// measurement** — normal rendering (false) keeps the "missing image = direct error" convention;
+    /// a missing image never silently draws a placeholder.
     lenient_images: bool,
 }
 
-/// 渲染主体（相机已定）。[`render_world`] 用缺省 opts 走到这里——
-/// 正常渲染路径的算术与重构前逐字节相同（向后兼容由测试锁死）。
-/// `tick` 只喂给粒子展开（[`emitter_particles`]，粒子是 tick 的纯函数）。
+/// Render main body (camera already decided). [`render_world`] reaches here with default opts —
+/// the arithmetic on the normal render path is byte-identical to before the refactor (backward
+/// compatibility locked by tests). `tick` is only fed to particle expansion ([`emitter_particles`],
+/// particles are a pure function of tick).
 fn render_with(
     world: &World,
     width: u32,
@@ -238,17 +287,19 @@ fn render_with(
     let mut buf = vec![0u8; (width * height * 4) as usize];
     fill(&mut buf, BACKGROUND);
 
-    // 法线缓冲（每帧）：光照开着、且素材仓库里真有法线贴图才分配——否则零分配
-    // 零开销（None 与"有缓冲但全哨兵"输出逐位相同，旧行为字节不变）。
-    // 哨兵零向量 = 该像素没有法线（走原光照公式，字节锁死）；精灵 blit 时顺手填充，
-    // 后画的东西覆盖像素就覆盖/清掉法线（盖住的像素属于上层那张图）。
+    // Normal buffer (per frame): allocated only when lighting is on AND the asset store actually
+    // has normal maps — otherwise zero allocation, zero overhead (None is bit-identical to "has a
+    // buffer but all sentinels", old bytes unchanged). Sentinel zero vector = this pixel has no
+    // normal (takes the original lighting formula, bytes locked); sprite blit fills it in passing,
+    // and anything drawn later overwrites/clears the normal when it overwrites the pixel (the
+    // covered pixel belongs to the upper image).
     let ambient = ambient_of(world)?;
     let mut normals: Option<Vec<[f32; 3]>> = ambient
         .as_ref()
         .filter(|_| assets.has_normal_maps())
         .map(|_| vec![[0.0f32; 3]; (width * height) as usize]);
 
-    // 按实体序绘制（确定性；后画的盖前画的）
+    // Draw in entity order (deterministic; later draws cover earlier ones)
     for id in world.query(&["Position", "Sprite"]) {
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;
@@ -256,7 +307,7 @@ fn render_with(
         let sh = num(world, id, "Sprite.h")?;
         let rot = rot_of(world, id)?;
 
-        // 世界 → 屏幕（y 翻转，相机居中）
+        // World → screen (y flipped, camera centered)
         let cx = (width as f64) / 2.0 + (px - cam_x) * scale;
         let cy = (height as f64) / 2.0 - (py - cam_y) * scale;
         let half_w = sw * scale / 2.0;
@@ -267,22 +318,25 @@ fn render_with(
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default();
-        // 宽容贴图模式（只在对比度测量的内部渲染开）：图不在素材仓库就当纯色块画
-        // （Sprite.color，缺省白）——拿不到真像素时用色块近似亮度，总比整帧报错强。
-        // 正常渲染不走这行，缺图照旧显式报错。
+        // Lenient image mode (only on for the internal contrast-measurement render): if the image
+        // is not in the asset store, draw it as a solid color block (Sprite.color, default white) —
+        // when there are no real pixels to sample, a color-block brightness approximation is better
+        // than erroring the whole frame. Normal rendering does not go through this line; a missing
+        // image still explicitly errors.
         if opts.lenient_images && !image_name.is_empty() && assets.image(&image_name).is_none() {
             image_name = String::new();
         }
 
         if rot == 0.0 {
-            // —— 快路径：不旋转（rot 缺省/为 0）。这段逻辑不许动——
-            //    输出字节必须与 rot 字段出现之前逐位相同（向后兼容由测试锁死）
+            // —— Fast path: no rotation (rot default/0). Do not touch this logic —
+            //    the output bytes must be bit-identical to before the rot field existed
+            //    (backward compatibility locked by tests)
             let x0 = (cx - half_w).floor().max(0.0) as i64;
             let x1 = (cx + half_w).ceil().min(width as f64) as i64;
             let y0 = (cy - half_h).floor().max(0.0) as i64;
             let y1 = (cy + half_h).ceil().min(height as f64) as i64;
             if image_name.is_empty() {
-                // 纯色块
+                // Solid color block
                 let color = world
                     .get_field(id, "Sprite.color")
                     .ok()
@@ -294,16 +348,19 @@ fn render_with(
                     for x in x0..x1 {
                         let i = ((y as u32 * width + x as u32) * 4) as usize;
                         buf[i..i + 4].copy_from_slice(&rgba);
-                        // 纯色块没有法线：清掉底下可能残留的法线（哨兵零向量）
+                        // Solid color blocks have no normal: clear any normal that may have been
+                        // left below (sentinel zero vector)
                         if let Some(ns) = normals.as_mut() {
                             ns[i / 4] = [0.0; 3];
                         }
                     }
                 }
             } else {
-                // 贴图：最近邻缩放 + alpha 混合。图不存在直接报错（不画占位符）。
+                // Image: nearest-neighbor scaling + alpha blending. A missing image directly
+                // errors (no placeholder drawn).
                 let img = image_of(assets, id, &image_name)?;
-                // 法线贴图按命名配对（hero.png → hero_n.png）；没配对 = 像素清法线
+                // Normal map by name pairing (hero.png → hero_n.png); no pairing = pixel clears
+                // the normal
                 let nmap = assets.normal_of(&image_name);
                 let span_x = 2.0 * half_w;
                 let span_y = 2.0 * half_h;
@@ -326,7 +383,8 @@ fn render_with(
                         }
                         dst[3] = 255;
                         if let Some(ns) = normals.as_mut() {
-                            // 用与贴图同一个 (u,v) 采样法线——不旋转时 sn=0/cs=1
+                            // Sample the normal at the same (u,v) as the image — when not rotated
+                            // sn=0/cs=1
                             ns[i / 4] = match nmap {
                                 Some(m) => sample_normal(m, u, v, 0.0, 1.0),
                                 None => [0.0; 3],
@@ -336,10 +394,13 @@ fn render_with(
                 }
             }
         } else {
-            // —— 旋转路径：扫旋转后四角的轴对齐包围盒，逐像素逆旋回精灵局部空间再采样。
-            // 角度约定见 [`rot_of`]；f64 三角函数依赖系统数学库——确定性边界与文档一致：
-            // 同平台同二进制逐字节保证，跨平台末位不保证。
-            // 世界逆时针 + 屏幕 y 翻转 → 屏幕系正向矩阵 [[c, s], [-s, c]]，逆变换取转置
+            // —— Rotation path: scan the axis-aligned bounding box of the four rotated corners,
+            // and per pixel inverse-rotate back into the sprite's local space then sample.
+            // Angle convention see [`rot_of`]; f64 trig depends on the system math library — the
+            // determinism boundary matches the docs: same platform + same binary is byte-for-byte
+            // guaranteed, cross-platform last-bit is not guaranteed.
+            // World counter-clockwise + screen y flip → screen-space forward matrix [[c, s], [-s, c]],
+            // inverse takes the transpose
             let (sn, cs) = rot.to_radians().sin_cos();
             let ext_x = half_w * cs.abs() + half_h * sn.abs();
             let ext_y = half_w * sn.abs() + half_h * cs.abs();
@@ -348,7 +409,8 @@ fn render_with(
             let y0 = (cy - ext_y).floor().max(0.0) as i64;
             let y1 = (cy + ext_y).ceil().min(height as f64) as i64;
             if image_name.is_empty() {
-                // 纯色块（旋转）：像素中心落在精灵内才上色
+                // Solid color block (rotated): a pixel is colored only if its center falls inside
+                // the sprite
                 let color = world
                     .get_field(id, "Sprite.color")
                     .ok()
@@ -363,7 +425,7 @@ fn render_with(
                         let lx = cs * dx - sn * dy;
                         let ly = sn * dx + cs * dy;
                         if lx.abs() > half_w || ly.abs() > half_h {
-                            continue; // 包围盒里但精灵外
+                            continue; // Inside the bounding box but outside the sprite
                         }
                         let i = ((y as u32 * width + x as u32) * 4) as usize;
                         buf[i..i + 4].copy_from_slice(&rgba);
@@ -373,7 +435,8 @@ fn render_with(
                     }
                 }
             } else {
-                // 贴图（旋转）：局部坐标直接当 UV 用，采样逻辑与快路径一致（最近邻 + alpha 混合）
+                // Image (rotated): local coordinates are used directly as UV; the sampling logic
+                // matches the fast path (nearest neighbor + alpha blending)
                 let img = image_of(assets, id, &image_name)?;
                 let nmap = assets.normal_of(&image_name);
                 let span_x = 2.0 * half_w;
@@ -404,7 +467,8 @@ fn render_with(
                         }
                         dst[3] = 255;
                         if let Some(ns) = normals.as_mut() {
-                            // 法线跟着精灵转：传入旋转矩阵的 sin/cos（局部→屏幕）
+                            // Normal rotates with the sprite: pass in the sin/cos of the rotation
+                            // matrix (local → screen)
                             ns[i / 4] = match nmap {
                                 Some(m) => sample_normal(m, u, v, sn, cs),
                                 None => [0.0; 3],
@@ -427,12 +491,14 @@ fn render_with(
         opts.skip_text,
     )?;
 
-    // 光照按 Ambient 实体的存在与否开关：没有 = 完全跳过（旧行为字节不变、零开销）。
-    // 有 = 整帧打光——精灵/文字/背景一视同仁，HUD 想保持可读自己在旁边放盏灯
+    // Lighting is toggled by the presence of an Ambient entity: none = skip entirely (old bytes
+    // unchanged, zero overhead). Otherwise the whole frame is lit — sprites/text/background all
+    // the same; if a HUD wants to stay readable it places a light next to itself
     if let Some((ambient, _)) = ambient {
         let lights = collect_lights(world)?;
-        // 遮光体只在投影开启时收集——关着（缺省）传空列表，逐像素循环里
-        // 空列表分支不改任何算术，输出字节与投影功能出现之前逐位相同（测试锁死）
+        // Occluders are collected only when projection is on — when off (default) an empty list is
+        // passed; the empty-list branch in the per-pixel loop changes no arithmetic, the output
+        // bytes are bit-identical to before the projection feature existed (locked by tests)
         let occluders = if shadows_of(world)? { collect_occluders(world)? } else { Vec::new() };
         apply_lighting(
             &mut buf,
@@ -446,26 +512,30 @@ fn render_with(
         );
     }
 
-    // 粒子在光照之后、泛光之前画——自发光（不被环境光压暗/灯衰减/投影），
-    // 亮粒子照常进泛光晕开。场上没有 Emitter = 零成本跳过（旧行为字节不变）
+    // Particles are drawn after lighting and before bloom — self-emissive (not darkened by ambient
+    // light / attenuated by lights / projected), bright particles still go into bloom. No Emitter
+    // in the scene = zero-cost skip (old bytes unchanged)
     draw_particles(world, &mut buf, width, height, (cam_x, cam_y, scale), tick)?;
 
-    // 泛光按 Bloom 实体的存在与否开关：没有 = 完全跳过（旧行为字节不变、零开销）。
-    // 在光照之后跑——亮部是打完光的亮部，灯照亮的东西才会晕开
+    // Bloom is toggled by the presence of a Bloom entity: none = skip entirely (old bytes
+    // unchanged, zero overhead). Runs after lighting — the bright part is the lit bright part;
+    // only what a light lit will bloom
     if let Some(bloom) = bloom_of(world)? {
         apply_bloom(&mut buf, width, height, &bloom);
     }
 
-    // UI 屏幕空间叠加层：紧接世界渲染（含光照/粒子/泛光）之后画，**不经相机变换**
-    // ——镜头移动/缩放/抖动 UI 不飘（像 HUD）。屏幕空间正交投影 = 直接用 layout
-    // 算出的屏幕像素矩形落笔，无离屏缓冲、复用同一块 buf。场上没有 UI（无 UiRoot）
-    // = 零成本跳过（旧行为字节不变）。
+    // UI screen-space overlay: drawn right after the world render (lighting/particles/bloom
+    // included), **not through the camera transform** — the UI does not drift when the camera
+    // moves/scales/shakes (like a HUD). Screen-space orthographic projection = directly write
+    // using the screen-pixel rect computed by layout, no off-screen buffer, reusing the same buf.
+    // No UI in the scene (no UiRoot) = zero-cost skip (old bytes unchanged).
     draw_ui(world, &mut buf, width, height, assets)?;
     Ok(buf)
 }
 
-/// 场景环境光：取第一个带 `Ambient` 组件的实体，返回 (0..1 通道值, 原始色串)。
-/// `None` = 场上没有 Ambient = 光照整体关闭（这是约定的总开关，不是缺省白光）。
+/// Scene ambient light: takes the first entity with an `Ambient` component, returns
+/// (0..1 channel values, original color string). `None` = no Ambient in the scene = lighting is
+/// entirely off (this is the agreed master switch, not a default white light).
 pub fn ambient_of(world: &World) -> Result<Option<([f64; 3], String)>, String> {
     match world.query(&["Ambient"]).first() {
         None => Ok(None),
@@ -489,10 +559,10 @@ pub fn ambient_of(world: &World) -> Result<Option<([f64; 3], String)>, String> {
     }
 }
 
-/// 投影开关：第一个 `Ambient` 实体上的可选 `shadows` 字段（bool）。
-/// 缺省 false = 不投影 = 旧行为字节不变（向后兼容由测试锁死）；
-/// 字段在但不是 bool → 显式报错（写错类型静默当 false 比报错更难排查）。
-/// 场上没有 Ambient（光照整体关闭）时恒为 false。
+/// Projection switch: the optional `shadows` field (bool) on the first `Ambient` entity.
+/// Default false = no projection = old bytes unchanged (backward compatibility locked by tests);
+/// field present but not a bool → explicit error (silently treating a wrong type as false is harder
+/// to debug than erroring). Always false when there is no Ambient in the scene (lighting entirely off).
 pub fn shadows_of(world: &World) -> Result<bool, String> {
     match world.query(&["Ambient"]).first() {
         None => Ok(false),
@@ -508,9 +578,9 @@ pub fn shadows_of(world: &World) -> Result<bool, String> {
     }
 }
 
-/// 一个遮光体（`Solid` + `Position` + `Collider` 实体的解析结果，世界坐标）：
-/// 中心 (x, y) + 宽高 (w, h) 的 AABB——和物理挡停用的是同一个碰撞盒，
-/// "挡身体的东西就挡光"，不引入第二套遮挡数据。
+/// One occluder (parsed result of a `Solid` + `Position` + `Collider` entity, world coordinates):
+/// an AABB of center (x, y) + size (w, h) — the same collision box used by physics blocking,
+/// "what blocks the body also blocks light", no second set of occlusion data introduced.
 pub struct Occluder {
     pub id: vitric_ecs::EntityId,
     pub x: f64,
@@ -519,9 +589,10 @@ pub struct Occluder {
     pub h: f64,
 }
 
-/// 收集场上全部遮光体（带 Solid+Position+Collider 的实体，槽位序）。
-/// 只在投影开启（[`shadows_of`] 为 true）时调用；超过 [`MAX_OCCLUDERS`] 显式报错。
-/// 字段校验全在这里做（Collider.w/h、Position.x/y 必须是数字），热路径只剩纯算术。
+/// Collect every occluder in the scene (entities with Solid+Position+Collider, in slot order).
+/// Called only when projection is on ([`shadows_of`] is true); exceeding [`MAX_OCCLUDERS`]
+/// explicitly errors. All field validation happens here (Collider.w/h, Position.x/y must be
+/// numbers), so the hot path is left with pure arithmetic.
 pub fn collect_occluders(world: &World) -> Result<Vec<Occluder>, String> {
     let ids = world.query(&["Solid", "Position", "Collider"]);
     if ids.len() > MAX_OCCLUDERS {
@@ -544,10 +615,12 @@ pub fn collect_occluders(world: &World) -> Result<Vec<Occluder>, String> {
         .collect()
 }
 
-/// 线段 (px,py)→(qx,qy) 与 AABB [x0..x1, y0..y1] 相交判定（slab 法）。
-/// 轴平行（分量差 < 1e-12）的轴退化成"起点必须落在该轴 slab 内"，不做除法——
-/// 除以接近零的数会算出 ±inf，min/max 链上 inf 的语义在 CPU(f64) 和 GPU(f32)
-/// 不保证一致，显式分支两侧才镜像得起来。GPU 侧（gpu.rs WGSL 的 shadowed）逐句同构。
+/// Whether the segment (px,py)→(qx,qy) intersects the AABB [x0..x1, y0..y1] (slab method).
+/// An axis-parallel component (delta < 1e-12) degenerates that axis into "the start point must
+/// fall inside that axis slab", with no division — dividing by a near-zero number would yield ±inf,
+/// and the min/max chain semantics of inf are not guaranteed to match between CPU (f64) and GPU
+/// (f32), so an explicit branch is the only way the two sides mirror each other. The GPU side
+/// (gpu.rs WGSL `shadowed`) is line-by-line isomorphic.
 fn segment_hits_aabb(
     (px, py): (f64, f64),
     (qx, qy): (f64, f64),
@@ -580,41 +653,49 @@ fn segment_hits_aabb(
     tmax >= tmin
 }
 
-/// 一个合并后的遮挡大箱（像素空间）。`aabb` 是成员子箱像素 AABB 的逐分量 min/max
-/// （**不是**世界合并框再变换——子箱各自走原变换表达式，min/max 保证大箱边界与
-/// 子箱边界逐位贴齐，外测命中才与逐箱命中逐位等价）。
+/// One merged big occluder box (pixel space). `aabb` is the per-component min/max of the member
+/// sub-box pixel AABBs (**not** a world-space merge box re-transformed — each sub-box goes through
+/// the original transform expression, min/max guarantees the big-box edges are bit-aligned with the
+/// sub-box edges, so an outside hit is bit-equivalent to per-box hits).
 pub struct MergedOccluder {
-    /// [x0, y0, x1, y1]，像素空间。
+    /// [x0, y0, x1, y1], pixel space.
     pub aabb: [f64; 4],
-    /// 在 [`ShadowBoxes::subs`] 里的起点。
+    /// Start offset within [`ShadowBoxes::subs`].
     pub sub_start: usize,
-    /// 成员子箱数。
+    /// Number of member sub-boxes.
     pub sub_len: usize,
 }
 
-/// 投影遮挡的逐帧加速结构（像素空间）：相邻齐边的遮光体合并成大箱，
-/// 大箱外的像素只测大箱；大箱内的像素回落到原始子箱（"自己所在的箱子不挡自己"
-/// 按原始实体逐个判——合并不改这条规则的语义）。见 [`build_shadow_boxes`]。
+/// Per-frame acceleration structure for projection occlusion (pixel space): adjacent edge-aligned
+/// occluders merge into big boxes; pixels outside a big box only test the big box; pixels inside a
+/// big box fall back to the original sub-boxes ("the box the pixel is in does not block itself" is
+/// still judged per original entity — merging does not change the semantics of this rule). See
+/// [`build_shadow_boxes`].
 pub struct ShadowBoxes {
     pub merged: Vec<MergedOccluder>,
-    /// 原始遮光体的像素空间 AABB [x0, y0, x1, y1]，按 merged 分组重排成连续区间。
-    /// 每个箱子的数值与逐箱路径同一条变换表达式——逐位相同。
+    /// Pixel-space AABBs [x0, y0, x1, y1] of the original occluders, regrouped into contiguous
+    /// ranges by `merged`. Each box's value uses the same transform expression as the per-box path
+    /// — bit-identical.
     pub subs: Vec<[f64; 4]>,
 }
 
-/// 把遮光体合并成大箱并变换到像素空间（每帧一次；CPU 逐像素路径和 GPU uniform
-/// 打包共用，语义源头在这里）。
+/// Merge occluders into big boxes and transform to pixel space (once per frame; shared by the CPU
+/// per-pixel path and the GPU uniform packing — the semantic source is here).
 ///
-/// 合并规则：两轮贪心 1D 合并——先沿 x（同 y 区间的瓦片行收成横条），再沿 y
-/// （同 x 区间的横条摞成大块）。只在**世界空间边缘 f64 逐位相等**（贴齐无缝）
-/// 且两侧都是规整箱（w/h > 0）时合并：并集 == 大箱时阴影几何一寸不变，
-/// 带容差的"差不多贴齐"会让并集 ≠ 大箱、阴影字节漂移，所以不做。
-/// 排序键全走 `total_cmp` + 原槽位——结果与输入顺序无关，逐帧确定。
+/// Merge rule: two passes of greedy 1D merging — first along x (tile rows in the same y range
+/// collapse into horizontal strips), then along y (strips in the same x range stack into big
+/// blocks). Merging happens only when **world-space edges are bit-equal f64** (aligned seamlessly)
+/// and both sides are well-formed boxes (w/h > 0): union == big-box means the shadow geometry does
+/// not change by a single bit, while a tolerant "roughly aligned" would make union != big-box and
+/// shadow bytes drift, so it is not done. Sort keys all go through `total_cmp` + the original slot
+/// — the result is independent of input order, frame-deterministic.
 ///
-/// 等价性（合并前后输出字节逐位相同，由测试锁死）：箱外像素对大箱的 slab 命中
-/// == 对成员子箱逐个 slab 命中取或——前提是子箱像素边缘逐位共享（贴齐的世界边缘
-/// 经同一条变换得到同一个 f64；瓦片坐标是二进制可精确表示的常见情形）。
-/// 箱内像素不走大箱，直接按原始子箱逐个判，与未合并路径同一条算式。
+/// Equivalence (output bytes are bit-identical before and after merging, locked by tests): a slab
+/// hit of an outside pixel against the big box == the OR of slab hits against each member sub-box —
+/// provided the sub-box pixel edges are bit-shared (aligned world edges go through the same transform
+/// to get the same f64; tile coordinates are a common case that is exactly representable in binary).
+/// In-box pixels skip the big box and judge per original sub-box with the same formula as the
+/// unmerged path.
 pub fn build_shadow_boxes(
     occluders: &[Occluder],
     width: u32,
@@ -628,7 +709,8 @@ pub fn build_shadow_boxes(
         y1: f64,
         members: Vec<usize>,
     }
-    // 世界空间边缘（只用于合并判定；像素变换始终按原始 Occluder 走原表达式）
+    // World-space edges (used only for the merge decision; pixel transform always uses the original
+    // Occluder through the original expression)
     let mut groups: Vec<Group> = occluders
         .iter()
         .enumerate()
@@ -640,7 +722,8 @@ pub fn build_shadow_boxes(
             members: vec![i],
         })
         .collect();
-    // 贪心 1D 合并：排序后线性扫描，与队尾贴齐就并入（队尾边界随合并延伸，长链一次收完）
+    // Greedy 1D merge: sort then linearly scan; merge into the tail when aligned (the tail edge
+    // extends as merging proceeds, so a long chain is collected in one pass)
     let merge_pass = |mut gs: Vec<Group>, along_x: bool| -> Vec<Group> {
         gs.sort_by(|a, b| {
             let key = |g: &Group| {
@@ -666,7 +749,8 @@ pub fn build_shadow_boxes(
                 } else {
                     last.x0 == g.x0 && last.x1 == g.x1 && last.y1 == g.y0
                 };
-                // 退化/反写箱（w/h ≤ 0）不参与合并：各自成组 = 原行为原样保留
+                // Degenerate / inverted boxes (w/h ≤ 0) do not participate in merging: each forms
+                // its own group = original behavior preserved as-is
                 let well_formed = last.x0 < last.x1
                     && last.y0 < last.y1
                     && g.x0 < g.x1
@@ -692,11 +776,13 @@ pub fn build_shadow_boxes(
     let mut merged = Vec::with_capacity(groups.len());
     for g in groups {
         let sub_start = subs.len();
-        // 单成员组的 aabb 就是子箱本身（min/max 各取一侧，反写箱也原样保留）
+        // For a single-member group the aabb is the sub-box itself (min/max take a side each;
+        // inverted boxes are also preserved as-is)
         let mut aabb = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
         for &i in &g.members {
             let o = &occluders[i];
-            // 与逐箱路径同一条变换表达式（取景含抖动，光跟画面走）——逐位相同
+            // Same transform expression as the per-box path (framing includes shake, light follows
+            // the picture) — bit-identical
             let cx = (width as f64) / 2.0 + (o.x - cam_x) * scale;
             let cy = (height as f64) / 2.0 - (o.y - cam_y) * scale;
             let (hw, hh) = (o.w * scale / 2.0, o.h * scale / 2.0);
@@ -712,10 +798,11 @@ pub fn build_shadow_boxes(
     ShadowBoxes { merged, subs }
 }
 
-/// 这盏灯的遮挡候选：圆盘（灯心 (lx,ly)、半径 r 像素）碰得到的大箱下标。
-/// 剔除是**无损**的：像素只在 d² < r² 时才做遮挡测试，线段两端（像素、灯心）
-/// 都在灯盘里，圆盘是凸的 → 线段整条在灯盘里 → 灯盘碰不到的箱子永远不会被命中。
-/// CPU 逐像素路径和 GPU uniform 打包共用（语义源头在这里）。
+/// This light's occluder candidates: the big-box indices whose disc (light center (lx,ly), radius r
+/// in pixels) is reachable. Culling is **lossless**: a pixel only does an occlusion test when
+/// d² < r²; both endpoints of the segment (pixel, light center) are inside the light disc, and the
+/// disc is convex → the whole segment is inside the disc → a box the disc cannot reach is never
+/// hit. Shared by the CPU per-pixel path and the GPU uniform packing (semantic source is here).
 pub fn cull_shadow_boxes(boxes: &ShadowBoxes, lx: f64, ly: f64, r: f64) -> Vec<u32> {
     let r2 = r * r;
     boxes
@@ -723,8 +810,9 @@ pub fn cull_shadow_boxes(boxes: &ShadowBoxes, lx: f64, ly: f64, r: f64) -> Vec<u
         .iter()
         .enumerate()
         .filter(|(_, m)| {
-            // slab 法自带区间归一（t1/t2 取 min/max），反写箱命中行为等同归一后的箱——
-            // 最近点也按归一后的边算，剔除判定与命中判定才对得上
+            // The slab method's interval normalization (min/max of t1/t2) means an inverted box's
+            // hit behavior equals the normalized box — the closest point is also computed on the
+            // normalized edges, so the cull test and the hit test agree
             let (x0, x1) = (m.aabb[0].min(m.aabb[2]), m.aabb[0].max(m.aabb[2]));
             let (y0, y1) = (m.aabb[1].min(m.aabb[3]), m.aabb[1].max(m.aabb[3]));
             let dx = lx - lx.clamp(x0, x1);
@@ -735,21 +823,23 @@ pub fn cull_shadow_boxes(boxes: &ShadowBoxes, lx: f64, ly: f64, r: f64) -> Vec<u
         .collect()
 }
 
-/// 光源种类（`Light.kind` 的解析结果）。角度字段全部是**度数**、世界空间、
-/// 0 = +x、逆时针为正——和 `Sprite.rot` 同一个约定（语义源头见 [`rot_of`]）。
+/// Light source kind (parsed result of `Light.kind`). All angle fields are **degrees**, world
+/// space, 0 = +x, counter-clockwise positive — same convention as `Sprite.rot` (semantic source
+/// see [`rot_of`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LightKind {
-    /// 点光源（kind 缺省）。
+    /// Point light (kind default).
     Point,
-    /// 聚光灯：`angle` = 锥角全宽（1..=360），`dir` = 朝向。
+    /// Spotlight: `angle` = cone full-width (1..=360), `dir` = facing.
     Spot { angle: f64, dir: f64 },
-    /// 平行光：`dir` = 光行进的方向。没有法线的像素贡献处处均匀（= color·intensity，
-    /// 旧行为字节不变）；有法线的像素按 dir 算 `max(dot(N, L), 0)`（见模块文档）。
+    /// Directional light: `dir` = the direction the light travels. The contribution at a pixel
+    /// without a normal is uniform everywhere (= color·intensity, old bytes unchanged); pixels
+    /// with normals compute `max(dot(N, L), 0)` from dir (see module docs).
     Directional { dir: f64 },
 }
 
 impl LightKind {
-    /// describe / 错误信息里的字符串名（和 `Light.kind` 的合法取值一致）。
+    /// String name in describe / error messages (matches the legal values of `Light.kind`).
     pub fn name(&self) -> &'static str {
         match self {
             LightKind::Point => "point",
@@ -759,27 +849,30 @@ impl LightKind {
     }
 }
 
-/// 一盏光源（`Light` 实体的解析结果，世界坐标）。
+/// One light source (parsed result of a `Light` entity, world coordinates).
 pub struct LightSource {
     pub id: vitric_ecs::EntityId,
     pub name: Option<String>,
-    /// 世界坐标。平行光不读 Position，恒为 0（占位，不参与计算）。
+    /// World coordinates. Directional does not read Position, always 0 (placeholder, does not
+    /// participate in computation).
     pub x: f64,
     pub y: f64,
-    /// 世界单位；到 radius 处光衰减为零。平行光不读 radius，恒为 0（占位）。
+    /// World units; light attenuates to zero at radius. Directional does not read radius, always 0
+    /// (placeholder).
     pub radius: f64,
     pub intensity: f64,
-    /// 原始色串（describe 输出用）。
+    /// Original color string (for describe output).
     pub color: String,
-    /// color 解析后的 0..1 通道值（未乘 intensity）。
+    /// Parsed 0..1 channel values of color (not multiplied by intensity).
     pub rgb: [f64; 3],
     pub kind: LightKind,
 }
 
-/// 收集场上全部光源（带 `Light` 组件的实体，槽位序）。超过 [`MAX_LIGHTS`] 直接报错
-/// （三种 kind 合计——逐像素/逐片元都要遍历全部灯，平行光也不豁免）。
-/// 校验全在这里做：kind 合法性、point/spot 必须有 Position、spot 的 angle/dir、
-/// directional 的 dir——渲染热路径里只剩纯算术。
+/// Collect every light source in the scene (entities with the `Light` component, in slot order).
+/// Exceeding [`MAX_LIGHTS`] directly errors (combined across the three kinds — per-pixel /
+/// per-fragment both iterate all lights, directional is not exempt). Validation all happens here:
+/// kind validity, point/spot must have Position, spot's angle/dir, directional's dir — the render
+/// hot path is left with pure arithmetic.
 pub fn collect_lights(world: &World) -> Result<Vec<LightSource>, String> {
     let ids = world.query(&["Light"]);
     if ids.len() > MAX_LIGHTS {
@@ -791,7 +884,8 @@ pub fn collect_lights(world: &World) -> Result<Vec<LightSource>, String> {
     }
     ids.into_iter()
         .map(|id| {
-            // kind：可选文本字段，缺省 "point"（旧场景没有这个字段，行为必须不变）
+            // kind: optional text field, default "point" (old scenes have no such field, behavior
+            // must be unchanged)
             let kind_str = match world.get_field(id, "Light.kind") {
                 Err(_) => "point".to_string(),
                 Ok(v) => v.as_str().map(String::from).ok_or_else(|| {
@@ -801,7 +895,7 @@ pub fn collect_lights(world: &World) -> Result<Vec<LightSource>, String> {
                     )
                 })?,
             };
-            // spot/directional 的必填角度字段（度数）；缺了给写法提示
+            // Required angle fields (in degrees) for spot/directional; missing ones get a usage hint
             let angle_field = |field: &str, hint: &str| -> Result<f64, String> {
                 match world.get_field(id, &format!("Light.{field}")) {
                     Err(_) => Err(format!(
@@ -846,7 +940,7 @@ pub fn collect_lights(world: &World) -> Result<Vec<LightSource>, String> {
                     ));
                 }
             };
-            // 平行光不读 Position/radius（太阳在无穷远）；point/spot 必须有
+            // Directional lights do not read Position/radius (the sun is at infinity); point/spot must have them
             let (x, y, radius) = if matches!(kind, LightKind::Directional { .. }) {
                 (0.0, 0.0, 0.0)
             } else {
@@ -894,22 +988,29 @@ pub fn collect_lights(world: &World) -> Result<Vec<LightSource>, String> {
         .collect()
 }
 
-/// 逐像素打光（CPU 路径）。公式见模块文档；GPU 侧（gpu.rs 的 WGSL）必须保持同一公式、
-/// 同一顺序（在 sRGB 字节空间上乘）。kind 分支全部在逐像素循环**外**做掉：
-/// - 平行光处处均匀 → 一帧折进基底色一次（`base = ambient + Σ directional`），内循环零成本；
-/// - point/spot 分进两个独立列表——纯点光场景的内循环和加 kind 之前逐条指令相同
-///   （字节级向后兼容由测试锁死），聚光灯才多付角度衰减的钱。
+/// Per-pixel lighting (CPU path). Formula in the module docs; the GPU side (gpu.rs WGSL) must keep
+/// the same formula and the same order (multiplied in sRGB byte space). All kind branches are done
+/// **outside** the per-pixel loop:
+/// - directional is uniform everywhere → folded into the base color once per frame
+///   (`base = ambient + Σ directional`), the inner loop is zero-cost;
+/// - point/spot split into two independent lists — the inner loop for a pure-point scene is
+///   instruction-identical to before kind was added (byte-level backward compatibility locked by
+///   tests), only spotlights pay the extra angular-falloff cost.
 ///
-/// 灯参数先变换到像素空间，点光内循环只剩距离平方比较。
+/// Light params are transformed to pixel space first, so the point-light inner loop is left with
+/// only a squared-distance comparison.
 ///
-/// `normals`：每帧法线缓冲（哨兵零向量 = 没有法线）。有法线的像素各灯贡献额外乘
-/// `max(dot(N, L), 0)`，平行光也按 dir 算方向（不再折进基底）；哨兵像素走上面那条
-/// 老路径，**输出字节逐位不变**。`None` = 整帧没有法线（等价全哨兵，但少一次查表）。
+/// `normals`: per-frame normal buffer (sentinel zero vector = no normal). Pixels with normals get
+/// each light's contribution multiplied by an additional `max(dot(N, L), 0)`, and directional also
+/// computes the direction from dir (no longer folded into the base); sentinel pixels take the old
+/// path above, **output bytes bit-identical**. `None` = no normals for the whole frame (equivalent
+/// to all-sentinel but saves one table lookup).
 ///
-/// `occluders`：投影的遮光体（空 = 不投影 = 算术逐位不变）。point/spot 在距离判定
-/// 通过、贡献非零后再做线段遮挡测试；遮光体先合并成大箱（[`build_shadow_boxes`]）、
-/// 再按灯盘逐灯剔除（[`cull_shadow_boxes`]）——两步都不改输出字节（测试锁死）。
-/// directional 不投影（v1，见模块文档）。
+/// `occluders`: projection occluders (empty = no projection = arithmetic bit-identical). point/spot
+/// do the segment occlusion test only after the distance check passes and the contribution is
+/// non-zero; occluders are first merged into big boxes ([`build_shadow_boxes`]), then culled per
+/// light disc ([`cull_shadow_boxes`]) — neither step changes output bytes (locked by tests).
+/// directional does not cast shadows (v1, see module docs).
 #[allow(clippy::too_many_arguments)]
 fn apply_lighting(
     buf: &mut [u8],
@@ -925,8 +1026,9 @@ fn apply_lighting(
     apply_lighting_impl(buf, width, height, cam, ambient, lights, &grid, true, normals);
 }
 
-/// [`apply_lighting`] 的主体，遮挡结构由调用方给（`cull=false` = 不做逐灯剔除，
-/// 全量候选——等价性测试的对照路径，正常渲染恒走 `cull=true`）。
+/// Body of [`apply_lighting`]; the occlusion structure is supplied by the caller (`cull=false` =
+/// no per-light culling, full candidates — the reference path for equivalence tests; normal
+/// rendering always uses `cull=true`).
 #[allow(clippy::too_many_arguments)]
 fn apply_lighting_impl(
     buf: &mut [u8],
@@ -944,14 +1046,15 @@ fn apply_lighting_impl(
         y: f64,
         r: f64,
         r2: f64,
-        /// 已乘 intensity 的通道值。
+        /// Channel values already multiplied by intensity.
         rgb: [f64; 3],
     }
     struct PxSpot {
         base: PxLight,
-        /// 朝向的**像素空间**单位向量（世界 dir 度数 → (cos, -sin)，y 翻转）。
+        /// Unit vector of the facing in **pixel space** (world dir degrees → (cos, -sin), y flipped).
         dir: [f64; 2],
-        /// 半锥角（弧度）。collect_lights 保证 angle ∈ 1..=360 → half > 0，除法安全。
+        /// Half cone angle (radians). collect_lights guarantees angle ∈ 1..=360 → half > 0, so the
+        /// division is safe.
         half: f64,
     }
     let to_px = |l: &LightSource| {
@@ -964,7 +1067,8 @@ fn apply_lighting_impl(
             rgb: [l.rgb[0] * l.intensity, l.rgb[1] * l.intensity, l.rgb[2] * l.intensity],
         }
     };
-    /// 平行光在法线路径的预计算：L = (−行进方向单位向量·0.8, 0.6)（单位长度由构造保证）。
+    /// Precomputed values for directional lights on the normal path: L = (−unit travel
+    /// direction·0.8, 0.6) (unit length guaranteed by construction).
     struct PxDir {
         l: [f64; 3],
         rgb: [f64; 3],
@@ -984,9 +1088,10 @@ fn apply_lighting_impl(
                     half: (angle / 2.0).to_radians(),
                 });
             }
-            // 平行光：哨兵像素的贡献 = color·intensity 处处相同 → 折进基底，逐像素不再付钱；
-            // 法线像素要按 dir 算 max(dot(N,L),0) → 另存一份带 L 的（行进方向像素空间
-            // (cos,-sin)，指向灯 = 取反，再按 0.8/0.6 抬升成单位向量）
+            // Directional: a sentinel pixel's contribution = color·intensity is the same everywhere
+            // → fold into base, no per-pixel cost; normal pixels must compute max(dot(N,L),0) from
+            // dir → store a separate copy carrying L (travel direction in pixel space (cos,-sin),
+            // pointing at the light = negate, then lift to a unit vector with 0.8/0.6)
             LightKind::Directional { dir } => {
                 for (c, b) in base.iter_mut().enumerate() {
                     *b += l.rgb[c] * l.intensity;
@@ -1004,8 +1109,9 @@ fn apply_lighting_impl(
         }
     }
 
-    // 每盏灯的遮挡候选（merged 大箱下标）：剔除灯盘碰不到的箱子（无损，
-    // 见 cull_shadow_boxes）。投影关闭时 grid 为空——候选全空，老路径算术一字不动。
+    // Each light's occluder candidates (merged big-box indices): cull the boxes the light disc
+    // cannot reach (lossless, see cull_shadow_boxes). When projection is off the grid is empty —
+    // the candidates are all empty, and the old-path arithmetic does not move a single bit.
     let light_boxes = |l: &PxLight| -> Vec<u32> {
         if cull {
             cull_shadow_boxes(grid, l.x, l.y, l.r)
@@ -1015,10 +1121,12 @@ fn apply_lighting_impl(
     };
     let point_boxes: Vec<Vec<u32>> = points.iter().map(light_boxes).collect();
     let spot_boxes: Vec<Vec<u32>> = spots.iter().map(|s| light_boxes(&s.base)).collect();
-    // 像素 (fx,fy) 到灯心 (lx,ly) 的线段是否被某个候选箱挡住。
-    // 大箱外的像素只测大箱（并集 == 大箱，命中逐位等价，见 build_shadow_boxes）；
-    // 大箱内的像素回落到原始子箱——像素自己所在的箱子跳过（规则：箱子里的像素
-    // 只被别的箱子遮挡，不自压成黑块），合并不改这条规则的字节语义。
+    // Whether the segment from pixel (fx,fy) to light center (lx,ly) is blocked by some candidate
+    // box. Pixels outside a big box only test the big box (union == big-box, hits bit-equivalent,
+    // see build_shadow_boxes); pixels inside a big box fall back to the original sub-boxes — the
+    // box the pixel itself is in is skipped (rule: a pixel inside a box is only blocked by other
+    // boxes, it does not crush itself into a black block), and merging does not change the byte
+    // semantics of this rule.
     let blocked = |fx: f64, fy: f64, lx: f64, ly: f64, candidates: &[u32]| -> bool {
         candidates.iter().any(|&k| {
             let m = &grid.merged[k as usize];
@@ -1036,14 +1144,17 @@ fn apply_lighting_impl(
         })
     };
 
-    // —— 逐灯有界扫描。重构前是逐像素扫全部灯（每帧 像素数×灯数 次距离判定），
-    //    重构后点/聚光只扫自己灯盘的外接方框——方框外的像素连距离都不用算。
-    //    字节等价的根据：每个像素收到的 f64 加法**序列**不变——
-    //    初始化（ambient/基底 + 平行光）→ 点光（槽位序）→ 聚光（槽位序）→
-    //    最后统一夹紧乘回；方框外像素在旧代码里走 d²≥r² 的 continue（不加），
-    //    新代码干脆不访问（同样不加）。锁死的光照/投影/法线测试全部盖住这一步。
+    // —— Bounded per-light scan. Before the refactor this was per-pixel scan over all lights
+    //    (pixel-count × light-count distance checks per frame); after the refactor point/spot only
+    //    scan their own light-disc bounding box — pixels outside the box do not even compute the
+    //    distance. The byte-equivalence basis: the f64 addition **sequence** each pixel receives
+    //    is unchanged — initialization (ambient/base + directional) → point lights (slot order) →
+    //    spotlights (slot order) → final clamp and multiply-back; out-of-box pixels took the
+    //    d²≥r² continue branch in the old code (no addition), and the new code does not visit them
+    //    at all (also no addition). The locked lighting/projection/normal tests all cover this step.
 
-    // 像素指向灯的单位方向 → xy·0.8 + z 0.6；d=0 方向无定义，约定 (0,0,1)
+    // Unit direction from pixel to light → xy·0.8 + z 0.6; d=0 direction is undefined, by
+    // convention (0,0,1)
     fn lambert(n: [f64; 3], dx: f64, dy: f64, d: f64) -> f64 {
         let l = if d > 0.0 {
             [-dx / d * NORMAL_LIGHT_XY, -dy / d * NORMAL_LIGHT_XY, NORMAL_LIGHT_Z]
@@ -1052,17 +1163,19 @@ fn apply_lighting_impl(
         };
         (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]).max(0.0)
     }
-    // 该像素的法线（哨兵零向量 = 没有 → None，走老路径——字节锁死）
+    // This pixel's normal (sentinel zero vector = none → None, takes the old path — bytes locked)
     let normal_at = |i: usize| -> Option<[f64; 3]> {
         normals
             .map(|ns| ns[i])
             .filter(|n| n[2] != 0.0)
             .map(|n| [n[0] as f64, n[1] as f64, n[2] as f64])
     };
-    // 行级候选过滤：slab 法的 y 区间只依赖 (fy, ly, 箱子 y 边)——整行是常量。
-    // y 区间已空的箱子，这一行的任何像素都不可能命中（x 轴只会让区间更紧），
-    // 用与 segment_hits_aabb **完全相同的算式**预判，过滤逐位无损；子箱的 y 边
-    // 被大箱的 min/max 夹住，大箱区间空 ⇒ 子箱区间更空，箱内回落路径同样无损。
+    // Row-level candidate filter: the slab method's y interval depends only on (fy, ly, box y
+    // edges) — it is constant for the whole row. A box whose y interval is already empty cannot
+    // be hit by any pixel on this row (the x axis only tightens the interval); predicted with the
+    // **exact same formula** as segment_hits_aabb, the filter is bit-lossless; the sub-box y edges
+    // are clamped by the big box's min/max, an empty big-box interval ⇒ an even emptier sub-box
+    // interval, so the in-box fallback path is also lossless.
     let row_pass = |fy: f64, ly: f64, y0: f64, y1: f64| -> bool {
         let dy = ly - fy;
         if dy.abs() < 1e-12 {
@@ -1075,10 +1188,11 @@ fn apply_lighting_impl(
             tmax >= tmin
         }
     };
-    // 行级候选的复用暂存（避免逐行分配）
+    // Reuse buffer for row-level candidates (avoid per-row allocation)
     let mut row_cand: Vec<u32> = Vec::new();
 
-    // 灯盘外接方框（裁到视口；±r 外 d²≥r² 恒不过判定，1px 余量盖住浮点边缘）
+    // Light-disc bounding box (clipped to the viewport; outside ±r the d²≥r² check always fails,
+    // 1px margin covers the floating-point edge)
     let light_rect = |lx: f64, ly: f64, r: f64| -> (u32, u32, u32, u32) {
         (
             ((lx - r - 1.5).floor().max(0.0) as u32).min(width),
@@ -1088,9 +1202,11 @@ fn apply_lighting_impl(
         )
     };
 
-    // —— 灯光累加缓冲只开"灯碰得到"的包围矩形（全部灯盘方框的并集外接框）那么大：
-    //    远离所有灯的像素整帧不分配不访问，合成时直接走未触碰路径。
-    //    touched = 该像素收过点/聚光贡献（累加值已从起点分化）。
+    // —— The lighting accumulation buffer is only as large as the bounding rectangle "reachable by
+    //    some light" (the union outer box of all light-disc boxes): pixels far from every light are
+    //    not allocated or accessed for the whole frame, and the composite step takes the untouched
+    //    path directly. touched = this pixel has received a point/spot contribution (the accumulated
+    //    value has diverged from the starting point).
     let (mut ux0, mut ux1, mut uy0, mut uy1) = (width, 0u32, height, 0u32);
     {
         let mut add_rect = |(x0, x1, y0, y1): (u32, u32, u32, u32)| {
@@ -1112,12 +1228,14 @@ fn apply_lighting_impl(
     let un = (uw as usize) * (uy1.saturating_sub(uy0)) as usize;
     let mut lit_buf: Vec<[f64; 3]> = vec![[0.0; 3]; un];
     let mut touched: Vec<bool> = vec![false; un];
-    // 帧像素 (x,y) → 累加缓冲下标（只在某盏灯的方框内调用，必在并集框内）
+    // Frame pixel (x,y) → accumulation-buffer index (only called inside some light's box, must be
+    // inside the union box)
     let local = |x: u32, y: u32| ((y - uy0) * uw + (x - ux0)) as usize;
 
-    // 像素的光照累加**起点**（第一次收到灯光贡献时才算；没收过的合成时现算同一条
-    // 式子）：法线像素 = ambient + 平行光按方向逐盏算（L 的构造见模块文档）；
-    // 哨兵像素 = 基底（平行光已折进去）
+    // The lighting accumulation **starting point** for a pixel (computed only when first receiving
+    // a light contribution; untouched pixels are computed on the fly in the composite step with the
+    // same formula): normal pixels = ambient + each directional computed by direction (L
+    // construction in the module docs); sentinel pixels = base (directional already folded in)
     let init_lit = |i: usize| -> [f64; 3] {
         match normal_at(i) {
             Some(n) => {
@@ -1134,11 +1252,11 @@ fn apply_lighting_impl(
         }
     };
 
-    // 点光 pass（槽位序——每像素的累加顺序与逐像素全扫描一致）
+    // Point-light pass (slot order — each pixel's accumulation order matches the per-pixel full scan)
     for (l, lb) in points.iter().zip(&point_boxes) {
         let (x0, x1, y0, y1) = light_rect(l.x, l.y, l.r);
         for y in y0..y1 {
-            let fy = y as f64 + 0.5; // 像素中心——GPU 片元的 @builtin(position) 也是中心坐标
+            let fy = y as f64 + 0.5; // Pixel center — the GPU fragment's @builtin(position) is also a center coordinate
             row_cand.clear();
             row_cand.extend(lb.iter().copied().filter(|&k| {
                 let m = &grid.merged[k as usize];
@@ -1156,18 +1274,20 @@ fn apply_lighting_impl(
                 let d = d2.sqrt();
                 let f = 1.0 - d / l.r;
                 let f = match normal_at(i) {
-                    // 法线像素：贡献 ×= max(dot(N, L), 0)
+                    // Normal pixel: contribution ×= max(dot(N, L), 0)
                     Some(n) => f * f * lambert(n, dx, dy, d),
-                    // 老路径：这条算式不许动（字节锁死）
+                    // Old path: do not touch this formula (bytes locked)
                     None => f * f,
                 };
-                // 贡献为零（背光面 / d 经舍入顶到 r）加不加都一样（+0.0 逐位
-                // 无操作）——先判零再做遮挡测试，零贡献像素一个箱子都不用碰
+                // Zero contribution (back face / d rounded up to r) — adding or not is the same
+                // (+0.0 is a bit-wise no-op) — test for zero before the occlusion test, so
+                // zero-contribution pixels do not touch a single box
                 if f == 0.0 {
                     continue;
                 }
-                // 投影：被遮光体挡住 = 这盏灯对该像素零贡献（硬影）；
-                // 候选全空时零成本短路——投影关闭的老路径字节锁死不受影响
+                // Projection: blocked by an occluder = this light contributes zero to this pixel
+                // (hard shadow); empty candidates short-circuit at zero cost — the projection-off
+                // old path is byte-locked and unaffected
                 if !row_cand.is_empty() && blocked(fx, fy, l.x, l.y, &row_cand) {
                     continue;
                 }
@@ -1184,7 +1304,7 @@ fn apply_lighting_impl(
         }
     }
 
-    // 聚光 pass（在点光之后——每像素仍是先点光后聚光，槽位序）
+    // Spot pass (after point lights — each pixel is still point-first then spot, slot order)
     for (l, lb) in spots.iter().zip(&spot_boxes) {
         let (x0, x1, y0, y1) = light_rect(l.base.x, l.base.y, l.base.r);
         for y in y0..y1 {
@@ -1205,9 +1325,10 @@ fn apply_lighting_impl(
                 let i = (y * width + x) as usize;
                 let d = d2.sqrt();
                 let f = 1.0 - d / l.base.r;
-                // 角度衰减（公式见模块文档，GPU 侧逐句镜像）：
-                //   Δθ = acos(像素方向 · 朝向)，t = clamp(1 - Δθ/half, 0, 1)，贡献 ×= t²
-                // d=0（像素正好在灯心）夹角无定义，约定取锥心（t=1）
+                // Angular falloff (formula in module docs, GPU side mirrors line by line):
+                //   Δθ = acos(pixel direction · facing), t = clamp(1 - Δθ/half, 0, 1),
+                //   contribution ×= t². d=0 (pixel exactly at the light center) has undefined angle,
+                //   by convention take the cone center (t=1)
                 let cosd = if d > 0.0 {
                     ((dx * l.dir[0] + dy * l.dir[1]) / d).clamp(-1.0, 1.0)
                 } else {
@@ -1218,12 +1339,14 @@ fn apply_lighting_impl(
                     Some(n) => f * f * t * t * lambert(n, dx, dy, d),
                     None => f * f * t * t,
                 };
-                // 锥外/背光面贡献为零：跳过遮挡测试（+0.0 逐位无操作）——
-                // 聚光锥只盖灯盘的一角，锥外像素一个箱子都不用碰
+                // Outside the cone / back face has zero contribution: skip the occlusion test
+                // (+0.0 is a bit-wise no-op) — the spot cone only covers part of the light disc,
+                // out-of-cone pixels do not touch a single box
                 if f == 0.0 {
                     continue;
                 }
-                // 投影：聚光灯同点光源一样被遮（锥角衰减不豁免遮挡）
+                // Projection: spotlights are blocked the same way as point lights (angular falloff
+                // does not exempt occlusion)
                 if !row_cand.is_empty() && blocked(fx, fy, l.base.x, l.base.y, &row_cand) {
                     continue;
                 }
@@ -1240,10 +1363,12 @@ fn apply_lighting_impl(
         }
     }
 
-    // 合成 pass：夹紧、乘回 sRGB 字节（与重构前同一条算式，alpha 不动）。
-    // 没收过灯光贡献的哨兵像素（累加值恒 = 基底）走 256 项查表——表项用同一条
-    // 表达式逐档预算，输出字节与逐像素现算逐位相同；没收过贡献的法线像素现算
-    // 起点（与 init_lit 同一条式子）再乘回。
+    // Composite pass: clamp and multiply back to sRGB bytes (same formula as before the refactor,
+    // alpha untouched). Sentinel pixels that never received a light contribution (accumulated value
+    // always = base) take the 256-entry lookup table — table entries are precomputed per slot with
+    // the same expression, output bytes are bit-identical to per-pixel on-the-fly computation;
+    // normal pixels that never received a contribution compute the starting point on the fly (same
+    // formula as init_lit) then multiply back.
     let mut lut = [[0u8; 256]; 3];
     for (c, table) in lut.iter_mut().enumerate() {
         let m = base[c].min(LIGHT_CLAMP);
@@ -1280,17 +1405,18 @@ fn apply_lighting_impl(
     }
 }
 
-/// 泛光参数（`Bloom` 组件的解析结果）。
+/// Bloom parameters (parsed result of the `Bloom` component).
 pub struct BloomParams {
-    /// 0..=1：通道值超过 threshold·255 的部分进泛光。
+    /// 0..=1: the part of a channel value exceeding threshold·255 enters bloom.
     pub threshold: f64,
-    /// ≥ 0：模糊后的亮部按这个倍率加回场景。
+    /// ≥ 0: the bright part after blur is added back to the scene at this scale.
     pub strength: f64,
 }
 
-/// 泛光设置：取第一个带 `Bloom` 组件的实体（同 Ambient/Camera 的约定）。
-/// `None` = 场上没有 Bloom = 泛光整体关闭（总开关，不是缺省参数）。
-/// 字段缺失/不是数字/越界都显式报错——后效参数写错了静默跳过比报错更难排查。
+/// Bloom settings: take the first entity with a `Bloom` component (same convention as
+/// Ambient/Camera). `None` = no Bloom in the scene = bloom is entirely off (master switch, not a
+/// default parameter). Missing field / non-numeric / out-of-range all explicitly error — silently
+/// skipping a post-effect parameter with a wrong value is harder to debug than erroring.
 pub fn bloom_of(world: &World) -> Result<Option<BloomParams>, String> {
     match world.query(&["Bloom"]).first() {
         None => Ok(None),
@@ -1326,22 +1452,24 @@ pub fn bloom_of(world: &World) -> Result<Option<BloomParams>, String> {
     }
 }
 
-/// 泛光模糊半径（像素）：视口高/90、下限 2——跟分辨率成比例，光晕占画面比例
-/// 与分辨率无关。CPU 全分辨率模糊直接用这个值；GPU 半分辨率 ping-pong 用它的一半
-/// （见 gpu.rs，语义源头在这里）。
+/// Bloom blur radius (pixels): viewport height / 90, lower bound 2 — scales with resolution, so
+/// the bloom-to-frame ratio is resolution-independent. The CPU full-resolution blur uses this
+/// value directly; the GPU half-resolution ping-pong uses half of it (see gpu.rs; the semantic
+/// source is here).
 pub fn bloom_radius_px(viewport_h: u32) -> u32 {
     (viewport_h / 90).max(2)
 }
 
-/// 全屏泛光后效（CPU 路径，公式见模块文档）。确定性：纯 f32 算术、固定遍历顺序、
-/// 无并行——同一输入逐字节同输出。效率：可分离盒式模糊（每像素每方向只加减 2 次的
-/// 滑动窗口）、亮部/暂存两个平面共享一次分配。
+/// Full-screen bloom post-effect (CPU path, formula in module docs). Determinism: pure f32
+/// arithmetic, fixed traversal order, no parallelism — same input → same output byte-for-byte.
+/// Efficiency: separable box blur (a sliding window that only adds and subtracts twice per pixel
+/// per direction); the bright plane and the scratch plane share one allocation.
 fn apply_bloom(buf: &mut [u8], width: u32, height: u32, bloom: &BloomParams) {
     let (w, h) = (width as usize, height as usize);
     let n = w * h;
     let thr = (bloom.threshold * 255.0) as f32;
 
-    // 一次分配：前半 = 亮部平面（RGB f32），后半 = 模糊暂存
+    // One allocation: first half = bright plane (RGB f32), second half = blur scratch
     let mut planes = vec![0f32; n * 3 * 2];
     let (a, b) = planes.split_at_mut(n * 3);
     for i in 0..n {
@@ -1350,14 +1478,15 @@ fn apply_bloom(buf: &mut [u8], width: u32, height: u32, bloom: &BloomParams) {
         }
     }
 
-    // 3 次迭代的可分离盒式模糊（H 写进暂存、V 写回亮部平面），近似高斯
+    // 3 iterations of separable box blur (H writes to scratch, V writes back to the bright plane),
+    // approximating a Gaussian
     let r = bloom_radius_px(height) as usize;
     for _ in 0..3 {
         box_blur_pass(a, b, w, h, r, true);
         box_blur_pass(b, a, w, h, r, false);
     }
 
-    // 加法合成：out = min(scene + blurred·strength, 255)
+    // Additive composite: out = min(scene + blurred·strength, 255)
     let s = bloom.strength as f32;
     for i in 0..n {
         for c in 0..3 {
@@ -1367,13 +1496,14 @@ fn apply_bloom(buf: &mut [u8], width: u32, height: u32, bloom: &BloomParams) {
     }
 }
 
-/// 盒式模糊单方向一趟（`horizontal` 选轴）：窗口 2r+1，越界采样取边缘像素
-/// （clamp-to-edge，GPU 侧 WGSL 的 clamp 同语义）。滑动窗口：每步加新减旧，
-/// f32 累加顺序固定 → 确定性。
+/// One pass of box blur in a single direction (`horizontal` picks the axis): window 2r+1, out-of-
+/// bounds samples take the edge pixel (clamp-to-edge, same semantics as the GPU side's WGSL
+/// clamp). Sliding window: each step adds the new sample and subtracts the old one; the f32
+/// accumulation order is fixed → deterministic.
 fn box_blur_pass(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: usize, horizontal: bool) {
     let norm = 1.0 / (2 * r + 1) as f32;
-    // 统一成"沿 len 轴扫，跨 lanes 条线"：水平 = 每行一条线（步长 3），
-    // 垂直 = 每列一条线（步长 3w）
+    // Unified as "scan along the len axis, across `lanes` lines": horizontal = one line per row
+    // (stride 3), vertical = one line per column (stride 3w)
     let (lanes, len, lane_stride, step) = if horizontal {
         (h, w, w * 3, 3usize)
     } else {
@@ -1384,7 +1514,7 @@ fn box_blur_pass(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: usize, hor
     for lane in 0..lanes {
         let base = lane * lane_stride;
         for c in 0..3 {
-            // 起始窗口：样本 -r..=r（越界 clamp 到边缘）
+            // Initial window: samples -r..=r (out-of-bounds clamped to the edge)
             let mut sum = 0f32;
             for k in -ri..=ri {
                 sum += src[base + k.clamp(0, last) as usize * step + c];
@@ -1400,17 +1530,18 @@ fn box_blur_pass(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: usize, hor
     }
 }
 
-/// 发射形态（`Emitter.kind` 的解析结果）。
+/// Emission shape (parsed result of `Emitter.kind`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EmitterKind {
-    /// 持续流：每秒 `rate` 个粒子，发射时间轴从 tick 0 起算。
+    /// Continuous stream: `rate` particles per second, the emission timeline starts from tick 0.
     Stream { rate: f64 },
-    /// 单次爆发：`burst` = 触发 tick 号（负数 = 未触发），`count` 个粒子同时出生。
+    /// Single burst: `burst` = the trigger tick number (negative = not triggered), `count`
+    /// particles are born simultaneously.
     Burst { count: i64, burst: i64 },
 }
 
 impl EmitterKind {
-    /// describe / 错误信息里的字符串名（和 `Emitter.kind` 的合法取值一致）。
+    /// String name in describe / error messages (matches the legal values of `Emitter.kind`).
     pub fn name(&self) -> &'static str {
         match self {
             EmitterKind::Stream { .. } => "stream",
@@ -1419,40 +1550,45 @@ impl EmitterKind {
     }
 }
 
-/// 一个粒子发射器（`Emitter` 实体的解析结果，世界坐标）。字段语义见模块文档；
-/// 校验全在 [`collect_emitters`]，粒子展开（[`emitter_particles`]）只剩纯算术。
+/// One particle emitter (parsed result of an `Emitter` entity, world coordinates). Field semantics
+/// in the module docs; all validation is in [`collect_emitters`], and particle expansion
+/// ([`emitter_particles`]) is left with pure arithmetic.
 #[derive(Debug)]
 pub struct EmitterSource {
     pub id: vitric_ecs::EntityId,
     pub name: Option<String>,
-    /// 发射原点（当前 Position——发射器移动时在途粒子整体跟着移，见模块文档）。
+    /// Emission origin (current Position — when the emitter moves, in-flight particles move with
+    /// it, see module docs).
     pub x: f64,
     pub y: f64,
     pub kind: EmitterKind,
-    /// 粒子寿命（tick，≥ 1）。
+    /// Particle lifetime (ticks, ≥ 1).
     pub lifetime: i64,
-    /// 初速范围（世界单位/秒，0 ≤ min ≤ max）。
+    /// Initial velocity range (world units/second, 0 ≤ min ≤ max).
     pub speed_min: f64,
     pub speed_max: f64,
-    /// 发射朝向（度数，0 = +x、逆时针为正）+ 扩散角全宽（度数 0..=360）。
+    /// Emission direction (degrees, 0 = +x, counter-clockwise positive) + spread full-width
+    /// (degrees 0..=360).
     pub dir: f64,
     pub spread: f64,
-    /// 重力加速度（世界单位/秒²，y 轴）。
+    /// Gravitational acceleration (world units/second², y axis).
     pub gravity: f64,
-    /// 起始/结束颜色（0..=255 通道值；rgb_end 缺省 = rgb 不渐变）+ 原始色串（describe 用）。
+    /// Start/end color (0..=255 channel values; rgb_end default = no rgb gradient) + original
+    /// color string (for describe).
     pub rgb: [f64; 3],
     pub rgb_end: [f64; 3],
     pub color: String,
-    /// 起始/结束大小（世界单位；size_end 缺省 = size 不渐变）。
+    /// Start/end size (world units; size_end default = no size gradient).
     pub size: f64,
     pub size_end: f64,
     pub active: bool,
-    /// 实体 id 派生的散列种子（[`emitter_seed`]）。
+    /// Hash seed derived from the entity id ([`emitter_seed`]).
     pub seed: u64,
 }
 
-/// SplitMix64 终混器：64 位打散，无状态纯函数。粒子散列和屏幕抖动
-/// （[`shake_offset`]）共用这一个——确定性装饰层的统一随机源，不碰模拟 RNG 流。
+/// SplitMix64 final mixer: 64-bit dispersion, stateless pure function. Particle hashing and screen
+/// shake ([`shake_offset`]) share this one — the unified random source for the deterministic
+/// decoration layer, never touching the simulation RNG stream.
 fn mix64(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -1460,14 +1596,15 @@ fn mix64(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// 发射器实体 id → 散列种子。index/generation 拼 64 位再过 SplitMix64——
-/// 两个发射器哪怕槽位相邻，粒子轨迹也互不相似。
+/// Emitter entity id → hash seed. The index/generation are packed into 64 bits then passed through
+/// SplitMix64 — even two emitters in adjacent slots get dissimilar particle trajectories.
 pub fn emitter_seed(id: vitric_ecs::EntityId) -> u64 {
     mix64(((id.index as u64) << 32) | id.generation as u64)
 }
 
-/// 收集场上全部发射器（带 `Emitter` 组件的实体，槽位序）。校验全在这里做
-/// （kind 合法性、必填字段、范围、粒子预算），热路径只剩纯算术。
+/// Collect every emitter in the scene (entities with the `Emitter` component, in slot order). All
+/// validation happens here (kind validity, required fields, ranges, particle budget), and the hot
+/// path is left with pure arithmetic.
 pub fn collect_emitters(world: &World) -> Result<Vec<EmitterSource>, String> {
     let ids = world.query(&["Emitter"]);
     if ids.len() > MAX_EMITTERS {
@@ -1479,7 +1616,7 @@ pub fn collect_emitters(world: &World) -> Result<Vec<EmitterSource>, String> {
     }
     ids.into_iter()
         .map(|id| {
-            // 数值字段读取：缺省值 or 显式报错（带写法提示）
+            // Numeric field read: default value or explicit error (with a writing hint)
             let opt_num = |field: &str, default: f64| -> Result<f64, String> {
                 match world.get_field(id, &format!("Emitter.{field}")) {
                     Err(_) => Ok(default),
@@ -1530,7 +1667,7 @@ pub fn collect_emitters(world: &World) -> Result<Vec<EmitterSource>, String> {
                             "实体 {id} 的 Emitter.rate 必须 > 0（粒子/秒），拿到 {rate}"
                         ));
                     }
-                    // 同屏粒子预算：稳态可见数 ≈ rate · lifetime / 60
+                    // On-screen particle budget: steady-state visible count ≈ rate · lifetime / 60
                     let steady = (rate * lifetime as f64 / PARTICLE_TICKS_PER_SECOND).ceil();
                     if steady > MAX_PARTICLES_PER_EMITTER as f64 {
                         return Err(format!(
@@ -1559,7 +1696,7 @@ pub fn collect_emitters(world: &World) -> Result<Vec<EmitterSource>, String> {
                              {MAX_PARTICLES_PER_EMITTER}"
                         ));
                     }
-                    // burst 缺省 -1 = 未触发（负数都算未触发）
+                    // burst default -1 = not triggered (any negative counts as not triggered)
                     let burst = match world.get_field(id, "Emitter.burst") {
                         Err(_) => -1,
                         Ok(v) => v.as_i64().ok_or_else(|| {
@@ -1577,7 +1714,7 @@ pub fn collect_emitters(world: &World) -> Result<Vec<EmitterSource>, String> {
                     ));
                 }
             };
-            // 发射器必须有位置（同 point/spot 光源的约定）
+            // Emitters must have a position (same convention as point/spot lights)
             let axis = |a: &str| -> Result<f64, String> {
                 match world.get_field(id, &format!("Position.{a}")) {
                     Err(_) => Err(format!(
@@ -1629,7 +1766,7 @@ pub fn collect_emitters(world: &World) -> Result<Vec<EmitterSource>, String> {
                 .unwrap_or_else(|| "#ffffff".to_string());
             let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Emitter.color: {e}"))?;
             let rgb = [rgba[0] as f64, rgba[1] as f64, rgba[2] as f64];
-            // color_end 缺省/空串 = 不渐变（同 Camera.follow 空串 = 不跟随的约定）
+            // color_end default/empty = no gradient (same convention as Camera.follow empty = no follow)
             let color_end = world
                 .get_field(id, "Emitter.color_end")
                 .ok()
@@ -1672,21 +1809,24 @@ pub fn collect_emitters(world: &World) -> Result<Vec<EmitterSource>, String> {
         .collect()
 }
 
-/// 一个待画的粒子（世界坐标 + 已算好的大小/颜色）。CPU 方点光栅化和 GPU 方块
-/// 顶点流共用——位置/数量/颜色两条路径必然一致。
+/// One particle to draw (world coordinates + already-computed size/color). Shared by the CPU
+/// square-dot rasterizer and the GPU quad vertex stream — position/count/color are necessarily
+/// identical on both paths.
 pub struct ParticleDot {
     pub x: f64,
     pub y: f64,
-    /// 当前大小（世界单位，按寿命进度从 size 渐变到 size_end）。
+    /// Current size (world units, gradient from size to size_end over the lifetime progress).
     pub size: f64,
-    /// 当前颜色（rgb 按寿命进度渐变，alpha 线性淡出 255 → 0）。
+    /// Current color (rgb gradient over the lifetime progress, alpha fades linearly 255 → 0).
     pub rgba: [u8; 4],
 }
 
-/// 第 `tick` tick 该发射器的全部在途粒子——**纯函数**：同 (发射器字段, tick) 永远
-/// 给出同一串粒子（顺序：老粒子在前 = 先画在底下；burst 全员同龄按序号排）。
-/// 无积分器：位置是解析式 `pos = origin + v0·t + ½g·t²`，t = 粒龄（秒）。
-/// 每个粒子的方向/初速由 SplitMix64(种子 ⊕ 序号) 散列出（不碰模拟 RNG 流）。
+/// All in-flight particles of this emitter at tick `tick` — **pure function**: the same
+/// (emitter fields, tick) always yields the same particle sequence (order: older particles first
+/// = drawn at the bottom; burst particles are all the same age, ordered by index). No integrator:
+/// the position is the analytic `pos = origin + v0·t + ½g·t²`, t = particle age (seconds). Each
+/// particle's direction / initial velocity is hashed out by SplitMix64(seed ⊕ index) (never
+/// touching the simulation RNG stream).
 pub fn emitter_particles(e: &EmitterSource, tick: u64) -> Vec<ParticleDot> {
     let mut out = Vec::new();
     if !e.active {
@@ -1695,14 +1835,14 @@ pub fn emitter_particles(e: &EmitterSource, tick: u64) -> Vec<ParticleDot> {
     let t = tick as i64;
     match e.kind {
         EmitterKind::Stream { rate } => {
-            // 第 b tick 出生的粒子序号 = [n(b), n(b+1))，n(b) = floor(b·rate/60)。
-            // 从最老（age = lifetime-1）往最新画——后生的粒子盖在上面
+            // Particle indices born at tick b = [n(b), n(b+1)), n(b) = floor(b·rate/60).
+            // Draw from oldest (age = lifetime-1) to newest — later-born particles cover the ones above
             let births_before =
                 |b: i64| -> i64 { (b as f64 * rate / PARTICLE_TICKS_PER_SECOND).floor() as i64 };
             for age in (0..e.lifetime).rev() {
                 let b = t - age;
                 if b < 0 {
-                    continue; // 世界从 tick 0 开始，没有更早的出生
+                    continue; // The world starts at tick 0, no earlier births
                 }
                 for k in births_before(b)..births_before(b + 1) {
                     out.push(particle_at(e, k as u64, age));
@@ -1711,11 +1851,11 @@ pub fn emitter_particles(e: &EmitterSource, tick: u64) -> Vec<ParticleDot> {
         }
         EmitterKind::Burst { count, burst } => {
             if burst < 0 {
-                return out; // 未触发
+                return out; // Not triggered
             }
             let age = t - burst;
             if age < 0 || age >= e.lifetime {
-                return out; // 还没到触发 tick / 寿命已尽
+                return out; // Not yet at the trigger tick / lifetime already exhausted
             }
             for k in 0..count {
                 out.push(particle_at(e, k as u64, age));
@@ -1725,17 +1865,17 @@ pub fn emitter_particles(e: &EmitterSource, tick: u64) -> Vec<ParticleDot> {
     out
 }
 
-/// 序号 `k`、粒龄 `age`（tick）的粒子——纯算术，无状态。
+/// The particle with index `k` and age `age` (ticks) — pure arithmetic, stateless.
 fn particle_at(e: &EmitterSource, k: u64, age: i64) -> ParticleDot {
     let h = mix64(e.seed ^ k);
-    // 高/低 32 位各出一个 [0,1] 均匀数：方向偏移 + 初速
+    // High/low 32 bits each yield one [0,1] uniform number: direction offset + initial velocity
     let u1 = (h >> 32) as u32 as f64 / u32::MAX as f64;
     let u2 = h as u32 as f64 / u32::MAX as f64;
     let dir = e.dir + (u1 - 0.5) * e.spread;
     let speed = e.speed_min + u2 * (e.speed_max - e.speed_min);
     let secs = age as f64 / PARTICLE_TICKS_PER_SECOND;
     let (sn, cs) = dir.to_radians().sin_cos();
-    // 寿命进度 0..<1（age ∈ 0..lifetime）：颜色/大小线性渐变，alpha 线性淡出
+    // Lifetime progress 0..<1 (age ∈ 0..lifetime): color/size gradient linear, alpha fades linearly
     let s = age as f64 / e.lifetime as f64;
     let ch = |c: usize| (e.rgb[c] + (e.rgb_end[c] - e.rgb[c]) * s).round() as u8;
     ParticleDot {
@@ -1746,9 +1886,10 @@ fn particle_at(e: &EmitterSource, k: u64, age: i64) -> ParticleDot {
     }
 }
 
-/// 粒子光栅化（CPU 路径）：方点，中心在世界坐标、边长 = 当前大小，与精灵同一套
-/// 世界→屏幕变换；src-alpha 混合（与贴图精灵的 alpha 混合同一条算式）。
-/// 在光照之后调用——粒子自发光，不参与法线缓冲。
+/// Particle rasterization (CPU path): square dots, centered on world coordinates, edge length =
+/// current size, with the same world→screen transform as sprites; src-alpha blending (same formula
+/// as the alpha blend for image sprites). Called after lighting — particles are self-emissive and
+/// do not participate in the normal buffer.
 fn draw_particles(
     world: &World,
     buf: &mut [u8],
@@ -1774,7 +1915,7 @@ fn draw_particles(
                 for x in x0..x1 {
                     let i = ((y as u32 * width + x as u32) * 4) as usize;
                     let dst = &mut buf[i..i + 4];
-                    // src-alpha 混合，与贴图精灵的逐通道算式一致
+                    // src-alpha blend, same per-channel formula as for image sprites
                     for (d, s) in dst.iter_mut().zip(p.rgba).take(3) {
                         *d = ((s as u32 * a + *d as u32 * (255 - a)) / 255) as u8;
                     }
@@ -1786,9 +1927,10 @@ fn draw_particles(
     Ok(())
 }
 
-/// 可选的 `Sprite.rot`（度数）。缺省 = 0 = 不旋转；字段在但不是数字 → 显式报错。
-/// 角度约定：**世界空间逆时针为正**——屏幕 y 翻转后，画面上看同样是逆时针。
-/// CPU 光栅化、GPU 顶点流、点选三处共用这一个语义源头。
+/// Optional `Sprite.rot` (degrees). Default = 0 = no rotation; field present but non-numeric →
+/// explicit error. Angle convention: **world-space counter-clockwise is positive** — after the
+/// screen-y flip it still looks counter-clockwise on screen. CPU rasterization, GPU vertex stream,
+/// and picking all share this one semantic source.
 pub fn rot_of(world: &World, id: vitric_ecs::EntityId) -> Result<f64, String> {
     match world.get_field(id, "Sprite.rot") {
         Err(_) => Ok(0.0),
@@ -1798,10 +1940,12 @@ pub fn rot_of(world: &World, id: vitric_ecs::EntityId) -> Result<f64, String> {
     }
 }
 
-/// 采样并解码法线贴图的一个纹素 → **屏幕空间**单位法线（约定见模块文档）：
-/// n = rgb/255·2-1，z 取绝对值（强制朝外），xy 按精灵旋转矩阵（局部→屏幕，
-/// 与顶点变换同一矩阵 [[c, s], [-s, c]]）旋转后整体归一化；零向量退化为平面 (0,0,1)。
-/// (u, v) 与漫反射贴图同一套（含 clamp 行为），法线贴图尺寸不必与漫反射一致。
+/// Sample and decode one texel of the normal map → **screen-space** unit normal (convention in
+/// module docs): n = rgb/255·2-1, z is taken absolute (forced outward), xy is rotated by the
+/// sprite's rotation matrix (local→screen, the same matrix as the vertex transform [[c, s], [-s, c]])
+/// and the whole vector is normalized; a zero vector degrades to the flat normal (0,0,1). (u, v)
+/// matches the diffuse-texture set (including clamp behavior); the normal map size need not match
+/// the diffuse map.
 fn sample_normal(img: &Image, u: f64, v: f64, sn: f64, cs: f64) -> [f32; 3] {
     let sx = ((u * img.width as f64) as i64).clamp(0, img.width as i64 - 1) as usize;
     let sy = ((v * img.height as f64) as i64).clamp(0, img.height as i64 - 1) as usize;
@@ -1818,7 +1962,8 @@ fn sample_normal(img: &Image, u: f64, v: f64, sn: f64, cs: f64) -> [f32; 3] {
     [(rx / len) as f32, (ry / len) as f32, (nz / len) as f32]
 }
 
-/// 取贴图素材；图不存在直接报错并列出现有素材（不画占位符）。
+/// Get an image asset; a missing image directly errors and lists the existing assets (no placeholder
+/// drawn).
 fn image_of<'a>(
     assets: &'a Assets,
     id: vitric_ecs::EntityId,
@@ -1833,13 +1978,15 @@ fn image_of<'a>(
     })
 }
 
-/// 文字：`Text` {"content","size","color"} + `Position`，画在所有精灵之上。
-/// 两条路径（语义见模块文档的 Text 约定）：素材仓库没挂字体走内嵌 8x8 点阵
-/// （ASCII，等宽，非 ASCII 画实心方块占位——**这段字节不许变**，向后兼容由测试锁死）；
-/// 挂了字体（清单 `font`）所有 Text 走矢量路径（比例字距 + 覆盖率抗锯齿）。
-/// 文字**永远直立**——`Sprite.rot` 只转精灵，不转文字（HUD 保持水平）。
-/// `normals`：文字像素清掉底下的法线（文字盖在法线精灵上时按平面打光，不继承浮雕）。
-/// `skip`：跳过这一个 Text 实体（对比度测量专用，见 [`RenderOpts`]）；`None` = 全画。
+/// Text: `Text` {"content","size","color"} + `Position`, drawn above all sprites. Two paths
+/// (semantics in the module docs' Text convention): if no font is mounted in the asset store, the
+/// built-in 8x8 bitmap is used (ASCII, monospace, non-ASCII draws a solid block placeholder —
+/// **these bytes must not change**, backward compatibility locked by tests); if a font is mounted
+/// (manifest `font`), all Text goes through the vector path (proportional spacing + coverage
+/// anti-aliasing). Text is **always upright** — `Sprite.rot` only rotates sprites, not text (HUD
+/// stays horizontal). `normals`: text pixels clear the normal underneath (when text covers a
+/// normal-mapped sprite it is lit as a flat surface, not inheriting the relief). `skip`: skip this
+/// one Text entity (contrast-measurement only, see [`RenderOpts`]); `None` = draw all.
 #[allow(clippy::too_many_arguments)]
 fn draw_texts(
     world: &World,
@@ -1873,8 +2020,9 @@ fn draw_texts(
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "#ffffff".to_string());
         let rgba = parse_color(&color).map_err(|e| format!("实体 {id} 的 Text.color: {e}"))?;
-        // reveal（0..=1 比例，文字显隐的进度）：缺省补 1.0=全显。可见字数 = reveal
-        // 的纯函数；缺字段 / ≥1 与未引入本特性时逐字节相同（向后兼容）。
+        // reveal (0..=1 ratio, the progress of text reveal): default 1.0 = fully shown. The visible
+        // character count is a pure function of reveal; missing field / ≥1 is byte-identical to
+        // before this feature was introduced (backward compatible).
         let reveal = world
             .get_field(id, "Text.reveal")
             .ok()
@@ -1883,11 +2031,12 @@ fn draw_texts(
         let total_chars = content.chars().count();
         let visible = revealed_chars(reveal, total_chars);
         if visible == 0 {
-            continue; // 一个字都没显（reveal=0）：和 content 为空一样不画
+            continue; // No characters shown at all (reveal=0): same as empty content, draw nothing
         }
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;
-        // screen=true: HUD 锚定——Position 解释为相对屏幕中心的偏移,不随相机走
+        // screen=true: HUD anchoring — Position is interpreted as an offset relative to the screen
+        // center, not following the camera
         let screen_anchored = world
             .get_field(id, "Text.screen")
             .ok()
@@ -1900,19 +2049,21 @@ fn draw_texts(
             ((width as f64) / 2.0 + (px - cam_x) * scale, (height as f64) / 2.0 - (py - cam_y) * scale)
         };
 
-        // 矢量路径：挂了字体所有 Text 都走这里（per-Text 覆盖不在范围内）
+        // Vector path: when a font is mounted all Text goes here (per-Text overrides out of scope)
         if let Some(font) = assets.font() {
-            // 整串排版一次（按内容居中、版面缓存），只画前 visible 个字形——
-            // 逐字显示绝不重排，可见字数只是排好后切一刀
+            // Lay out the whole string once (centered on content, layout cached), only the first
+            // `visible` glyphs are drawn — per-character reveal never re-lays-out; the visible count
+            // is just slicing the already-laid-out result
             draw_text_vector(
                 buf, width, height, font, &content, size, scale, (cx, cy), rgba, normals, visible,
             );
             continue;
         }
 
-        // —— 点阵路径：这段逻辑不许动——没挂字体时输出字节必须与字体功能
-        //    出现之前逐位相同（向后兼容由测试锁死）。reveal 只是把要画的字符
-        //    截到前 visible 个（全显时 chars == content.chars()，字节不变）
+        // —— Bitmap path: this logic must not change — when no font is mounted the output bytes
+        //    must be bit-identical to before the font feature existed (backward compatibility
+        //    locked by tests). reveal just truncates the drawn characters to the first `visible`
+        //    (when fully shown chars == content.chars(), bytes unchanged)
         let chars: Vec<char> = content.chars().take(visible).collect();
         let n = chars.len();
         let half_w = n as f64 * size * scale / 2.0;
@@ -1925,8 +2076,8 @@ fn draw_texts(
         let span_y = 2.0 * half_h;
         for y in y0..y1 {
             for x in x0..x1 {
-                let u = ((x as f64 + 0.5) - (cx - half_w)) / span_x; // 0..1 横跨整串
-                let v = ((y as f64 + 0.5) - (cy - half_h)) / span_y; // 0..1 纵跨一字
+                let u = ((x as f64 + 0.5) - (cx - half_w)) / span_x; // 0..1 spans the whole string
+                let v = ((y as f64 + 0.5) - (cy - half_h)) / span_y; // 0..1 spans one character vertically
                 let idx = ((u * n as f64) as usize).min(n - 1);
                 let col = (((u * n as f64 - idx as f64) * 8.0) as usize).min(7);
                 let row = ((v * 8.0) as usize).min(7);
@@ -1943,7 +2094,7 @@ fn draw_texts(
     Ok(())
 }
 
-/// 字符 → 8x8 点阵（每字节一行，低位在左）。非 ASCII 用实心方块占位。
+/// Character → 8x8 bitmap (one byte per row, low bit on the left). Non-ASCII uses a solid block placeholder.
 fn glyph_of(c: char) -> [u8; 8] {
     let cp = c as usize;
     if cp < 128 {
@@ -1953,11 +2104,13 @@ fn glyph_of(c: char) -> [u8; 8] {
     }
 }
 
-/// 矢量文字：一整串按比例字距排版后逐字形栅格化（缓存）+ 覆盖率混合（抗锯齿）。
-/// 几何约定：字号 = size×scale 像素的字形总高；整串横向居中于 (cx,cy)，竖向把
-/// 字身带（ascent..descent）居中；字形落笔在整数像素（不做亚像素，缓存键才成立）。
-/// GPU 路径（vitric-cli gpu.rs）用同一套 layout/raster/取整——视觉对齐，
-/// 但不承诺与 CPU 逐字节相同（截图/断言以这里为准）。
+/// Vector text: lay out a whole string with proportional spacing, then rasterize each glyph
+/// (cached) + coverage blending (anti-aliasing). Geometric conventions: font size = total glyph
+/// height of size×scale pixels; the whole string is horizontally centered on (cx,cy), vertically
+/// centering the glyph body (ascent..descent); glyphs land on integer pixels (no sub-pixel
+/// placement, otherwise the cache key would not hold). The GPU path (vitric-cli gpu.rs) uses the
+/// same layout/raster/rounding — visually aligned, but bit-identical output with the CPU is not
+/// promised (screenshots/asserts treat this path as the source of truth).
 #[allow(clippy::too_many_arguments)]
 fn draw_text_vector(
     buf: &mut [u8],
@@ -1973,8 +2126,9 @@ fn draw_text_vector(
     visible: usize,
 ) {
     let px_size = FontStore::px_size(size, scale);
-    // 缓存版排版：整串排一次进 memo，逐字显示同段文字播 N tick 排版只跑一次。
-    // 居中按整串总宽算（reveal 时文字不左右抖动），只画前 visible 个字形。
+    // Cached layout: lay the whole string out once into the memo; per-character reveal of the same
+    // text played for N ticks runs layout exactly once. Centering uses the whole-string total width
+    // (text does not jitter left/right during reveal); only the first `visible` glyphs are drawn.
     let laid = font.layout_cached(content, px_size);
     let (placements, total_w) = (&laid.0, laid.1);
     let left = cx - total_w as f64 / 2.0;
@@ -1982,7 +2136,7 @@ fn draw_text_vector(
     for p in placements.iter().take(visible) {
         let g = font.raster(p.ch, px_size);
         if g.coverage.is_empty() {
-            continue; // 空轮廓（空格等）只占 advance
+            continue; // Empty outline (space etc.) only contributes advance
         }
         let gx0 = (left + p.x as f64).round() as i64 + g.left as i64;
         let gy0 = baseline + g.top as i64;
@@ -2000,15 +2154,17 @@ fn draw_text_vector(
                 if cov == 0 {
                     continue;
                 }
-                // 覆盖率混合 = 抗锯齿。矢量文字是引擎里唯一刻意平滑的元素，
-                // 精灵贴图仍是最近邻硬边（像素风不动）
+                // Coverage blending = anti-aliasing. Vector text is the only element in the engine
+                // that is intentionally smoothed; sprite images stay nearest-neighbor hard-edged
+                // (the pixel-art look is preserved)
                 let i = ((y as u32 * width + x as u32) * 4) as usize;
                 let dst = &mut buf[i..i + 4];
                 for c in 0..3 {
                     dst[c] = ((rgba[c] as u32 * cov + dst[c] as u32 * (255 - cov)) / 255) as u8;
                 }
                 dst[3] = 255;
-                // 任何覆盖率 > 0 的文字像素都清法线（半覆盖边缘也按文字算，不做半个法线）
+                // Any text pixel with coverage > 0 clears the normal (half-covered edges also count
+                // as text; no half-normals)
                 if let Some(ns) = normals.as_mut() {
                     ns[i / 4] = [0.0; 3];
                 }
@@ -2017,13 +2173,16 @@ fn draw_text_vector(
     }
 }
 
-/// UI 屏幕空间叠加渲染（CPU 真相源）。布局由 [`ui::solve_layout`] 给出（纯函数，
-/// 不经相机），这里只把解算好的屏幕像素矩形画出来：Panel = 背景框（纯色/精灵），
-/// UiLabel = 文字（复用 font.rs 版面缓存 + Text.reveal）。
+/// UI screen-space overlay rendering (CPU source of truth). Layout is provided by
+/// [`ui::solve_layout`] (a pure function, no camera involved); here we only draw the solved
+/// screen-pixel rects: Panel = background frame (solid color / sprite),
+/// UiLabel = text (reusing the font.rs layout cache + Text.reveal).
 ///
-/// 性能：场上没有 UI（无 UiRoot）= 第一行 early-return，零分配零遍历（空 UI 零成本）。
-/// 复用现有 buf，无离屏缓冲。画家序按 query 槽位序（确定性，后画盖前画）。
-/// `normals` 不传——UI 是叠加层，画在光照/泛光之后，自身不参与打光（HUD 语义）。
+/// Performance: no UI in the scene (no UiRoot) = early-return on the first line, zero allocation
+/// and zero traversal (empty UI is zero-cost). Reuses the existing buf, no offscreen buffer.
+/// Painter order follows the query slot order (deterministic; later draws cover earlier ones).
+/// `normals` is not passed — UI is an overlay layer, drawn after lighting/bloom, and does not
+/// participate in lighting itself (HUD semantics).
 fn draw_ui(
     world: &World,
     buf: &mut [u8],
@@ -2032,18 +2191,21 @@ fn draw_ui(
     assets: &Assets,
 ) -> Result<(), String> {
     if !ui::has_ui(world) {
-        return Ok(()); // 空 UI 零成本：没有 UiRoot，整条 UI 路径零分配零遍历
+        return Ok(()); // Empty UI zero-cost: no UiRoot, the entire UI path is zero-allocation zero-traversal
     }
     let layout = ui::solve_layout(world, width, height)?;
 
-    // Panel：背景框。按实体序画（后画盖前画）。纯色 = 直接 alpha 混合方块；
-    // 精灵 = 最近邻缩放贴图（NinePatch 留 1.2，纯色 + 精灵 1.1 必做）。
+    // Panel: background frame. Drawn in entity order (later draws cover earlier ones). Solid color
+    // = direct alpha-blended block; sprite = nearest-neighbor scaled image (NinePatch deferred to
+    // 1.2; solid color + sprite is required for 1.1).
     for id in world.query(&["Ui", "Panel"]) {
         let Some(rect) = layout.get(&id) else { continue };
-        // 按下反馈（1.2）：挂了 Button 且 press_t≥0 时，按 press_scale/press_modulate 的
-        // 解析式做 scale（绕矩形中心缩）+ modulate（提亮）。**纯渲染装饰**：只读组件里的
-        // press_t（进哈希进存档），偏移是 press_t 的纯函数，不碰布局矩形/模拟 RNG——
-        // 重放/快照回退一致（同 shake/bloom 的装饰纪律）。CPU/GPU 共用 ui_press_feedback。
+        // Press feedback (1.2): when Button is attached and press_t≥0, apply the analytic
+        // press_scale/press_modulate formulas for scale (shrink around the rect center) + modulate
+        // (brighten). **Pure render decoration**: only reads press_t from the component (enters the
+        // hash and saves); the offset is a pure function of press_t, does not touch the layout rect
+        // or the simulation RNG — replay/snapshot rollback is consistent (same decoration discipline
+        // as shake/bloom). The CPU and GPU share ui_press_feedback.
         let (rect, modulate) = ui_interact::ui_press_feedback(world, id, *rect);
         let x0 = rect.x.floor().max(0.0) as i64;
         let y0 = rect.y.floor().max(0.0) as i64;
@@ -2058,7 +2220,7 @@ fn draw_ui(
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default();
         if image_name.is_empty() {
-            // 纯色框（含 alpha）——Panel.color 缺省不透明白
+            // Solid color block (with alpha) — Panel.color defaults to opaque white
             let color = world
                 .get_field(id, "Panel.color")
                 .ok()
@@ -2068,7 +2230,7 @@ fn draw_ui(
             modulate_rgb(&mut rgba, modulate);
             let a = rgba[3] as u32;
             if a == 0 {
-                continue; // 全透明 = 不画
+                continue; // Fully transparent = do not draw
             }
             for y in y0..y1 {
                 for x in x0..x1 {
@@ -2085,7 +2247,8 @@ fn draw_ui(
                 }
             }
         } else {
-            // 精灵背景：图不存在直接报错（不画占位）——口径对齐 Sprite.image
+            // Sprite background: a missing image explicitly errors (no placeholder drawn) — same
+            // policy as Sprite.image
             let img = assets.image(&image_name).ok_or_else(|| {
                 format!(
                     "实体 {id} 的 Panel.image {image_name:?} 不在素材仓库里。现有素材: [{}]",
@@ -2117,8 +2280,9 @@ fn draw_ui(
         }
     }
 
-    // UiLabel：文字。整串排版后画在节点框里，按 align 水平对齐、竖向居中于框。
-    // 复用 font.rs（挂字体走矢量，否则点阵）+ Text.reveal（逐字显示已落地）。
+    // UiLabel: text. The whole string is laid out then drawn in the node frame, horizontally
+    // aligned by `align` and vertically centered in the frame. Reuses font.rs (vector path when a
+    // font is mounted, otherwise bitmap) + Text.reveal (per-character reveal already implemented).
     let mut no_normals: Option<Vec<[f32; 3]>> = None;
     for id in world.query(&["Ui", "UiLabel"]) {
         let Some(rect) = layout.get(&id) else { continue };
@@ -2151,15 +2315,17 @@ fn draw_ui(
             .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "center".to_string());
-        // UI 字号是**屏幕像素**字号（不经相机 scale）——size 直接当像素高用。
-        // 文字竖向居中于节点框，水平按 align 在框内对齐。
+        // UI font size is in **screen pixels** (no camera scale applied) — `size` is used directly
+        // as the pixel height. Text is vertically centered in the node frame and horizontally
+        // aligned by `align` within the frame.
         draw_ui_label(buf, width, height, assets, &content, size, &align, *rect, rgba, &mut no_normals, visible);
     }
     Ok(())
 }
 
-/// 画一条 UI 文字（屏幕空间，字号 = 像素高，不经相机）。挂字体走矢量、否则点阵——
-/// 与世界文字 [`draw_texts`] 同两条路径，但坐标是 UI layout 的屏幕矩形。
+/// Draw one UI text (screen space, font size = pixel height, no camera). Vector path when a font
+/// is mounted, otherwise bitmap — same two paths as world-space [`draw_texts`], but the coordinates
+/// are the UI layout's screen rect.
 #[allow(clippy::too_many_arguments)]
 fn draw_ui_label(
     buf: &mut [u8],
@@ -2174,13 +2340,13 @@ fn draw_ui_label(
     normals: &mut Option<Vec<[f32; 3]>>,
     visible: usize,
 ) {
-    let cy = rect.y + rect.h / 2.0; // 竖向居中于框
+    let cy = rect.y + rect.h / 2.0; // Vertically centered in the frame
     if let Some(font) = assets.font() {
-        // UI 字号直接是像素（scale=1）：px_size = size 像素的字形总高
+        // UI font size is directly in pixels (scale=1): px_size = total glyph height of `size` pixels
         let px_size = FontStore::px_size(size, 1.0);
         let laid = font.layout_cached(content, px_size);
         let (placements, total_w) = (&laid.0, laid.1);
-        // 水平对齐：在框宽内放整串
+        // Horizontal alignment: place the whole string within the frame width
         let left = match align {
             "start" => rect.x,
             "end" => rect.x + rect.w - total_w as f64,
@@ -2197,7 +2363,7 @@ fn draw_ui_label(
             blit_coverage(buf, width, height, &g, gx0, gy0, rgba, normals);
         }
     } else {
-        // 点阵路径：等宽 size×size 像素方格
+        // Bitmap path: monospace size×size pixel cells
         let chars: Vec<char> = content.chars().take(visible).collect();
         let n = chars.len();
         let total_w = n as f64 * size;
@@ -2230,8 +2396,8 @@ fn draw_ui_label(
     }
 }
 
-/// 把一个栅格化字形的覆盖率位图混进 buf（抗锯齿），落笔在 (gx0,gy0)。
-/// 抽出来给 UI 文字复用（与 [`draw_text_vector`] 的内层混合逻辑同口径）。
+/// Blend a rasterized glyph's coverage bitmap into buf (anti-aliasing), pen at (gx0,gy0). Factored
+/// out for UI text reuse (same blending policy as the inner loop of [`draw_text_vector`]).
 #[allow(clippy::too_many_arguments)]
 fn blit_coverage(
     buf: &mut [u8],
@@ -2270,8 +2436,8 @@ fn blit_coverage(
     }
 }
 
-/// 屏幕像素 → 世界坐标（检查器拖拽、点选用）。
-/// 用不抖的相机：点选/拖拽对的是世界本体，抖动只是几帧的视觉装饰。
+/// Screen pixels → world coordinates (for inspector drag and picking). Uses the non-shaken camera:
+/// picking/dragging targets the world itself, shake is just a few frames of visual decoration.
 pub fn screen_to_world(
     world: &World,
     width: u32,
@@ -2286,7 +2452,7 @@ pub fn screen_to_world(
     ))
 }
 
-/// 点选拾取：返回屏幕坐标 (px,py) 命中的最上层实体（绘制顺序靠后者优先）。
+/// Picking: return the topmost entity hit by screen coordinates (px,py) (later draw order wins).
 pub fn pick(
     world: &World,
     width: u32,
@@ -2298,25 +2464,26 @@ pub fn pick(
     pick_world(world, wx, wy)
 }
 
-/// 点选拾取（世界坐标版）：返回世界点 (wx,wy) 命中的最上层实体。
-/// 窗口点击（屏幕坐标先经 screen_to_world）和控制面 `input/click`（直接给
-/// 世界坐标）共用这一套判定——人点的和 AI 点的命中规则逐位一致。
-/// 判定确定性：query 按槽位序、不碰模拟 RNG，可安全用于录制中的点击解析。
+/// Picking (world-coordinate version): return the topmost entity hit by the world point (wx,wy).
+/// Window clicks (screen coordinates first go through screen_to_world) and the control-plane
+/// `input/click` (which gives world coordinates directly) share this judgment — what a human clicks
+/// and what an AI clicks use bit-identical hit rules. Determinism: query is in slot order, does
+/// not touch the simulation RNG, safe for click resolution inside a recording.
 pub fn pick_world(
     world: &World,
     wx: f64,
     wy: f64,
 ) -> Result<Option<vitric_ecs::EntityId>, String> {
     let ids = world.query(&["Position", "Sprite"]);
-    // 倒序：后画的盖在上面，优先命中
+    // Reverse order: later draws are on top, so they are hit first
     for &id in ids.iter().rev() {
         let x = num(world, id, "Position.x")?;
         let y = num(world, id, "Position.y")?;
         let w = num(world, id, "Sprite.w")?;
         let h = num(world, id, "Sprite.h")?;
         let rot = rot_of(world, id)?;
-        // rot != 0 时把点击点逆旋回精灵局部空间（世界系，y 向上）——
-        // 命中判定对的是旋转后的真实形状，不是未旋转的 AABB
+        // When rot != 0, inverse-rotate the click point back into the sprite's local space (world
+        // system, y up) — hit testing targets the rotated real shape, not the un-rotated AABB
         let (dx, dy) = (wx - x, wy - y);
         let (lx, ly) = if rot == 0.0 {
             (dx, dy)
@@ -2331,8 +2498,9 @@ pub fn pick_world(
     Ok(None)
 }
 
-/// 在已渲染的帧上给实体画选中描边（检查器高亮，青色 2px）。
-/// `tick` 必须和这帧 `render_world` 用的同一个——描边要跟着抖动的画面走，不然抖屏时错位。
+/// Draw a selection outline on an already-rendered frame for an entity (inspector highlight,
+/// cyan 2px). `tick` must be the same one used by this frame's `render_world` — the outline must
+/// follow the shaken picture, otherwise it would be misaligned during screen shake.
 pub fn draw_selection_outline(
     buf: &mut [u8],
     world: &World,
@@ -2342,7 +2510,8 @@ pub fn draw_selection_outline(
     tick: u64,
 ) -> Result<(), String> {
     if !world.is_alive(selected) || !world.has_component(selected, "Sprite") {
-        return Ok(()); // 选中的实体没了/不可见，描边静默跳过（选中态本身由上层管理）
+        return Ok(()); // The selected entity is gone/invisible — silently skip the outline (the
+                        // selected-state itself is managed by the upper layer)
     }
     let (cam_x, cam_y, scale) = camera_of(world, tick, height)?;
     let x = num(world, selected, "Position.x")?;
@@ -2350,8 +2519,9 @@ pub fn draw_selection_outline(
     let w = num(world, selected, "Sprite.w")?;
     let h = num(world, selected, "Sprite.h")?;
     let rot = rot_of(world, selected)?;
-    // rot != 0 时描边取**旋转后形状的轴对齐包围盒**——画轴对齐矩形比描旋转轮廓
-    // 简单得多，检查器高亮要的只是"看见选中了谁"，不需要贴边精确
+    // When rot != 0 the outline uses the **axis-aligned bounding box of the rotated shape** —
+    // drawing an axis-aligned rectangle is much simpler than tracing the rotated outline; the
+    // inspector highlight only needs "see who is selected", edge-perfect accuracy is not required
     let (ew, eh) = if rot == 0.0 {
         (w, h)
     } else {
@@ -2386,10 +2556,12 @@ pub fn draw_selection_outline(
     Ok(())
 }
 
-/// 在已渲染的帧上画"建造落点预览"：光标所在世界格画一块半透明绿虚影 + 亮边，
-/// 让玩家在点下去之前就看清这次建造会落在哪一格。只在建造模式且选了类型时由窗口侧调用。
-/// `wx,wy` 是光标对应的世界坐标（窗口先 screen_to_world 得到），落点吸附到最近整格。
-/// `tick` 必须和这帧 render_world 同一个——跟着抖屏走才不错位。
+/// Draw a "build placement preview" on the already-rendered frame: a translucent green
+/// ghost + bright edge at the cursor's world grid cell, so the player sees where a build will
+/// land before clicking. Only called by the window side when in build mode with a type selected.
+/// `wx,wy` are the cursor's world coordinates (the window first does screen_to_world);
+/// the placement snaps to the nearest whole grid cell.
+/// `tick` must be the same one passed to this frame's render_world -- it must follow the screen jitter to avoid misalignment.
 pub fn draw_build_preview(
     buf: &mut [u8],
     world: &World,
@@ -2400,19 +2572,19 @@ pub fn draw_build_preview(
     tick: u64,
 ) -> Result<(), String> {
     let (cam_x, cam_y, scale) = camera_of(world, tick, height)?;
-    // 吸附到最近整格（建造落在点中的瓦片）
+    // Snap to nearest whole grid cell (build lands on the clicked tile)
     let gx = wx.round();
     let gy = wy.round();
     let cx = (width as f64) / 2.0 + (gx - cam_x) * scale;
     let cy = (height as f64) / 2.0 - (gy - cam_y) * scale;
-    let half = scale / 2.0; // 1×1 世界格
+    let half = scale / 2.0; // 1x1 world grid cell
     let x0 = (cx - half).floor().max(0.0) as i64;
     let x1 = ((cx + half).ceil().min(width as f64) as i64 - 1).max(x0);
     let y0 = (cy - half).floor().max(0.0) as i64;
     let y1 = ((cy + half).ceil().min(height as f64) as i64 - 1).max(y0);
     const FILL: [u8; 3] = [120, 235, 150];
     const EDGE: [u8; 4] = [190, 255, 205, 255];
-    let bw = 2i64; // 边框宽
+    let bw = 2i64; // Border width
     for y in y0..=y1 {
         for x in x0..=x1 {
             if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height {
@@ -2423,7 +2595,7 @@ pub fn draw_build_preview(
             if edge {
                 buf[i..i + 4].copy_from_slice(&EDGE);
             } else {
-                // 内部与底色 35% 混合，呈半透明虚影
+                // Blend interior with background at 35% -> translucent ghost
                 for c in 0..3 {
                     buf[i + c] = ((buf[i + c] as u32 * 65 + FILL[c] as u32 * 35) / 100) as u8;
                 }
@@ -2433,7 +2605,7 @@ pub fn draw_build_preview(
     Ok(())
 }
 
-/// RGBA 像素 → PNG 字节。
+/// RGBA pixels -> PNG bytes.
 pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     {
@@ -2446,7 +2618,7 @@ pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Strin
     Ok(out)
 }
 
-/// 一步到位：world → PNG。
+/// One-shot: world → PNG.
 pub fn screenshot_png(
     world: &World,
     width: u32,
@@ -2458,36 +2630,47 @@ pub fn screenshot_png(
     encode_png(&rgba, width, height)
 }
 
-/// 语义观察：把"画面上有什么"翻译成 LLM 能精确读懂的结构化描述。
+/// Semantic observation: translate "what is on the screen" into a structured description an LLM
+/// can read precisely.
 ///
-/// 这是 agent 的**主观察通道**——比让模型看像素更精准：
-/// 坐标是确切数字、方位是九宫格词、遮挡是明确的实体对、
-/// 视野外的东西有方向和距离。截图（screenshot）退居兜底验证。
+/// This is the agent's **primary observation channel** — more precise than letting the model look
+/// at pixels: coordinates are exact numbers, directions are 9-region words, occlusion is explicit
+/// entity pairs, and off-screen things carry direction and distance. Screenshots (screenshot)
+/// become a fallback verification.
 ///
-/// 没有素材仓库的便捷入口：等价于 `describe_world_with_assets(.., &Assets::empty())`。
-/// 结构化字段与素材无关；区别只在文字对比度测量的保真度——空仓库时带贴图的精灵
-/// 退化成 `Sprite.color` 纯色块近似底色亮度（见 [`describe_world_with_assets`]）。
+/// Convenience entry without an asset store: equivalent to
+/// `describe_world_with_assets(.., &Assets::empty())`. The structured fields are asset-independent;
+/// the only difference is the fidelity of text-contrast measurement — with an empty store, image
+/// sprites degrade to `Sprite.color` solid-color blocks approximating the background luminance (see
+/// [`describe_world_with_assets`]).
 pub fn describe_world(world: &World, width: u32, height: u32) -> Result<serde_json::Value, String> {
     describe_world_with_assets(world, width, height, &Assets::empty())
 }
 
-/// [`describe_world`] 的全功能版：带素材仓库，文字对比度测量按真贴图渲染。
+/// The full-featured version of [`describe_world`]: takes an asset store so text-contrast
+/// measurement renders with the real images.
 ///
-/// 可读性警告（AI 开发者的眼睛）：屏上每条文字，把世界**少画这一条文字**渲一帧
-/// （素材宽容模式，缺图退纯色近似），取文字包围盒内的平均背景相对亮度 L_bg，
-/// 与 `Text.color` 的相对亮度 L_fg 算 WCAG 式对比度 `(max+0.05)/(min+0.05)`；
-/// 低于 [`TEXT_CONTRAST_MIN`] 就给一条 `warnings[]`（kind=`low-contrast-text`）
-/// 并在中文摘要里加一行 ⚠。真实事故原型：米色文字叠在米色卡面上，构建它的 agent
-/// "看不见"所以从没发现人眼读不出来。
+/// Readability warning (eyes of AI developers): for each piece of text on screen, render one frame
+/// with **this one text omitted** (lenient image mode; missing images degrade to solid-color
+/// approximation), take the average background relative luminance L_bg within the text bounding
+/// box, compute the WCAG-style contrast `(max+0.05)/(min+0.05)` against the relative luminance L_fg
+/// of `Text.color`; if below [`TEXT_CONTRAST_MIN`] emit a `warnings[]` entry
+/// (kind=`low-contrast-text`) and append a ⚠ line to the Chinese summary. Real-world incident
+/// prototype: beige text on a beige card — the agent that built it "could not see it" and so never
+/// noticed that human eyes could not read it.
 ///
-/// 已知近似（这是 lint 不是色彩学）：
-/// - 文字色取原始值、底色取打光后的像素——开了光照/泛光时文字实际也会被打光，
-///   比值有偏差；阈值放宽到 2.5 已把这类偏差吃进余量；
-/// - 包围盒按未渲染的排版几何估（点阵 = 等宽字格，矢量 = layout 总宽 × 字高）；
-/// - 只测中心点在屏内的文字（describe 判"视野外"的同一条标准），视野外不渲不测；
-/// - 测量渲染用不抖的相机（describe 的语义就是不抖）。
+/// Known approximations (this is a lint, not color science):
+/// - The text color is the raw value, the background is the lit pixel — when lighting/bloom are on
+///   the text is actually lit too, so the ratio has bias; the threshold is relaxed to 2.5 to absorb
+///   this kind of bias into the margin;
+/// - The bounding box is estimated from un-rendered layout geometry (bitmap = monospace cell,
+///   vector = layout total width × glyph height);
+/// - Only text whose center is on-screen is measured (same standard describe uses for "off-screen");
+///   off-screen text is neither rendered nor measured;
+/// - The measurement render uses the non-shaken camera (describe semantics are non-shaken by definition).
 ///
-/// 成本：每条屏上文字多渲一帧 describe 分辨率的 CPU 帧；场上没文字 = 零额外开销。
+/// Cost: each on-screen text costs one extra CPU frame at describe resolution; no text in the scene
+/// = zero extra overhead.
 pub fn describe_world_with_assets(
     world: &World,
     width: u32,
@@ -2499,19 +2682,22 @@ pub fn describe_world_with_assets(
     if width == 0 || height == 0 {
         return Err(format!("分辨率 {width}x{height} 不合法"));
     }
-    // 语义观察用不抖的相机：agent 断言的坐标不该被几帧视觉抖动晃花
+    // Semantic observation uses the non-shaken camera: coordinates the agent asserts should not be
+    // shaken by a few frames of visual jitter
     let (cam_x, cam_y, scale) = camera_base(world, height)?;
     let half_w_units = width as f64 / scale / 2.0;
     let half_h_units = height as f64 / scale / 2.0;
 
-    // 焦点（以自我为中心关系的「我」）：Camera.follow 指名的实体。没有就不输出
-    // relative_to_focal、也不按距离排序（退化回槽位序，向后兼容）。
+    // Focal point (the "self" of egocentric relations): the entity named by Camera.follow. When
+    // absent, relative_to_focal is not output and distance sorting is not applied (degrades back to
+    // slot order, backward compatible).
     let focal = focal_of(world);
     let focal_id = focal.map(|(id, _)| id);
 
-    // 收集时带排序键：(有名次序, 到焦点距离, id)。没焦点时距离恒为 0、靠原序兜底。
-    // 主次排序的意图：有名字的实体（玩法主体）排前，再按离焦点近的排前——让模型先读到
-    // 「我」身边最相关的东西。
+    // Collect with sort keys: (named-order, distance-to-focal, id). Without a focal point the
+    // distance is always 0 and the original order is the fallback. The intent of primary/secondary
+    // sorting: named entities (the gameplay subjects) come first, then nearer-to-focal comes first
+    // — let the model read the things most relevant to "me" first.
     struct DescribeRow {
         named: bool,
         dist: f64,
@@ -2520,7 +2706,7 @@ pub fn describe_world_with_assets(
     }
     let mut visible: Vec<DescribeRow> = Vec::new();
     let mut offscreen: Vec<DescribeRow> = Vec::new();
-    let mut rects: Vec<(String, f64, f64, f64, f64)> = Vec::new(); // (id, x, y, w, h) 世界坐标
+    let mut rects: Vec<(String, f64, f64, f64, f64)> = Vec::new(); // (id, x, y, w, h) world coordinates
 
     for id in world.query(&["Position", "Sprite"]) {
         let px = num(world, id, "Position.x")?;
@@ -2555,15 +2741,18 @@ pub fn describe_world_with_assets(
             sprite["image"] = json!(image);
         }
         if rot != 0.0 {
-            // 旋转角进语义观察（缺省 0 不输出——和画面行为一样，没有就是没有）
+            // Rotation angle goes into semantic observation (default 0 is not output — same as the
+            // picture behavior; absent means absent)
             sprite["rot"] = json!(rot);
         }
         entry.insert("sprite".into(), sprite);
 
-        // 以自我为中心关系：相对焦点的方位/距离/同行同列/相邻/遮挡。焦点自己不输出这块
-        // （自己跟自己没关系）；没焦点时整块不出现（向后兼容）。复用 ecs 的世界感知算子
-        // relate_in_world，和 SceneView 同源同值——一次带齐含 blocked（视线被第三方 Solid
-        // 挡没挡）。dist_to_focal 兼作主次排序键（没焦点时为 0）。
+        // Egocentric relations: direction/distance/same-row-same-column/adjacency/occlusion
+        // relative to the focal point. The focal point itself does not output this block (no relation
+        // to itself); without a focal point the whole block is absent (backward compatible). Reuses
+        // the ecs world-perception operator relate_in_world — same source, same value as SceneView,
+        // brought in once with `blocked` included (whether the line of sight is blocked by a third
+        // Solid). dist_to_focal doubles as the primary/secondary sort key (0 when no focal point).
         let mut dist_to_focal = 0.0;
         if let Some((fid, _fplace)) = focal {
             if fid != id {
@@ -2604,13 +2793,14 @@ pub fn describe_world_with_assets(
         }
     }
 
-    // 主次排序（只在有焦点时启用——没焦点排序键无意义，保持槽位序向后兼容）：
-    // 有名字的排前，再按到焦点距离升序，距离平手用 id 兜底——键确定 → 结果逐帧确定。
+    // Primary/secondary sort (only enabled when there is a focal point — without one the sort key
+    // is meaningless, slot order is kept for backward compatibility): named first, then ascending
+    // by distance-to-focal, ties broken by id — deterministic key → deterministic result per frame.
     if focal_id.is_some() {
         let sort_rows = |rows: &mut Vec<DescribeRow>| {
             rows.sort_by(|a, b| {
                 b.named
-                    .cmp(&a.named) // named=true 排前（true > false，反向）
+                    .cmp(&a.named) // named=true first (true > false, reversed)
                     .then(a.dist.total_cmp(&b.dist))
                     .then(a.id.cmp(&b.id))
             });
@@ -2621,15 +2811,16 @@ pub fn describe_world_with_assets(
     let visible: Vec<serde_json::Value> = visible.into_iter().map(|r| r.value).collect();
     let offscreen: Vec<serde_json::Value> = offscreen.into_iter().map(|r| r.value).collect();
 
-    // 屏上文字：内容本身就是语义，agent 不用 OCR 截图
+    // On-screen text: the content itself is the semantics, the agent does not OCR the screenshot
     let mut texts = Vec::new();
-    // 对比度测量候选：只收中心点在屏内、有正字号的（视野外/画不出来的不渲不测）
+    // Contrast-measurement candidates: only collect text whose center is on-screen with a positive
+    // font size (off-screen / undrawable text is neither rendered nor measured)
     struct ContrastCandidate {
         id: vitric_ecs::EntityId,
         content: String,
         color: String,
         size: f64,
-        /// 屏幕像素坐标（与绘制路径同一公式）。
+        /// Screen-pixel coordinates (same formula as the draw path).
         cx: f64,
         cy: f64,
     }
@@ -2662,7 +2853,8 @@ pub fn describe_world_with_assets(
             let sx = width as f64 / 2.0 + dx * scale;
             let sy = height as f64 / 2.0 - dy * scale;
             entry.insert("region".into(), json!(region_word(sx / width as f64, sy / height as f64)));
-            // size 缺失/非正的文字画不出来（render 会报错/跳过），没有"底色"可言，不进对比度测量
+            // Text with missing / non-positive size cannot be drawn (render errors/skips it); it has
+            // no "background" to speak of, so it is excluded from contrast measurement
             let size = world.get_field(id, "Text.size").ok().and_then(Value::as_f64);
             if let Some(size) = size.filter(|s| *s > 0.0) {
                 candidates.push(ContrastCandidate {
@@ -2684,14 +2876,16 @@ pub fn describe_world_with_assets(
         texts.push(serde_json::Value::Object(entry));
     }
 
-    // 文字可读性检查（见函数文档）：屏上有文字才渲帧，否则零额外成本
+    // Text readability check (see the function doc): only render a frame when there is text on
+    // screen, otherwise zero extra cost
     let mut warnings: Vec<Value> = Vec::new();
     let mut warning_lines: Vec<String> = Vec::new();
     for c in &candidates {
-        // 少画这一条文字渲一帧（其余文字照画——文字叠文字时底色也算数），
-        // 相机用 describe 自己的不抖相机，素材宽容模式见 RenderOpts。
-        // tick 固定 0：describe 没有时间概念，测量帧里的粒子按 tick 0 展开
-        //（stream 在 tick 0 几乎没有粒子）——对比度是 lint 不是色彩学，已知近似
+        // Render one frame with this one text omitted (the rest of the text is still drawn — when
+        // text overlaps text the lower text also counts as background). The camera is describe's
+        // own non-shaken camera; lenient image mode see RenderOpts. tick is fixed at 0: describe has
+        // no notion of time, particles in the measurement frame expand at tick 0 (stream has almost
+        // no particles at tick 0) — contrast is a lint, not color science; known approximation
         let frame = render_with(
             world,
             width,
@@ -2701,7 +2895,8 @@ pub fn describe_world_with_assets(
             0,
             &RenderOpts { skip_text: Some(c.id), lenient_images: true },
         )?;
-        // 包围盒按绘制几何估算（与 draw_texts 的两条路径镜像），裁到屏内
+        // Bounding box estimated from draw geometry (mirrors the two paths of draw_texts), clipped
+        // to the screen
         let (half_w, half_h) = match assets.font() {
             Some(font) => {
                 let px_size = FontStore::px_size(c.size, scale);
@@ -2718,7 +2913,7 @@ pub fn describe_world_with_assets(
         let y0 = (c.cy - half_h).floor().max(0.0) as i64;
         let y1 = (c.cy + half_h).ceil().min(height as f64) as i64;
         if x0 >= x1 || y0 >= y1 {
-            continue; // 包围盒裁完没有像素（贴边的极端情形），没东西可测
+            continue; // Bounding box clipped to no pixels (extreme edge-hugging case), nothing to measure
         }
         let mut sum = 0.0;
         for y in y0..y1 {
@@ -2746,9 +2941,10 @@ pub fn describe_world_with_assets(
         }
     }
 
-    // 视觉重叠（画面上谁压着谁）。已知近似：一律按**未旋转尺寸**的 AABB 判相交——
-    // 旋转精灵的精确相交（SAT）对语义观察不值得：方位/坐标/rot 字段已足够 agent 定位，
-    // 边缘误报误漏由像素截图兜底
+    // Visual overlap (who is covering whom on the picture). Known approximation: intersection is
+    // always judged by the **un-rotated-size** AABB — precise intersection of rotated sprites (SAT)
+    // is not worth it for semantic observation: direction/coordinates/rot fields are enough for the
+    // agent to locate things; edge false-positives/false-negatives are caught by the pixel screenshot
     let mut overlaps = Vec::new();
     for i in 0..rects.len() {
         for j in (i + 1)..rects.len() {
@@ -2760,7 +2956,7 @@ pub fn describe_world_with_assets(
         }
     }
 
-    // 一段给 LLM 直接读的中文摘要（结构化字段的浓缩版）
+    // A Chinese summary for the LLM to read directly (condensed version of the structured fields)
     let mut lines = vec![format!(
         "相机({cam_x},{cam_y}) 缩放{scale}，可见世界范围 x∈[{:.0},{:.0}] y∈[{:.0},{:.0}]。可见 {} 个、视野外 {} 个带图形的实体。",
         cam_x - half_w_units, cam_x + half_w_units,
@@ -2792,10 +2988,12 @@ pub fn describe_world_with_assets(
             t["world"]["x"], t["world"]["y"],
         ));
     }
-    // 可读性警告紧跟文字行——agent 读摘要时警告就在出问题的文字旁边
+    // Readability warnings immediately follow the text lines — when the agent reads the summary,
+    // the warning is right next to the problematic text
     lines.extend(warning_lines);
 
-    // 光照设置：开着就让 agent 在文字层面看见全部灯（位置/半径/颜色），不用看像素猜
+    // Lighting settings: when on, let the agent see all the lights at the text level
+    // (position/radius/color) instead of guessing from pixels
     let lighting = match ambient_of(world)? {
         None => None,
         Some((_, ambient_color)) => {
@@ -2804,7 +3002,8 @@ pub fn describe_world_with_assets(
                 "光照开启：环境色 {ambient_color}，{} 盏光源。",
                 lights.len()
             ));
-            // 投影状态也文字化：开着就报遮光体数量，agent 不用数像素猜"影子为什么没出来"
+            // Shadow state is also textualized: when on, report the occluder count; the agent does
+            // not have to count pixels to guess "why didn't a shadow come out"
             let shadows = shadows_of(world)?;
             let occluder_count = if shadows { collect_occluders(world)?.len() } else { 0 };
             if shadows {
@@ -2821,7 +3020,8 @@ pub fn describe_world_with_assets(
                         entry.insert("name".into(), json!(n));
                     }
                     entry.insert("kind".into(), json!(l.kind.name()));
-                    // 平行光没有位置/半径（占位 0 不是真值，不输出免得误导 agent）
+                    // Directional lights have no position/radius (placeholder 0 is not a real value;
+                    // omit it so as not to mislead the agent)
                     if !matches!(l.kind, LightKind::Directional { .. }) {
                         entry.insert("world".into(), json!({"x": l.x, "y": l.y}));
                         entry.insert("radius".into(), json!(l.radius));
@@ -2845,7 +3045,8 @@ pub fn describe_world_with_assets(
         }
     };
 
-    // 泛光设置：开着就把参数文字化——agent 看 describe 就知道后效怎么配的，不用猜像素
+    // Bloom settings: when on, textualize the parameters — the agent reads describe to see how the
+    // post effect is configured, no pixel-guessing needed
     let bloom = bloom_of(world)?;
     if let Some(b) = &bloom {
         lines.push(format!(
@@ -2854,9 +3055,10 @@ pub fn describe_world_with_assets(
         ));
     }
 
-    // 粒子发射器：按发射器汇总一行（粒子不逐个列——它们是纯函数展开的画面装饰，
-    // 不是可观察的世界状态）。describe 没有时间概念：stream 给稳态可见数估算，
-    // burst 给触发字段原值，agent 自己对照当前 tick
+    // Particle emitters: summarize one line per emitter (particles are not listed individually —
+    // they are pure-function-expanded picture decoration, not observable world state). describe has
+    // no notion of time: stream gives a steady-state visible-count estimate, burst gives the raw
+    // trigger field; the agent cross-references the current tick itself
     let emitters = collect_emitters(world)?;
     let mut emitters_json: Vec<Value> = Vec::new();
     for em in &emitters {
@@ -2914,7 +3116,8 @@ pub fn describe_world_with_assets(
     if let Some((ambient_color, lights_json, shadows, occluder_count)) = lighting {
         out["ambient"] = json!({"color": ambient_color});
         out["lights"] = json!(lights_json);
-        // 投影关闭时不出现这两个键——"没有键 = 没开"，和 bloom/warnings 同一约定
+        // When shadows are off these two keys do not appear — "no key = not enabled", same
+        // convention as bloom/warnings
         if shadows {
             out["shadows"] = json!(true);
             out["occluders"] = json!(occluder_count);
@@ -2923,25 +3126,27 @@ pub fn describe_world_with_assets(
     if let Some(b) = &bloom {
         out["bloom"] = json!({"threshold": b.threshold, "strength": b.strength});
     }
-    // 没发射器就不出现 emitters 键——同 bloom/warnings 的"没有键 = 没有"约定
+    // No emitters = no emitters key — same "no key = none" convention as bloom/warnings
     if !emitters_json.is_empty() {
         out["emitters"] = json!(emitters_json);
     }
-    // 没警告就不出现 warnings 键——"没有这个键 = 没发现问题"，agent 不用扫空数组
+    // No warnings = no warnings key — "no key = no problem found", the agent does not scan empty arrays
     if !warnings.is_empty() {
         out["warnings"] = json!(warnings);
     }
-    // 以焦点为中心的 ASCII 格子图：有焦点才加顶层 ascii_map（无 follow 不加 = 向后兼容）。
-    // 和 SceneView 同源（都调 ecs::ascii_map，默认半径/自动推 cell），给模型一张粗略的
-    // 「谁在我哪个方向、隔几格、中间有没有墙(#)」的导航图。
+    // Focal-centered ASCII grid map: only when there is a focal point is the top-level ascii_map
+    // added (no follow = not added = backward compatible). Same source as SceneView (both call
+    // ecs::ascii_map, default radius / auto-derived cell) — gives the model a rough navigation map
+    // of "who is in which direction from me, how many cells away, and whether there is a wall (#) in between".
     if let Some((fid, _)) = focal {
         out["ascii_map"] = ascii_map(world, fid, &AsciiMapOpts::default()).to_json();
     }
     Ok(out)
 }
 
-/// WCAG 相对亮度（输入 sRGB 字节的前 3 通道）：先逆 gamma 线性化再加权
-/// `L = 0.2126R + 0.7152G + 0.0722B`。对比度比值 = `(L1+0.05)/(L2+0.05)`（亮比暗）。
+/// WCAG relative luminance (input is the first 3 channels of an sRGB byte): first inverse-gamma
+/// linearize, then weight `L = 0.2126R + 0.7152G + 0.0722B`. Contrast ratio = `(L1+0.05)/(L2+0.05)`
+/// (brighter over darker).
 fn relative_luminance(rgb: &[u8]) -> f64 {
     let lin = |c: u8| {
         let c = c as f64 / 255.0;
@@ -2950,7 +3155,7 @@ fn relative_luminance(rgb: &[u8]) -> f64 {
     0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2])
 }
 
-/// 屏幕九宫格方位词（输入为 0..1 的屏幕比例坐标）。
+/// Screen 9-region direction word (input is 0..1 screen-ratio coordinates).
 fn region_word(fx: f64, fy: f64) -> &'static str {
     let col = if fx < 1.0 / 3.0 { 0 } else if fx < 2.0 / 3.0 { 1 } else { 2 };
     let row = if fy < 1.0 / 3.0 { 0 } else if fy < 2.0 / 3.0 { 1 } else { 2 };
@@ -2961,7 +3166,7 @@ fn region_word(fx: f64, fy: f64) -> &'static str {
     }
 }
 
-/// 视野外方向词（世界坐标系，y 向上）。
+/// Off-screen direction word (world coordinate system, y up).
 fn direction_word(dx: f64, dy: f64) -> &'static str {
     let horiz = if dx < -0.5 { -1 } else if dx > 0.5 { 1 } else { 0 };
     let vert = if dy < -0.5 { -1 } else if dy > 0.5 { 1 } else { 0 };
@@ -2973,9 +3178,10 @@ fn direction_word(dx: f64, dy: f64) -> &'static str {
     }
 }
 
-/// 相机本体（不含抖动偏移）：取第一个 Camera 实体，没有则原点、8 像素/单位。
-/// 可选 `view_h`（竖向可视世界高度，单位数）> 0 时按视口高度反推像素密度——
-/// 内容占屏比例与分辨率无关，4K 和 720p 看到同样大的世界；否则用 scale（像素/单位）。
+/// Camera body (no shake offset): take the first Camera entity; if none, origin / 8 pixels per unit.
+/// When optional `view_h` (vertical visible world height, in units) > 0, pixel density is back-derived
+/// from the viewport height — content's on-screen ratio is resolution-independent: 4K and 720p see
+/// the same-sized world; otherwise `scale` (pixels per unit) is used.
 fn camera_base(world: &World, viewport_h: u32) -> Result<(f64, f64, f64), String> {
     let cams = world.query(&["Camera"]);
     match cams.first() {
@@ -3000,14 +3206,17 @@ fn camera_base(world: &World, viewport_h: u32) -> Result<(f64, f64, f64), String
     }
 }
 
-/// 焦点实体（以自我为中心关系的「我」）：取第一个 `Camera` 实体的 `follow` 字段
-/// 指名的实体。约定和 vitric-sim 的相机跟随一致——`follow` 是实体名（文本），
-/// 缺省/空串 = 不跟随 = 没有焦点（向后兼容：没焦点时 describe 不输出 relative_to_focal）。
+/// Focal entity (the "self" of egocentric relations): the entity named by the first `Camera`
+/// entity's `follow` field. The convention matches vitric-sim's camera follow — `follow` is an
+/// entity name (text); default/empty string = no follow = no focal point (backward compatible:
+/// without a focal point describe does not output relative_to_focal).
 ///
-/// 返回焦点的 (id, 世界占位)。占位的 w/h 取 `Sprite.w`/`Sprite.h`（缺了当 0，
-/// 相邻判定退化为严格中心重合——比凭空假设尺寸安全）。
-/// follow 指向不存在的实体时返回 `None`（语义观察不该因为配置笔误整帧报错——
-/// 渲染/sim 那边会把这个错暴露出来，describe 只是少输出一块）。
+/// Returns the focal point's (id, world placement). The placement's w/h come from `Sprite.w`/
+/// `Sprite.h` (default 0 if absent — adjacency degrades to strict center coincidence, which is
+/// safer than fabricating a size).
+/// Returns `None` when `follow` points to a non-existent entity (semantic observation should not
+/// fail an entire frame due to a configuration typo — render/sim will surface that error; describe
+/// just omits this block).
 fn focal_of(world: &World) -> Option<(vitric_ecs::EntityId, Placement)> {
     let cam = *world.query(&["Camera"]).first()?;
     let name = world.get_field(cam, "Camera.follow").ok()?.as_str()?.to_string();
@@ -3017,14 +3226,14 @@ fn focal_of(world: &World) -> Option<(vitric_ecs::EntityId, Placement)> {
     let id = world.entity(&name).ok()?;
     let x = num(world, id, "Position.x").ok()?;
     let y = num(world, id, "Position.y").ok()?;
-    // 尺寸可选：没有 Sprite 的焦点（如纯逻辑锚点）w/h 当 0
+    // Size is optional: a focal point without a Sprite (e.g. a pure logic anchor) gets w/h = 0
     let w = world.get_field(id, "Sprite.w").ok().and_then(Value::as_f64).unwrap_or(0.0);
     let h = world.get_field(id, "Sprite.h").ok().and_then(Value::as_f64).unwrap_or(0.0);
     Some((id, Placement::new(x, y, w, h)))
 }
 
-/// 渲染取景相机：本体 + 相机实体上 `Shake` 组件的抖动偏移。
-/// CPU 光栅化和 GPU 路径都从这里取相机——两条路径抖得逐位一致。
+/// Render camera: body + the shake offset from the `Shake` component on the camera entity. Both
+/// the CPU rasterizer and the GPU path take the camera from here — the two paths shake bit-identically.
 pub fn camera_of(world: &World, tick: u64, viewport_h: u32) -> Result<(f64, f64, f64), String> {
     let (mut x, mut y, scale) = camera_base(world, viewport_h)?;
     if let Some(&id) = world.query(&["Camera"]).first() {
@@ -3038,14 +3247,16 @@ pub fn camera_of(world: &World, tick: u64, viewport_h: u32) -> Result<(f64, f64,
     Ok((x, y, scale))
 }
 
-/// 屏幕抖动偏移（世界单位）：(tick, amplitude) 的纯函数，与模拟的 RNG 流完全无关
-/// ——抖屏永远不会扰动 gameplay 的确定性轨迹，快照里也没有额外状态要存。
-/// 实现：SplitMix64 把 tick 打散成 64 位，高/低各 32 位映射到 [-1, 1] 两轴再乘振幅。
+/// Screen shake offset (world units): a pure function of (tick, amplitude), completely independent
+/// of the simulation's RNG stream — shake never perturbs the deterministic gameplay trajectory,
+/// and the snapshot has no extra state to store.
+/// Implementation: SplitMix64 spreads the tick into 64 bits; the high/low 32 bits each map to
+/// [-1, 1] on the two axes, then multiplied by the amplitude.
 pub fn shake_offset(tick: u64, amplitude: f64) -> (f64, f64) {
     if amplitude <= 0.0 {
         return (0.0, 0.0);
     }
-    let z = mix64(tick); // 同一个 SplitMix64（粒子散列共用），运算序列与重构前逐位相同
+    let z = mix64(tick); // Same SplitMix64 (shared with particle hashing); the operation sequence is bit-identical to before the refactor
     let nx = ((z >> 32) as u32 as f64) / (u32::MAX as f64) * 2.0 - 1.0;
     let ny = (z as u32 as f64) / (u32::MAX as f64) * 2.0 - 1.0;
     (nx * amplitude, ny * amplitude)
@@ -3067,9 +3278,10 @@ fn parse_color(s: &str) -> Result<[u8; 4], String> {
     Ok([p(0), p(2), p(4), 255])
 }
 
-/// 颜色解析（带可选 alpha）：`#rrggbb`（不透明）或 `#rrggbbaa`（带透明度）。
-/// UI Panel 背景常要半透明遮罩，所以单独一条支持 8 位 hex；世界精灵/文字仍走
-/// [`parse_color`]（只认 6 位，alpha 恒 255，字节锁死的旧行为不动）。
+/// Color parsing (with optional alpha): `#rrggbb` (opaque) or `#rrggbbaa` (with transparency).
+/// UI Panel backgrounds often need a semi-transparent mask, so this separate path supports 8-digit
+/// hex; world sprites/text still go through [`parse_color`] (only 6 digits, alpha always 255 — the
+/// byte-locked old behavior is unchanged).
 fn parse_color_a(s: &str) -> Result<[u8; 4], String> {
     let hex = s.strip_prefix('#').ok_or_else(|| {
         format!("颜色 {s:?} 格式不对。写法: \"#rrggbb\" 或带透明度 \"#rrggbbaa\"")
@@ -3119,7 +3331,7 @@ mod tests {
     fn camera_moves_the_view() {
         let mut w = world_one_red_sprite();
         let cam = w.spawn();
-        // 相机右移 2 单位 → 精灵在屏幕上左移 2*8=16 像素
+        // Camera moves right 2 units → the sprite moves left 2*8=16 pixels on screen
         w.set_component(cam, "Camera", json!({"x": 2.0, "y": 0.0, "scale": 8.0})).unwrap();
         let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         assert_eq!(pixel(&buf, 64, 32 - 16, 32), [255, 0, 0, 255]);
@@ -3131,14 +3343,15 @@ mod tests {
         let mut w = World::new();
         let e = w.spawn_named("score").unwrap();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
-        // "I" 单字符，4 单位 → 32x32 像素，居中
+        // "I" single character, 4 units → 32x32 pixels, centered
         w.set_component(e, "Text", json!({"content": "I", "size": 4.0, "color": "#00ff00"}))
             .unwrap();
         let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
-        // "I" 的竖干在字形第 2-3 列（8x8 点阵字形偏左），取样打在竖干上
+        // The vertical stroke of "I" is in columns 2-3 of the glyph (the 8x8 bitmap glyph is
+        // left-biased); the sample lands on the stroke
         assert_eq!(pixel(&buf, 64, 25, 32), [0, 255, 0, 255], "竖干处应是字形像素");
         assert_eq!(pixel(&buf, 64, 2, 2), [24, 26, 33, 255]);
-        // 同世界同字节（文字也确定性）
+        // Same world → same bytes (text is also deterministic)
         assert_eq!(buf, render_world(&w, 64, 64, &Assets::empty(), 0).unwrap());
 
         let d = describe_world(&w, 64, 64).unwrap();
@@ -3181,7 +3394,7 @@ mod tests {
 
     #[test]
     fn image_sprite_blits_with_alpha() {
-        // 2x2 贴图：左半红不透明，右半全透明
+        // 2x2 image: left half red opaque, right half fully transparent
         let dir = std::env::temp_dir().join(format!("vitric-blit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -3207,12 +3420,12 @@ mod tests {
             json!({"w": 4.0, "h": 4.0, "color": "#ffffff", "image": "half.png"}),
         )
         .unwrap();
-        // 默认相机 scale=8：精灵占屏幕中央 32x32 像素
+        // Default camera scale=8: the sprite occupies the central 32x32 pixels of the screen
         let buf = render_world(&w, 64, 64, &assets, 0).unwrap();
         assert_eq!(pixel(&buf, 64, 32 - 8, 32), [255, 0, 0, 255], "左半是贴图红");
         assert_eq!(pixel(&buf, 64, 32 + 8, 32), [24, 26, 33, 255], "右半透明 → 透出背景");
 
-        // 引用不存在的图：报错并列出现有素材
+        // Referencing a non-existent image: errors and lists the existing assets
         w.set_field(e, "Sprite.image", json!("ghost.png")).unwrap();
         let err = render_world(&w, 64, 64, &assets, 0).unwrap_err();
         assert!(err.contains("half.png"), "{err}");
@@ -3225,11 +3438,11 @@ mod tests {
         let p = w.spawn_named("player").unwrap();
         w.set_component(p, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(p, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000"})).unwrap();
-        // 跟玩家重叠的金币
+        // A coin overlapping the player
         let c = w.spawn_named("coin").unwrap();
         w.set_component(c, "Position", json!({"x": 0.5, "y": 0.0})).unwrap();
         w.set_component(c, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#ffd84d"})).unwrap();
-        // 视野外左边远处一个
+        // One far off-screen to the left
         let far = w.spawn_named("far-away").unwrap();
         w.set_component(far, "Position", json!({"x": -100.0, "y": 0.0})).unwrap();
         w.set_component(far, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#00ff00"})).unwrap();
@@ -3241,10 +3454,10 @@ mod tests {
         assert_eq!(d["visible"][0]["region"], json!("中心"));
         assert_eq!(d["offscreen"][0]["direction"], json!("左"));
         assert_eq!(d["offscreen"][0]["distance_units"], json!(100.0));
-        // 玩家和金币视觉重叠要被点名
+        // Player and coin visually overlap — must be flagged
         let overlaps = d["overlaps"].as_array().unwrap();
         assert_eq!(overlaps.len(), 1, "{overlaps:?}");
-        // 摘要可直接读
+        // The summary is directly readable
         let text = d["text"].as_str().unwrap();
         assert!(text.contains("player") && text.contains("中心") && text.contains("视野外"), "{text}");
     }
@@ -3258,13 +3471,13 @@ mod tests {
         let above = w.spawn_named("above").unwrap();
         w.set_component(above, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(above, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#00ff00"})).unwrap();
-        // 屏幕中心：两个都覆盖，命中后画的 above
+        // Screen center: both cover it; the later-drawn `above` is hit
         assert_eq!(pick(&w, 64, 64, 32.0, 32.0).unwrap(), Some(above));
-        // 偏一点：只有大的 below 覆盖（above 半宽 1 单位 = 8px）
+        // Slightly offset: only the larger `below` covers it (above half-width = 1 unit = 8px)
         assert_eq!(pick(&w, 64, 64, 32.0 + 12.0, 32.0).unwrap(), Some(below));
-        // 空地
+        // Empty land
         assert_eq!(pick(&w, 64, 64, 2.0, 2.0).unwrap(), None);
-        // 坐标往返
+        // Coordinate round-trip
         let (wx, wy) = screen_to_world(&w, 64, 64, 32.0 + 8.0, 32.0 - 16.0).unwrap();
         assert!((wx - 1.0).abs() < 1e-9 && (wy - 2.0).abs() < 1e-9, "{wx},{wy}");
     }
@@ -3275,11 +3488,12 @@ mod tests {
         let e = w.spawn_named("card").unwrap();
         w.set_component(e, "Position", json!({"x": 3.0, "y": 2.0})).unwrap();
         w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#00ff00"})).unwrap();
-        // 世界坐标直接命中/空地
+        // Direct hit / empty land in world coordinates
         assert_eq!(pick_world(&w, 3.0, 2.0).unwrap(), Some(e));
         assert_eq!(pick_world(&w, 3.9, 1.1).unwrap(), Some(e), "边内要命中");
         assert_eq!(pick_world(&w, 5.5, 2.0).unwrap(), None, "边外是空地");
-        // 与屏幕坐标版同一套判定：屏幕点 → screen_to_world → pick_world 闭环
+        // Same judgment as the screen-coordinate version: screen point → screen_to_world →
+        // pick_world closed loop
         let (wx, wy) = screen_to_world(&w, 64, 64, 32.0 + 24.0, 32.0 - 16.0).unwrap();
         assert_eq!(pick(&w, 64, 64, 32.0 + 24.0, 32.0 - 16.0).unwrap(), pick_world(&w, wx, wy).unwrap());
         assert_eq!(pick_world(&w, wx, wy).unwrap(), Some(e));
@@ -3297,13 +3511,14 @@ mod tests {
         let (w, e) = w_;
         let mut buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         draw_selection_outline(&mut buf, &w, 64, 64, e, 0).unwrap();
-        // 精灵半宽 8px + 2px 外扩 → 描边在 x=32±10
+        // Sprite half-width 8px + 2px outset → outline at x=32±10
         assert_eq!(pixel(&buf, 64, 32 - 10, 32), [39, 192, 168, 255], "左描边");
         assert_eq!(pixel(&buf, 64, 32, 32), [255, 0, 0, 255], "精灵本体不被盖");
     }
 
-    /// 旋转测试用素材：halves.png（2x1，左红右蓝——不对称图案才能看出转没转对）。
-    /// 返回 (素材库, 临时目录)，用完调用方负责删目录。
+    /// Rotation-test asset: halves.png (2x1, left red right blue — an asymmetric pattern is needed
+    /// to see whether rotation is correct). Returns (asset store, temp dir); the caller deletes the
+    /// dir when done.
     fn assets_with_halves(tag: &str) -> (Assets, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("vitric-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3319,7 +3534,7 @@ mod tests {
         (Assets::load_dir(&dir).unwrap(), dir)
     }
 
-    /// 原点处 4x2 的 halves 贴图精灵，可选 rot。
+    /// A 4x2 halves-image sprite at the origin, with optional rot.
     fn world_halves_sprite(rot: Option<f64>) -> World {
         let mut w = World::new();
         let e = w.spawn();
@@ -3334,7 +3549,8 @@ mod tests {
 
     #[test]
     fn rot_zero_takes_fast_path_byte_identical() {
-        // 显式写 rot: 0 必须与压根没有 rot 字段逐字节相同（快路径向后兼容锁死）
+        // Explicit rot: 0 must be byte-identical to having no rot field at all (fast-path backward
+        // compatibility locked down)
         let plain = render_world(&world_one_red_sprite(), 64, 64, &Assets::empty(), 0).unwrap();
         let mut w = World::new();
         let e = w.spawn();
@@ -3342,7 +3558,7 @@ mod tests {
         w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#ff0000", "rot": 0.0}))
             .unwrap();
         assert_eq!(plain, render_world(&w, 64, 64, &Assets::empty(), 0).unwrap());
-        // 贴图精灵同理
+        // Same for image sprites
         let (assets, dir) = assets_with_halves("rot0");
         let plain = render_world(&world_halves_sprite(None), 64, 64, &assets, 0).unwrap();
         let with_field = render_world(&world_halves_sprite(Some(0.0)), 64, 64, &assets, 0).unwrap();
@@ -3352,12 +3568,14 @@ mod tests {
 
     #[test]
     fn rot_90_rotates_pixels_counter_clockwise() {
-        // 4x2 左红右蓝，逆时针转 90°：右边的蓝半边转到画面上方，红半边到下方
+        // 4x2 left-red right-blue, rotated 90° counter-clockwise: the blue right half rotates to
+        // the top of the picture, the red half to the bottom
         let (assets, dir) = assets_with_halves("rot90");
         let buf = render_world(&world_halves_sprite(Some(90.0)), 64, 64, &assets, 0).unwrap();
         assert_eq!(pixel(&buf, 64, 32, 20), [0, 0, 255, 255], "上方是蓝（原来的右半边）");
         assert_eq!(pixel(&buf, 64, 32, 44), [255, 0, 0, 255], "下方是红（原来的左半边）");
-        // 未旋转 AABB 的左右两翼现在是空的——旋转后形状是竖条（占 x 24..40, y 16..48）
+        // The left/right wings of the un-rotated AABB are now empty — the rotated shape is a
+        // vertical bar (occupying x 24..40, y 16..48)
         assert_eq!(pixel(&buf, 64, 20, 32), BACKGROUND, "左翼是背景");
         assert_eq!(pixel(&buf, 64, 44, 32), BACKGROUND, "右翼是背景");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -3365,7 +3583,8 @@ mod tests {
 
     #[test]
     fn rot_180_equals_flipping_both_axes() {
-        // 居中精灵转 180° = 整幅画面两轴同时翻转（逐像素对比）
+        // A centered sprite rotated 180° = the whole picture flipped on both axes at once
+        // (pixel-by-pixel comparison)
         let (assets, dir) = assets_with_halves("rot180");
         let plain = render_world(&world_halves_sprite(None), 64, 64, &assets, 0).unwrap();
         let turned = render_world(&world_halves_sprite(Some(180.0)), 64, 64, &assets, 0).unwrap();
@@ -3383,7 +3602,7 @@ mod tests {
 
     #[test]
     fn rotated_render_is_deterministic() {
-        // 任意角度（三角函数路径）同世界同 tick → 字节逐位相同
+        // Arbitrary angle (trig path) same world same tick → bit-identical bytes
         let mut w = World::new();
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.5, "y": -0.25})).unwrap();
@@ -3400,11 +3619,13 @@ mod tests {
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(e, "Sprite", json!({"w": 4.0, "h": 2.0, "color": "#ff0000", "rot": 90.0}))
             .unwrap();
-        // 屏幕 (32,18) = 世界 (0, 1.75)：未旋转 AABB 之外（h=2），旋转后竖条之内 → 命中
+        // Screen (32,18) = world (0, 1.75): outside the un-rotated AABB (h=2), inside the rotated
+        // vertical bar → hit
         assert_eq!(pick(&w, 64, 64, 32.0, 18.0).unwrap(), Some(e), "旋转后的形状内要命中");
-        // 屏幕 (46,32) = 世界 (1.75, 0)：未旋转 AABB 之内（w=4），旋转后已是空地 → 不命中
+        // Screen (46,32) = world (1.75, 0): inside the un-rotated AABB (w=4), but after rotation
+        // already empty land → no hit
         assert_eq!(pick(&w, 64, 64, 46.0, 32.0).unwrap(), None, "转走了的区域不该命中");
-        // 对照组：rot 归零后两个判定正好反过来
+        // Control group: with rot reset to 0 the two verdicts are exactly reversed
         w.set_field(e, "Sprite.rot", json!(0.0)).unwrap();
         assert_eq!(pick(&w, 64, 64, 32.0, 18.0).unwrap(), None);
         assert_eq!(pick(&w, 64, 64, 46.0, 32.0).unwrap(), Some(e));
@@ -3419,14 +3640,15 @@ mod tests {
             .unwrap();
         let d = describe_world(&w, 64, 64).unwrap();
         assert_eq!(d["visible"][0]["sprite"]["rot"], json!(45.0));
-        // 不旋转的精灵不带 rot 字段
+        // Non-rotated sprites do not carry a rot field
         let d0 = describe_world(&world_one_red_sprite(), 64, 64).unwrap();
         assert!(d0["visible"][0]["sprite"].get("rot").is_none());
     }
 
     #[test]
     fn selection_outline_uses_rotated_bbox() {
-        // 4x2 转 90° → 旋转后包围盒约 2x4（世界单位）：描边贴竖条，不贴原始横条
+        // 4x2 rotated 90° → the rotated bounding box is about 2x4 (world units): the outline hugs
+        // the vertical bar, not the original horizontal bar
         let mut w = World::new();
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
@@ -3434,22 +3656,24 @@ mod tests {
             .unwrap();
         let mut buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         draw_selection_outline(&mut buf, &w, 64, 64, e, 0).unwrap();
-        // 旋转后半宽 1 单位 = 8px + 2px 外扩 → 左描边在 x≈22（2px 厚，取靠内那列避开浮点边界）
+        // After rotation half-width 1 unit = 8px + 2px outset → left outline at x≈22 (2px thick;
+        // take the inner column to avoid floating-point boundaries)
         assert_eq!(pixel(&buf, 64, 22, 32), [39, 192, 168, 255], "左描边贴竖条");
-        // 未旋转尺寸的描边位置（32-18=14）应是背景——证明用的是旋转后的包围盒
+        // The outline position for the un-rotated size (32-18=14) should be background — proves the
+        // rotated bounding box is what's used
         assert_eq!(pixel(&buf, 64, 14, 32), BACKGROUND, "老位置不该有描边");
-        // 上描边：旋转后半高 2 单位 = 16px + 2px → y=14 起两行
+        // Top outline: after rotation half-height 2 units = 16px + 2px → y=14 for two rows
         assert_eq!(pixel(&buf, 64, 32, 15), [39, 192, 168, 255], "上描边随包围盒抬高");
         assert_eq!(pixel(&buf, 64, 32, 32), [255, 0, 0, 255], "精灵本体不被盖");
     }
 
     #[test]
     fn shake_offset_is_pure_function_of_tick_and_amplitude() {
-        // 同 (tick, amplitude) → 同偏移（纯函数，没有隐藏状态）
+        // Same (tick, amplitude) → same offset (pure function, no hidden state)
         assert_eq!(shake_offset(7, 0.5), shake_offset(7, 0.5));
-        // 不同 tick → 偏移变（不然抖动是冻住的）
+        // Different tick → offset changes (otherwise shake is frozen)
         assert_ne!(shake_offset(7, 0.5), shake_offset(8, 0.5));
-        // 偏移每轴不超振幅；amplitude=0 → 零偏移
+        // Offset per axis does not exceed amplitude; amplitude=0 → zero offset
         let (dx, dy) = shake_offset(123, 0.5);
         assert!(dx.abs() <= 0.5 && dy.abs() <= 0.5, "({dx},{dy})");
         assert_eq!(shake_offset(123, 0.0), (0.0, 0.0));
@@ -3457,18 +3681,19 @@ mod tests {
 
     #[test]
     fn view_h_makes_zoom_resolution_independent() {
-        // view_h=8:不管视口多少像素,竖向永远看到 8 个世界单位——内容占屏比例恒定
+        // view_h=8: regardless of viewport pixel count, vertically you always see 8 world units —
+        // the content's on-screen ratio is constant
         let mut w = world_one_red_sprite();
         let cam = w.spawn();
         w.set_component(cam, "Camera", json!({"x": 0.0, "y": 0.0, "scale": 8.0, "view_h": 8.0}))
             .unwrap();
         assert_eq!(camera_of(&w, 0, 80).unwrap().2, 10.0, "80px/8单位=10像素每单位");
         assert_eq!(camera_of(&w, 0, 160).unwrap().2, 20.0, "分辨率翻倍像素密度翻倍");
-        // 2x2 的精灵在 view_h=8 下永远占竖向 1/4,与分辨率无关
+        // A 2x2 sprite under view_h=8 always occupies 1/4 of the vertical, regardless of resolution
         for vh in [64u32, 128] {
             let buf = render_world(&w, vh, vh, &Assets::empty(), 0).unwrap();
             let bg = [24, 26, 33, 255];
-            let top = (vh as f64 * (0.5 - 1.0 / 8.0)) as u32; // 精灵上缘
+            let top = (vh as f64 * (0.5 - 1.0 / 8.0)) as u32; // Sprite top edge
             assert_eq!(pixel(&buf, vh, vh / 2, top + 1), [255, 0, 0, 255]);
             assert_eq!(pixel(&buf, vh, vh / 2, top - 1), bg);
         }
@@ -3487,15 +3712,16 @@ mod tests {
         let (dx, dy) = shake_offset(7, 0.5);
         assert_eq!(shaken, (1.0 + dx, 2.0 + dy, 8.0), "取景 = 相机本体 + shake_offset");
 
-        // 渲染整帧也确定：同 tick 逐字节相同，抖动 tick 间像素不同
+        // Rendering the whole frame is also deterministic: same tick → byte-identical; pixels
+        // differ between shake ticks
         let f7 = render_world(&w, 64, 64, &Assets::empty(), 7).unwrap();
         assert_eq!(f7, render_world(&w, 64, 64, &Assets::empty(), 7).unwrap());
         assert_ne!(f7, render_world(&w, 64, 64, &Assets::empty(), 8).unwrap());
 
-        // amplitude 归零 → 偏移消失，取景回到相机本体
+        // amplitude zero → offset vanishes, framing returns to the camera body
         w.set_field(cam, "Shake.amplitude", json!(0.0)).unwrap();
         assert_eq!(camera_of(&w, 7, 64).unwrap(), (1.0, 2.0, 8.0));
-        // 语义观察/点选永远读不抖的相机
+        // Semantic observation / picking always reads the non-shaken camera
         w.set_field(cam, "Shake.amplitude", json!(0.5)).unwrap();
         let d = describe_world(&w, 64, 64).unwrap();
         assert_eq!(d["camera"], json!({"x": 1.0, "y": 2.0, "scale": 8.0}));
@@ -3503,7 +3729,8 @@ mod tests {
 
     #[test]
     fn lighting_brightens_near_light_and_is_deterministic() {
-        // 暗环境 + 一盏白灯在原点：近灯像素比远处亮，且逐字节确定
+        // Dark ambient + one white light at the origin: pixels near the light are brighter than
+        // far ones, and the output is byte-deterministic
         let mut w = World::new();
         let amb = w.spawn();
         w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
@@ -3514,16 +3741,18 @@ mod tests {
         let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         let near = pixel(&buf, 64, 32, 32);
         let far = pixel(&buf, 64, 2, 2);
-        // 灯半径 4 单位 × scale 8 = 32px：角落在半径外 → 环境黑 = 全黑
+        // Light radius 4 units × scale 8 = 32px: the corner is outside the radius → ambient black
+        // = all black
         assert_eq!(far, [0, 0, 0, 255], "半径外只剩环境光（纯黑）");
         assert!(near[0] > far[0] && near[2] > far[2], "近灯应更亮: {near:?} vs {far:?}");
-        // 同世界同 tick → 字节逐位相同
+        // Same world same tick → bit-identical bytes
         assert_eq!(buf, render_world(&w, 64, 64, &Assets::empty(), 0).unwrap());
     }
 
     #[test]
     fn no_ambient_entity_skips_lighting_entirely() {
-        // 有灯没 Ambient = 光照整体关闭：和没灯的世界渲出同样的字节（向后兼容）
+        // Lights without Ambient = lighting entirely off: renders the same bytes as a world with
+        // no lights (backward compatible)
         let plain = render_world(&world_one_red_sprite(), 64, 64, &Assets::empty(), 0).unwrap();
         let mut w = world_one_red_sprite();
         let lamp = w.spawn();
@@ -3534,19 +3763,20 @@ mod tests {
 
     #[test]
     fn lighting_formula_clamps_at_1_5_and_white_ambient_is_identity() {
-        // 公式锁死：lit = min(ambient + Σ 贡献, 1.5)，out = min(scene·lit, 1)
+        // Formula locked: lit = min(ambient + Σ contributions, 1.5), out = min(scene·lit, 1)
         let mut w = World::new();
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
-        // #646464 = (100,100,100)：过曝上限 1.5 → 100*1.5 = 150，数值可精确断言
+        // #646464 = (100,100,100): overexposure cap 1.5 → 100*1.5 = 150, the value can be asserted
+        // exactly
         w.set_component(e, "Sprite", json!({"w": 2.0, "h": 2.0, "color": "#646464"})).unwrap();
         let amb = w.spawn();
         w.set_component(amb, "Ambient", json!({"color": "#ffffff"})).unwrap();
-        // 白环境光（lit=1.0）且没灯 = 恒等变换，字节不变
+        // White ambient (lit=1.0) with no lights = identity transform, bytes unchanged
         let lit = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         assert_eq!(pixel(&lit, 64, 32, 32), [100, 100, 100, 255], "白环境光不改像素");
         assert_eq!(pixel(&lit, 64, 2, 2), [24, 26, 33, 255], "背景也不变");
-        // 加一盏强灯：白环境 1.0 + 大贡献 → 夹到 1.5 → 100*1.5=150
+        // Add a strong light: white ambient 1.0 + large contribution → clamped to 1.5 → 100*1.5=150
         let lamp = w.spawn();
         w.set_component(lamp, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(lamp, "Light", json!({"radius": 100.0, "intensity": 10.0})).unwrap();
@@ -3566,7 +3796,7 @@ mod tests {
         }
         let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
         assert!(err.contains("65") && err.contains("64"), "{err}");
-        // 半径非法也要显式报
+        // Invalid radius must also be an explicit error
         let mut w2 = World::new();
         let a2 = w2.spawn();
         w2.set_component(a2, "Ambient", json!({"color": "#202838"})).unwrap();
@@ -3597,12 +3827,13 @@ mod tests {
         assert_eq!(lights[0]["color"], json!("#ff8800"));
         let text = d["text"].as_str().unwrap();
         assert!(text.contains("光照开启") && text.contains("#202838") && text.contains("1 盏"), "{text}");
-        // 没 Ambient：describe 里不出现光照字段
+        // No Ambient: lighting fields do not appear in describe
         let d = describe_world(&World::new(), 64, 64).unwrap();
         assert!(d.get("ambient").is_none() && d.get("lights").is_none());
     }
 
-    /// 黑环境 + 一盏可配 kind 的灯（原点）——聚光/平行光测试的公共脚手架。
+    /// Dark ambient + one configurable-kind light (at the origin) — shared scaffold for spot /
+    /// directional light tests.
     fn world_dark_with_light(light: Value) -> World {
         let mut w = World::new();
         let amb = w.spawn();
@@ -3615,7 +3846,8 @@ mod tests {
 
     #[test]
     fn point_light_with_explicit_kind_matches_no_kind_byte_for_byte() {
-        // kind:"point" 显式写出 = 不写 kind 的旧点光源，输出逐字节相同（快路径不变）
+        // Explicit kind:"point" = the old point light without a kind field; output is byte-identical
+        // (fast path unchanged)
         let implicit = render_world(
             &world_dark_with_light(json!({"radius": 4.0})),
             64,
@@ -3637,9 +3869,10 @@ mod tests {
 
     #[test]
     fn spot_light_lights_cone_and_rotates_with_dir() {
-        // 灯在原点（像素 32,32）、半径 4 单位 = 32px、锥角 90°、朝 +x（dir=0）。
-        // 像素 (40,32) 和 (32,40) 到灯心距离严格相等（dx/dy 对称），只差方向：
-        // (40,32) 在 +x 锥内 → 亮；(32,40) 在 -y 方向（Δθ≈87° > 半角 45°）→ 锥外全黑
+        // Light at the origin (pixel 32,32), radius 4 units = 32px, cone angle 90°, facing +x
+        // (dir=0). Pixels (40,32) and (32,40) are at strictly equal distance from the light center
+        // (dx/dy symmetric), differing only in direction: (40,32) is inside the +x cone → lit;
+        // (32,40) is in the -y direction (Δθ≈87° > half-angle 45°) → outside the cone, all black
         let spot = |dir: f64| {
             json!({"radius": 4.0, "kind": "spot", "angle": 90.0, "dir": dir, "intensity": 1.0})
         };
@@ -3649,13 +3882,14 @@ mod tests {
         let outside = pixel(&buf, 64, 32, 40);
         assert_eq!(outside, [0, 0, 0, 255], "锥外同距离像素只剩环境黑");
         assert!(inside[0] > 0 && inside[1] > 0 && inside[2] > 0, "锥内该被照亮: {inside:?}");
-        // 锥跟着 dir 转：dir=90（世界 +y = 画面上方）→ 上方亮、原来 +x 的像素掉出锥外
+        // The cone rotates with dir: dir=90 (world +y = top of the picture) → the top is lit, and
+        // the previously +x pixel falls outside the cone
         let buf = render_world(&world_dark_with_light(spot(90.0)), 64, 64, &Assets::empty(), 0)
             .unwrap();
         assert!(pixel(&buf, 64, 32, 24)[0] > 0, "dir=90 后画面上方在锥内");
         assert_eq!(pixel(&buf, 64, 40, 32), [0, 0, 0, 255], "+x 方向掉出锥外（Δθ=90° > 45°）");
         assert_eq!(pixel(&buf, 64, 32, 40), [0, 0, 0, 255], "画面下方仍是锥外");
-        // 确定性：同世界同 tick → 字节逐位相同
+        // Determinism: same world, same tick → bit-identical
         assert_eq!(
             buf,
             render_world(&world_dark_with_light(spot(90.0)), 64, 64, &Assets::empty(), 0).unwrap()
@@ -3667,26 +3901,26 @@ mod tests {
         let render = |light: Value| {
             render_world(&world_dark_with_light(light), 64, 64, &Assets::empty(), 0).unwrap_err()
         };
-        // 未知 kind：报错列出全部合法取值
+        // Unknown kind: error lists all legal values
         let err = render(json!({"radius": 4.0, "kind": "cone"}));
         assert!(
             err.contains("point") && err.contains("spot") && err.contains("directional"),
             "{err}"
         );
-        // kind 不是文本
+        // kind is not text
         let err = render(json!({"radius": 4.0, "kind": 1}));
         assert!(err.contains("Light.kind"), "{err}");
-        // 聚光灯缺 angle / 缺 dir：显式报错带写法
+        // Spot light missing angle / missing dir: explicit error with usage hint
         let err = render(json!({"radius": 4.0, "kind": "spot", "dir": 0.0}));
         assert!(err.contains("angle"), "{err}");
         let err = render(json!({"radius": 4.0, "kind": "spot", "angle": 60.0}));
         assert!(err.contains("dir"), "{err}");
-        // angle 越界（锥角全宽 1..=360）
+        // angle out of range (cone full-width 1..=360)
         for bad in [0.5, 361.0, -90.0] {
             let err = render(json!({"radius": 4.0, "kind": "spot", "angle": bad, "dir": 0.0}));
             assert!(err.contains("1..=360") && err.contains("Light.angle"), "{err}");
         }
-        // point/spot 必须有 Position（平行光才允许没有）
+        // point/spot must have Position (only directional is allowed to omit it)
         let mut w = World::new();
         let amb = w.spawn();
         w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
@@ -3694,7 +3928,8 @@ mod tests {
         w.set_component(lamp, "Light", json!({"radius": 4.0})).unwrap();
         let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
         assert!(err.contains("Position") && err.contains("directional"), "{err}");
-        // 平行光也占 64 盏配额：65 盏平行光显式报错
+        // Directional lights also count against the 64-light quota: 65 directional lights is an
+        // explicit error
         let mut w = World::new();
         let amb = w.spawn();
         w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
@@ -3708,13 +3943,13 @@ mod tests {
 
     #[test]
     fn directional_light_brightens_uniformly_without_position() {
-        // 平行光不需要 Position；贡献处处 = color·intensity，与离任何东西的距离无关。
-        // 黑环境 + 白色平行光 intensity 0.5 → 每个像素 = 原像素 × 0.5（精确可断言）
+        // Directional lights do not need Position; contribution is everywhere = color·intensity, independent of distance to anything.
+        // Dark ambient + white directional light intensity 0.5 → each pixel = original pixel × 0.5 (exactly assertable)
         let plain = render_world(&world_one_red_sprite(), 64, 64, &Assets::empty(), 0).unwrap();
         let mut w = world_one_red_sprite();
         let amb = w.spawn();
         w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
-        let sun = w.spawn(); // 不挂 Position——平行光在无穷远
+        let sun = w.spawn(); // No Position attached — directional light is at infinity
         w.set_component(sun, "Light", json!({"kind": "directional", "dir": 270.0, "intensity": 0.5}))
             .unwrap();
         let lit = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
@@ -3723,7 +3958,7 @@ mod tests {
                 if i % 4 == 3 { 255 } else { (plain[i] as f64 * 0.5).min(255.0) as u8 };
             assert_eq!(lit[i], expect, "字节 {i}：平行光对全画面是同一个倍率");
         }
-        // 对照：只有黑环境（没平行光）= 全黑——亮度差全部来自平行光
+        // Control: only dark ambient (no directional light) = all black — the brightness difference comes entirely from the directional light
         let mut w2 = world_one_red_sprite();
         let amb2 = w2.spawn();
         w2.set_component(amb2, "Ambient", json!({"color": "#000000"})).unwrap();
@@ -3753,22 +3988,22 @@ mod tests {
         let d = describe_world(&w, 64, 64).unwrap();
         let lights = d["lights"].as_array().unwrap();
         assert_eq!(lights.len(), 3);
-        // 点光源：kind 总是给出（旧场景没写 kind 也报 "point"），没有 angle/dir
+        // Point light: kind is always present (old scenes without kind also report "point"), no angle/dir
         assert_eq!(lights[0]["kind"], json!("point"));
         assert!(lights[0].get("angle").is_none() && lights[0].get("dir").is_none());
-        // 聚光灯：kind + angle + dir + world/radius
+        // Spot light: kind + angle + dir + world/radius
         assert_eq!(lights[1]["kind"], json!("spot"));
         assert_eq!(lights[1]["angle"], json!(60.0));
         assert_eq!(lights[1]["dir"], json!(90.0));
         assert_eq!(lights[1]["radius"], json!(8.0));
-        // 平行光：kind + dir，没有 world/radius（占位 0 不是真值，不输出）
+        // Directional light: kind + dir, no world/radius (placeholder 0 is not a real value, not emitted)
         assert_eq!(lights[2]["kind"], json!("directional"));
         assert_eq!(lights[2]["dir"], json!(270.0));
         assert!(lights[2].get("world").is_none() && lights[2].get("radius").is_none());
         assert!(d["text"].as_str().unwrap().contains("3 盏"), "{}", d["text"]);
     }
 
-    /// 写一张纯色 RGBA PNG（法线贴图测试素材用）。
+    /// Write a solid-color RGBA PNG (used as normal-map test asset).
     fn write_solid_png(path: &std::path::Path, w: u32, h: u32, rgba: [u8; 4]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let file = std::fs::File::create(path).unwrap();
@@ -3779,7 +4014,7 @@ mod tests {
         enc.write_header().unwrap().write_image_data(&pixels).unwrap();
     }
 
-    /// 法线测试素材：纯白漫反射 hero.png + 指定法线色的 hero_n.png（整张同一向量）。
+    /// Normal-map test asset: pure-white diffuse hero.png + hero_n.png with the specified normal color (whole image, single vector).
     fn assets_with_normal(tag: &str, normal_rgba: [u8; 4]) -> (Assets, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("vitric-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3788,7 +4023,7 @@ mod tests {
         (Assets::load_dir(&dir).unwrap(), dir)
     }
 
-    /// 黑环境 + 一盏白点光（世界坐标 lx,ly，半径 20）+ 原点 4x4 贴图精灵（可选 rot）。
+    /// Dark ambient + one white point light (world coords lx,ly, radius 20) + a 4x4 textured sprite at the origin (optional rot).
     fn world_normal_scene(lx: f64, ly: f64, rot: Option<f64>) -> World {
         let mut w = World::new();
         let amb = w.spawn();
@@ -3808,8 +4043,8 @@ mod tests {
 
     #[test]
     fn normal_mapped_sprite_lit_side_brighter_than_shadow_side() {
-        // 法线整张朝左（r=0 → nx=-1）：灯在左 = 迎光亮，灯在右 = 背光黑。
-        // 两盏灯到精灵中心距离相同——亮度差全部来自 max(dot(N,L),0)
+        // Normal points left across the whole image (r=0 → nx=-1): light on the left = lit side bright, light on the right = back side dark.
+        // The two lights are at equal distance from the sprite center — the brightness difference comes entirely from max(dot(N,L),0)
         let (assets, dir) = assets_with_normal("nlit", [0, 128, 255, 255]);
         let lit = render_world(&world_normal_scene(-8.0, 0.0, None), 64, 64, &assets, 0).unwrap();
         let dark = render_world(&world_normal_scene(8.0, 0.0, None), 64, 64, &assets, 0).unwrap();
@@ -3817,18 +4052,18 @@ mod tests {
         let shadow_px = pixel(&dark, 64, 32, 32);
         assert!(bright_px[0] > 60, "迎光面应明显被照亮: {bright_px:?}");
         assert_eq!(shadow_px, [0, 0, 0, 255], "背光面 dot<0 夹到 0 = 只剩环境黑");
-        // 确定性：同世界同 tick → 字节逐位相同
+        // Determinism: same world, same tick → bit-identical
         assert_eq!(lit, render_world(&world_normal_scene(-8.0, 0.0, None), 64, 64, &assets, 0).unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn flat_normal_still_gets_lit_by_z_lift() {
-        // 平面法线 (128,128,255)≈(0,0,1)：靠 L.z=0.6 的抬升仍被照亮，但偏离灯心的像素
-        // 比"没有法线"的同场景暗（老公式没有 dot 因子）——锁住 z_lift 语义
+        // Flat normal (128,128,255)≈(0,0,1): still lit thanks to the L.z=0.6 lift, but pixels away from the light center
+        // are darker than the same scene "without a normal map" (the old formula has no dot factor) — locks the z_lift semantics
         let (assets, dir) = assets_with_normal("nflat", [128, 128, 255, 255]);
         let with_n = render_world(&world_normal_scene(-8.0, 0.0, None), 64, 64, &assets, 0).unwrap();
-        // 对照组：同一场景但素材没有 _n 配对
+        // Control group: same scene but the asset has no _n pairing
         let plain_dir = std::env::temp_dir().join(format!("vitric-nflatp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&plain_dir);
         write_solid_png(&plain_dir.join("hero.png"), 2, 2, [255, 255, 255, 255]);
@@ -3844,7 +4079,7 @@ mod tests {
 
     #[test]
     fn pixels_without_normals_stay_byte_identical_under_lighting() {
-        // 1) 纯色精灵 + 光照：素材仓库里有没有 _n 文件不改一个字节
+        // 1) Solid sprite + lighting: whether the asset store has a _n file or not changes not a single byte
         let mut w = World::new();
         let amb = w.spawn();
         w.set_component(amb, "Ambient", json!({"color": "#404040"})).unwrap();
@@ -3860,7 +4095,7 @@ mod tests {
             render_world(&w, 64, 64, &assets, 0).unwrap(),
             "没引用法线精灵的场景：字节与空素材仓库逐位相同"
         );
-        // 2) 法线精灵被后画的纯色块完全盖住：盖住的像素按"没有法线"打光（法线被覆盖清掉）
+        // 2) A normal-mapped sprite fully covered by a solid block drawn later: covered pixels are lit as "having no normal map" (the normal is cleared by the cover)
         let mut covered = world_normal_scene(-8.0, 0.0, None);
         let cover = covered.spawn();
         covered.set_component(cover, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
@@ -3884,8 +4119,8 @@ mod tests {
 
     #[test]
     fn rotation_rotates_normals_with_the_sprite() {
-        // 法线整张朝上（g=0 → ny=-1，屏幕 y 向下）。逆时针转 90° 后法线朝左：
-        // 「90° 精灵 + 左灯」 ≈ 「不转 + 上灯」（两盏灯到中心距离相同，逐像素近似相等）
+        // Normal points up across the whole image (g=0 → ny=-1, screen y is downward). After a 90° counter-clockwise rotation the normal points left:
+        // "90° sprite + left light" ≈ "unrotated + top light" (the two lights are at equal distance from the center, roughly equal pixel by pixel)
         let (assets, dir) = assets_with_normal("nrot", [128, 0, 255, 255]);
         let up_lit = render_world(&world_normal_scene(0.0, 8.0, None), 64, 64, &assets, 0).unwrap();
         let rot_lit =
@@ -3899,7 +4134,7 @@ mod tests {
             );
         }
         assert!(a[0] > 60, "迎光面确实亮着（不是两边都黑的虚假相等）: {a:?}");
-        // 对照：转了 90° 之后顶灯不再正对法线 → 比左灯暗（旋转真的改了方向）
+        // Control: after the 90° rotation the top light no longer faces the normal head-on → darker than the left light (rotation really changed the direction)
         let rot_wrong =
             render_world(&world_normal_scene(0.0, 8.0, Some(90.0)), 64, 64, &assets, 0).unwrap();
         let wrong = pixel(&rot_wrong, 64, 32, 32);
@@ -3907,7 +4142,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// 泛光测试场景：中央 2x2 纯白精灵（亮部），可选挂 Bloom。
+    /// Bloom test scene: a 2x2 pure-white sprite at the center (bright area), with an optional Bloom component.
     fn world_bright_sprite(bloom: Option<(f64, f64)>) -> World {
         let mut w = World::new();
         let e = w.spawn();
@@ -3923,23 +4158,23 @@ mod tests {
 
     #[test]
     fn bloom_halo_brightens_outside_sprite_and_scales_with_strength() {
-        // 白精灵占屏幕中央 24..40：精灵矩形**之外**的像素要被光晕照亮
+        // The white sprite occupies the screen center 24..40: pixels **outside** the sprite rect should be lit by the halo
         let plain = render_world(&world_bright_sprite(None), 64, 64, &Assets::empty(), 0).unwrap();
         let lit = render_world(&world_bright_sprite(Some((0.5, 1.0))), 64, 64, &Assets::empty(), 0)
             .unwrap();
-        // 紧贴精灵右缘外侧（半径 2px、3 次迭代 → 扩散约 6px）：无泛光时是背景
+        // Just outside the sprite's right edge (radius 2px, 3 iterations → spreads ~6px): without bloom this is background
         let halo = pixel(&lit, 64, 42, 32);
         let bg = pixel(&plain, 64, 42, 32);
         assert_eq!(bg, BACKGROUND, "对照组：泛光关时精灵外是背景");
         assert!(halo[0] > bg[0] && halo[1] > bg[1] && halo[2] > bg[2], "光晕该比背景亮: {halo:?}");
-        // 远角不受影响（光晕是局部的）
+        // Far corners are unaffected (the halo is local)
         assert_eq!(pixel(&lit, 64, 2, 2), BACKGROUND, "远处仍是背景");
-        // strength 越大光晕越亮
+        // Larger strength → brighter halo
         let stronger =
             render_world(&world_bright_sprite(Some((0.5, 3.0))), 64, 64, &Assets::empty(), 0)
                 .unwrap();
         assert!(pixel(&stronger, 64, 42, 32)[0] > halo[0], "strength 大光晕更亮");
-        // 确定性：同世界同 tick → 字节逐位相同
+        // Determinism: same world, same tick → bit-identical
         assert_eq!(
             lit,
             render_world(&world_bright_sprite(Some((0.5, 1.0))), 64, 64, &Assets::empty(), 0)
@@ -3949,13 +4184,13 @@ mod tests {
 
     #[test]
     fn bloom_threshold_one_changes_nothing() {
-        // threshold=1.0：没有通道能超过 255 → 亮部全零 → 字节与无 Bloom 实体逐位相同
+        // threshold=1.0: no channel can exceed 255 → bright area all zero → bytes bit-identical to an entity without Bloom
         let plain = render_world(&world_bright_sprite(None), 64, 64, &Assets::empty(), 0).unwrap();
         let capped =
             render_world(&world_bright_sprite(Some((1.0, 2.0))), 64, 64, &Assets::empty(), 0)
                 .unwrap();
         assert_eq!(plain, capped);
-        // strength=0 同理：加 0 不改字节（u8→f32→u8 往返精确）
+        // strength=0 likewise: adding 0 changes no byte (u8→f32→u8 round-trip is exact)
         let zero = render_world(&world_bright_sprite(Some((0.5, 0.0))), 64, 64, &Assets::empty(), 0)
             .unwrap();
         assert_eq!(plain, zero);
@@ -3971,17 +4206,17 @@ mod tests {
 
     #[test]
     fn bloom_params_are_validated_explicitly() {
-        // threshold 越界
+        // threshold out of range
         let mut w = World::new();
         let b = w.spawn();
         w.set_component(b, "Bloom", json!({"threshold": 1.5, "strength": 1.0})).unwrap();
         let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
         assert!(err.contains("Bloom.threshold"), "{err}");
-        // strength 为负
+        // strength negative
         w.set_component(b, "Bloom", json!({"threshold": 0.5, "strength": -1.0})).unwrap();
         let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
         assert!(err.contains("Bloom.strength"), "{err}");
-        // 字段缺失：显式报错并给写法
+        // Missing field: explicit error with the correct usage
         w.set_component(b, "Bloom", json!({"threshold": 0.5})).unwrap();
         let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
         assert!(err.contains("strength") && err.contains("threshold"), "{err}");
@@ -3993,14 +4228,14 @@ mod tests {
         let d = describe_world(&w, 64, 64).unwrap();
         assert_eq!(d["bloom"], json!({"threshold": 0.6, "strength": 0.8}));
         assert!(d["text"].as_str().unwrap().contains("泛光开启"), "{}", d["text"]);
-        // 没 Bloom：describe 里不出现泛光字段
+        // No Bloom: the bloom field does not appear in describe
         let d = describe_world(&world_bright_sprite(None), 64, 64).unwrap();
         assert!(d.get("bloom").is_none());
         assert!(!d["text"].as_str().unwrap().contains("泛光"));
     }
 
-    /// 测试用 TTF：book 示例 vendored 的 DejaVu Sans（Bitstream Vera 许可，
-    /// 见 examples/book/fonts/LICENSE）。
+    /// Test TTF: the DejaVu Sans vendored with the book example (Bitstream Vera license,
+    /// see examples/book/fonts/LICENSE).
     fn test_font_path() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/book/fonts/DejaVuSans.ttf")
@@ -4021,7 +4256,7 @@ mod tests {
         w
     }
 
-    /// 收集所有非背景像素的坐标。
+    /// Collect the coordinates of all non-background pixels.
     fn non_background(buf: &[u8], width: u32, height: u32) -> Vec<(u32, u32)> {
         let mut out = Vec::new();
         for y in 0..height {
@@ -4036,7 +4271,7 @@ mod tests {
 
     #[test]
     fn no_font_keeps_bitmap_path_byte_identical() {
-        // 素材仓库不挂字体 = 点阵旧行为：与 Assets::empty() 渲出的字节逐位相同
+        // No font attached to the asset store = old bitmap behavior: bit-identical to what Assets::empty() renders
         let w = world_with_text("SCORE 42");
         let dir = std::env::temp_dir().join(format!("vitric-nofont-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -4057,19 +4292,19 @@ mod tests {
         let buf = render_world(&w, 96, 96, &assets, 0).unwrap();
         let hits = non_background(&buf, 96, 96);
         assert!(!hits.is_empty(), "矢量文字应画出像素");
-        // size=3、scale=8 → 字号 24px：所有文字像素都该落在 Position（屏幕中心）附近
-        // 的包围盒里（横向按两字符比例宽放余量，竖向按字号一半放余量）
+        // size=3, scale=8 → font size 24px: all text pixels should fall inside the bounding box near Position (screen center)
+        // (horizontal margin scaled by the two-character ratio, vertical margin by half the font size)
         for &(x, y) in &hits {
             assert!((24..=72).contains(&x) && (30..=66).contains(&y), "({x},{y}) 跑出文字包围盒");
         }
-        // 字形内部应有满覆盖像素 = 精确的 Text.color（抗锯齿只在边缘）
+        // Inside the glyph there must be fully-covered pixels = exact Text.color (anti-aliasing only at edges)
         assert!(
             hits.iter().any(|&(x, y)| pixel(&buf, 96, x, y) == [0, 255, 0, 255]),
             "应存在满覆盖像素"
         );
-        // 确定性：同世界同 tick → 字节逐位相同（缓存命中与否不影响输出）
+        // Determinism: same world, same tick → bit-identical (cache hit/miss does not affect output)
         assert_eq!(buf, render_world(&w, 96, 96, &assets, 0).unwrap());
-        // 比例字距："iii" 比 "WWW" 窄（点阵等宽做不到这一点）
+        // Proportional kerning: "iii" is narrower than "WWW" (the fixed-width bitmap path cannot do this)
         let font = assets.font().unwrap();
         let (_, narrow) = font.layout("iii", 24);
         let (_, wide) = font.layout("WWW", 24);
@@ -4078,8 +4313,8 @@ mod tests {
 
     #[test]
     fn vector_font_renders_cjk_with_nonempty_coverage() {
-        // CJK 字符走矢量路径必须画出东西：字体含该字形就是真字，不含（如 DejaVu）
-        // 就是该字体的 .notdef 豆腐块——明确可见，不是静默消失
+        // CJK characters must draw something via the vector path: if the font has the glyph it is the real character, otherwise (e.g. DejaVu)
+        // it is the font's .notdef tofu block — visibly present, not silently dropped
         let assets = assets_with_font();
         let g = assets.font().unwrap().raster('中', 24);
         assert!(!g.coverage.is_empty(), "CJK 字符栅格化覆盖率不应为空");
@@ -4089,10 +4324,10 @@ mod tests {
         assert!(!non_background(&buf, 96, 96).is_empty(), "CJK 文字应有可见像素");
     }
 
-    /// reveal 缺省 / ≥1 与未引入本特性时逐字节相同（向后兼容，两条路径都验）。
+    /// reveal default / ≥1 is byte-identical to before the feature was introduced (backward compatibility, both paths verified).
     #[test]
     fn reveal_full_or_absent_is_byte_identical() {
-        // 矢量路径
+        // Vector path
         let w_plain = world_with_text("REVEAL");
         let mut w_full = World::new();
         let e = w_full.spawn_named("label").unwrap();
@@ -4106,21 +4341,21 @@ mod tests {
             render_world(&w_full, 128, 64, &assets, 0).unwrap(),
             "矢量路径 reveal=1 必须与无 reveal 字段逐字节相同"
         );
-        // reveal=2（>1）也全显，等价
+        // reveal=2 (>1) also fully shows, equivalent
         w_full.set_field(e, "Text.reveal", json!(2.0)).unwrap();
         assert_eq!(
             render_world(&w_plain, 128, 64, &assets, 0).unwrap(),
             render_world(&w_full, 128, 64, &assets, 0).unwrap(),
         );
-        // 点阵路径同样逐字节相同
+        // Bitmap path likewise byte-identical
         assert_eq!(
             render_world(&w_plain, 128, 64, &Assets::empty(), 0).unwrap(),
             render_world(&w_full, 128, 64, &Assets::empty(), 0).unwrap(),
         );
     }
 
-    /// reveal 驱动下可见字数 = 纯函数：reveal 越大画的字越多、像素单调不减，
-    /// 且 reveal<1 画出的是全显的真子集（逐字显示是"往右长"，不重排）。
+    /// Under reveal, the visible character count = pure function: larger reveal draws more characters, pixel count is monotonically non-decreasing,
+    /// and reveal<1 draws a true subset of the fully-shown text (character-by-character reveal "grows to the right", no reflow).
     #[test]
     fn reveal_progressively_shows_more_pixels() {
         let assets = assets_with_font();
@@ -4129,10 +4364,10 @@ mod tests {
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
         w.set_component(e, "Text", json!({"content": "ABCDEF", "size": 3.0, "color": "#00ff00", "reveal": 0.0}))
             .unwrap();
-        // reveal=0：一个字都不画
+        // reveal=0: not a single character is drawn
         let none = render_world(&w, 160, 64, &assets, 0).unwrap();
         assert!(non_background(&none, 160, 64).is_empty(), "reveal=0 不该画任何字");
-        // 逐步放开：像素数单调不减
+        // Progressively open up: pixel count is monotonically non-decreasing
         let mut prev = 0usize;
         for r in [0.34_f64, 0.67, 1.0] {
             w.set_field(e, "Text.reveal", json!(r)).unwrap();
@@ -4141,8 +4376,8 @@ mod tests {
             assert!(hits >= prev, "reveal={r} 像素数应不少于更小的 reveal（{hits} < {prev}）");
             prev = hits;
         }
-        // 半显的字形落在全显的左半区（同一份排版切片，不左右抖）：
-        // reveal=0.5（3 个字 ABC）的最右像素必须 < 全显最右像素
+        // The half-shown glyph falls in the left half of the full show (the same layout slice, no left-right jitter):
+        // reveal=0.5 (3 chars ABC) the rightmost pixel must be < the full-show rightmost pixel
         w.set_field(e, "Text.reveal", json!(0.5)).unwrap();
         let half = render_world(&w, 160, 64, &assets, 0).unwrap();
         w.set_field(e, "Text.reveal", json!(1.0)).unwrap();
@@ -4151,7 +4386,7 @@ mod tests {
         assert!(max_x(&half) < max_x(&full), "半显的字应是全显的左前缀，不越过全显右缘");
     }
 
-    /// 性能预算第 3 条：同一段文字播 N tick，排版（layout 算法）只发生 1 次。
+    /// Performance budget item 3: playing the same text over N ticks, layout (the layout algorithm) runs exactly once.
     #[test]
     fn typewriter_layout_runs_exactly_once_over_many_ticks() {
         let assets = assets_with_font();
@@ -4162,7 +4397,7 @@ mod tests {
         w.set_component(e, "Text", json!({"content": "TYPEWRITER", "size": 2.0, "color": "#ffffff", "reveal": 0.0}))
             .unwrap();
         let base = font.layout_runs();
-        // 打字机：reveal 从 0 渐进到 1，渲 40 帧（每帧改可见字数，绝不重排整段）
+        // Typewriter: reveal gradually goes from 0 to 1, render 40 frames (each frame changes the visible char count, never reflows the whole line)
         for i in 0..=40u32 {
             w.set_field(e, "Text.reveal", json!(i as f64 / 40.0)).unwrap();
             let _ = render_world(&w, 192, 96, &assets, 0).unwrap();
@@ -4179,7 +4414,7 @@ mod tests {
         let mut a = Assets::empty();
         let err = a.load_font(std::path::Path::new("/nonexistent/ghost.ttf")).unwrap_err();
         assert!(err.contains("/nonexistent/ghost.ttf"), "{err}");
-        // 损坏的字体：能读到字节但解析失败，同样点名路径
+        // Corrupt font: bytes can be read but parsing fails, likewise names the path
         let dir = std::env::temp_dir().join(format!("vitric-badfont-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -4212,17 +4447,17 @@ mod tests {
         let err = render_world(&w, 32, 32, &Assets::empty(), 0).unwrap_err();
         assert!(err.contains("#rrggbb"), "{err}");
         assert!(render_world(&w, 0, 32, &Assets::empty(), 0).is_err());
-        // rot 写成字符串：显式报错（不是静默当 0）
+        // rot written as a string: explicit error (not silently treated as 0)
         w.set_component(e, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#ff0000", "rot": "45"}))
             .unwrap();
         let err = render_world(&w, 32, 32, &Assets::empty(), 0).unwrap_err();
         assert!(err.contains("Sprite.rot"), "{err}");
     }
 
-    // ---- 文字可读性警告（真实事故原型：米色字叠米色卡面，建造者 agent 看不见）----
+    // ---- Text readability warnings (real incident prototype: beige text on a beige card face, invisible to the builder agent) ----
 
-    /// 白底精灵 + 一条文字（位置/颜色可调）的脚手架。
-    /// 缺省相机：8 像素/单位 → 64x64 视口可见世界 ±4 单位。
+    /// Scaffold: white-background sprite + one text line (position/color adjustable).
+    /// Default camera: 8 pixels/unit → a 64x64 viewport sees world ±4 units.
     fn world_text_on_sprite(sprite_color: &str, text_color: &str, x: f64) -> World {
         let mut w = World::new();
         let bg = w.spawn();
@@ -4238,7 +4473,7 @@ mod tests {
 
     #[test]
     fn describe_warns_on_low_contrast_text() {
-        // 白字叠白底：对比度 ≈ 1，必须给 low-contrast-text 警告 + 摘要 ⚠ 行
+        // White text on white background: contrast ≈ 1, must give a low-contrast-text warning + a ⚠ line in the summary
         let w = world_text_on_sprite("#ffffff", "#ffffff", 0.0);
         let d = describe_world(&w, 64, 64).unwrap();
         let warns = d["warnings"].as_array().expect("白字白底必须有 warnings");
@@ -4250,14 +4485,14 @@ mod tests {
         assert!(warns[0]["hint"].as_str().unwrap().contains("人眼难读"));
         let text = d["text"].as_str().unwrap();
         assert!(text.contains('⚠') && text.contains("对比度过低"), "{text}");
-        // 事故原型：米色字（#f5e8cc）叠米色底也必须被抓住
+        // Incident prototype: beige text (#f5e8cc) on a beige background must also be caught
         let d = describe_world(&world_text_on_sprite("#f0e6c8", "#f5e8cc", 0.0), 64, 64).unwrap();
         assert!(d.get("warnings").is_some(), "米色叠米色必须有警告");
     }
 
     #[test]
     fn describe_no_warning_on_dark_background() {
-        // 同一条白字落在深色底（缺省背景色）上：不警告、不出现 warnings 键
+        // The same white text on a dark background (the default background color): no warning, no warnings key
         let mut w = World::new();
         let t = w.spawn();
         w.set_component(t, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
@@ -4270,18 +4505,18 @@ mod tests {
 
     #[test]
     fn describe_skips_contrast_check_for_offscreen_text() {
-        // 同样的白叠白搬到视野外（±4 单位之外）：不渲不测，没有警告
+        // The same white-on-white moved off-screen (beyond ±4 units): neither rendered nor measured, no warning
         let w = world_text_on_sprite("#ffffff", "#ffffff", 100.0);
         let d = describe_world(&w, 64, 64).unwrap();
         assert_eq!(d["texts"][0]["region"], json!("视野外"));
         assert!(d.get("warnings").is_none(), "视野外的文字不进对比度测量");
     }
 
-    // ---- 2D 投影（Ambient.shadows + Solid 遮光体）----
+    // ---- 2D shadows (Ambient.shadows + Solid occluders) ----
 
-    /// 投影测试脚手架：黑环境（shadows 字段可配）+ 原点白点光（radius 6 = 48px，
-    /// 盖满 64x64 视口大半）。光照作用于整帧（背景也被打光）——不放精灵，
-    /// 亮暗变化全部来自光照/投影，不混入绘制差异。
+    /// Shadow test scaffold: dark ambient (shadows field configurable) + a white point light at the origin (radius 6 = 48px,
+    /// covering most of the 64x64 viewport). Lighting applies to the whole frame (the background is also lit) — no sprite is placed,
+    /// all brightness changes come from lighting/shadows, with no drawing differences mixed in.
     fn world_shadow_scene(shadows: Option<Value>) -> World {
         let mut w = World::new();
         let amb = w.spawn();
@@ -4296,8 +4531,8 @@ mod tests {
         w
     }
 
-    /// 在 (x,y) 放一面 cw×ch 的遮光墙（Solid+Position+Collider，刻意不挂 Sprite——
-    /// 画面上隐形，像素差异只能来自它挡光）。
+    /// Place a cw×ch occluder wall at (x,y) (Solid+Position+Collider, deliberately without a Sprite —
+    /// invisible on screen, pixel differences can only come from it blocking light).
     fn add_wall(w: &mut World, x: f64, y: f64, cw: f64, ch: f64) -> vitric_ecs::EntityId {
         let e = w.spawn();
         w.set_component(e, "Position", json!({"x": x, "y": y})).unwrap();
@@ -4308,27 +4543,27 @@ mod tests {
 
     #[test]
     fn shadows_off_is_byte_identical() {
-        // 三组对照逐字节锁死"不开 = 没这回事"：
-        // 1) shadows 字段缺省 vs 显式 false（schema 默认值会把 false 物化进组件）
+        // Three control groups lock down byte-for-byte that "off = as if it didn't exist":
+        // 1) shadows field default vs explicit false (the schema default materializes false into the component)
         let mut absent = world_shadow_scene(None);
         add_wall(&mut absent, 2.0, 0.0, 1.0, 2.0);
         let mut explicit_off = world_shadow_scene(Some(json!(false)));
         add_wall(&mut explicit_off, 2.0, 0.0, 1.0, 2.0);
         let buf_absent = render_world(&absent, 64, 64, &Assets::empty(), 0).unwrap();
         assert_eq!(buf_absent, render_world(&explicit_off, 64, 64, &Assets::empty(), 0).unwrap());
-        // 2) 关着时 Solid 墙对画面零影响（墙没有 Sprite，挡光是它唯一可能的像素效应）
+        // 2) When off, the Solid wall has zero effect on the frame (the wall has no Sprite, blocking light is its only possible pixel effect)
         let no_wall = world_shadow_scene(None);
         assert_eq!(buf_absent, render_world(&no_wall, 64, 64, &Assets::empty(), 0).unwrap());
-        // 3) 开了但场上没有遮光体：和关着逐字节相同（空列表不改算术）
+        // 3) On but with no occluders in the scene: byte-identical to off (an empty list changes no arithmetic)
         let on_empty = world_shadow_scene(Some(json!(true)));
         assert_eq!(buf_absent, render_world(&on_empty, 64, 64, &Assets::empty(), 0).unwrap());
     }
 
     #[test]
     fn wall_casts_shadow_and_removing_it_equalizes() {
-        // 灯在像素 (32,32)，墙占像素 x∈[44,52] y∈[24,40]。
-        // 取两个到灯心**严格等距**的像素中心：(56,32)→fx 56.5（墙后）和
-        // (7,32)→fx 7.5（对侧无墙），|dx| 同为 24.5、dy 同为 0.5——亮度差只能来自遮挡
+        // The light is at pixel (32,32), the wall occupies pixels x∈[44,52] y∈[24,40].
+        // Pick two pixel centers **strictly equidistant** from the light center: (56,32)→fx 56.5 (behind the wall) and
+        // (7,32)→fx 7.5 (the opposite side with no wall), |dx| both 24.5, dy both 0.5 — the brightness difference can only come from occlusion
         let mut w = world_shadow_scene(Some(json!(true)));
         let wall = add_wall(&mut w, 2.0, 0.0, 1.0, 2.0);
         let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
@@ -4336,7 +4571,7 @@ mod tests {
         let open = pixel(&buf, 64, 7, 32);
         assert_eq!(behind, [0, 0, 0, 255], "墙后像素被挡 = 只剩环境黑");
         assert!(open[0] > 0 && open[1] > 0, "对侧等距像素该被照亮: {open:?}");
-        // 拆墙（移除 Solid 即不再是遮光体）：两侧等距像素亮度完全相等
+        // Tear down the wall (removing Solid means it is no longer an occluder): the two equidistant pixels are now equally bright
         w.remove_component(wall, "Solid").unwrap();
         let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         assert_eq!(pixel(&buf, 64, 56, 32), pixel(&buf, 64, 7, 32), "无墙时等距像素同亮");
@@ -4345,14 +4580,14 @@ mod tests {
 
     #[test]
     fn pixel_on_occluder_is_lit_but_other_boxes_still_shadow_it() {
-        // 规则锁死：箱子里的像素不被**自己**遮挡，但照样被**别的**箱子遮挡。
-        // 像素 (48,32)（fx 48.5）在墙 x∈[44,52] 内部
+        // Rule lock: a pixel inside a box is not occluded by **itself**, but is still occluded by **other** boxes.
+        // Pixel (48,32) (fx 48.5) is inside the wall x∈[44,52]
         let mut w = world_shadow_scene(Some(json!(true)));
         add_wall(&mut w, 2.0, 0.0, 1.0, 2.0);
         let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         let on_wall = pixel(&buf, 64, 48, 32);
         assert!(on_wall[0] > 0, "遮光体上的像素不被自己压黑: {on_wall:?}");
-        // 在灯和墙之间再立一面墙（像素 x∈[38,42]）：原来"在墙上"的像素现在被它挡住
+        // Stand up another wall between the light and the wall (pixels x∈[38,42]): the pixel that was "on the wall" is now blocked by it
         add_wall(&mut w, 1.0, 0.0, 0.5, 2.0);
         let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         assert_eq!(pixel(&buf, 64, 48, 32), [0, 0, 0, 255], "别的箱子照样遮它");
@@ -4360,8 +4595,8 @@ mod tests {
 
     #[test]
     fn spot_light_is_shadowed_too() {
-        // 聚光灯朝 +x（dir=0，锥角 90°）：墙后像素 (56,32) 在锥内但被挡 → 黑；
-        // 拆墙后同像素亮——锥角衰减不豁免遮挡
+        // Spot light facing +x (dir=0, cone angle 90°): the pixel behind the wall (56,32) is inside the cone but blocked → black;
+        // after tearing down the wall the same pixel is lit — cone attenuation does not exempt occlusion
         let mut w = World::new();
         let amb = w.spawn();
         w.set_component(amb, "Ambient", json!({"color": "#000000", "shadows": true})).unwrap();
@@ -4398,7 +4633,7 @@ mod tests {
         }
         let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
         assert!(err.contains("257") && err.contains("256"), "{err}");
-        // 同样的墙阵关着投影不报错（上限只属于投影路径）
+        // The same wall array with shadows off does not error (the cap only belongs to the shadow path)
         let mut off = world_shadow_scene(None);
         for i in 0..(MAX_OCCLUDERS + 1) {
             add_wall(&mut off, i as f64, -10.0, 1.0, 1.0);
@@ -4408,11 +4643,11 @@ mod tests {
 
     #[test]
     fn shadow_fields_are_validated_explicitly() {
-        // shadows 不是 bool：显式报错（不静默当 false）
+        // shadows not a bool: explicit error (not silently treated as false)
         let w = world_shadow_scene(Some(json!("yes")));
         let err = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap_err();
         assert!(err.contains("Ambient.shadows"), "{err}");
-        // 遮光体的 Collider.w 不是数字：显式报错点名字段
+        // Occluder Collider.w not a number: explicit error naming the field
         let mut w = world_shadow_scene(Some(json!(true)));
         let wall = add_wall(&mut w, 2.0, 0.0, 1.0, 2.0);
         w.set_field(wall, "Collider.w", json!("wide")).unwrap();
@@ -4423,17 +4658,17 @@ mod tests {
     #[test]
     fn segment_hits_aabb_covers_axis_parallel_and_misses() {
         let bx = (4.0, 4.0, 6.0, 6.0);
-        // 横穿 / 纵穿（轴平行分量 = 0 的退化分支）
+        // Cross horizontally / vertically (degenerate branch where the axis-parallel component = 0)
         assert!(segment_hits_aabb((0.0, 5.0), (10.0, 5.0), bx), "水平穿过");
         assert!(segment_hits_aabb((5.0, 0.0), (5.0, 10.0), bx), "垂直穿过");
         assert!(!segment_hits_aabb((0.0, 7.0), (10.0, 7.0), bx), "水平线在箱外");
         assert!(!segment_hits_aabb((7.0, 0.0), (7.0, 10.0), bx), "垂直线在箱外");
-        // 斜穿 / 斜过但不相交（slab 区间不重叠）
+        // Diagonal cross / diagonal pass-through without intersection (slab intervals do not overlap)
         assert!(segment_hits_aabb((0.0, 0.0), (10.0, 10.0), bx), "对角穿过");
         assert!(!segment_hits_aabb((0.0, 6.5), (10.0, 16.5), bx), "斜线擦过上方");
-        // 线段截断：方向对但够不着（t > 1）
+        // Segment truncation: right direction but out of reach (t > 1)
         assert!(!segment_hits_aabb((0.0, 5.0), (3.0, 5.0), bx), "线段没到箱子就停");
-        // 端点在箱内也算相交（区间 [0,1] 截在箱内）
+        // An endpoint inside the box also counts as intersection (the interval [0,1] is clipped inside the box)
         assert!(segment_hits_aabb((5.0, 5.0), (10.0, 5.0), bx), "起点在箱内");
     }
 
@@ -4447,7 +4682,7 @@ mod tests {
         assert_eq!(d["occluders"], json!(2));
         let text = d["text"].as_str().unwrap();
         assert!(text.contains("投影开启") && text.contains("2 个遮光体"), "{text}");
-        // 关着（缺省）：键不出现、摘要无投影行
+        // Off (default): the key does not appear, the summary has no shadow line
         let mut off = world_shadow_scene(None);
         add_wall(&mut off, 2.0, 0.0, 1.0, 2.0);
         let d = describe_world(&off, 64, 64).unwrap();
@@ -4455,25 +4690,25 @@ mod tests {
         assert!(!d["text"].as_str().unwrap().contains("投影"));
     }
 
-    /// glow 量级的合成场景：1280x720、12 盏点光、100 个瓦片遮光体（两条 40 瓦地板
-    /// 加 20 根散立柱）。基准测试和等价性测试共用——盖住合并（整行地板）、
-    /// 不可合并（错位立柱）、灯心落在地板带内（箱内像素路径）这几类形态。
+    /// Glow-scale composite scene: 1280x720, 12 point lights, 100 tile occluders (two 40-tile floors
+    /// plus 20 scattered pillars). Shared by the benchmark and equivalence tests — covers mergeable (whole-row floors),
+    /// non-mergeable (staggered pillars), and light center inside a floor band (in-box pixel path) shapes.
     fn world_glow_like_scene() -> World {
         let mut w = World::new();
         let amb = w.spawn();
         w.set_component(amb, "Ambient", json!({"color": "#101018", "shadows": true})).unwrap();
-        // 两条 40 瓦的地板（整行可合并成一根长条）
+        // Two 40-tile floors (a whole row can be merged into one long slab)
         for row in 0..2 {
             let y = if row == 0 { -2.0 } else { 6.0 };
             for i in 0..40 {
                 add_wall(&mut w, -19.5 + i as f64, y, 1.0, 1.0);
             }
         }
-        // 20 根散立柱（间隔 3，留缝不可合并）
+        // 20 scattered pillars (spaced 3 apart, leaving gaps, not mergeable)
         for i in 0..20 {
             add_wall(&mut w, -28.5 + i as f64 * 3.0, 2.0, 1.0, 2.0);
         }
-        // 12 盏点光：一半飘在地板上方，一半灯心埋进地板带（箱内像素也要走遮挡）
+        // 12 point lights: half float above the floor, half have their center buried in a floor band (in-box pixels also go through occlusion)
         for i in 0..12 {
             let lamp = w.spawn();
             let x = -22.0 + i as f64 * 4.0;
@@ -4484,13 +4719,13 @@ mod tests {
         w
     }
 
-    /// 基准（默认忽略，手动跑：`cargo test --release -p vitric-render -- --ignored shadow_bench --nocapture`）。
-    /// 1280x720 · 12 灯 · 100 遮光体——优化前这一帧是 像素×灯×箱子 的全乘积。
+    /// Benchmark (ignored by default, run manually: `cargo test --release -p vitric-render -- --ignored shadow_bench --nocapture`).
+    /// 1280x720 · 12 lights · 100 occluders — before optimization this frame was the full product of pixels × lights × boxes.
     #[test]
     #[ignore]
     fn shadow_bench_glow_like_scene() {
         let w = world_glow_like_scene();
-        // 预热一次（占位分配、页错误不进计时）
+        // Warm up once (placeholder allocations and page faults do not enter timing)
         render_world(&w, 1280, 720, &Assets::empty(), 0).unwrap();
         let n = 5;
         let t0 = std::time::Instant::now();
@@ -4501,7 +4736,7 @@ mod tests {
         println!("shadow_bench: 1280x720 · 12 灯 · 100 遮光体 = {per_frame:.1} ms/帧");
     }
 
-    /// 等价性基准：每个遮光体各自成组（不合并）——外测路径就是原始逐箱算式。
+    /// Equivalence baseline: each occluder forms its own group (no merging) — the external path is the original per-box formula.
     fn naive_grid(occluders: &[Occluder], width: u32, height: u32, cam: (f64, f64, f64)) -> ShadowBoxes {
         let mut grid = ShadowBoxes { merged: Vec::new(), subs: Vec::new() };
         for i in 0..occluders.len() {
@@ -4516,8 +4751,8 @@ mod tests {
         grid
     }
 
-    /// 等价性测试的加强版场景：在 glow 量级场景上再加聚光灯、重叠墙、退化墙（w=0）
-    /// 和非默认（但二进制可精确表示的）相机——盖住合并判定的全部分支。
+    /// Strengthened scene for the equivalence test: on top of the glow-scale scene add a spot light, overlapping walls, degenerate walls (w=0)
+    /// and a non-default (but binary-exactly-representable) camera — covers every branch of the merge predicate.
     fn world_equivalence_scene() -> World {
         let mut w = world_glow_like_scene();
         let beam = w.spawn();
@@ -4528,8 +4763,8 @@ mod tests {
             json!({"radius": 12.0, "kind": "spot", "angle": 80.0, "dir": 270.0}),
         )
         .unwrap();
-        add_wall(&mut w, 0.25, -2.0, 1.0, 1.0); // 与地板行重叠但不贴齐：不许合并
-        add_wall(&mut w, 5.0, 0.5, 0.0, 2.0); // 退化墙（w=0）：不参与合并，行为原样
+        add_wall(&mut w, 0.25, -2.0, 1.0, 1.0); // Overlaps the floor row but is not flush: must not merge
+        add_wall(&mut w, 5.0, 0.5, 0.0, 2.0); // Degenerate wall (w=0): does not participate in merging, behavior unchanged
         let cam = w.spawn();
         w.set_component(cam, "Camera", json!({"x": 0.5, "y": -0.25, "scale": 4.0})).unwrap();
         w
@@ -4537,8 +4772,8 @@ mod tests {
 
     #[test]
     fn merged_and_culled_shadows_are_byte_identical_to_naive() {
-        // 优化路径（render_world：合并 + 逐灯剔除）与对照路径（逐箱全量、不剔除）
-        // 输出逐字节相同——合并/剔除都不许改一个字节。
+        // The optimized path (render_world: merge + per-light culling) and the control path (per-box full pass, no culling)
+        // produce byte-identical output — neither merge nor culling may change a single byte.
         let (width, height) = (320u32, 180u32);
         let mut w = world_equivalence_scene();
         let optimized = render_world(&w, width, height, &Assets::empty(), 0).unwrap();
@@ -4547,19 +4782,19 @@ mod tests {
         let occs = collect_occluders(&w).unwrap();
         let cam = camera_of(&w, 0, height).unwrap();
         let (ambient, _) = ambient_of(&w).unwrap().unwrap();
-        // 不点亮的底版：拿掉 Ambient = 光照整体关闭，其余绘制完全相同
+        // Unlit baseplate: remove Ambient = lighting entirely off, the rest of the drawing is exactly the same
         let amb = w.query(&["Ambient"])[0];
         w.remove_component(amb, "Ambient").unwrap();
         let unlit = render_world(&w, width, height, &Assets::empty(), 0).unwrap();
         assert_ne!(optimized, unlit, "场景必须真的被光照改写过，否则测试空转");
 
-        // 对照 1：不合并、不剔除（原始逐箱逐灯全量算式）
+        // Control 1: no merging, no culling (the original per-box per-light full pass formula)
         let mut naive = unlit.clone();
         let grid = naive_grid(&occs, width, height, cam);
         apply_lighting_impl(&mut naive, width, height, cam, ambient, &lights, &grid, false, None);
         assert_eq!(optimized, naive, "合并+剔除改了输出字节");
 
-        // 对照 2：合并、不剔除——单独锁死"逐灯剔除无损"
+        // Control 2: merge, no culling — independently locks down "per-light culling is lossless"
         let mut merged_only = unlit;
         let grid = build_shadow_boxes(&occs, width, height, cam);
         apply_lighting_impl(
@@ -4579,21 +4814,21 @@ mod tests {
     #[test]
     fn flush_tiles_merge_into_slabs_and_gaps_do_not() {
         let mut w = World::new();
-        // 10 块 1x1 瓦片贴齐成行（中心 x = 0..9）→ 合并成一根横条
+        // 10 1x1 tiles flush in a row (center x = 0..9) → merge into one horizontal slab
         for i in 0..10 {
             add_wall(&mut w, i as f64, 0.0, 1.0, 1.0);
         }
-        add_wall(&mut w, 12.0, 0.0, 1.0, 1.0); // 留缝：不并
-        add_wall(&mut w, 0.0, 3.0, 1.0, 1.0); // 同列但 y 不贴齐：不并
+        add_wall(&mut w, 12.0, 0.0, 1.0, 1.0); // Gap: does not merge
+        add_wall(&mut w, 0.0, 3.0, 1.0, 1.0); // Same column but y not flush: does not merge
         let occs = collect_occluders(&w).unwrap();
         let g = build_shadow_boxes(&occs, 64, 64, (0.0, 0.0, 8.0));
         assert_eq!(g.merged.len(), 3, "一根横条 + 两个孤箱");
         assert_eq!(g.subs.len(), 12, "子箱总数 = 原始遮光体数");
         let slab = g.merged.iter().find(|m| m.sub_len == 10).expect("瓦片行收成一组");
-        // 行世界 x ∈ [-0.5, 9.5]、y ∈ [-0.5, 0.5] → 像素 [28, 28, 108, 36]（scale 8）
+        // Row world x ∈ [-0.5, 9.5], y ∈ [-0.5, 0.5] → pixels [28, 28, 108, 36] (scale 8)
         assert_eq!(slab.aabb, [28.0, 28.0, 108.0, 36.0]);
 
-        // 2x2 瓦片阵：先沿 x 收成两条、再沿 y 摞成一块（4 个子箱）
+        // 2x2 tile array: first collect along x into two strips, then stack along y into one block (4 sub-boxes)
         let mut w = World::new();
         for (x, y) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
             add_wall(&mut w, x, y, 1.0, 1.0);
@@ -4606,23 +4841,23 @@ mod tests {
     #[test]
     fn light_disc_culls_only_unreachable_boxes() {
         let mut w = World::new();
-        add_wall(&mut w, 1.0, 0.0, 1.0, 1.0); // 灯盘内：保留
-        add_wall(&mut w, 20.0, 0.0, 1.0, 1.0); // 远在灯盘外：剔除
+        add_wall(&mut w, 1.0, 0.0, 1.0, 1.0); // Inside the light disc: kept
+        add_wall(&mut w, 20.0, 0.0, 1.0, 1.0); // Far outside the light disc: culled
         let occs = collect_occluders(&w).unwrap();
         let g = build_shadow_boxes(&occs, 64, 64, (0.0, 0.0, 8.0));
-        // 灯在像素 (32,32)，半径 6*8=48px。近箱中心 (40,32)、远箱中心 (192,32)
+        // Light at pixel (32,32), radius 6*8=48px. Near box center (40,32), far box center (192,32)
         let kept = cull_shadow_boxes(&g, 32.0, 32.0, 48.0);
         assert_eq!(kept.len(), 1);
         assert_eq!(g.merged[kept[0] as usize].aabb, [36.0, 28.0, 44.0, 36.0]);
-        // 灯心埋在箱子里：最近距离 0，必然保留
+        // Light center buried inside a box: nearest distance 0, necessarily kept
         let kept = cull_shadow_boxes(&g, 40.0, 32.0, 1.0);
         assert_eq!(kept.len(), 1);
     }
 
     #[test]
     fn describe_contrast_check_tolerates_missing_images() {
-        // 贴图不在素材仓库：对比度测量退 Sprite.color 纯色块近似，describe 不报错。
-        // （正常渲染 render_world 对缺图仍是显式报错——宽容只属于测量这条内部路径）
+        // Image not in the asset store: the contrast measurement falls back to a Sprite.color solid-block approximation, describe does not error.
+        // (Normal rendering render_world still errors explicitly on a missing image — the leniency belongs only to this internal measurement path)
         let mut w = world_text_on_sprite("#ffffff", "#ffffff", 0.0);
         let bg = w.query(&["Sprite"])[0];
         w.set_component(
@@ -4637,9 +4872,9 @@ mod tests {
         assert_eq!(warns[0]["kind"], json!("low-contrast-text"));
     }
 
-    // ---- 粒子发射器（Emitter，纯渲染层产物）----
+    // ---- Particle emitters (Emitter, a pure render-layer product) ----
 
-    /// 火花流测试场：一个 stream 发射器（每秒 60 粒、寿命 30 tick）。
+    /// Spark-stream test field: one stream emitter (60 particles/sec, lifetime 30 ticks).
     fn world_stream_emitter() -> World {
         let mut w = World::new();
         let e = w.spawn_named("sparks").unwrap();
@@ -4665,7 +4900,7 @@ mod tests {
             a.chunks_exact(4).any(|p| p != BACKGROUND),
             "稳态 tick 100 必须真的画出粒子"
         );
-        // 不同 tick 画面演化（粒子在动）
+        // Different ticks evolve the frame (particles are moving)
         let c = render_world(&w, 64, 64, &Assets::empty(), 101).unwrap();
         assert_ne!(a, c, "粒子是 tick 的函数，下一 tick 画面应不同");
     }
@@ -4680,11 +4915,11 @@ mod tests {
         for (a, b) in p1.iter().zip(&p2) {
             assert_eq!((a.x, a.y, a.size, a.rgba), (b.x, b.y, b.size, b.rgba));
         }
-        // 稳态可见数 = rate·lifetime/60 = 60·30/60 = 30
+        // Steady-state visible count = rate·lifetime/60 = 60·30/60 = 30
         assert_eq!(p1.len(), 30, "稳态在途粒子数");
-        // 早期（tick < lifetime）只有已出生的：tick 5 → 出生 tick 0..=5 共 6 批×1
+        // Early (tick < lifetime) only already-born batches: tick 5 → birth ticks 0..=5, 6 batches × 1
         assert_eq!(emitter_particles(e, 5).len(), 6);
-        // 老粒子在前（先画在底下）：首个粒子比末个老 → alpha 更低
+        // Older particles first (drawn underneath): the first particle is older than the last → lower alpha
         assert!(p1.first().unwrap().rgba[3] < p1.last().unwrap().rgba[3]);
     }
 
@@ -4704,7 +4939,7 @@ mod tests {
         assert_eq!(emitter_particles(em, 50).len(), 12, "触发 tick 全员出生");
         assert_eq!(emitter_particles(em, 69).len(), 12, "寿命最后一 tick 还在");
         assert_eq!(emitter_particles(em, 70).len(), 0, "寿命到期当帧消失");
-        // burst 缺省 -1 = 未触发
+        // burst default -1 = not triggered
         w.set_component(
             e,
             "Emitter",
@@ -4717,7 +4952,7 @@ mod tests {
 
     #[test]
     fn particle_motion_is_analytic_and_fades() {
-        // spread 0 + 固定初速 + 重力：位置必须严格等于解析式 origin + v0·t + ½g·t²
+        // spread 0 + fixed initial velocity + gravity: position must strictly equal the analytic formula origin + v0·t + ½g·t²
         let mut w = World::new();
         let e = w.spawn_named("jet").unwrap();
         w.set_component(e, "Position", json!({"x": 1.0, "y": 2.0})).unwrap();
@@ -4733,11 +4968,11 @@ mod tests {
         for age in [0i64, 10, 30, 59] {
             let p = &emitter_particles(em, age as u64)[0];
             let t = age as f64 / PARTICLE_TICKS_PER_SECOND;
-            // dir=90（+y）、spread=0：x 不动（cos90 的浮点尾数 ≈ 0）
+            // dir=90 (+y), spread=0: x does not move (the floating-point tail of cos90 ≈ 0)
             assert!((p.x - 1.0).abs() < 1e-9, "age {age}: x={}", p.x);
             let expect_y = 2.0 + 6.0 * t + 0.5 * (-10.0) * t * t;
             assert!((p.y - expect_y).abs() < 1e-9, "age {age}: y={} 应为 {expect_y}", p.y);
-            // alpha 线性淡出
+            // alpha fades out linearly
             let expect_a = (255.0 * (1.0 - age as f64 / 60.0)).round() as u8;
             assert_eq!(p.rgba[3], expect_a, "age {age}");
         }
@@ -4745,7 +4980,7 @@ mod tests {
 
     #[test]
     fn emitter_off_or_absent_keeps_bytes_identical() {
-        // 同一世界：没有发射器 vs 挂了 active=false 的发射器 → 输出逐字节相同
+        // Same world: no emitter vs an emitter with active=false → output byte-identical
         let base = world_one_red_sprite();
         let frame_none = render_world(&base, 64, 64, &Assets::empty(), 77).unwrap();
         let mut with_off = world_one_red_sprite();
@@ -4765,7 +5000,7 @@ mod tests {
 
     #[test]
     fn particles_are_self_lit_under_darkness() {
-        // 全黑环境光：精灵被压黑，粒子照亮自己（自发光约定）
+        // Fully-black ambient light: the sprite is darkened, particles light themselves (self-emission convention)
         let mut w = world_one_red_sprite();
         let amb = w.spawn();
         w.set_component(amb, "Ambient", json!({"color": "#000000"})).unwrap();
@@ -4778,10 +5013,10 @@ mod tests {
                    "spread": 0.0, "color": "#00ff00"}),
         )
         .unwrap();
-        // burst@0、age 0、speed 0 → 粒子停在原点 = 屏幕中心，alpha 255 纯绿
+        // burst@0, age 0, speed 0 → particle stays at origin = screen center, alpha 255 pure green
         let buf = render_world(&w, 64, 64, &Assets::empty(), 0).unwrap();
         assert_eq!(pixel(&buf, 64, 32, 32), [0, 255, 0, 255], "粒子不被全黑环境光压暗");
-        // 粒子边界外的精灵像素确实被压黑了（光照在跑）
+        // Sprite pixels outside the particle's bounds are indeed darkened (lighting is running)
         assert_eq!(pixel(&buf, 64, 26, 26), [0, 0, 0, 255], "精灵照常被打光");
     }
 
@@ -4790,29 +5025,29 @@ mod tests {
         let mut w = World::new();
         let e = w.spawn_named("bad").unwrap();
         w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
-        // kind 缺失
+        // kind missing
         w.set_component(e, "Emitter", json!({"lifetime": 30, "size": 0.5})).unwrap();
         let err = collect_emitters(&w).unwrap_err();
         assert!(err.contains("kind") && err.contains("stream") && err.contains("burst"), "{err}");
-        // kind 不认识
+        // kind unrecognized
         w.set_component(e, "Emitter", json!({"kind": "fountain", "lifetime": 30, "size": 0.5}))
             .unwrap();
         let err = collect_emitters(&w).unwrap_err();
         assert!(err.contains("fountain") && err.contains("不认识"), "{err}");
-        // stream 缺 rate
+        // stream missing rate
         w.set_component(e, "Emitter", json!({"kind": "stream", "lifetime": 30, "size": 0.5}))
             .unwrap();
         let err = collect_emitters(&w).unwrap_err();
         assert!(err.contains("rate") && err.contains("写法"), "{err}");
-        // lifetime 非法
+        // lifetime invalid
         w.set_component(e, "Emitter", json!({"kind": "stream", "rate": 10.0, "lifetime": 0, "size": 0.5}))
             .unwrap();
         assert!(collect_emitters(&w).unwrap_err().contains("lifetime"), "lifetime ≥ 1");
-        // size 缺失
+        // size missing
         w.set_component(e, "Emitter", json!({"kind": "stream", "rate": 10.0, "lifetime": 30}))
             .unwrap();
         assert!(collect_emitters(&w).unwrap_err().contains("size"));
-        // 粒子预算超限
+        // particle budget exceeded
         w.set_component(
             e,
             "Emitter",
@@ -4821,7 +5056,7 @@ mod tests {
         .unwrap();
         let err = collect_emitters(&w).unwrap_err();
         assert!(err.contains("预算") && err.contains("1024"), "{err}");
-        // 没有 Position
+        // no Position
         let mut w2 = World::new();
         let e2 = w2.spawn_named("floating").unwrap();
         w2.set_component(e2, "Emitter", json!({"kind": "burst", "count": 5, "lifetime": 30, "size": 0.5}))
@@ -4850,7 +5085,7 @@ mod tests {
         let text = d["text"].as_str().unwrap();
         assert!(text.contains("发射器 sparks") && text.contains("~30 粒子可见"), "{text}");
         assert!(text.contains("发射器 boom") && text.contains("未触发"), "{text}");
-        // 没有发射器 = 没有 emitters 键
+        // no emitters = no emitters key
         let d2 = describe_world(&world_one_red_sprite(), 64, 64).unwrap();
         assert!(d2.get("emitters").is_none());
     }
@@ -4860,14 +5095,14 @@ mod tests {
         let a = emitter_seed(vitric_ecs::EntityId { index: 1, generation: 1 });
         let b = emitter_seed(vitric_ecs::EntityId { index: 2, generation: 1 });
         assert_ne!(a, b);
-        // 同一 id 永远同种子（确定性）
+        // same id always produces same seed (deterministic)
         assert_eq!(a, emitter_seed(vitric_ecs::EntityId { index: 1, generation: 1 }));
     }
 
-    // ---- 以自我为中心关系 + 主次排序（relative_to_focal） ----
+    // ---- egocentric relations + primary/secondary sort (relative_to_focal) ----
 
-    /// 一个带 follow 相机的世界：hero(0,0) 焦点 + 右边邻居 coin(3,0) + 视野外 far(-100,0)。
-    /// 相机宽到能把 coin 收进屏内（scale 小）。
+    /// A world with a follow camera: hero(0,0) focal point + right neighbor coin(3,0) + offscreen far(-100,0).
+    /// The camera is wide enough to bring coin into view (small scale).
     fn focal_world() -> World {
         let mut w = World::new();
         let hero = w.spawn_named("hero").unwrap();
@@ -4877,7 +5112,7 @@ mod tests {
         w.set_component(coin, "Position", json!({"x": 3.0, "y": 0.0})).unwrap();
         w.set_component(coin, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#ffd84d"})).unwrap();
         let cam = w.spawn();
-        // 焦点 = follow 指向 hero；scale 1 像素/单位 → 64px 视口能看到 ±32 单位
+        // focal = follow points to hero; scale 1 pixel/unit → 64px viewport can see ±32 units
         w.set_component(cam, "Camera", json!({"x": 0.0, "y": 0.0, "scale": 1.0, "follow": "hero"}))
             .unwrap();
         w
@@ -4888,7 +5123,7 @@ mod tests {
         let w = focal_world();
         let d = describe_world(&w, 64, 64).unwrap();
         let vis = d["visible"].as_array().unwrap();
-        // coin 在 hero 右边 3 单位
+        // coin is 3 units to the right of hero
         let coin = vis.iter().find(|e| e["name"] == json!("coin")).unwrap();
         let rel = &coin["relative_to_focal"];
         assert_eq!(rel["direction"], json!("right"), "coin 在 hero 右边");
@@ -4908,10 +5143,10 @@ mod tests {
 
     #[test]
     fn describe_without_follow_has_no_relative_block() {
-        // 向后兼容：没有 Camera.follow 时整块不出现，输出和加这功能之前一样
+        // Backward compatibility: without Camera.follow the whole block is absent, output matches before this feature was added
         let mut w = world_one_red_sprite();
         let cam = w.spawn();
-        // 有相机但没 follow（不跟随）
+        // has camera but no follow (not following)
         w.set_component(cam, "Camera", json!({"x": 0.0, "y": 0.0, "scale": 8.0})).unwrap();
         let d = describe_world(&w, 64, 64).unwrap();
         for e in d["visible"].as_array().unwrap() {
@@ -4921,7 +5156,7 @@ mod tests {
 
     #[test]
     fn describe_offscreen_neighbor_relative_direction() {
-        // 视野外的实体也带 relative_to_focal（关系不分屏内屏外）
+        // Offscreen entities also carry relative_to_focal (relations don't distinguish on/off-screen)
         let mut w = focal_world();
         let up = w.spawn_named("moon").unwrap();
         w.set_component(up, "Position", json!({"x": 0.0, "y": 100.0})).unwrap();
@@ -4935,13 +5170,13 @@ mod tests {
 
     #[test]
     fn describe_primary_sort_named_then_distance() {
-        // 主次排序：有名字的排前，再按到焦点距离升序
-        let mut w = focal_world(); // hero(0,0,焦点) + coin(3,0)
-        // 一个无名近邻 near(1,0)：距离 1，但无名
+        // Primary/secondary sort: named first, then ascending by distance to focal point
+        let mut w = focal_world(); // hero(0,0, focal point) + coin(3,0)
+        // An unnamed near neighbor near(1,0): distance 1, but unnamed
         let near = w.spawn();
         w.set_component(near, "Position", json!({"x": 1.0, "y": 0.0})).unwrap();
         w.set_component(near, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#0000ff"})).unwrap();
-        // 一个有名远邻 star(5,0)：距离 5，有名
+        // A named far neighbor star(5,0): distance 5, named
         let star = w.spawn_named("star").unwrap();
         w.set_component(star, "Position", json!({"x": 5.0, "y": 0.0})).unwrap();
         w.set_component(star, "Sprite", json!({"w": 1.0, "h": 1.0, "color": "#00ff00"})).unwrap();
@@ -4951,15 +5186,15 @@ mod tests {
         let names: Vec<String> = vis.iter()
             .map(|e| e.get("name").and_then(|n| n.as_str()).unwrap_or("<anon>").to_string())
             .collect();
-        // 有名字的在前（hero 距 0、coin 距 3、star 距 5），无名 near 殿后
+        // Named ones first (hero distance 0, coin distance 3, star distance 5), unnamed near at the end
         assert_eq!(names, vec!["hero", "coin", "star", "<anon>"], "有名字优先、再按距离升序");
     }
 
-    // ---- 视线遮挡（blocked）+ ASCII 格子图（ascii_map） ----
+    // ---- Line-of-sight occlusion (blocked) + ASCII grid map (ascii_map) ----
 
     #[test]
     fn describe_relative_carries_blocked_field() {
-        // relative_to_focal 现在带 blocked 字段：无墙 → false
+        // relative_to_focal now carries a blocked field: no wall → false
         let w = focal_world();
         let d = describe_world(&w, 64, 64).unwrap();
         let coin = d["visible"].as_array().unwrap().iter()
@@ -4969,7 +5204,7 @@ mod tests {
 
     #[test]
     fn describe_blocked_true_when_wall_between() {
-        // 焦点 hero(0,0) 和 coin(3,0) 之间立一面 Solid 墙(1.5,0) → blocked=true
+        // Stand a Solid wall(1.5,0) between focal hero(0,0) and coin(3,0) → blocked=true
         let mut w = focal_world();
         let wall = w.spawn();
         w.set_component(wall, "Position", json!({"x": 1.5, "y": 0.0})).unwrap();
@@ -4983,7 +5218,7 @@ mod tests {
 
     #[test]
     fn describe_has_ascii_map_with_focus() {
-        // 有 Camera.follow → 顶层有 ascii_map，@ 在正中
+        // With Camera.follow → top level has ascii_map, @ in the center
         let w = focal_world();
         let d = describe_world(&w, 64, 64).unwrap();
         let map = &d["ascii_map"];
@@ -4993,13 +5228,13 @@ mod tests {
         let mid_row = grid[center].as_str().unwrap();
         assert_eq!(mid_row.chars().nth(center), Some('@'), "@ 在正中");
         assert_eq!(map["focal_at"], json!([center, center]));
-        // coin 在右边某格、进了图例
+        // coin is in some cell to the right, included in the legend
         assert!(map["legend"].as_object().unwrap().values().any(|v| v == "coin"));
     }
 
     #[test]
     fn describe_no_ascii_map_without_follow() {
-        // 向后兼容：没有 follow → 不出现 ascii_map 键
+        // Backward compatibility: no follow → no ascii_map key
         let mut w = world_one_red_sprite();
         let cam = w.spawn();
         w.set_component(cam, "Camera", json!({"x": 0.0, "y": 0.0, "scale": 8.0})).unwrap();

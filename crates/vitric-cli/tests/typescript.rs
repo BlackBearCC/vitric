@@ -1,4 +1,4 @@
-//! TypeScript 脚本端到端：.ts 经 esbuild 转译进 QuickJS，类型错误显式报。
+//! TypeScript script end-to-end: .ts is transpiled into QuickJS via esbuild, type errors are reported explicitly.
 
 use std::fs;
 use std::path::PathBuf;
@@ -7,7 +7,7 @@ use serde_json::json;
 
 use vitric_cli::runtime::Runtime;
 
-/// 测试用 esbuild：仓库 mcp/node_modules 里有一份；CI 由 workflow 装到 PATH。
+/// Test uses esbuild: the repo has a copy in mcp/node_modules; CI installs it onto PATH via the workflow.
 fn esbuild_env() -> Option<String> {
     if std::env::var("ESBUILD_BIN").is_ok() {
         return Some(std::env::var("ESBUILD_BIN").unwrap());
@@ -63,7 +63,7 @@ fn typescript_system_runs_after_transpile() {
     let Some(_) = esbuild_env() else {
         panic!("测试需要 esbuild：仓库里跑 `cd mcp && npm install`，或设 ESBUILD_BIN");
     };
-    // 真 TS：接口、类型注解、泛型——QuickJS 原生吃不下这些
+    // Real TS: interfaces, type annotations, generics — QuickJS cannot consume these natively
     let dir = make_project(
         "ok",
         r#"

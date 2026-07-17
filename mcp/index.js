@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// vitric-mcp — 把 Vitric 控制面暴露成 MCP 工具。
-// 引擎只有一套接口（HTTP 控制面），这里是给 MCP 客户端的薄皮。
-// 环境变量：VITRIC_BIN = vitric 可执行文件路径（默认 PATH 上的 "vitric"）。
+// vitric-mcp — exposes the Vitric control plane as MCP tools.
+// The engine has a single interface (HTTP control plane); this is a thin wrapper for MCP clients.
+// Env var: VITRIC_BIN = path to the vitric executable (defaults to "vitric" on PATH).
 
 import { spawn } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
@@ -12,10 +12,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 const VITRIC_BIN = process.env.VITRIC_BIN || "vitric";
-// 角色工单随引擎发货：本文件在 <repo>/mcp/，工单的唯一权威源在 <repo>/team/
+// Role workorders ship with the engine: this file is in <repo>/mcp/, the single source of truth for workorders is <repo>/team/
 const TEAM_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../team");
 
-/** 当前由本 server 启动的游戏进程。 */
+/** The currently running game process started by this server. */
 let game = null; // { child, controlUrl, project }
 
 function text(value) {
@@ -56,7 +56,7 @@ server.tool(
   }
 );
 
-/** 跑一个 vitric 子命令，把 stdout（成功）或 stderr（失败）原样回给客户端。 */
+/** Run a vitric subprocess, returning its stdout (on success) or stderr (on failure) as-is to the client. */
 function runCli(args, { okExit = [0] } = {}) {
   return new Promise((resolve) => {
     const p = spawn(VITRIC_BIN, args);
