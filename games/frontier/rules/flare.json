@@ -1,0 +1,20 @@
+{
+  "rules": [
+    { "id": "toast-flare-imminent", "on": { "event": "flare-imminent" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": "耀斑 30 秒后来袭!储备电力氧气!" },
+      { "set": "@toast_lbl.Toast.timer", "to": 3.0 }
+    ] },
+    { "id": "toast-flare-hit", "on": { "event": "flare-hit" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": "耀斑冲击!电力氧气大幅下降" },
+      { "set": "@toast_lbl.Toast.timer", "to": 3.0 }
+    ] },
+    { "id": "toast-night-fall", "on": { "event": "night-fall" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": "夜幕降临,野外危险,速回基地" },
+      { "set": "@toast_lbl.Toast.timer", "to": 3.0 }
+    ] },
+    { "id": "toast-dawn-break", "on": { "event": "dawn-break" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": "天亮了,新的一天" },
+      { "set": "@toast_lbl.Toast.timer", "to": 2.5 }
+    ] }
+  ]
+}

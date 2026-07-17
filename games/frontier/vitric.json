@@ -18,6 +18,7 @@
     "rules/time.json",
     "rules/narrative.json",
     "rules/toast.json",
+    "rules/flare.json",
     "rules/affordability.json"
   ],
   "scripts": [
@@ -27,7 +28,8 @@
     "scripts/companion.js",
     "scripts/clock.js",
     "scripts/hud.js",
-    "scripts/toast.js"
+    "scripts/toast.js",
+    "scripts/flare.js"
   ],
   "seed": 1,
   "render": {
