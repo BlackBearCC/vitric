@@ -18,7 +18,7 @@ Existing engines were designed for a human in front of an editor; to an AI they 
 
 - [Quick start](#quick-start) · [The agent API](#the-agent-api) · [Automated playtesting](#automated-playtesting)
 - [Features](#features) · [Architecture](#architecture) · [Examples](#examples) · [Docs](#docs)
-- [MCP & multi-agent](#mcp--multi-agent) · [Status](#status) · [Contributing](#contributing) · [License](#license)
+- [MCP & multi-agent](#mcp--multi-agent) · [Status](#status) · [Roadmap](#roadmap) · [Contributing](#contributing) · [License](#license)
 
 ## Quick start
 
@@ -147,6 +147,13 @@ The engine also carries a multi-agent team harness: role work tickets (`team/`),
 ## Status
 
 Pre-1.0 and under active development; the API may change. The core is real and tested (650+ tests in CI, including an end-to-end run where an agent beats a game over HTTP and the recording replays hash-identically). Determinism, replay, gates, headless rendering, lighting/shadows/bloom, rules + TypeScript, save/load, scene flow, GPU presentation, audio, asset harmonization, frame animation, the playtest swarm, and the MCP server are all in place. Binaries ship for Linux and Windows.
+
+## Roadmap
+
+- [ ] **Web playground (WASM)** — compile the engine to WebAssembly so anyone can play `coin-run` in a browser without installing Rust. *Why: the project has zero stars because no one can try it in 30 seconds; a one-click demo is the single highest-leverage fix.*
+- [ ] **Benchmark suite** — deterministic sim throughput vs. other Rust 2D engines (Bevy 2D, Macroquad, Fyrox). *Why: "deterministic" is the core selling point but currently unquantified; a number on a chart is what makes the claim credible to engine shoppers.*
+- [ ] **Cookbook** — recipes for common gameplay patterns (inventory, dialogue trees, save points) written in rules + scripts. *Why: the rules + scripts split is novel and unfamiliar; concrete copy-paste recipes are how new users cross the learning curve.*
+- [ ] **Hot-reload for rules & scenes** — reload rule and scene data without restarting the sim (scripts already support it). *Why: the inner loop of game development is edit → run → edit; cold-restart kills iteration speed, which kills adoption among game devs.*
 
 ## Contributing
 
