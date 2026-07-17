@@ -19,6 +19,7 @@
     "rules/narrative.json",
     "rules/toast.json",
     "rules/flare.json",
+    "rules/poi.json",
     "rules/affordability.json"
   ],
   "scripts": [
@@ -29,7 +30,8 @@
     "scripts/clock.js",
     "scripts/hud.js",
     "scripts/toast.js",
-    "scripts/flare.js"
+    "scripts/flare.js",
+    "scripts/poi.js"
   ],
   "seed": 1,
   "render": {

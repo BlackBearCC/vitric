@@ -103,6 +103,29 @@ entities.append({"name": "drifter", "components": {
     "Text": {"content": "", "size": 0.7, "color": "#ffe9b0"},
 }})
 
+# ---- 3 POIs in wild zone (daily-refreshing wild points of interest) ----
+POI_SPECS = [
+    # (name, kind, x, y, reward_table) — reward_table: {item: [lo, hi]} rolled on explore.
+    ("poi_camp",  "abandoned-camp", 18, 10, {"ore": [1, 2], "wheat": [2, 4], "fiber": [1, 3]}),
+    ("poi_cave",  "cave-entrance",  23, 2,  {"ore": [3, 5]}),                 # high-risk high-reward
+    ("poi_wreck", "shipwreck",      26, 5,  {"wheat": [3, 5], "plank": [1, 2]}),
+]
+POI_LABELS = {"abandoned-camp": "废弃营地", "cave-entrance": "洞穴入口", "shipwreck": "沉船"}
+POI_COLORS = {"abandoned-camp": "#8b6f47", "cave-entrance": "#5a4a6a", "shipwreck": "#4a5a6a"}
+for name, kind, x, y, rewards in POI_SPECS:
+    entities.append({"name": name, "components": {
+        "Position": {"x": x, "y": y},
+        "Sprite": {"w": 1.6, "h": 1.6, "color": POI_COLORS[kind], "image": ""},
+        "Collider": {"w": 1.6, "h": 1.6},
+        "Poi": {
+            "kind": kind,
+            "state": "fresh",
+            "cooldown": 0,
+            "reward_table": json.dumps(rewards),
+        },
+        "Text": {"content": POI_LABELS[kind], "size": 0.4, "color": "#ffe070", "screen": False},
+    }})
+
 # ---- UI shell ----
 def ui_entity(name, ui, extra=None):
     comps = {"Ui": ui}

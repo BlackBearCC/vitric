@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "id": "poi-interact-click",
+      "comment": "Interact mode + left-click on a POI -> call interact_poi (rolls rewards, marks looted, emits inv-set + entered-poi). Inventory is passed in full; the existing inv-apply rule in economy.json writes it back.",
+      "on": { "event": "mouse" },
+      "if": [ ["@uistate.Mode.value", "==", "interact"] ],
+      "do": [ { "call": "interact_poi", "with": {
+        "entity": "event.entity", "comp": "event.comp", "x": "event.x", "y": "event.y",
+        "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+        "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
+      } } ]
+    }
+  ]
+}
