@@ -46,7 +46,7 @@ vitric.system("flare", { query: ["Colony", "Clock"], writes: ["Colony"] }, (enti
     cl.power = cl.power * 0.6;
     cl.oxygen = cl.oxygen * 0.6;
     cl.flare_warning = 0;
-    cl.flare_timer = 180 + Math.floor(Math.random() * 120);
+    cl.flare_timer = 180 + Math.floor(ctx.random() * 120);
     return;
   }
   // Warning band: arm at <=30s, clear if it drifts back above 30s.
