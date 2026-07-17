@@ -639,6 +639,26 @@
         "companion_affinity_avg": {
           "type": "number",
           "default": 0
+        },
+        "flare_timer": {
+          "type": "number",
+          "default": 240
+        },
+        "flare_warning": {
+          "type": "int",
+          "default": 0
+        },
+        "is_night": {
+          "type": "int",
+          "default": 0
+        },
+        "wild_threat": {
+          "type": "int",
+          "default": 0
+        },
+        "companion_wish_count": {
+          "type": "int",
+          "default": 0
         }
       }
     },
@@ -750,6 +770,10 @@
         "contribution_timer": {
           "type": "number",
           "default": 0
+        },
+        "memory_unlocked": {
+          "type": "int",
+          "default": 0
         }
       }
     },
@@ -774,6 +798,39 @@
         "timer": {
           "type": "number",
           "default": 0
+        }
+      }
+    },
+    "Wish": {
+      "fields": {
+        "items": {
+          "type": "text",
+          "default": "[]"
+        },
+        "fulfilled": {
+          "type": "int",
+          "default": 0
+        }
+      }
+    },
+    "Poi": {
+      "fields": {
+        "kind": {
+          "type": "text",
+          "default": "abandoned-camp"
+        },
+        "state": {
+          "type": "enum",
+          "variants": ["fresh", "looted", "depleted"],
+          "default": "fresh"
+        },
+        "cooldown": {
+          "type": "number",
+          "default": 0
+        },
+        "reward_table": {
+          "type": "text",
+          "default": "{}"
         }
       }
     },
