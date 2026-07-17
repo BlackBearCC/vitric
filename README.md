@@ -150,10 +150,29 @@ Pre-1.0 and under active development; the API may change. The core is real and t
 
 ## Roadmap
 
+**Near-term**
 - [ ] **Web playground (WASM)** — compile the engine to WebAssembly so anyone can play `coin-run` in a browser without installing Rust. *Why: the project has zero stars because no one can try it in 30 seconds; a one-click demo is the single highest-leverage fix.*
 - [ ] **Benchmark suite** — deterministic sim throughput vs. other Rust 2D engines (Bevy 2D, Macroquad, Fyrox). *Why: "deterministic" is the core selling point but currently unquantified; a number on a chart is what makes the claim credible to engine shoppers.*
 - [ ] **Cookbook** — recipes for common gameplay patterns (inventory, dialogue trees, save points) written in rules + scripts. *Why: the rules + scripts split is novel and unfamiliar; concrete copy-paste recipes are how new users cross the learning curve.*
 - [ ] **Hot-reload for rules & scenes** — reload rule and scene data without restarting the sim (scripts already support it). *Why: the inner loop of game development is edit → run → edit; cold-restart kills iteration speed, which kills adoption among game devs.*
+
+**Long-term engine capabilities**
+
+*Pipelines*
+- [ ] **Render pipeline** — post-processing chain, multi-pass, custom shader injection. *Why: lighting/bloom/shadows exist but are hardcoded passes; exposing them as a composable pipeline unlocks stylized looks without forking the engine.*
+- [ ] **Asset pipeline** — end-to-end import → compress → pack → hot-update. *Why: BC7/frame-atlas/palette pieces exist today but are scattered CLI commands; a unified pipeline is what separates an engine from a library.*
+- [ ] **Build pipeline** — one-command multi-target packaging (Windows / macOS / Linux / Web). *Why: cross-platform shipping is a baseline expectation for any 2D engine; today only Linux/Windows binaries ship.*
+- [ ] **AI pipeline** — closed loop of agent playtest → report → auto-fix. *Why: the control plane + swarm + gate are in place, but they're manual tools; closing the loop (agent finds bug → agent patches rules/scripts → gate re-runs) is the unique bet of this engine.*
+
+*Hardening*
+- [ ] **Determinism hardening** — fuzz testing, cross-platform byte-identical verification, edge-case coverage. *Why: determinism is the contract that everything else (replay, multiplayer, gates) rests on; one silent violation invalidates every clear certificate.*
+- [ ] **Performance hardening** — sim/render profiling, hot-path optimization, memory budget. *Why: "deterministic" must not mean "slow"; without numbers, "fast enough" is a guess.*
+- [ ] **Stability hardening** — crash recovery, error handling, logging/diagnostics. *Why: an engine that crashes takes the game down with it; production use needs graceful degradation, not panics.*
+- [ ] **Security hardening** — script sandbox lockdown, asset validation, injection prevention. *Why: scripts come from untrusted sources (LLM-generated, user-authored); the sandbox is the engine's security perimeter.*
+
+*New platforms*
+- [ ] **Mobile target (iOS / Android)** — compile + input + audio + GPU for mobile. *Why: 2D games ship on phones; without mobile, the engine can't reach where most players are.*
+- [ ] **Deterministic multiplayer** — snapshot/diff-based netcode over the deterministic sim. *Why: determinism + replay already gives the raw material for rollback netcode; multiplayer is the highest-leverage capability built on what the engine already does well.*
 
 ## Contributing
 
