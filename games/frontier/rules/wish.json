@@ -1,0 +1,83 @@
+{
+  "rules": [
+    {
+      "id": "wish-advance-build",
+      "comment": "Any structure built -> advance all companions' 'build' wish by 1.",
+      "on": { "event": "built" },
+      "do": [ { "call": "advance_wish", "with": { "kind": "build", "n": 1 } } ]
+    },
+    {
+      "id": "wish-advance-build-lamp",
+      "comment": "Lamp built -> also advance 'build-lamp' wish by 1.",
+      "on": { "event": "built", "filter": { "kind": "lamp" } },
+      "do": [ { "call": "advance_wish", "with": { "kind": "build-lamp", "n": 1 } } ]
+    },
+    {
+      "id": "wish-advance-harvest",
+      "comment": "Wheat harvested -> advance 'harvest' wish by 1.",
+      "on": { "event": "harvested", "filter": { "id": "wheat" } },
+      "do": [ { "call": "advance_wish", "with": { "kind": "harvest", "n": 1 } } ]
+    },
+    {
+      "id": "wish-advance-harvest-wheat",
+      "comment": "Wheat harvested -> advance 'harvest-wheat' wish by event.n.",
+      "on": { "event": "harvested", "filter": { "id": "wheat" } },
+      "do": [ { "call": "advance_wish", "with": { "kind": "harvest-wheat", "n": "event.n" } } ]
+    },
+    {
+      "id": "wish-advance-gather-ore",
+      "comment": "Ore gathered -> advance 'gather-ore' wish by event.n.",
+      "on": { "event": "gathered", "filter": { "id": "ore" } },
+      "do": [ { "call": "advance_wish", "with": { "kind": "gather-ore", "n": "event.n" } } ]
+    },
+    {
+      "id": "wish-advance-poi",
+      "comment": "Player entered a POI -> advance 'enter-poi' wish by 1.",
+      "on": { "event": "entered-poi" },
+      "do": [ { "call": "advance_wish", "with": { "kind": "enter-poi", "n": 1 } } ]
+    },
+    {
+      "id": "wish-advance-upgrade",
+      "comment": "Structure upgraded (Task 7 emits this) -> advance 'upgrade' wish by 1.",
+      "on": { "event": "upgrade-structure" },
+      "do": [ { "call": "advance_wish", "with": { "kind": "upgrade", "n": 1 } } ]
+    },
+    {
+      "id": "wish-advance-food-high",
+      "comment": "Colony food >= 80 (emitted by wish_food_check system) -> advance 'food-high' wish by 80.",
+      "on": { "event": "food-high" },
+      "do": [ { "call": "advance_wish", "with": { "kind": "food-high", "n": 80 } } ]
+    },
+    {
+      "id": "wish-advance-see-dawn",
+      "comment": "Dawn breaks AND player is in wild zone (x>=16) -> advance 'see-dawn' wish by 1.",
+      "on": { "event": "dawn-break" },
+      "if": [ ["@player.Position.x", ">=", 16] ],
+      "do": [ { "call": "advance_wish", "with": { "kind": "see-dawn", "n": 1 } } ]
+    },
+    {
+      "id": "wish-fulfilled-toast",
+      "comment": "Wish fulfilled -> toast notification.",
+      "on": { "event": "wish-fulfilled" },
+      "do": [
+        { "set": "@toast_lbl.UiLabel.content", "to": { "format": "{} 心愿达成: {}", "args": ["event.companion", "event.wish_desc"] } },
+        { "set": "@toast_lbl.Toast.timer", "to": 3.0 }
+      ]
+    },
+    {
+      "id": "toast-show-generic",
+      "comment": "Generic toast-show listener (resolves Task 3 F2): any script can emit toast-show{text} and this lands it on the toast label.",
+      "on": { "event": "toast-show" },
+      "do": [
+        { "set": "@toast_lbl.UiLabel.content", "to": "event.text" },
+        { "set": "@toast_lbl.Toast.timer", "to": 2.5 }
+      ]
+    },
+    {
+      "id": "companion-mood-drop-apply",
+      "comment": "companion-mood-drop event (resolves Task 3 F3): decrement all companions' Need.comfort by event.amount. Uses a fn because rules can't iterate companion_handles.",
+      "on": { "event": "companion-mood-drop" },
+      "do": [ { "call": "apply_mood_drop", "with": { "amount": "event.amount" } } ]
+    }
+  ]
+}

@@ -20,7 +20,8 @@
     "rules/toast.json",
     "rules/flare.json",
     "rules/poi.json",
-    "rules/affordability.json"
+    "rules/affordability.json",
+    "rules/wish.json"
   ],
   "scripts": [
     "scripts/colony.js",
@@ -31,7 +32,8 @@
     "scripts/hud.js",
     "scripts/toast.js",
     "scripts/flare.js",
-    "scripts/poi.js"
+    "scripts/poi.js",
+    "scripts/wish.js"
   ],
   "seed": 1,
   "render": {

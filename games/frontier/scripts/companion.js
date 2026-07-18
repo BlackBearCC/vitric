@@ -21,6 +21,34 @@ const WANDER_RADIUS = 2.5;  // around home_x/y ± radius
 const COMP_DAY_SEC = 60.0;
 const COMP_TICK_PER_SEC = 60;
 
+// Wish templates per archetype family. Each companion gets 3 wishes based on their archetype.
+// items is stored as JSON text in Wish.items (schema doesn't support nested list-of-struct).
+const WISH_TEMPLATES = {
+  builder: [
+    { desc: "建造 3 个结构", kind: "build", target: 3, progress: 0, done: false },
+    { desc: "建一盏灯",     kind: "build-lamp", target: 1, progress: 0, done: false },
+    { desc: "升级 1 个结构", kind: "upgrade", target: 1, progress: 0, done: false },
+  ],
+  farmer: [
+    { desc: "种出 2 茬作物",     kind: "harvest", target: 2, progress: 0, done: false },
+    { desc: "收获 8 单位麦子",   kind: "harvest-wheat", target: 8, progress: 0, done: false },
+    { desc: "吃饱一次(食≥80)",   kind: "food-high", target: 80, progress: 0, done: false },
+  ],
+  explorer: [
+    { desc: "探索 3 处野外地点", kind: "enter-poi", target: 3, progress: 0, done: false },
+    { desc: "采集 10 单位矿石",  kind: "gather-ore", target: 10, progress: 0, done: false },
+    { desc: "看一次日出(凌晨出门)", kind: "see-dawn", target: 1, progress: 0, done: false },
+  ],
+};
+// Map Chinese archetype strings to template keys via keyword match.
+function wishesForArchetype(archetype) {
+  const a = archetype || "";
+  let key = "explorer"; // default
+  if (/技|电|匠|build|builder/i.test(a)) key = "builder";
+  else if (/厨|医|农|farm|farmer/i.test(a)) key = "farmer";
+  return WISH_TEMPLATES[key] || WISH_TEMPLATES.explorer;
+}
+
 function compTodOf(tick) {
   const secOfDay = (tick / COMP_TICK_PER_SEC) % COMP_DAY_SEC;
   const frac = secOfDay / COMP_DAY_SEC;
@@ -319,6 +347,7 @@ vitric.fn("consumeDrifter", (args, ctx) => {
     Sprite: { w: 0.9, h: 0.9, color: personaColor(name) },
     Text: { content: "", size: 0.7, color: "#ffe9b0" },
     Census: { count: 0, is_hub: 0 },
+    Wish: { items: JSON.stringify(wishesForArchetype(args.archetype)), fulfilled: 0 },
   });
   ctx.emit("companion-moved-in", { name: persona.name });
 });
