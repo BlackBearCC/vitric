@@ -60,6 +60,14 @@
 
     { "id": "kb-mode-build",    "on": { "event": "input", "filter": { "action": "q", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "build" } ] },
     { "id": "kb-mode-interact", "on": { "event": "input", "filter": { "action": "r", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "interact" } ] },
-    { "id": "kb-mode-craft",    "on": { "event": "input", "filter": { "action": "e", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "craft" } ] }
+    { "id": "kb-mode-craft",    "on": { "event": "input", "filter": { "action": "e", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "craft" } ] },
+    { "id": "kb-mode-upgrade", "comment": "u 键切升级模式:藏两个菜单(同 interact 模式),点击结构即调 upgrade_structure。",
+      "on": { "event": "input", "filter": { "action": "u", "phase": "pressed" } },
+      "do": [
+        { "set": "@uistate.Mode.value", "to": "upgrade" },
+        { "set": "@build_menu.Ui.ox", "to": -3000 },
+        { "set": "@craft_menu.Ui.ox", "to": -3000 }
+      ]
+    }
   ]
 }

@@ -22,3 +22,13 @@ vitric.system("food-bar", { query: ["Colony"], writes: ["Colony"] }, (entities, 
     e.Colony.food_bar = "食 " + clamped + "/100 [" + bar + "]";
   }
 });
+
+// Flare warning bar: shows a warning string when Colony.flare_warning == 1.
+// The rule in hud.json pulls Colony.flare_bar into @flare_lbl.UiLabel.content.
+// @flare_lbl entity is added in Task 9 scene polish; until then the rule's set silently no-ops.
+vitric.system("flare-bar", { query: ["Colony"], writes: ["Colony"] }, (entities, ctx) => {
+  for (const e of entities) {
+    const warn = e.Colony.flare_warning | 0;
+    e.Colony.flare_bar = warn ? "\u26a0 \u8000\u6591\u5373\u5c06\u6765\u88ad!" : "";
+  }
+});

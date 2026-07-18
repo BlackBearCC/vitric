@@ -87,6 +87,18 @@
           "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
         } }
       ]
+    },
+    {
+      "id": "upgrade-click",
+      "comment": "Upgrade mode + left-click on a structure -> call upgrade_structure. Passes hit entity + full inventory. The fn handles non-structure clicks gracefully (returns early).",
+      "on": { "event": "mouse" },
+      "if": [ ["@uistate.Mode.value", "==", "upgrade"] ],
+      "do": [ { "call": "upgrade_structure", "with": {
+        "entity": "event.entity",
+        "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+        "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
+      } } ]
     }
   ]
 }

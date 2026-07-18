@@ -53,6 +53,14 @@
         { "set": "@inv-chair_lbl.UiLabel.content", "to": { "format": "椅 {}",  "args": ["@player.Inventory.chair"] } },
         { "set": "@inv-lamp_lbl.UiLabel.content",  "to": { "format": "灯 {}",  "args": ["@player.Inventory.lamp"] } }
       ]
+    },
+    {
+      "id": "hud-flare-bar",
+      "comment": "耀斑预警条:flare-bar 系统写 Colony.flare_bar,这里拉到 @flare_lbl。@flare_lbl 实体在 Task 9 场景 polish 里加,届时该规则生效。",
+      "on": "tick",
+      "do": [
+        { "set": "@flare_lbl.UiLabel.content", "to": "@colony.Colony.flare_bar" }
+      ]
     }
   ]
 }
