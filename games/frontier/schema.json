@@ -374,7 +374,8 @@
           "variants": [
             "build",
             "craft",
-            "interact"
+            "interact",
+            "upgrade"
           ],
           "default": "build"
         }
@@ -647,6 +648,10 @@
         "flare_warning": {
           "type": "int",
           "default": 0
+        },
+        "flare_bar": {
+          "type": "text",
+          "default": ""
         },
         "is_night": {
           "type": "int",
