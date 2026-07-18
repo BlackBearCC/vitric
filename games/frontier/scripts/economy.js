@@ -122,13 +122,18 @@ vitric.fn("interact", (a, ctx) => {
     return;
   }
   // ---- Wild resource node gathering (scene pre-spawns 6 nodes, left>0 means harvestable) ----
+  // On depletion (left hits 0), set cooldown so node_regrow system can regrow it after 90s.
   if (node && (node.left | 0) > 0) {
     const inv = readInv(a);
     const nodeKind = node.kind || "ore";
     const ITEM_MAP = { ore: "ore", wood: "wood", fiber: "fiber" };
     const itemId = ITEM_MAP[nodeKind] || "ore";
     inv[itemId] += 1;
-    ctx.setField(a.entity, "Node.left", (node.left | 0) - 1);
+    const newLeft = (node.left | 0) - 1;
+    ctx.setField(a.entity, "Node.left", newLeft);
+    if (newLeft <= 0) {
+      ctx.setField(a.entity, "Node.cooldown", 90); // 1.5 min regrow timer
+    }
     emitInv(ctx, inv);
     ctx.emit("gathered", { node: nodeKind, id: itemId, n: 1 });
     return;
@@ -167,4 +172,56 @@ vitric.fn("craft", (a, ctx) => {
   inv[rec.out] += 1;
   emitInv(ctx, inv);
   ctx.emit("crafted", { id: rec.out, n: 1 });
+});
+
+// ---- Node regrowth: depleted nodes regrow to max after cooldown elapses ----
+vitric.system("node_regrow", { query: ["Node"], writes: ["Node"] }, (entities, ctx) => {
+  for (const e of entities) {
+    const left = e.Node.left | 0;
+    const cd = e.Node.cooldown || 0;
+    if (left <= 0 && cd > 0) {
+      const newCd = cd - ctx.dt;
+      if (newCd <= 0) {
+        e.Node.left = e.Node.max | 0;
+        e.Node.cooldown = 0;
+      } else {
+        e.Node.cooldown = newCd;
+      }
+    }
+  }
+});
+
+// ---- Structure upgrade: tier-1 -> tier-2, pay resources, change kind ----
+// Called by rule on ui-activate{action:"upgrade-prompt"} — passes target entity handle + current inventory.
+// Reads Structure.kind/tier via ctx.getField (deferred-write safe: reads happen before any writes).
+// UPGRADES table: which tier-1 kinds can upgrade, to what, and the cost.
+vitric.fn("upgrade_structure", (a, ctx) => {
+  if (typeof a.entity !== "string" || !a.entity) return;
+  const kind = ctx.getField(a.entity, "Structure.kind");
+  const tier = ctx.getField(a.entity, "Structure.tier") | 0;
+  if (!kind || tier >= 2) {
+    ctx.emit("toast-show", { text: "已满级或无法升级" });
+    return;
+  }
+  const UPGRADES = {
+    plot:     { to: "greenhouse",  cost: { ore: 2, plank: 2 } },
+    conduit:  { to: "solar-array", cost: { ore: 3, plank: 1 } },
+    quarters: { to: "cabin",       cost: { plank: 4, lamp: 1 } },
+  };
+  const up = UPGRADES[kind];
+  if (!up) {
+    ctx.emit("toast-show", { text: "该结构无法升级" });
+    return;
+  }
+  const inv = readInv(a);
+  if (!canPay(inv, up.cost)) {
+    ctx.emit("toast-show", { text: "资源不足" });
+    return;
+  }
+  pay(inv, up.cost);
+  emitInv(ctx, inv);
+  ctx.setField(a.entity, "Structure.kind", up.to);
+  ctx.setField(a.entity, "Structure.tier", 2);
+  ctx.emit("upgrade-structure", { id: a.entity, kind: up.to });
+  ctx.emit("toast-show", { text: "升级为" + up.to });
 });

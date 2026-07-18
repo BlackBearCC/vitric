@@ -74,6 +74,19 @@
         { "set": "@player.Inventory.plank", "to": 6 },
         { "set": "@player.Inventory.lamp",  "to": 2 }
       ]
+    },
+    {
+      "id": "upgrade-button-click",
+      "comment": "Build mode right-click on tier-1 structure -> attempt upgrade. UI (hud.js) emits ui-activate{action:\"upgrade-prompt\", target_id:<entity>} — wired in Task 8.",
+      "on": { "event": "ui-activate", "filter": { "action": "upgrade-prompt" } },
+      "do": [
+        { "call": "upgrade_structure", "with": {
+          "entity": "event.target_id",
+          "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+          "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+          "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
+        } }
+      ]
     }
   ]
 }
