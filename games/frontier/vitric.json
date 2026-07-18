@@ -45,7 +45,7 @@
     "playthroughs": [
       {
         "recording": "qa/clear.json",
-        "must_emit": "game-won"
+        "must_emit": "settlement-founded"
       }
     ],
     "check": true,

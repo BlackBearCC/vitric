@@ -22,9 +22,12 @@
     },
     {
       "id": "quest-step3-done",
-      "comment": "step3 请第一个伙伴:companion-moved-in → step=4。守卫 step==3。",
-      "on": { "event": "companion-moved-in" },
-      "if": [ ["@quest.QuestLog.step", "==", 3] ],
+      "comment": "step3 请第一个伙伴:wish-fulfilled + 第一个伙伴(companion)好感>=60 -> step=4.",
+      "on": { "event": "wish-fulfilled" },
+      "if": [
+        ["@quest.QuestLog.step", "==", 3],
+        ["@companion.Need.affinity", ">=", 60]
+      ],
       "do": [
         { "set": "@quest.QuestLog.step", "to": 4 },
         { "emit": "quest-done", "data": { "id": "first-companion" } }
@@ -59,13 +62,13 @@
     },
     {
       "id": "quest-step6-done",
-      "comment": "step6 成群:day≥5 + 人手≥3 + 至少 1 位伙伴好感≥50(用心养到会帮忙那档)→ step=7。守卫 step==6 + day-floor + census + 关系闸门。",
+      "comment": "step6 成群:day>=5 + pop>=3 + 累计心愿达成>=2 -> step=7.",
       "on": "tick",
       "if": [
         ["@quest.QuestLog.step", "==", 6],
         ["@colony.Colony.day", ">=", 5],
         ["@colony.Colony.pop", ">=", 3],
-        ["@colony.Colony.companion_happy_count", ">=", 1]
+        ["@colony.Colony.companion_wish_count", ">=", 2]
       ],
       "do": [
         { "set": "@quest.QuestLog.step", "to": 7 },
@@ -81,8 +84,8 @@
       ]
     },
     {
-      "id": "game-won",
-      "comment": "step7 → day≥6(走 stage「兴旺」闸门)+ 丰碑已立 → settlement-thrived → game-won。",
+      "id": "settlement-founded",
+      "comment": "step7 -> day>=6 + monument built -> settlement-founded (milestone, not ending). Game continues freely.",
       "on": "tick",
       "if": [
         ["@quest.QuestLog.step", "==", 7],
@@ -90,9 +93,8 @@
         ["@colony.Colony.monument_built", ">=", 1]
       ],
       "do": [
-        { "emit": "settlement-thrived", "data": {} },
-        { "set": "@quest.QuestLog.step", "to": 8 },
-        { "emit": "game-won", "data": {} }
+        { "emit": "settlement-founded", "data": {} },
+        { "set": "@quest.QuestLog.step", "to": 8 }
       ]
     },
 
@@ -165,8 +167,8 @@
       "on": "tick",
       "if": [ ["@quest.QuestLog.step", "==", 8] ],
       "do": [
-        { "set": "@quest_title_lbl.UiLabel.content", "to": "聚落兴旺" },
-        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "通关!" }
+        { "set": "@quest_title_lbl.UiLabel.content", "to": "自由探索中" },
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "定居点已建立,四个循环自驱,继续你的故事" }
       ]
     }
   ]
