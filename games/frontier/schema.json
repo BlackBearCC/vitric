@@ -664,6 +664,14 @@
         "companion_wish_count": {
           "type": "int",
           "default": 0
+        },
+        "_wish_food_day": {
+          "type": "int",
+          "default": 0
+        },
+        "last_wish_memory_target": {
+          "type": "text",
+          "default": ""
         }
       }
     },
