@@ -65,6 +65,15 @@
       ]
     },
     {
+      "id": "wish-fulfilled-memory",
+      "comment": "Wish fulfilled -> trigger LLM memory dialogue (companion shares a past memory).",
+      "on": { "event": "wish-fulfilled" },
+      "do": [ { "call": "triggerWishMemory", "with": {
+        "entity": "event.entity",
+        "wish_desc": "event.wish_desc"
+      } } ]
+    },
+    {
       "id": "toast-show-generic",
       "comment": "Generic toast-show listener (resolves Task 3 F2): any script can emit toast-show{text} and this lands it on the toast label.",
       "on": { "event": "toast-show" },
