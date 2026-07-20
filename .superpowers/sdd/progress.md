@@ -1,4 +1,23 @@
-# Frontier Deepening — SDD Progress Ledger
+# Frontier Sandbox Expansion — SDD Progress Ledger
+
+Plan: docs/superpowers/plans/2026-07-20-frontier-sandbox-expansion.md
+Base commit: c0c7af5
+Branch: main (per user preference: auto-commit + push to main)
+
+## Tasks
+
+- Task 1: complete (commits c0c7af5..a9e1167, APPROVED after I1 fix)
+  - E1 Region dormant/active/frozen: `world.query`/`render_world`/`describe_world` skip dormant; `Sim::thaw_region(id)` transitions state + emits `region-thaw`; `accumulate_dormant_ticks` runs each step; `invoke_catch_up_for_region` stub added for Task 2 integration.
+  - `Region` component added to `games/frontier/schema.json` (10 fields, state enum dormant/active/frozen). Mountain marker entity added to `scenes/main.json` (dormant, anchor 0,12, 30×28).
+  - `pending_events: Vec<Event>` field added to `Sim` for host-side event emission (flushed at start of `step()`, not recorded by `Recording` — same determinism model as `pending_inputs`/`pending_replies`).
+  - `qa/clear.json` re-recorded (37249 ticks, final_hash `0xab58ec29d99275df`, settlement-founded emitted) — necessary because mountain marker changed tick-0 hash.
+  - Review I1 fix (commit a9e1167): added `was_discovered` conditional + `invoke_catch_up_for_region` stub.
+  - Minor findings (non-blocking): M1 silent no-op on missing region (safer than brief's `.expect()`); M2 `thaw_region` not idempotent on already-active (rules can dedupe via `discovered`); M3 no positive-case test for `dormant_ticks` increment (brief didn't require).
+  - Cannot-verify items resolved by controller: typescript failures pre-existing (esbuild missing); region tests 4/4 PASS verified; gate PASS with re-recorded qa/clear.json verified.
+
+---
+
+# Legacy: Frontier Deepening — SDD Progress Ledger
 
 Plan: docs/superpowers/plans/2026-07-17-frontier-deepening.md
 Base commit: af83c61

@@ -52,3 +52,17 @@ The brief's pseudocode showed intent; the implementation adapted to the real API
 4. **Schema field audit** — The `Region.state` enum (`dormant`/`active`/`frozen`) is properly declared in `schema.json` under `components.Region.fields.state.variants`. The dormant filter reads this field via `region.get("state").and_then(|v| v.as_str())` (NOT through `ctx.getField` / `@entity.Region.state` rule syntax), so it's not subject to the "undeclared field crash" lesson from the Frontier deepening. Still, the pattern applies going forward — any new field added to `Region` and read by rules must be declared.
 5. **`pending_events` is NOT recorded by the recording** — This is intentional (host API calls are deterministic given the same host program), but it means a *different* host program calling `thaw_region` at a different tick would diverge. This is the same model as direct `Sim` method calls in general — recordings only capture the input stream, not arbitrary host API calls. Documented in the field's doc comment.
 6. **Defensive `is_renderable` guard added redundantly** — `world.query` already filters dormant, so the explicit `if !is_renderable(world, id) { continue; }` in `render_with` and `describe_world_with_assets` is technically dead code today. Kept it because the brief's pseudocode showed it as the intended invariant guard, and it survives any future refactor that bypasses `query`. If the reviewer prefers DRY, both guards can be removed — the `query` filter alone is sufficient.
+
+## Fix for I1
+
+- **Status:** DONE
+- **Commit hash:** `a9e1167ef7eb6832520dfd8b59537718f56e4b9a` (pushed to `origin/main`)
+- **Test results:**
+
+| Command | Result |
+|---|---|
+| `cargo test -p vitric-cli --test region --` | **PASS** — 4/4 (`dormant_entities_excluded_from_query`, `dormant_entities_skipped_in_render`, `thaw_region_activates_entities`, `dormant_entities_skip_logic_systems`) |
+| `cargo build -p vitric-sim` | **PASS** — clean compile, no warnings |
+| `cargo test --workspace` | **PASS** (modulo pre-existing) — only the 2 known typescript tests fail (`typescript_system_runs_after_transpile`, `typescript_syntax_error_names_the_file`) with the esbuild-missing message; all other tests pass, no regressions |
+
+- **Files touched:** `crates/vitric-sim/src/sim.rs` only (7 insertions: `was_discovered` computation, conditional `invoke_catch_up_for_region(id)` call, and the no-op stub method with its doc comment). The existing doc comment on `thaw_region` was preserved.
