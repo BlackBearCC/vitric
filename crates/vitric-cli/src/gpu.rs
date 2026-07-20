@@ -1884,6 +1884,14 @@ fn build_scene_vertices(
     }
 
     // Sprites: in entity order (painter's algorithm, later draws cover earlier ones)
+    // NOTE: View-frustum culling is intentionally NOT mirrored here. The CPU rasterizer
+    // (vitric_render::render_with) culls off-screen sprites — that is the source of truth for
+    // screenshots/assertions/gate (Task 4 / E4). The GPU path is only used for the live
+    // interactive window display; off-screen sprites cost a tiny bit of vertex-stream overhead
+    // but render the same visible pixels. Culling here would be a pure perf optimization and
+    // risks diverging from the CPU's culling math (causing visible differences between window
+    // and screenshot). The CPU path's AABB check uses (cam_x ± view_w_world/2) with the rotated
+    // bounding-box extent; if GPU culling is needed later, port that exact check here.
     for id in world.query(&["Position", "Sprite"]) {
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;

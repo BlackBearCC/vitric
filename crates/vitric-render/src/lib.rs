@@ -307,6 +307,21 @@ fn render_with(
         .filter(|_| assets.has_normal_maps())
         .map(|_| vec![[0.0f32; 3]; (width * height) as usize]);
 
+    // View-frustum culling bounds (world units): same scale the camera derived (see [`camera_of`])
+    // and same pixel dimensions — describe_world uses the same boundary to classify visible vs
+    // off-screen. Sprites whose rotated AABB is entirely outside this viewport are skipped by the
+    // entity loop below (Task 4 / E4). This is a pure render-layer optimization: skipped entities
+    // contribute zero pixels anyway (the pixel loop clamps to [0, width]/[0, height]), so the
+    // output bytes for entities that ARE on screen are bit-identical to before this cull was added
+    // (locked by `culling_preserves_byte_identical_output_for_onscreen_entities` and the existing
+    // `frames.rs` / `glow.rs` screenshot tests).
+    let view_w_world = width as f64 / scale;
+    let view_h_world = height as f64 / scale;
+    let view_x0 = cam_x - view_w_world / 2.0;
+    let view_x1 = cam_x + view_w_world / 2.0;
+    let view_y0 = cam_y - view_h_world / 2.0;
+    let view_y1 = cam_y + view_h_world / 2.0;
+
     // Draw in entity order (deterministic; later draws cover earlier ones)
     for id in world.query(&["Position", "Sprite"]) {
         // Defensive dormant check: world.query already filters dormant entities, but keep the
@@ -318,6 +333,30 @@ fn render_with(
         let sw = num(world, id, "Sprite.w")?;
         let sh = num(world, id, "Sprite.h")?;
         let rot = rot_of(world, id)?;
+
+        // View-frustum cull: skip entities whose rotated AABB is entirely outside the camera
+        // viewport. For rot==0 the AABB is the sprite's own box; for rot!=0 the AABB is the
+        // bounding box of the rotated shape (same extent the rotation path's pixel loop uses
+        // below — so culling and rendering agree bit-exactly on what is "on screen"). No fixed
+        // margin is added: the AABB already covers the rendered pixels exactly (and rotation
+        // extents cover the rotated bounding box); shadow casters are collected separately
+        // (see [`collect_occluders`]) and are not affected by this cull.
+        let half_w_world = sw / 2.0;
+        let half_h_world = sh / 2.0;
+        let (ext_x, ext_y) = if rot == 0.0 {
+            (half_w_world, half_h_world)
+        } else {
+            let (sn, cs) = rot.to_radians().sin_cos();
+            (
+                half_w_world * cs.abs() + half_h_world * sn.abs(),
+                half_w_world * sn.abs() + half_h_world * cs.abs(),
+            )
+        };
+        if px + ext_x < view_x0 || px - ext_x > view_x1
+            || py + ext_y < view_y0 || py - ext_y > view_y1
+        {
+            continue;
+        }
 
         // World → screen (y flipped, camera centered)
         let cx = (width as f64) / 2.0 + (px - cam_x) * scale;
