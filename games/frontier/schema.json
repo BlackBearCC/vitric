@@ -728,6 +728,10 @@
         "last_wish_memory_target": {
           "type": "text",
           "default": ""
+        },
+        "collective_wish_done": {
+          "type": "int",
+          "default": 0
         }
       }
     },
@@ -775,6 +779,11 @@
         "preferred": {
           "type": "text",
           "default": ""
+        },
+        "role": {
+          "type": "enum",
+          "variants": ["builder", "farmer", "explorer", "guard", "trader", "scholar"],
+          "default": "builder"
         }
       }
     },

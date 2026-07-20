@@ -77,7 +77,7 @@
 
     {
       "id": "companion-invite-process",
-      "comment": "邀请 → consumeDrifter(despawn by id + spawn companion + emit moved-in)。",
+      "comment": "邀请 → consumeDrifter(despawn by id + spawn companion + emit moved-in)。role 从 event 透传到新伙伴 Persona.role。",
       "on": { "event": "companion-invited" },
       "do": [
         { "call": "consumeDrifter", "with": {
@@ -85,7 +85,8 @@
           "name": "event.name",
           "archetype": "event.archetype",
           "traits": "event.traits",
-          "speech": "event.speech"
+          "speech": "event.speech",
+          "role": "event.role"
         } }
       ]
     },
@@ -100,13 +101,14 @@
     },
 
     {
-      "id": "drifter-cadence",
-      "comment": "每隔一个游戏日 spawn 一个新旅人(最多 4 个,且场上没人时才 spawn)。",
+      "id": "drifter-cadence-normal",
+      "comment": "每隔一个游戏日 spawn 一个新旅人(最多 8 个,且场上没人时才 spawn)。stage != 兴旺 时 cadence=2 天。",
       "on": { "event": "day-start" },
       "if": [
         ["event.day", ">=", "@colony.Colony.next_drifter_day"],
-        ["@colony.Colony.drifters_spawned", "<", 4],
-        ["@colony.Colony.target_drifter", "==", ""]
+        ["@colony.Colony.drifters_spawned", "<", 8],
+        ["@colony.Colony.target_drifter", "==", ""],
+        ["@colony.Colony.stage", "!=", "兴旺"]
       ],
       "do": [
         { "call": "spawnNewDrifter", "with": {
@@ -115,6 +117,25 @@
         } },
         { "add": "@colony.Colony.drifters_spawned", "by": 1 },
         { "add": "@colony.Colony.next_drifter_day", "by": 2 }
+      ]
+    },
+    {
+      "id": "drifter-cadence-fast",
+      "comment": "兴旺阶段:cadence=1 天(更频繁的旅人到访)。",
+      "on": { "event": "day-start" },
+      "if": [
+        ["event.day", ">=", "@colony.Colony.next_drifter_day"],
+        ["@colony.Colony.drifters_spawned", "<", 8],
+        ["@colony.Colony.target_drifter", "==", ""],
+        ["@colony.Colony.stage", "==", "兴旺"]
+      ],
+      "do": [
+        { "call": "spawnNewDrifter", "with": {
+          "idx": "@colony.Colony.drifters_spawned",
+          "arrival_day": "event.day"
+        } },
+        { "add": "@colony.Colony.drifters_spawned", "by": 1 },
+        { "add": "@colony.Colony.next_drifter_day", "by": 1 }
       ]
     },
 

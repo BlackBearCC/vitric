@@ -1,4 +1,4 @@
-// Companion wish system: each companion has 3 archetype-based wishes.
+// Companion wish system: each companion has 3 role-based wishes.
 // Wishes advance via gameplay events (built/harvested/gathered/entered-poi/upgrade/food-high/see-dawn).
 // Fulfilling a wish: +30 affinity, Colony.companion_wish_count++, emit wish-fulfilled.
 // Task 5 wires wish-fulfilled to LLM memory dialogue; this task only advances + emits.
@@ -8,6 +8,9 @@
 // companion-register system in companion.js), iterates each companion, reads/advances Wish.items.
 
 const AFFINITY_GAIN_PER_WISH = 30;
+
+// Note: WISH_TEMPLATES, wishesForRole(), wishesForArchetype() live in companion.js (loaded first).
+// QuickJS scripts share a single global scope, so wish.js can call them directly without re-declaring.
 
 // Advance all companions' wishes of `kind` by `amount`. Called by rules/wish.json on gameplay events.
 vitric.fn("advance_wish", (a, ctx) => {
@@ -168,4 +171,32 @@ vitric.system("wish_food_check", { query: ["Colony"], writes: [] }, (entities, c
     ctx.setField("colony", "Colony._wish_food_day", day);
     ctx.emit("food-high", { food: food });
   }
+});
+
+// ---- Collective wish (Task 9): granary-50 colony milestone ----
+// One-time: when Colony.food_i >= 50 AND collective_wish_done == 0:
+//   - mark collective_wish_done = 1
+//   - +10 affinity to all companions (via Colony.companion_handles)
+//   - emit collective-wish-fulfilled + toast-show
+// The HUD rule hud-collective-wish-* (rules/hud.json) reads collective_wish_done to swap the label.
+const COLLECTIVE_WISH_THRESHOLD = 50;
+const COLLECTIVE_WISH_AFFINITY_GAIN = 10;
+vitric.system("collective-wish-check", { query: ["Colony"], writes: [] }, (entities, ctx) => {
+  const c = entities[0];
+  if (!c) return;
+  if ((c.Colony.collective_wish_done | 0) !== 0) return;
+  if ((c.Colony.food_i | 0) < COLLECTIVE_WISH_THRESHOLD) return;
+  // Fulfill: mark done, buff all companions, emit event.
+  ctx.setField("colony", "Colony.collective_wish_done", 1);
+  const handles = ctx.getField("colony", "Colony.companion_handles") || [];
+  for (const h of handles) {
+    if (!h) continue;
+    const aff = ctx.getField(h, "Need.affinity");
+    const affNum = (typeof aff === "number" && !isNaN(aff)) ? aff : 30;
+    const newAff = Math.min(100, affNum + COLLECTIVE_WISH_AFFINITY_GAIN);
+    ctx.setField(h, "Need.affinity", newAff);
+    ctx.setField(h, "Need.affinity_i", Math.round(newAff));
+  }
+  ctx.emit("collective-wish-fulfilled", { threshold: COLLECTIVE_WISH_THRESHOLD });
+  ctx.emit("toast-show", { text: "共识达成: 粮储达到 " + COLLECTIVE_WISH_THRESHOLD + "!" });
 });

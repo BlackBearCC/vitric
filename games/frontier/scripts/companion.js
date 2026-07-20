@@ -21,8 +21,9 @@ const WANDER_RADIUS = 2.5;  // around home_x/y ± radius
 const COMP_DAY_SEC = 60.0;
 const COMP_TICK_PER_SEC = 60;
 
-// Wish templates per archetype family. Each companion gets 3 wishes based on their archetype.
+// Wish templates per role. Each companion gets 3 wishes based on their Persona.role.
 // items is stored as JSON text in Wish.items (schema doesn't support nested list-of-struct).
+// Duplicated in wish.js (QuickJS has no ES modules — each file is its own scope; keep both copies in sync).
 const WISH_TEMPLATES = {
   builder: [
     { desc: "建造 3 个结构", kind: "build", target: 3, progress: 0, done: false },
@@ -39,14 +40,36 @@ const WISH_TEMPLATES = {
     { desc: "采集 10 单位矿石",  kind: "gather-ore", target: 10, progress: 0, done: false },
     { desc: "看一次日出(凌晨出门)", kind: "see-dawn", target: 1, progress: 0, done: false },
   ],
+  guard: [
+    { desc: "建造 3 个结构",     kind: "build", target: 3, progress: 0, done: false },
+    { desc: "升级 1 个结构",     kind: "upgrade", target: 1, progress: 0, done: false },
+    { desc: "采集 10 单位矿石",  kind: "gather-ore", target: 10, progress: 0, done: false },
+  ],
+  trader: [
+    { desc: "探索 3 处野外地点", kind: "enter-poi", target: 3, progress: 0, done: false },
+    { desc: "建造 3 个结构",     kind: "build", target: 3, progress: 0, done: false },
+    { desc: "收获 8 单位麦子",   kind: "harvest-wheat", target: 8, progress: 0, done: false },
+  ],
+  scholar: [
+    { desc: "探索 5 处野外地点", kind: "enter-poi", target: 5, progress: 0, done: false },
+    { desc: "采集 10 单位矿石",  kind: "gather-ore", target: 10, progress: 0, done: false },
+    { desc: "建造 3 个结构",     kind: "build", target: 3, progress: 0, done: false },
+  ],
 };
-// Map Chinese archetype strings to template keys via keyword match.
+// Direct role-keyed lookup (post-Task-9 every companion has Persona.role).
+function wishesForRole(role) {
+  return WISH_TEMPLATES[role] || WISH_TEMPLATES.builder;
+}
+// Backwards-compat: derive role from archetype keywords (for any pre-Task-9 companion lacking Persona.role).
 function wishesForArchetype(archetype) {
   const a = archetype || "";
-  let key = "explorer"; // default
-  if (/技|电|匠|build|builder/i.test(a)) key = "builder";
-  else if (/厨|医|农|farm|farmer/i.test(a)) key = "farmer";
-  return WISH_TEMPLATES[key] || WISH_TEMPLATES.explorer;
+  let role = "explorer"; // default
+  if (/技|电|匠|build|builder/i.test(a)) role = "builder";
+  else if (/厨|医|农|farm|farmer/i.test(a)) role = "farmer";
+  else if (/兵|卫|guard/i.test(a)) role = "guard";
+  else if (/商|trade|trader/i.test(a)) role = "trader";
+  else if (/学|究|scholar/i.test(a)) role = "scholar";
+  return wishesForRole(role);
 }
 
 function compTodOf(tick) {
@@ -323,12 +346,14 @@ function personaColor(name) {
 vitric.fn("consumeDrifter", (args, ctx) => {
   if (args.drifter_id) ctx.despawn(args.drifter_id);
   const name = args.name || "旅人";
+  const role = args.role || "builder";
   const persona = {
     name: name,
     archetype: args.archetype || "",
     traits: args.traits || "",
     speech: args.speech || "",
     preferred: args.preferred || personaPreferred(name),
+    role: role,
   };
   const sx = 5 + Math.round(ctx.random() * 4);
   const sy = 5 + Math.round(ctx.random() * 4);
@@ -347,7 +372,7 @@ vitric.fn("consumeDrifter", (args, ctx) => {
     Sprite: { w: 0.9, h: 0.9, color: personaColor(name) },
     Text: { content: "", size: 0.7, color: "#ffe9b0" },
     Census: { count: 0, is_hub: 0 },
-    Wish: { items: JSON.stringify(wishesForArchetype(args.archetype)), fulfilled: 0 },
+    Wish: { items: JSON.stringify(args.role ? wishesForRole(args.role) : wishesForArchetype(args.archetype)), fulfilled: 0 },
   });
   ctx.emit("companion-moved-in", { name: persona.name });
 });
@@ -355,14 +380,20 @@ vitric.fn("consumeDrifter", (args, ctx) => {
 // ---- Drifter arrival: triggered by the day-start event every game day; pick a persona by index ----
 // Fixed persona pool (deterministic → replay/recording consistent). Each spawn is unnamed (avoids collision with existing @drifter).
 // Each persona carries "preferred items" (preferred, comma-separated) → used by the iter2 gift system: matching gift +12 affinity, wrong +3 affinity.
-// 6 differentiated personas: distinct name/archetype/personality/speech style/preferred, not a single cookie-cutter template.
+// 12 differentiated personas (Task 9: 2 per role × 6 roles). Each entry carries a `role` field consumed by consumeDrifter.
 const DRIFTER_POOL = [
-  { name: "Mira",  archetype: "山地步兵",   traits: "坚忍,寡言,脚步轻",           speech: "简短、爱用省略号",     preferred: "fiber,wood" },
-  { name: "Kade",  archetype: "电工学徒",   traits: "好奇、爱拆东西、胆大",       speech: "语速快、夹英文",       preferred: "ore,plank" },
-  { name: "Sori",  archetype: "老年医师",   traits: "慈祥、念叨、健忘",           speech: "慢热、爱讲从前",       preferred: "lamp,chair" },
-  { name: "Vex",   archetype: "游戏少年",   traits: "浮躁、爱吹、爱笑",           speech: "夸张、表情符号感",     preferred: "wheat,seed" },
-  { name: "Nell",  archetype: "沉默匠人",   traits: "内向、手巧、爱干净",         speech: "句子短、偶尔冒冷笑话", preferred: "wood,ore" },
-  { name: "Orin",  archetype: "退役厨师",   traits: "话多、爱美食、嗓门大",       speech: "嗓门大、爱用感叹号",   preferred: "wheat,lamp" },
+  { name: "Mira",  archetype: "山地步兵",   traits: "坚忍,寡言,脚步轻",           speech: "简短、爱用省略号",     preferred: "fiber,wood",    role: "guard" },
+  { name: "Kade",  archetype: "电工学徒",   traits: "好奇、爱拆东西、胆大",       speech: "语速快、夹英文",       preferred: "ore,plank",     role: "builder" },
+  { name: "Sori",  archetype: "老年医师",   traits: "慈祥、念叨、健忘",           speech: "慢热、爱讲从前",       preferred: "lamp,chair",    role: "scholar" },
+  { name: "Vex",   archetype: "游戏少年",   traits: "浮躁、爱吹、爱笑",           speech: "夸张、表情符号感",     preferred: "wheat,seed",    role: "explorer" },
+  { name: "Nell",  archetype: "沉默匠人",   traits: "内向、手巧、爱干净",         speech: "句子短、偶尔冒冷笑话", preferred: "wood,ore",      role: "builder" },
+  { name: "Orin",  archetype: "退役厨师",   traits: "话多、爱美食、嗓门大",       speech: "嗓门大、爱用感叹号",   preferred: "wheat,lamp",    role: "farmer" },
+  { name: "Holt",  archetype: "退役士兵",   traits: "严肃、警觉、责任感强",       speech: "短促、爱用军语",       preferred: "ore,plank",     role: "guard" },
+  { name: "Pim",   archetype: "博物学者",   traits: "好奇、博学、爱记录",         speech: "学究气、爱引用",       preferred: "lamp,chair",    role: "scholar" },
+  { name: "Dax",   archetype: "徒步旅人",   traits: "机敏、爱冒险、记路",         speech: "简洁、爱用方向词",     preferred: "fiber,wood",    role: "explorer" },
+  { name: "Yara",  archetype: "园丁",       traits: "耐心、爱植物、观察入微",     speech: "温柔、爱用比喻",       preferred: "seed,wheat",    role: "farmer" },
+  { name: "Rix",   archetype: "商队学徒",   traits: "精明、爱砍价、记帐快",       speech: "快嘴、爱用数字",       preferred: "plank,lamp",    role: "trader" },
+  { name: "Lira",  archetype: "游商",       traits: "圆滑、爱讲故事、见多识广",   speech: "热络、爱用感叹",       preferred: "wheat,chair",   role: "trader" },
 ];
 vitric.fn("spawnNewDrifter", (args, ctx) => {
   const idx = (args.idx | 0) || 0;
@@ -408,12 +439,15 @@ vitric.fn("inviteAnyNearby", (args, ctx) => {
   const dist2 = (px - dx) * (px - dx) + (py - dy) * (py - dy);
   if (dist2 > 16) { ctx.emit("invite-fail", {}); return; } // 太远:给个"走近点"提示
   if (!args.drifter_id) return;
+  // Read the drifter's Persona.role and forward it so consumeDrifter can stamp it on the new companion.
+  const role = (ctx.getField(args.drifter_id, "Persona.role") || "builder").toString();
   ctx.emit("companion-invited", {
     drifter_id: args.drifter_id,
     name: args.pname || "旅人",
     archetype: args.parch || "",
     traits: args.ptraits || "",
     speech: args.pspeech || "",
+    role: role,
   });
 });
 
@@ -635,15 +669,20 @@ vitric.system("companion-day-reset", { query: ["Companion", "Need"], writes: ["N
 });
 
 // ---- Contribution: affinity>=50 + mood happy/calm → every 12 seconds auto-help the colony ----
-// Candidate actions:
-//   (B) +1 ore/wood/fiber to @player inventory (random one)
-//   (C) +0.5 to Colony food_rate (effective for only one tick; the rate system will naturally decay it)
+// Role-based dispatch (Task 9):
+//   builder  → +1 plank to @player.Inventory
+//   farmer   → +0.5 Colony.food_rate (one-tick boost)
+//   explorer → +1 fiber to @player.Inventory + explore-bonus forward-compat hook
+//   guard    → +1 ore to @player.Inventory + guard-patrol forward-compat hook
+//   trader   → +1 wheat to @player.Inventory + trade-available forward-compat hook
+//   scholar  → emit tp-set {value: tp+1} → tp-apply rule writes @player.TechPoint.value
 // Action (A) helping the nearest crop speed up is split into a separate system companion-tend-crops (queries Crop, doesn't go through ctx.world).
 const CONTRIB_INTERVAL_SEC = 12.0;
 const CONTRIB_AFFINITY_MIN = 50;
 // query doesn't include Colony: read/write colony goes via ctx.getField/ctx.setField across entities; putting Colony in the query would make the system
 // match 0 entities (no entity has both Companion and Colony) → the entire contribution loop never runs (previous cause of death for iter2).
-vitric.system("companion-contribution", { query: ["Companion", "Need", "Mood", "Position"], writes: ["Need"] }, (entities, ctx) => {
+// Persona is included so e.Persona.role is readable.
+vitric.system("companion-contribution", { query: ["Companion", "Need", "Mood", "Persona", "Position"], writes: ["Need"] }, (entities, ctx) => {
   for (const e of entities) {
     const n = e.Need;
     if ((n.affinity || 0) < CONTRIB_AFFINITY_MIN) continue;
@@ -652,20 +691,63 @@ vitric.system("companion-contribution", { query: ["Companion", "Need", "Mood", "
     n.contribution_timer = (n.contribution_timer || 0) - ctx.dt;
     if (n.contribution_timer > 0) continue;
     n.contribution_timer = CONTRIB_INTERVAL_SEC + ctx.random() * 4; // 12~16 seconds
-    // Pick one of two (no more crop-tend; that's handled by a separate system based on whole-colony state)
-    const pick = (ctx.random() * 2) | 0;
-    if (pick === 0) {
-      // (B) +1 resource to @player inventory
-      const items = ["ore", "wood", "fiber"];
-      const which = items[(ctx.random() * items.length) | 0];
-      const cur = ctx.getField("@player", "Inventory." + which) | 0;
-      ctx.setField("@player", "Inventory." + which, cur + 1);
-      ctx.emit("companion-contributed", { pid: e.id, kind: which });
-    } else {
-      // (C) +0.5 to Colony food_rate (lasts 1 tick; the colony system will decay it afterwards)
-      const fr = ctx.getField("colony", "Colony.food_rate");
-      ctx.setField("colony", "Colony.food_rate", (typeof fr === "number" ? fr : 0) + 0.5);
-      ctx.emit("companion-boost", { pid: e.id, what: "food" });
+
+    const role = (e.Persona && e.Persona.role) || "builder";
+    switch (role) {
+      case "builder": {
+        const cur = ctx.getField("@player", "Inventory.plank") | 0;
+        ctx.setField("@player", "Inventory.plank", cur + 1);
+        ctx.emit("companion-contributed", { pid: e.id, kind: "plank", role: "builder" });
+        break;
+      }
+      case "farmer": {
+        const fr = ctx.getField("colony", "Colony.food_rate");
+        ctx.setField("colony", "Colony.food_rate", (typeof fr === "number" ? fr : 0) + 0.5);
+        ctx.emit("companion-boost", { pid: e.id, what: "food", role: "farmer" });
+        break;
+      }
+      case "explorer": {
+        const cur = ctx.getField("@player", "Inventory.fiber") | 0;
+        ctx.setField("@player", "Inventory.fiber", cur + 1);
+        ctx.emit("explore-bonus", { pid: e.id, role: "explorer" }); // forward-compat hook for Task 12
+        ctx.emit("companion-contributed", { pid: e.id, kind: "fiber", role: "explorer" });
+        break;
+      }
+      case "guard": {
+        const cur = ctx.getField("@player", "Inventory.ore") | 0;
+        ctx.setField("@player", "Inventory.ore", cur + 1);
+        ctx.emit("guard-patrol", { pid: e.id, role: "guard" }); // forward-compat hook for Task 10
+        ctx.emit("companion-contributed", { pid: e.id, kind: "ore", role: "guard" });
+        break;
+      }
+      case "trader": {
+        const cur = ctx.getField("@player", "Inventory.wheat") | 0;
+        ctx.setField("@player", "Inventory.wheat", cur + 1);
+        ctx.emit("trade-available", { pid: e.id, role: "trader" }); // forward-compat hook for Task 11
+        ctx.emit("companion-contributed", { pid: e.id, kind: "wheat", role: "trader" });
+        break;
+      }
+      case "scholar": {
+        const tp = ctx.getField("@player", "TechPoint.value") | 0;
+        ctx.emit("tp-set", { value: tp + 1 }); // tp-apply rule in research.json writes TechPoint.value
+        ctx.emit("companion-contributed", { pid: e.id, kind: "techpoint", role: "scholar" });
+        break;
+      }
+      default: {
+        // Fallback: existing random pick (shouldn't fire — all companions have a role post-Task-9).
+        const pick = (ctx.random() * 2) | 0;
+        if (pick === 0) {
+          const items = ["ore", "wood", "fiber"];
+          const which = items[(ctx.random() * items.length) | 0];
+          const cur = ctx.getField("@player", "Inventory." + which) | 0;
+          ctx.setField("@player", "Inventory." + which, cur + 1);
+          ctx.emit("companion-contributed", { pid: e.id, kind: which });
+        } else {
+          const fr = ctx.getField("colony", "Colony.food_rate");
+          ctx.setField("colony", "Colony.food_rate", (typeof fr === "number" ? fr : 0) + 0.5);
+          ctx.emit("companion-boost", { pid: e.id, what: "food" });
+        }
+      }
     }
   }
 });

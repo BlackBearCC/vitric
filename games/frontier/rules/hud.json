@@ -101,6 +101,24 @@
       "do": [
         { "set": "@research_status_lbl.UiLabel.content", "to": { "format": "研究中: {} ({}/{})", "args": ["@colony.Research.current", "@colony.Research.progress", "@colony.Research.cost_total"] } }
       ]
+    },
+    {
+      "id": "hud-collective-wish-pending",
+      "comment": "共识愿望未达成:显示 粮储 NN/50。每帧刷 @colony.Colony.food_i(只要 collective_wish_done==0)。",
+      "on": "tick",
+      "if": [ ["@colony.Colony.collective_wish_done", "==", 0] ],
+      "do": [
+        { "set": "@collective_wish_lbl.UiLabel.content", "to": { "format": "共识: 粮储 {}/50 (未达成)", "args": ["@colony.Colony.food_i"] } }
+      ]
+    },
+    {
+      "id": "hud-collective-wish-done",
+      "comment": "共识愿望已达成:显示 ✓共识达成。collective_wish_done==1 时刷。",
+      "on": "tick",
+      "if": [ ["@colony.Colony.collective_wish_done", "==", 1] ],
+      "do": [
+        { "set": "@collective_wish_lbl.UiLabel.content", "to": "✓共识达成: 粮储 50" }
+      ]
     }
   ]
 }
