@@ -300,6 +300,86 @@
         "tier": {
           "type": "int",
           "default": 1
+        },
+        "_cd_t": {
+          "type": "number",
+          "default": 0
+        }
+      }
+    },
+    "Hp": {
+      "fields": {
+        "value": {
+          "type": "number",
+          "default": 100
+        },
+        "max": {
+          "type": "number",
+          "default": 100
+        }
+      }
+    },
+    "Enemy": {
+      "fields": {
+        "kind": {
+          "type": "text",
+          "default": "gnawer"
+        },
+        "damage": {
+          "type": "number",
+          "default": 5
+        },
+        "aggro_range": {
+          "type": "number",
+          "default": 8
+        },
+        "home_region": {
+          "type": "text",
+          "default": "wild"
+        },
+        "_attack_cd": {
+          "type": "number",
+          "default": 0
+        }
+      }
+    },
+    "Weapon": {
+      "fields": {
+        "kind": {
+          "type": "text",
+          "default": "stone_axe"
+        },
+        "damage": {
+          "type": "number",
+          "default": 10
+        },
+        "range": {
+          "type": "number",
+          "default": 2
+        },
+        "cooldown": {
+          "type": "number",
+          "default": 1
+        },
+        "_cd_t": {
+          "type": "number",
+          "default": 0
+        }
+      }
+    },
+    "Guard": {
+      "fields": {
+        "post_x": {
+          "type": "number",
+          "default": 0
+        },
+        "post_y": {
+          "type": "number",
+          "default": 0
+        },
+        "patrol_r": {
+          "type": "number",
+          "default": 5
         }
       }
     },
@@ -431,7 +511,8 @@
             "craft",
             "interact",
             "upgrade",
-            "research"
+            "research",
+            "combat"
           ],
           "default": "build"
         }
@@ -730,6 +811,14 @@
           "default": ""
         },
         "collective_wish_done": {
+          "type": "int",
+          "default": 0
+        },
+        "enemy_snapshot": {
+          "type": "text",
+          "default": "[]"
+        },
+        "last_threat": {
           "type": "int",
           "default": 0
         }

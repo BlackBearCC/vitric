@@ -54,6 +54,17 @@
         { "set": "@craft_menu.Ui.ox", "to": -3000 }
       ]
     },
+    {
+      "id": "mode-combat",
+      "comment": "切战斗模式：藏所有菜单(同 interact 模式)。左键挥击武器由 rules/combat.json 处理。",
+      "on": { "event": "ui-activate", "filter": { "action": "mode-combat" } },
+      "do": [
+        { "set": "@uistate.Mode.value", "to": "combat" },
+        { "set": "@build_menu.Ui.ox", "to": -3000 },
+        { "set": "@craft_menu.Ui.ox", "to": -3000 },
+        { "set": "@tech_menu.Ui.ox", "to": -3000 }
+      ]
+    },
 
     { "id": "pick-plot",      "on": { "event": "ui-activate", "filter": { "action": "pick-plot" } },      "do": [ { "set": "@uistate.Build.kind", "to": "plot" } ] },
     { "id": "pick-wall",      "on": { "event": "ui-activate", "filter": { "action": "pick-wall" } },      "do": [ { "set": "@uistate.Build.kind", "to": "wall" } ] },
@@ -116,6 +127,17 @@
         { "set": "@tech_menu.Ui.ox", "to": 208 },
         { "set": "@build_menu.Ui.ox", "to": -3000 },
         { "set": "@craft_menu.Ui.ox", "to": -3000 }
+      ]
+    },
+    {
+      "id": "kb-mode-combat",
+      "comment": "F 键切战斗模式:藏三个菜单(同 interact 模式)。左键挥击武器由 rules/combat.json 处理。",
+      "on": { "event": "input", "filter": { "action": "f", "phase": "pressed" } },
+      "do": [
+        { "set": "@uistate.Mode.value", "to": "combat" },
+        { "set": "@build_menu.Ui.ox", "to": -3000 },
+        { "set": "@craft_menu.Ui.ox", "to": -3000 },
+        { "set": "@tech_menu.Ui.ox", "to": -3000 }
       ]
     }
   ]

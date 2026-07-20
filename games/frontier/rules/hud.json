@@ -119,6 +119,14 @@
       "do": [
         { "set": "@collective_wish_lbl.UiLabel.content", "to": "✓共识达成: 粮储 50" }
       ]
+    },
+    {
+      "id": "hud-hp",
+      "comment": "HP HUD:显示玩家当前 HP/MaxHp。每帧刷 @player.Hp(战斗系统 Task 10)。",
+      "on": "tick",
+      "do": [
+        { "set": "@hp_lbl.UiLabel.content", "to": { "format": "HP {}/{}", "args": ["@player.Hp.value", "@player.Hp.max"] } }
+      ]
     }
   ]
 }

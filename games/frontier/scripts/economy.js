@@ -6,6 +6,10 @@
 // Why inventory isn't modified directly here: fn can only spawn/despawn whole entities + write to components it queried,
 // it can't reach @player.Inventory (that's another entity). So the rule passes the current inventory in as an argument,
 // here we compute the new value after deduction, emit it back and let the rule set it.
+//
+// DEPENDENCY: STRUCTURE_HP_BY_TIER is declared in scripts/combat.js (Task 10). vitric.json MUST load combat.js BEFORE
+// economy.js so the global is available when the build fn runs. The build fn adds Hp{value, max} to spawned structures
+// based on tier — without this, enemy-attack-structures would have no Hp to damage.
 
 // Build table (GDD + depth): kind -> materials + tier + color + label + visual size.
 //   Size tiers (per _layout_spec.md section 3):
@@ -95,12 +99,17 @@ vitric.fn("build", (a, ctx) => {
   const gx = Math.round(a.x);
   const gy = Math.round(a.y);
   pay(inv, def.cost);
+  // Structure Hp by tier (STRUCTURE_HP_BY_TIER declared in combat.js — loaded before economy.js in vitric.json).
+  // enemy-attack-structures (combat.js) degrades Hp; Hp<=0 triggers tier downgrade or despawn.
+  const tier = def.tier || 1;
+  const tierHp = STRUCTURE_HP_BY_TIER[tier] || 50;
   // ctx.spawn(component object, optional name) — the components are the flat first parameter (not {components:...}); here we spawn anonymously.
   const comps = {
-    Structure: { kind: a.kind, tier: def.tier || 1 },
+    Structure: { kind: a.kind, tier: tier, _cd_t: 0 },
     Position: { x: gx, y: gy },
     Sprite: { w: def.size, h: def.size, color: def.color },
     Text: { content: def.label, size: 0.34, color: "#ffffff", screen: false }, // Name label on the structure
+    Hp: { value: tierHp, max: tierHp },
   };
   // A plot carries an empty Crop once built — later interaction clicks directly setField to plant the crop on this tile (in-place, no separate crop entity spawned).
   if (a.kind === "plot") comps.Crop = { kind: "", stage: 0, timer: 0 };

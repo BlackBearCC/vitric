@@ -1,0 +1,51 @@
+{
+  "rules": [
+    {
+      "id": "night-fall-spawn-wave",
+      "comment": "night-fall{threat} → 调 spawn_wave 脚本(按威胁度和已解锁区域数算波次大小,在区域边缘 spawn 敌人)。day 用于 raider 解锁判定(day>=5 且 mountain 已解锁)。",
+      "on": { "event": "night-fall" },
+      "do": [
+        { "call": "spawn_wave", "with": {
+          "threat": "event.threat",
+          "day": "@colony.Clock.day"
+        } }
+      ]
+    },
+    {
+      "id": "dawn-break-retreat",
+      "comment": "dawn-break → 调 retreat_all_enemies 脚本(despawn 所有敌人,它们退回野外)。",
+      "on": { "event": "dawn-break" },
+      "do": [
+        { "call": "retreat_all_enemies", "with": {} }
+      ]
+    },
+    {
+      "id": "combat-click",
+      "comment": "战斗模式下左键 → player_attack fn(找最近敌人,在武器范围内则挥击)。武器 cooldown 由 player-combat-cooldown 系统每 tick 递减,fn 通过 ctx.getField 读 Weapon._cd_t。",
+      "on": { "event": "mouse" },
+      "if": [ ["@uistate.Mode.value", "==", "combat"] ],
+      "do": [
+        { "call": "player_attack", "with": {
+          "px": "@colony.Colony.player_x", "py": "@colony.Colony.player_y",
+          "weapon_damage": "@player.Weapon.damage",
+          "weapon_range": "@player.Weapon.range",
+          "weapon_cd": "@player.Weapon.cooldown"
+        } }
+      ]
+    },
+    {
+      "id": "enemy-killed-loot",
+      "comment": "enemy-killed{loot} → apply_loot fn(把战利品合并到背包全集,emit inv-set)。已有的 inv-apply 规则(economy.json)消费 inv-set 写回 @player.Inventory.*。",
+      "on": { "event": "enemy-killed" },
+      "do": [
+        { "call": "apply_loot", "with": {
+          "loot": "event.loot",
+          "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+          "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+          "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+          "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
+        } }
+      ]
+    }
+  ]
+}

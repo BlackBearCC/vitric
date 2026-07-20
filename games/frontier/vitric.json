@@ -22,10 +22,12 @@
     "rules/poi.json",
     "rules/affordability.json",
     "rules/wish.json",
-    "rules/research.json"
+    "rules/research.json",
+    "rules/combat.json"
   ],
   "scripts": [
     "scripts/colony.js",
+    "scripts/combat.js",
     "scripts/economy.js",
     "scripts/crops.js",
     "scripts/companion.js",
