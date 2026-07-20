@@ -1,0 +1,695 @@
+=== COMMITS ===
+53da162 docs(sdd): Task 2 review artifacts
+182e812 feat(script,sim): E2 catch_up system API
+
+=== STAT ===
+ .superpowers/sdd/briefs/task-2-brief.md  | 150 +++++++++++++++++++++++++++++++
+ .superpowers/sdd/briefs/task-2-report.md |  51 +++++++++++
+ crates/vitric-cli/src/runtime.rs         |  21 +++++
+ crates/vitric-cli/tests/region.rs        |  55 ++++++++++++
+ crates/vitric-script/src/lib.rs          |  84 +++++++++++++++++
+ crates/vitric-script/src/prelude.js      |  46 +++++++++-
+ crates/vitric-sim/src/sim.rs             |  96 ++++++++++++++++++--
+ games/frontier/scripts/crops.js          |  17 ++++
+ 8 files changed, 509 insertions(+), 11 deletions(-)
+
+=== FULL DIFF ===
+diff --git a/crates/vitric-cli/src/runtime.rs b/crates/vitric-cli/src/runtime.rs
+index cbe2f47..f1152c1 100644
+--- a/crates/vitric-cli/src/runtime.rs
++++ b/crates/vitric-cli/src/runtime.rs
+@@ -293,20 +293,41 @@ impl GameLogic for Runtime {
+     /// Input action vocabulary: introspected from the rule set (the same `input_actions` as the playtest SceneView).
+     /// Runtime is rule-like logic and can reach `self.rules`, so returns non-empty — the dispatcher's
+     /// `dyn GameLogic` cannot reach the rule engine, this hook hands the action vocabulary out and merges it into describe.
+     fn available_actions(&self) -> Vec<(String, Vec<String>)> {
+         vitric_rules::input_actions(&self.rules.rules)
+             .into_iter()
+             .map(|ia| (ia.action, ia.phases))
+             .collect()
+     }
+ 
++    /// Run catch_up for each system that declared one, for entities in the thawed region.
++    /// Delegates to `ScriptEngine::run_catch_up_for_region`. Events emitted by catch_up fns
++    /// (rare — catch_up is typically a pure timer/stage fast-forward) enter carryover so the
++    /// next tick's rules can react, mirroring how `run_systems` events are handled.
++    fn catch_up_region(
++        &mut self,
++        world: &mut vitric_ecs::World,
++        rng: &mut Pcg32,
++        region_id: &str,
++        dormant_ticks: u32,
++        tick: u64,
++    ) -> Result<(), String> {
++        let so = self
++            .scripts
++            .run_catch_up_for_region(region_id, dormant_ticks, world, rng, tick)
++            .map_err(|e| e.to_string())?;
++        self.observed.extend(so.events.iter().cloned());
++        self.carryover.extend(so.events);
++        Ok(())
++    }
++
+     /// Hot reload: re-read rules + scripts from disk, rebuild as a whole and atomically replace;
+     /// any step failure keeps the old logic untouched (no half-dead state).
+     /// Note: schema/scene changes are not in hot reload's scope (they define the world's shape, changes require restart).
+     fn reload(&mut self) -> Result<serde_json::Value, String> {
+         let root = self.root.clone().ok_or("该运行时没有项目目录，无法热重载")?;
+         let project = Project::load(&root).map_err(|r| r.to_string())?;
+         let fresh = Runtime::build(&project)?;
+         self.rules = fresh.rules;
+         self.scripts = fresh.scripts;
+         // carryover holds pure-data events, safe across reloads, retained
+diff --git a/crates/vitric-cli/tests/region.rs b/crates/vitric-cli/tests/region.rs
+index 9549b9a..69444cd 100644
+--- a/crates/vitric-cli/tests/region.rs
++++ b/crates/vitric-cli/tests/region.rs
+@@ -120,10 +120,65 @@ fn thaw_region_activates_entities() {
+     assert!(report.events.iter().any(|e| e.name == "region-thaw"),
+         "region-thaw event must be fed to the logic on the tick after thaw_region: {:?}",
+         report.events.iter().map(|e| e.name.as_str()).collect::<Vec<_>>());
+ 
+     // dormant_ticks must NOT have advanced for the (now-active) mountain region — once
+     // thawed, it's no longer dormant so accumulate_dormant_ticks skips it.
+     let dormant_ticks = sim.world.get_field(mountain_e, "Region.dormant_ticks")
+         .unwrap().as_i64().unwrap();
+     assert_eq!(dormant_ticks, 0, "active region should not accumulate dormant_ticks");
+ }
++
++#[test]
++fn catch_up_advances_dormant_crop_on_thaw() {
++    // A Crop entity inside a dormant region accumulates `dormant_ticks` while frozen out
++    // of the regular crop-grow system (the dormant filter excludes it from the query).
++    // On thaw, the engine queues a catch-up; the next step flushes it, invoking each
++    // system's optional catch_up function for entities in the thawed region. crop-grow
++    // declares a catch_up that fast-forwards `Crop.timer`/`Crop.stage` by the dormant
++    // tick budget — so the timer must jump from 0 to ~elapsed_seconds after the flush.
++    //
++    // The crop-grow system queries ["Crop","Sprite"] (see games/frontier/scripts/crops.js),
++    // so the test entity must carry both components to be matched by the catch_up filter.
++    let (mut sim, mut rt) = Runtime::boot(&frontier_dir()).unwrap();
++    let crop_e = sim.world.spawn_named("mountain_crop").unwrap();
++    sim.world.set_component(crop_e, "Position", json!({"x":15,"y":15})).unwrap();
++    sim.world.set_component(crop_e, "Sprite", json!({"w":1,"h":1,"color":"#7fbf5a"})).unwrap();
++    sim.world.set_component(crop_e, "Crop", json!({"kind":"wheat","stage":0,"timer":0,"_tend_t":0})).unwrap();
++    sim.world.set_component(crop_e, "Region", json!({
++        "id":"mountain","biome":"mountain","state":"dormant","discovered":0,
++        "anchor_x":0,"anchor_y":12,"w":30,"h":28,
++        "dormant_ticks":0,"spawn_timer":7200
++    })).unwrap();
++
++    // 3600 ticks = 60 seconds of sim time. The mountain region accumulates dormant_ticks
++    // each tick (Task 1's accumulate_dormant_ticks). The crop-grow system skips the dormant
++    // entity, so Crop.timer stays at 0.
++    for _ in 0..3600 {
++        sim.step(&mut rt).unwrap();
++    }
++    let timer_before = sim.world.get_field(crop_e, "Crop.timer")
++        .unwrap().as_f64().unwrap();
++    assert_eq!(timer_before, 0.0,
++        "dormant crop's timer must not advance before thaw");
++
++    // Mountain region's dormant_ticks is now 3600. thaw_region queues a catch-up; the
++    // catch_up itself does NOT run inline — it runs on the NEXT step (when pending_catch_ups
++    // is flushed before logic.on_tick). So we must step at least once before checking.
++    sim.thaw_region("mountain");
++    sim.step(&mut rt).unwrap(); // Flushes pending_catch_ups → catch_up runs
++
++    let timer_after = sim.world.get_field(crop_e, "Crop.timer")
++        .unwrap().as_f64().unwrap();
++    assert!(timer_after > 0.0,
++        "catch_up should advance timer by ~60s of dormant budget, got {}", timer_after);
++
++    // dormant_ticks on the mountain region must be reset to 0 after catch-up (the budget
++    // was consumed). The mountain_crop marker's own Region.dormant_ticks is NOT reset
++    // (it's a separate Region component on a separate entity — only the region entity
++    // named in thaw_region is reset).
++    let mountain_e = sim.world.entity("mountain").unwrap();
++    let dormant_ticks = sim.world.get_field(mountain_e, "Region.dormant_ticks")
++        .unwrap().as_i64().unwrap();
++    assert_eq!(dormant_ticks, 0,
++        "dormant_ticks must be reset to 0 after catch-up consumes the budget");
++}
+diff --git a/crates/vitric-script/src/lib.rs b/crates/vitric-script/src/lib.rs
+index e43ca97..c4d1f34 100644
+--- a/crates/vitric-script/src/lib.rs
++++ b/crates/vitric-script/src/lib.rs
+@@ -37,20 +37,24 @@ fn resolve_field(world: &World, reference: &str, path: &str) -> Option<Value> {
+ }
+ 
+ /// Declaration of a registered system.
+ #[derive(Debug, Clone)]
+ pub struct SystemDecl {
+     pub name: String,
+     /// Entity filter + the set of readable components.
+     pub query: Vec<String>,
+     /// Set of writable components (⊆ query).
+     pub writes: Vec<String>,
++    /// Whether the system declared an optional `catch_up(entity, ctx, dormant_ticks)` fn.
++    /// Set at registration time (4th arg to `vitric.system`); the engine uses this flag to
++    /// skip systems without catch_up when iterating for region thaw catch-up.
++    pub has_catch_up: bool,
+ }
+ 
+ /// Script execution output.
+ #[derive(Debug, Default)]
+ pub struct ScriptOutput {
+     /// Events emitted by the script; the runtime layer feeds them back to the rule engine.
+     pub events: Vec<Event>,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq)]
+@@ -176,20 +180,98 @@ impl ScriptEngine {
+         rng: &mut Pcg32,
+         tick: u64,
+     ) -> Result<ScriptOutput, ScriptError> {
+         let mut out = ScriptOutput::default();
+         for idx in 0..self.systems.len() {
+             self.run_one_system(idx, world, rng, tick, &mut out)?;
+         }
+         Ok(out)
+     }
+ 
++    /// Run each system's optional `catch_up` fn for entities in the given region. Invoked by
++    /// the runtime when a region thaws after being dormant — each system that declared a
++    /// catch_up fn fast-forwards entity state by the dormant tick budget (e.g. crop-grow
++    /// advances Crop.timer/stage so a crop frozen for 60s of sim time doesn't stay at timer=0).
++    ///
++    /// Entity iteration uses `world.entities()` (NOT `query`) because `query` filters dormant
++    /// entities — the just-thawed entities are now "active" at the region-entity level, but
++    /// individual entities carrying a Region component may still have state="dormant" on their
++    /// own Region component (the engine's thaw_region only updates the region entity named by
++    /// `region_id`, not every entity in that region). The system's `query` filter is applied
++    /// on top: an entity must have all query components to be matched.
++    ///
++    /// Each matching entity triggers one `__runCatchUp` call (per-entity, not per-batch). The
++    /// catch_up fn reads/writes via ctx.getField/ctx.setField — the deferred-op channel — so
++    /// writes are subject to schema validation but NOT to the system's `writes` declaration
++    /// (catch_up is best-effort reconciliation, the writes declaration governs the main fn only).
++    pub fn run_catch_up_for_region(
++        &mut self,
++        region_id: &str,
++        dormant_ticks: u32,
++        world: &mut World,
++        rng: &mut Pcg32,
++        tick: u64,
++    ) -> Result<ScriptOutput, ScriptError> {
++        let mut out = ScriptOutput::default();
++        for idx in 0..self.systems.len() {
++            let decl = self.systems[idx].clone();
++            if !decl.has_catch_up {
++                continue;
++            }
++            let location = format!("系统 {:?} 的 catch_up", decl.name);
++            let query: Vec<&str> = decl.query.iter().map(|s| s.as_str()).collect();
++
++            // Find entities in this region (Region.id == region_id) that have all query components.
++            // Use entities() (not query()) because query filters dormant — we want the just-thawed
++            // entities even if their own Region component still says "dormant".
++            let mut matching: Vec<EntityId> = Vec::new();
++            for id in world.entities() {
++                let Ok(region) = world.get_component(id, "Region") else { continue; };
++                let Some(id_str) = region.get("id").and_then(|v| v.as_str()) else { continue; };
++                if id_str != region_id {
++                    continue;
++                }
++                if !query.iter().all(|c| world.has_component(id, c)) {
++                    continue;
++                }
++                matching.push(id);
++            }
++
++            for id in matching {
++                let payload = json!({
++                    "dt": vitric_sim::DT,
++                    "tick": tick,
++                    "rng": rng_to_json(rng),
++                });
++                // Open the getField read-live-World window for this JS call, close it immediately after.
++                WORLD_PTR.with(|p| p.set(world as *const World));
++                let call = self.call_js(
++                    "__runCatchUp",
++                    (idx as i32, id.to_string(), dormant_ticks as i32, payload.to_string()),
++                    &location,
++                );
++                WORLD_PTR.with(|p| p.set(std::ptr::null()));
++                let result_str = call?;
++                let mut result: Value = serde_json::from_str(&result_str).map_err(|e| {
++                    ScriptError::Op {
++                        location: location.clone(),
++                        message: format!("返回值不是合法 JSON: {e}"),
++                    }
++                })?;
++                revive_f64(&mut result, &location)?;
++                *rng = rng_from_json(result.get("rng"), &location)?;
++                self.apply_ops(result.get("ops"), world, &mut out, &location)?;
++            }
++        }
++        Ok(out)
++    }
++
+     fn run_one_system(
+         &mut self,
+         idx: usize,
+         world: &mut World,
+         rng: &mut Pcg32,
+         tick: u64,
+         out: &mut ScriptOutput,
+     ) -> Result<(), ScriptError> {
+         let decl = self.systems[idx].clone();
+         let location = format!("系统 {:?}", decl.name);
+@@ -448,20 +530,22 @@ impl ScriptEngine {
+         let listing = self.call_js("__list", (), "<注册表>")?;
+         let v: Value = serde_json::from_str(&listing).expect("prelude __list 输出合法 JSON");
+         self.systems = v["systems"]
+             .as_array()
+             .expect("systems 是数组")
+             .iter()
+             .map(|s| SystemDecl {
+                 name: s["name"].as_str().expect("name").to_string(),
+                 query: to_string_vec(&s["query"]),
+                 writes: to_string_vec(&s["writes"]),
++                // Prelude's __list reports `catch_up: true/false` per system; missing/false = no catch_up.
++                has_catch_up: s.get("catch_up").and_then(|v| v.as_bool()).unwrap_or(false),
+             })
+             .collect();
+         self.fns = to_string_vec(&v["fns"]);
+         Ok(())
+     }
+ }
+ 
+ /// Restore prelude's bit-string floats: `{"$f64":"<16hex>"}` → f64.
+ /// QuickJS's dtoa is not shortest-round-trip, so non-integer floats crossing the boundary must go through IEEE754 bit strings.
+ fn revive_f64(v: &mut Value, location: &str) -> Result<(), ScriptError> {
+diff --git a/crates/vitric-script/src/prelude.js b/crates/vitric-script/src/prelude.js
+index aaa3f72..75aabd0 100644
+--- a/crates/vitric-script/src/prelude.js
++++ b/crates/vitric-script/src/prelude.js
+@@ -1,39 +1,48 @@
+ // Vitric script runtime prelude — injected before any user script.
+ "use strict";
+ 
+ globalThis.__systems = [];
+ globalThis.__fns = {};
+ 
+ globalThis.vitric = {
+-  // Register a system: vitric.system("name", {query: [components...], writes: [components...]}, (entities, ctx) => {...})
++  // Register a system: vitric.system("name", {query: [components...], writes: [components...]}, (entities, ctx) => {...} [, catch_up_fn])
+   // query is the entity filter (the system can read these components); writes must be a subset of query (which it can change).
+-  system(name, decl, fn) {
++  // catch_up_fn is optional: (entity, ctx, dormant_ticks) => {...}. Invoked per matching entity when a region thaws after
++  // being dormant, so the system can fast-forward entity state by the dormant tick budget instead of leaving it stale.
++  // The catch_up_fn uses ctx.getField/ctx.setField (same as a rule `call` fn) — it does NOT receive the entity batch,
++  // and writes via setField are NOT subject to the system's `writes` declaration (setField is the deferred-op channel).
++  system(name, decl, fn, catch_up_fn) {
+     if (typeof name !== "string" || !name) {
+       throw new Error("vitric.system: 第一个参数必须是非空系统名");
+     }
+     if (!decl || !Array.isArray(decl.query) || decl.query.length === 0) {
+       throw new Error("vitric.system(\"" + name + "\"): 第二个参数必须含非空 query 数组，声明系统要处理哪些组件");
+     }
+     const writes = decl.writes || [];
+     for (const w of writes) {
+       if (!decl.query.includes(w)) {
+         throw new Error("vitric.system(\"" + name + "\"): writes 里的 \"" + w + "\" 不在 query 里。能写的组件必须先在 query 里声明");
+       }
+     }
+     if (typeof fn !== "function") {
+       throw new Error("vitric.system(\"" + name + "\"): 第三个参数必须是函数 (entities, ctx) => {...}");
+     }
++    // Optional 4th arg: catch_up(entity, ctx, dormant_ticks). null/undefined = system has no catch_up.
++    // Any other type is an explicit error (catches `vitric.system(name, decl, fn, someNonFn)` typos).
++    if (catch_up_fn !== undefined && catch_up_fn !== null && typeof catch_up_fn !== "function") {
++      throw new Error("vitric.system(\"" + name + "\"): 第四个参数（可选 catch_up）必须是函数 (entity, ctx, dormant_ticks) => {...}，或省略/null");
++    }
+     if (__systems.some((s) => s.name === name)) {
+       throw new Error("vitric.system: 系统名 \"" + name + "\" 已注册过，系统名全局唯一");
+     }
+-    __systems.push({ name, query: decl.query, writes, fn });
++    __systems.push({ name, query: decl.query, writes, fn, catch_up: catch_up_fn || null });
+   },
+   // Register a function callable by the rule `call` action: vitric.fn("name", (args, ctx) => {...})
+   fn(name, f) {
+     if (typeof name !== "string" || !name) {
+       throw new Error("vitric.fn: 第一个参数必须是非空函数名");
+     }
+     if (typeof f !== "function") {
+       throw new Error("vitric.fn(\"" + name + "\"): 第二个参数必须是函数 (args, ctx) => {...}");
+     }
+     __fns[name] = f;
+@@ -199,20 +208,42 @@ globalThis.__runSystem = function (idx, payloadJson) {
+   const ops = [];
+   const ctx = __makeCtx(payload, ops, rng);
+   sys.fn(payload.entities, ctx);
+   return __jsonStr({
+     entities: payload.entities,
+     ops,
+     rng: { state: rng.state.toString(), inc: rng.inc.toString() },
+   });
+ };
+ 
++// Rust-side entry: run the catch_up fn of system `idx` for a single entity. The entity is
++// passed by handle (string like "e3v0"); the catch_up fn reads/writes via ctx.getField/ctx.setField
++// (NOT via the entity batch — catch_up is per-entity, not per-query-batch). dormant_ticks is the
++// number of ticks the entity's region spent dormant, the budget the fn fast-forwards by.
++// Returns the same shape as __runSystem: {ops, rng} — ops are applied to the world by the Rust side.
++globalThis.__runCatchUp = function (idx, entityHandle, dormantTicks, payloadJson) {
++  const sys = __systems[idx];
++  if (!sys.catch_up) {
++    throw new Error("系统 " + JSON.stringify(sys.name) + " 没有 catch_up 函数，不应被调度");
++  }
++  const payload = JSON.parse(payloadJson);
++  const rng = { state: BigInt(payload.rng.state), inc: BigInt(payload.rng.inc) };
++  const ops = [];
++  const ctx = __makeCtx(payload, ops, rng);
++  // The entity is exposed to the fn as a handle string (e3v0) — same shape ctx.setField/ctx.getField take.
++  sys.catch_up(entityHandle, ctx, dormantTicks);
++  return __jsonStr({
++    ops,
++    rng: { state: rng.state.toString(), inc: rng.inc.toString() },
++  });
++};
++
+ // Rust-side entry: run the function targeted by a rule's `call` action
+ globalThis.__callFn = function (name, payloadJson) {
+   const f = __fns[name];
+   if (!f) {
+     throw new Error(
+       "没有注册名为 \"" + name + "\" 的脚本函数。已注册: [" + Object.keys(__fns).join(", ") +
+       "]。用 vitric.fn(\"" + name + "\", (args, ctx) => {...}) 注册"
+     );
+   }
+   const payload = JSON.parse(payloadJson);
+@@ -220,14 +251,21 @@ globalThis.__callFn = function (name, payloadJson) {
+   const ops = [];
+   const ctx = __makeCtx(payload, ops, rng);
+   ctx.self = payload.self; // entity handle bound at rule trigger time (may be null)
+   f(payload.args, ctx);
+   return __jsonStr({ ops, rng: { state: rng.state.toString(), inc: rng.inc.toString() } });
+ };
+ 
+ // Rust-side entry: enumerate registration results
+ globalThis.__list = function () {
+   return JSON.stringify({
+-    systems: __systems.map((s) => ({ name: s.name, query: s.query, writes: s.writes })),
++    systems: __systems.map((s) => ({
++      name: s.name,
++      query: s.query,
++      writes: s.writes,
++      // Whether this system declared a catch_up fn (4th arg to vitric.system). The Rust side
++      // uses this to skip systems without catch_up when iterating for region thaw catch-up.
++      catch_up: !!s.catch_up,
++    })),
+     fns: Object.keys(__fns),
+   });
+ };
+diff --git a/crates/vitric-sim/src/sim.rs b/crates/vitric-sim/src/sim.rs
+index 860eb9b..440b232 100644
+--- a/crates/vitric-sim/src/sim.rs
++++ b/crates/vitric-sim/src/sim.rs
+@@ -50,20 +50,40 @@ pub trait GameLogic {
+         Ok(())
+     }
+ 
+     /// This logic's current "what can I do" input action vocabulary: `(action_name, list of phases it has appeared in)`.
+     /// The control plane describe uses it to tell the agent, beyond "what's on the screen", also "what you can press" — unified with the playable
+     /// SceneView affordance. Default empty: only rules-style logic (Runtime) reaches the rules and can return non-empty;
+     /// sim holds a `dyn GameLogic` and cannot reach the concrete rules engine, so this hook is overridden by implementors as needed.
+     fn available_actions(&self) -> Vec<(String, Vec<String>)> {
+         Vec::new()
+     }
++
++    /// Run catch-up for entities in the given region. Called by `Sim::step` when a region thaws
++    /// after being dormant — each system with an optional `catch_up` fn fast-forwards entity
++    /// state by the dormant tick budget (e.g. crop-grow advances `Crop.timer`/`Crop.stage`).
++    /// Default no-op: only Runtime (which holds `ScriptEngine`) actually runs the catch_up fns;
++    /// other `GameLogic` impls (e.g. `()`, test stubs) have no systems to catch up.
++    ///
++    /// `dormant_ticks` is the budget (in ticks) the region spent dormant — read from
++    /// `Region.dormant_ticks` by the caller and reset to 0 after this returns. `tick` is the
++    /// current simulation tick (same value `on_tick` will receive this step).
++    fn catch_up_region(
++        &mut self,
++        _world: &mut World,
++        _rng: &mut Pcg32,
++        _region_id: &str,
++        _dormant_ticks: u32,
++        _tick: u64,
++    ) -> Result<(), String> {
++        Ok(())
++    }
+ }
+ 
+ /// Empty logic (for pure physics simulation).
+ impl GameLogic for () {
+     fn on_tick(&mut self, _: &mut World, _: Vec<Event>, _: &mut Pcg32, _: u64) -> Result<(), String> {
+         Ok(())
+     }
+ }
+ 
+ #[derive(Debug, Clone, PartialEq)]
+@@ -117,33 +137,42 @@ pub struct Sim {
+     /// Injected but unconsumed external replies (LLM replies, etc.). A second recording channel at the
+     /// same level as pending_inputs: enters step as events + enters the recording, enters the snapshot.
+     pending_replies: Vec<(String, serde_json::Value)>,
+     /// Events queued by host API calls (e.g. [`Sim::thaw_region`]) between steps. Same lifecycle
+     /// as `pending_replies` — drained into the logic inbox at the start of the next step. NOT
+     /// recorded by the recording: a host API call is deterministic given the same host program
+     /// (replay re-runs the same host program, so the same `thaw_region` call happens at the same
+     /// tick). If a recording must capture an externally-injected event, use `inject_reply`
+     /// (which IS recorded, same channel as LLM replies).
+     pending_events: Vec<Event>,
++    /// Region IDs queued by [`Sim::thaw_region`] for catch-up. Drained at the start of the next
++    /// step (before `logic.on_tick`): for each region ID, the engine reads `Region.dormant_ticks`
++    /// from the region entity, calls `logic.catch_up_region(region_id, dormant_ticks)`, then
++    /// resets `dormant_ticks` to 0 (the budget is consumed). Same determinism reasoning as
++    /// `pending_events`: a host API call is deterministic given the same host program, so this
++    /// vector does not need to be recorded by the recording. It IS snapshotted/restored so a
++    /// mid-thaw save/load round-trips the pending catch-up.
++    pending_catch_ups: Vec<String>,
+     recorder: Option<Recording>,
+ }
+ 
+ impl Sim {
+     pub fn new(seed: u64) -> Sim {
+         Sim {
+             world: World::new(),
+             rng: Pcg32::new(seed),
+             tick: 0,
+             seed,
+             pending_inputs: Vec::new(),
+             pending_replies: Vec::new(),
+             pending_events: Vec::new(),
++            pending_catch_ups: Vec::new(),
+             recorder: None,
+         }
+     }
+ 
+     /// Seed of this run (set at construction, overwritten by snapshot on restore). When manually assembling a recording, use it as `Recording.seed`.
+     pub fn seed(&self) -> u64 {
+         self.seed
+     }
+ 
+     /// Inject an input (takes effect on the next step). phase: "pressed" | "released".
+@@ -161,37 +190,42 @@ impl Sim {
+ 
+     /// Transition a Region entity from dormant/frozen to active, mark it discovered, and queue
+     /// a `region-thaw` event for the next step. The event carries `{"id": <region_id>}` and
+     /// reaches the logic inbox on the next step (where rules can react to it).
+     ///
+     /// Safe to call on a non-existent region or an entity without a Region component — both
+     /// are silent no-ops (defensive: the host may call this speculatively). Not idempotent on
+     /// already-active regions — the state is re-set to "active" (no-op) and the event is still
+     /// emitted (rules can decide whether to dedupe based on `discovered`).
+     ///
+-    /// Catch-up logic for previously-discovered regions is Task 2 (out of scope here).
++    /// Catch-up is queued whenever the region WAS dormant or frozen (i.e. it accumulated
++    /// `dormant_ticks` that need to be reconciled). This covers both first-thaw (state was
++    /// "dormant", discovered 0→1) and re-thaw (state was "frozen", discovered already 1).
++    /// Already-active regions do not queue catch-up (dormant_ticks is 0, nothing to reconcile).
++    /// The next step flushes `pending_catch_ups` before `logic.on_tick`, calling each system's
++    /// optional catch_up fn to fast-forward entity state by the dormant tick budget (Task 2).
+     pub fn thaw_region(&mut self, id: &str) {
+         let Ok(region_e) = self.world.entity(id) else { return; };
+         let Ok(mut region) = self.world.get_component(region_e, "Region").cloned() else { return; };
+-        let was_discovered = region.get("discovered").and_then(|v| v.as_i64()).unwrap_or(0) == 1;
++        let was_dormant = matches!(
++            region.get("state").and_then(|v| v.as_str()),
++            Some("dormant") | Some("frozen")
++        );
+         region["state"] = json!("active");
+         region["discovered"] = json!(1);
+         let _ = self.world.set_component(region_e, "Region", region);
+         self.pending_events.push(Event::new("region-thaw", json!({"id": id})));
+-        if was_discovered {
+-            self.invoke_catch_up_for_region(id);
++        if was_dormant {
++            self.pending_catch_ups.push(id.to_string());
+         }
+     }
+ 
+-    /// Catch-up scheduling for a re-thawed region. Stub — implemented in Task 2.
+-    fn invoke_catch_up_for_region(&mut self, _region_id: &str) {}
+-
+     /// Start recording (records from the current state).
+     pub fn start_recording(&mut self) {
+         self.recorder = Some(Recording {
+             seed: self.seed,
+             checkpoints: vec![(self.tick, self.world.state_hash())],
+             ..Default::default()
+         });
+     }
+ 
+     /// Whether recording is in progress. Recordings only record the input stream: any state modification bypassing inputs during recording
+@@ -267,20 +301,53 @@ impl Sim {
+         //    (the amplitude set by rules this tick renders at its original value on the first frame, decay starts next tick);
+         //    particles are despawned before collision detection (dead particles emit no collision event)
+         self.follow_camera()?;
+         self.decay_shake()?;
+         self.age_particles()?;
+         self.advance_tweens(&mut events)?;
+ 
+         // 4. Collisions
+         self.detect_collisions(&mut events)?;
+ 
++        // 4.5 Flush pending catch-ups (region thaws queued by host API since the last step).
++        // For each region ID, read `Region.dormant_ticks` from the region entity, call
++        // `logic.catch_up_region(region_id, dormant_ticks)`, then reset `dormant_ticks` to 0
++        // (the budget is consumed). Runs BEFORE `logic.on_tick` so the regular systems see the
++        // post-catch-up state and continue from there (e.g. crop-grow's main fn sees the
++        // fast-forwarded Crop.timer and doesn't re-advance it).
++        //
++        // Determinism: pending_catch_ups is populated by `thaw_region` (a host API call). Replay
++        // re-runs the same host program, so the same `thaw_region` calls happen at the same ticks,
++        // producing the same pending_catch_ups in the same order — bit-identical catch-up.
++        for region_id in std::mem::take(&mut self.pending_catch_ups) {
++            let Ok(region_e) = self.world.entity(&region_id) else { continue; };
++            let dormant_ticks = self
++                .world
++                .get_field(region_e, "Region.dormant_ticks")
++                .ok()
++                .and_then(|v| v.as_i64())
++                .unwrap_or(0)
++                .max(0) as u32;
++            logic
++                .catch_up_region(
++                    &mut self.world,
++                    &mut self.rng,
++                    &region_id,
++                    dormant_ticks,
++                    self.tick,
++                )
++                .map_err(|message| SimError::Logic { tick: self.tick, message })?;
++            // Consume the budget: dormant_ticks resets to 0 after catch-up. The region is now
++            // active, so accumulate_dormant_ticks won't touch it anymore.
++            let _ = self.world.set_field(region_e, "Region.dormant_ticks", json!(0));
++        }
++
+         // 5. Logic
+         logic
+             .on_tick(&mut self.world, events.clone(), &mut self.rng, self.tick)
+             .map_err(|message| SimError::Logic { tick: self.tick, message })?;
+ 
+         // 5.5 Region dormant accounting: every step, dormant/frozen regions accumulate one tick
+         // of `dormant_ticks` — used by catch-up logic (Task 2) to decide how much sim time to
+         // fast-forward when the region thaws. Runs after logic so rule/script state mutations
+         // this tick are visible; uses `entities()` (not `query`) because query filters dormant.
+         self.accumulate_dormant_ticks();
+@@ -360,20 +427,23 @@ impl Sim {
+             "rng": serde_json::to_value(&self.rng).expect("rng 可序列化"),
+             "world": self.world.snapshot(),
+             // Injected but unconsumed inputs/external replies. Dropping any of them makes them vanish on restore, causing silent trajectory divergence
+             "pending_inputs": self.pending_inputs,
+             "pending_replies": self.pending_replies,
+             // Host API events queued between save and next step (region-thaw etc.). Serialized
+             // manually because Event doesn't derive Serialize — keep shape in sync with restore.
+             "pending_events": self.pending_events.iter()
+                 .map(|e| json!({"name": e.name, "data": serde_json::Value::Object(e.data.clone())}))
+                 .collect::<Vec<_>>(),
++            // Region IDs queued for catch-up by thaw_region since the last step. Same lifecycle
++            // as pending_events — drained into logic.catch_up_region at the start of the next step.
++            "pending_catch_ups": self.pending_catch_ups,
+             // Logic layer stashed state (events emitted by the script last tick, etc.)
+             "logic": logic.snapshot_state(),
+         })
+     }
+ 
+     /// Restore from snapshot.
+     pub fn restore(
+         &mut self,
+         snap: &serde_json::Value,
+         logic: &mut dyn GameLogic,
+@@ -402,28 +472,40 @@ impl Sim {
+         let pending_events_arr = snap.get("pending_events").and_then(|v| v.as_array());
+         let mut pending_events: Vec<Event> = Vec::new();
+         if let Some(arr) = pending_events_arr {
+             for ev in arr {
+                 let name = ev.get("name").and_then(|v| v.as_str())
+                     .ok_or("pending_events 缺 name 字段")?;
+                 let data = ev.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                 pending_events.push(Event::new(name, data));
+             }
+         }
++        // pending_catch_ups: region IDs queued by thaw_region since the last step. Old snapshots
++        // predating this field → treat as empty (forward compatibility).
++        let pending_catch_ups: Vec<String> = snap
++            .get("pending_catch_ups")
++            .and_then(|v| v.as_array())
++            .map(|a| {
++                a.iter()
++                    .filter_map(|v| v.as_str().map(String::from))
++                    .collect()
++            })
++            .unwrap_or_default();
+         logic.restore_state(snap.get("logic").ok_or("快照缺 logic 状态")?)?;
+         self.tick = tick;
+         self.seed = seed;
+         self.rng = rng;
+         self.world = world;
+         self.pending_inputs = pending;
+         self.pending_replies = pending_replies;
+         self.pending_events = pending_events;
++        self.pending_catch_ups = pending_catch_ups;
+         // The timeline is broken, so an in-progress recording is necessarily non-replayable — invalidate it directly, no silently corrupted recording left behind
+         self.recorder = None;
+         Ok(())
+     }
+ 
+     // ---- Built-in systems ----
+ 
+     /// Increment `Region.dormant_ticks` on every Region entity currently in dormant or frozen
+     /// state. Uses `entities()` (not `query`) because `query` filters dormant — we explicitly
+     /// want to find dormant entities to increment their counter. Used by catch-up logic (Task 2)
+diff --git a/games/frontier/scripts/crops.js b/games/frontier/scripts/crops.js
+index 2d815d2..1a7b441 100644
+--- a/games/frontier/scripts/crops.js
++++ b/games/frontier/scripts/crops.js
+@@ -36,11 +36,28 @@ vitric.system("crop-grow", { query: ["Crop", "Sprite"], writes: ["Crop", "Sprite
+       c.timer += ctx.dt;
+       if (c.timer >= STAGE_SECONDS) {
+         c.timer = 0;
+         c.stage += 1;
+         if (c.stage >= RIPE_STAGE) ctx.emit("crop-ready", {});
+       }
+     }
+     const color = STAGE_COLOR[c.stage] || STAGE_COLOR[RIPE_STAGE];
+     if (e.Sprite.color !== color) e.Sprite.color = color;
+   }
++},
++// catch_up: fast-forward Crop.timer/stage by the dormant tick budget when a region thaws.
++// Simplified reconciliation — ONLY advances timer and stage, NOT other side effects:
++// no emit (crop-ready will fire on the next regular tick if the crop reached ripe),
++// no Sprite.color update (the main fn paints that next tick), no night check (dormant
++// time is treated as continuous growth, since the regular fn already paused at night).
++// dormant_ticks is in ticks (60 ticks = 1 second); convert to seconds and roll stages.
++(entityHandle, ctx, dormantTicks) => {
++  const dormantSec = dormantTicks / CROP_TICK_PER_SEC;
++  let t = (ctx.getField(entityHandle, "Crop.timer") || 0) + dormantSec;
++  let s = ctx.getField(entityHandle, "Crop.stage") || 0;
++  while (t >= STAGE_SECONDS && s < RIPE_STAGE) {
++    t -= STAGE_SECONDS;
++    s += 1;
++  }
++  ctx.setField(entityHandle, "Crop.timer", t);
++  ctx.setField(entityHandle, "Crop.stage", s);
+ });

@@ -6,6 +6,30 @@ Branch: main (per user preference: auto-commit + push to main)
 
 ## Tasks
 
+- Task 4: complete (commits c286ca5..58ab058, APPROVED with 0 Critical/Important, 3 Minor)
+  - E4 View-frustum culling: `render_with` computes world-space viewport bounds from `(cam_x, cam_y, scale)` + framebuffer dimensions, then per-entity AABB check (rotation-aware `ext_x`/`ext_y` for `rot != 0`) before the pixel loop. Skipped entities are exactly those whose rotated AABB is entirely outside the viewport. Culling uses the shaken camera (same as the picture) so shake-panned entities are never lost.
+  - **Dropped `margin = 4.0`**: brief pseudocode used margin "for shadow casters" but `collect_occluders` queries `["Solid","Position","Collider"]` via a separate path — sprite cull doesn't affect shadows. Exact AABB is the right boundary; any margin would be arbitrary over-conservatism. Approved deviation.
+  - **Replaced flaky perf test with 3 deterministic correctness tests** (brief explicitly allows): `offscreen_entities_not_rendered` (regression guard — passes even without culling due to existing clamp, but locks contract), `onscreen_entities_rendered` (would fail if culling math has a sign flip), `culling_preserves_byte_identical_output_for_onscreen_entities` (asserts `Vec<u8>` equality + 32×32 magenta footprint). Screenshot-hash tests (frames/glow/particles) + gate hash lock the determinism contract end-to-end.
+  - **GPU mirror skipped** (brief Step 5 optional): documented in `gpu.rs:1887-1894` pointing to CPU logic. CPU path is source of truth for screenshots/gate.
+  - **`describe_world` not culled** (intentional): already classifies visible/offscreen with its own boundary check; off-screen entities appear in `offscreen` array for agent navigation. Culling would lose semantic info.
+  - **Lights/Emitters not culled** (intentional): off-screen Light can illuminate on-screen pixels (radius extends into viewport); lighting formula already does per-pixel radius culling. Emitters draw via separate `draw_particles` path.
+  - Gate hash unchanged: `0xab58ec29d99275df` (controller re-ran gate to verify — pass:true, verified:true, 37249 ticks).
+  - Minor: M1 test header undercount ("two" → "three", fixed in post-review commit); M2 `offscreen_entities_not_rendered` is a weak TDD driver (useful regression guard, implementer honest); M3 test name `culling_preserves_byte_identical_output_for_onscreen_entities` slightly misleading (actual byte-lock comes from existing screenshot-hash tests + gate hash).
+  - Cannot-verify items resolved by controller: typescript failures pre-existing (esbuild missing, verified via git stash in Task 1); gate hash verified by controller rerun (pass:true, hash matches); leftover uncommitted files committed in post-review docs commit.
+
+- Task 3: complete (commits 53da162..c286ca5, APPROVED with 0 Critical/Important, 3 Minor)
+  - E3 Seeded RNG substreams: `Substream` struct in `pcg.rs` (FNV-like hash of `(world_seed, name)` → increment); `Sim::substreams: HashMap<String, Substream>`; `Sim::random_stream(name) -> &mut Substream` inserts-if-absent; native `__randomStreamNext(name)` via `SIM_PTR` thread-local (mirrors `WORLD_PTR`); `ctx.random_stream(name)` in prelude returns `{ next(), nextInt(min, max) }`; substream state in `Sim::snapshot`/`restore` (serde_json BTreeMap-backed → byte-stable).
+  - Substream state NOT in recording checkpoint hash (by design — recording hashes World only); determinism via `(world_seed, name)` seed contract + call-order replay.
+  - Gate hash unchanged: `0xab58ec29d99275df` (substreams are Sim state, not World state).
+  - Minor: M1 per-call FFI cost (revisit in Task 12); M2 test helper RAII (harmless); M3 safety comment imprecise (mirrors existing pattern).
+  - Cannot-verify (Task 12 follow-ups): thaw_region not recorded by Recording — verify Task 12 region-thaw triggers are deterministic-given-recording; substream divergence only detected via world-state hash — verify Task 12 substream consumers write results into entity components.
+
+- Task 2: complete (commits 202504a..53da162, APPROVED with 0 findings)
+  - E2 Catch_up system API: `vitric.system(name, decl, fn, catch_up_fn?)` accepts optional 4th arg; `__runCatchUp` global in prelude; `SystemDecl.has_catch_up: bool`; `Sim::pending_catch_ups: Vec<String>` queue flushed in `step()` before `on_tick`; `GameLogic::catch_up_region` trait method (default no-op); `Runtime::catch_up_region` bridges to `ScriptEngine::run_catch_up_for_region`; `crop-grow` declares simplified catch_up (timer + stage only, no emit/side effects).
+  - **Deviation approved**: queueing condition changed from `was_discovered` (brief pseudocode) to `was_dormant` — brief's `was_discovered` would skip catch_up on first thaw of never-discovered region, but test explicitly verifies catch_up runs on first thaw when entities exist in dormant region. `was_dormant` is semantically correct: dormant regions have un-simulated entities needing reconciliation; active regions have dormant_ticks=0 so catch_up is no-op anyway.
+  - Cannot-verify items resolved by controller: region tests 5/5 PASS (catch_up test takes ~65s in debug due to 3600-tick step); gate PASS with same hash `0xab58ec29d99275df` (Task 2 didn't perturb deterministic trajectory — catch_up only fires on thaw, which existing recording doesn't do).
+  - Pre-existing typescript failures (esbuild missing) unchanged.
+
 - Task 1: complete (commits c0c7af5..a9e1167, APPROVED after I1 fix)
   - E1 Region dormant/active/frozen: `world.query`/`render_world`/`describe_world` skip dormant; `Sim::thaw_region(id)` transitions state + emits `region-thaw`; `accumulate_dormant_ticks` runs each step; `invoke_catch_up_for_region` stub added for Task 2 integration.
   - `Region` component added to `games/frontier/schema.json` (10 fields, state enum dormant/active/frozen). Mountain marker entity added to `scenes/main.json` (dormant, anchor 0,12, 30×28).

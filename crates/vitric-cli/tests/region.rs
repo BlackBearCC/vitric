@@ -294,11 +294,12 @@ fn random_stream_state_in_snapshot() {
 
 // ---- Task 4 (E4): View-frustum culling ----
 //
-// Replaces the brief's flaky timing-based perf test with two deterministic correctness tests:
-// off-screen entities must not appear in the pixel buffer (their color must not bleed in), and
-// on-screen entities must still render (their color must appear). Together these lock the
-// culling contract — render skips work for off-screen entities but never changes the visible
-// pixels — without depending on wall-clock timing.
+// Replaces the brief's flaky timing-based perf test with three deterministic correctness tests:
+// off-screen entities must not appear in the pixel buffer (their color must not bleed in),
+// on-screen entities must still render (their color must appear), and the same world rendered
+// twice must be byte-identical with the on-screen sprite's full AABB covered. Together these
+// lock the culling contract — render skips work for off-screen entities but never changes the
+// visible pixels — without depending on wall-clock timing.
 //
 // Setup: isolated world, default camera (origin, 8 px/unit). For a 64x64 frame the visible world
 // viewport is 8x8 units centered on the origin → (-4..=4 on each axis). An entity at (1000, 1000)

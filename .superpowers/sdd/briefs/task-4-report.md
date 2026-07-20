@@ -11,7 +11,9 @@
 
 ## 2. Commits
 
-(tbd — filled in after `git commit` + `git push` complete; see Section 7 update.)
+- `58ab058cd354950faf0211ac48c4ba12c0d0df94` — `feat(render): E4 view-frustum culling` (pushed to `origin/main`)
+  - Files: `crates/vitric-render/src/lib.rs`, `crates/vitric-cli/src/gpu.rs`, `crates/vitric-cli/tests/region.rs`, `.superpowers/sdd/briefs/task-4-brief.md`, `.superpowers/sdd/briefs/task-4-report.md` (5 files, +308 lines).
+  - Parent: `c286ca5` (E3 seeded RNG substreams).
 
 ## 3. Test results
 
