@@ -85,6 +85,22 @@
       "do": [
         { "set": "@forecast_lbl.UiLabel.content", "to": "@colony.Forecast.days" }
       ]
+    },
+    {
+      "id": "hud-techpoint",
+      "comment": "科技点 HUD:科技点 N。每帧刷 @player.TechPoint.value。",
+      "on": "tick",
+      "do": [
+        { "set": "@techpoint_lbl.UiLabel.content", "to": { "format": "科技点 {}", "args": ["@player.TechPoint.value"] } }
+      ]
+    },
+    {
+      "id": "hud-research-status",
+      "comment": "研发状态 HUD:研究中: <name> (<progress>/<total>s)。每帧刷 @colony.Research。",
+      "on": "tick",
+      "do": [
+        { "set": "@research_status_lbl.UiLabel.content", "to": { "format": "研究中: {} ({}/{})", "args": ["@colony.Research.current", "@colony.Research.progress", "@colony.Research.cost_total"] } }
+      ]
     }
   ]
 }

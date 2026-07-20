@@ -2,7 +2,7 @@
   "rules": [
     {
       "id": "build-click",
-      "comment": "建造模式下左键点地 → 调 build 脚本(算料/扣料/spawn 结构)。把点击坐标、命中实体名、选中 kind、当前背包全集都传进去——脚本够不到别的实体,只能靠规则喂参数。",
+      "comment": "建造模式下左键点地 → 调 build 脚本(算料/扣料/spawn 结构)。把点击坐标、命中实体名、选中 kind、当前背包全集都传进去——脚本够不到别的实体,只能靠规则喂参数。known(已研发科技 JSON 串)用于 tier-2/3 配方的科技前置校验。",
       "on": { "event": "mouse" },
       "if": [ ["@uistate.Mode.value", "==", "build"] ],
       "do": [
@@ -10,7 +10,9 @@
           "x": "event.x", "y": "event.y", "entity": "event.entity", "kind": "@uistate.Build.kind",
           "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
           "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
-          "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
+          "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+          "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core",
+          "known": "@colony.Research.known"
         } }
       ]
     },
@@ -22,7 +24,8 @@
         "id": "plank",
         "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
         "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
-        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
       } } ]
     },
     {
@@ -32,7 +35,8 @@
         "id": "chair",
         "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
         "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
-        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
       } } ]
     },
     {
@@ -42,7 +46,8 @@
         "id": "lamp",
         "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
         "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
-        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
       } } ]
     },
 
@@ -58,7 +63,9 @@
         { "set": "@player.Inventory.wheat", "to": "event.wheat" },
         { "set": "@player.Inventory.plank", "to": "event.plank" },
         { "set": "@player.Inventory.chair", "to": "event.chair" },
-        { "set": "@player.Inventory.lamp",  "to": "event.lamp" }
+        { "set": "@player.Inventory.lamp",  "to": "event.lamp" },
+        { "set": "@player.Inventory.hide",  "to": "event.hide" },
+        { "set": "@player.Inventory.crystal_core", "to": "event.crystal_core" }
       ]
     },
 
@@ -84,7 +91,8 @@
           "entity": "event.target_id",
           "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
           "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
-          "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
+          "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+          "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
         } }
       ]
     },
@@ -97,7 +105,8 @@
         "entity": "event.entity",
         "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
         "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
-        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
       } } ]
     }
   ]

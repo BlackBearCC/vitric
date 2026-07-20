@@ -45,7 +45,8 @@ vitric.fn("interact_poi", (a, ctx) => {
   try { rewards = JSON.parse(poi.reward_table || "{}"); } catch { return; }
 
   // Build inventory from args (same pattern as economy.js readInv).
-  const ITEMS = ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp"];
+  // `hide` + `crystal_core` round-trip through inv-set alongside the rest of the inventory.
+  const ITEMS = ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp", "hide", "crystal_core"];
   const inv = {};
   for (const k of ITEMS) inv[k] = a[k] | 0;
 
@@ -72,6 +73,12 @@ vitric.fn("interact_poi", (a, ctx) => {
   // Mark POI looted + start cooldown (writes to the clicked entity's Poi component).
   ctx.setField(a.entity, "Poi.state", "looted");
   ctx.setField(a.entity, "Poi.cooldown", POI_COOLDOWN_LOOTED);
+
+  // Award TechPoints for POI exploration (+2 per fresh POI).
+  // The rule passes the current TechPoint.value in as `techpoint`; we emit the new absolute
+  // value back via tp-set, the tp-apply rule in research.json writes it to @player.TechPoint.value.
+  const tp = (a.techpoint | 0) + 2;
+  ctx.emit("tp-set", { value: tp });
 
   // Toast with reward summary.
   ctx.emit("toast-show", { text: `探索收获: ${rewardText.trim()}` });

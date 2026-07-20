@@ -2,39 +2,54 @@
   "rules": [
     {
       "id": "ui-init",
-      "comment": "开局默认建造模式：显建造菜单(ox 208)、藏制作菜单(ox -3000 推出屏外,子按钮跟着没)。",
+      "comment": "开局默认建造模式：显建造菜单(ox 208)、藏制作菜单(ox -3000 推出屏外,子按钮跟着没)。科技菜单也藏起来。",
       "on": { "event": "start" },
       "do": [
         { "set": "@build_menu.Ui.ox", "to": 208 },
-        { "set": "@craft_menu.Ui.ox", "to": -3000 }
+        { "set": "@craft_menu.Ui.ox", "to": -3000 },
+        { "set": "@tech_menu.Ui.ox", "to": -3000 }
       ]
     },
     {
       "id": "mode-build",
-      "comment": "切建造模式：set 模式 + 显建造菜单 + 藏制作菜单。",
+      "comment": "切建造模式：set 模式 + 显建造菜单 + 藏制作/科技菜单。",
       "on": { "event": "ui-activate", "filter": { "action": "mode-build" } },
       "do": [
         { "set": "@uistate.Mode.value", "to": "build" },
         { "set": "@build_menu.Ui.ox", "to": 208 },
-        { "set": "@craft_menu.Ui.ox", "to": -3000 }
+        { "set": "@craft_menu.Ui.ox", "to": -3000 },
+        { "set": "@tech_menu.Ui.ox", "to": -3000 }
       ]
     },
     {
       "id": "mode-craft",
-      "comment": "切制作模式：set 模式 + 显制作菜单 + 藏建造菜单。",
+      "comment": "切制作模式：set 模式 + 显制作菜单 + 藏建造/科技菜单。",
       "on": { "event": "ui-activate", "filter": { "action": "mode-craft" } },
       "do": [
         { "set": "@uistate.Mode.value", "to": "craft" },
         { "set": "@craft_menu.Ui.ox", "to": 208 },
-        { "set": "@build_menu.Ui.ox", "to": -3000 }
+        { "set": "@build_menu.Ui.ox", "to": -3000 },
+        { "set": "@tech_menu.Ui.ox", "to": -3000 }
       ]
     },
     {
       "id": "mode-interact",
-      "comment": "切互动模式：两个菜单都藏(互动靠点地里的 plot/作物)。",
+      "comment": "切互动模式：三个菜单都藏(互动靠点地里的 plot/作物)。",
       "on": { "event": "ui-activate", "filter": { "action": "mode-interact" } },
       "do": [
         { "set": "@uistate.Mode.value", "to": "interact" },
+        { "set": "@build_menu.Ui.ox", "to": -3000 },
+        { "set": "@craft_menu.Ui.ox", "to": -3000 },
+        { "set": "@tech_menu.Ui.ox", "to": -3000 }
+      ]
+    },
+    {
+      "id": "mode-research",
+      "comment": "切科研模式：set 模式 + 显科技菜单 + 藏建造/制作菜单。",
+      "on": { "event": "ui-activate", "filter": { "action": "mode-research" } },
+      "do": [
+        { "set": "@uistate.Mode.value", "to": "research" },
+        { "set": "@tech_menu.Ui.ox", "to": 208 },
         { "set": "@build_menu.Ui.ox", "to": -3000 },
         { "set": "@craft_menu.Ui.ox", "to": -3000 }
       ]
@@ -49,6 +64,26 @@
     { "id": "pick-plot2",     "on": { "event": "ui-activate", "filter": { "action": "pick-plot2" } },     "do": [ { "set": "@uistate.Build.kind", "to": "plot2" } ] },
     { "id": "pick-monument",  "on": { "event": "ui-activate", "filter": { "action": "pick-monument" } },  "do": [ { "set": "@uistate.Build.kind", "to": "monument" } ] },
 
+    { "id": "pick-well2",       "on": { "event": "ui-activate", "filter": { "action": "pick-well2" } },       "do": [ { "set": "@uistate.Build.kind", "to": "well2" } ] },
+    { "id": "pick-recycler",    "on": { "event": "ui-activate", "filter": { "action": "pick-recycler" } },    "do": [ { "set": "@uistate.Build.kind", "to": "recycler" } ] },
+    { "id": "pick-dome",        "on": { "event": "ui-activate", "filter": { "action": "pick-dome" } },        "do": [ { "set": "@uistate.Build.kind", "to": "dome" } ] },
+    { "id": "pick-hydroponics", "on": { "event": "ui-activate", "filter": { "action": "pick-hydroponics" } }, "do": [ { "set": "@uistate.Build.kind", "to": "hydroponics" } ] },
+    { "id": "pick-arc_gun",     "on": { "event": "ui-activate", "filter": { "action": "pick-arc_gun" } },     "do": [ { "set": "@uistate.Build.kind", "to": "arc_gun" } ] },
+    { "id": "pick-turret",      "on": { "event": "ui-activate", "filter": { "action": "pick-turret" } },      "do": [ { "set": "@uistate.Build.kind", "to": "turret" } ] },
+
+    { "id": "pick-tech-survival_t1",    "on": { "event": "ui-activate", "filter": { "action": "pick-tech-survival_t1" } },    "do": [ { "call": "start_research", "with": { "tech_id": "survival_t1",    "techpoint": "@player.TechPoint.value", "known": "@colony.Research.known" } } ] },
+    { "id": "pick-tech-survival_t2",    "on": { "event": "ui-activate", "filter": { "action": "pick-tech-survival_t2" } },    "do": [ { "call": "start_research", "with": { "tech_id": "survival_t2",    "techpoint": "@player.TechPoint.value", "known": "@colony.Research.known" } } ] },
+    { "id": "pick-tech-survival_t3",    "on": { "event": "ui-activate", "filter": { "action": "pick-tech-survival_t3" } },    "do": [ { "call": "start_research", "with": { "tech_id": "survival_t3",    "techpoint": "@player.TechPoint.value", "known": "@colony.Research.known" } } ] },
+    { "id": "pick-tech-agriculture_t1", "on": { "event": "ui-activate", "filter": { "action": "pick-tech-agriculture_t1" } }, "do": [ { "call": "start_research", "with": { "tech_id": "agriculture_t1", "techpoint": "@player.TechPoint.value", "known": "@colony.Research.known" } } ] },
+    { "id": "pick-tech-agriculture_t2", "on": { "event": "ui-activate", "filter": { "action": "pick-tech-agriculture_t2" } }, "do": [ { "call": "start_research", "with": { "tech_id": "agriculture_t2", "techpoint": "@player.TechPoint.value", "known": "@colony.Research.known" } } ] },
+    { "id": "pick-tech-agriculture_t3", "on": { "event": "ui-activate", "filter": { "action": "pick-tech-agriculture_t3" } }, "do": [ { "call": "start_research", "with": { "tech_id": "agriculture_t3", "techpoint": "@player.TechPoint.value", "known": "@colony.Research.known" } } ] },
+    { "id": "pick-tech-exploration_t1", "on": { "event": "ui-activate", "filter": { "action": "pick-tech-exploration_t1" } }, "do": [ { "call": "start_research", "with": { "tech_id": "exploration_t1", "techpoint": "@player.TechPoint.value", "known": "@colony.Research.known" } } ] },
+    { "id": "pick-tech-exploration_t2", "on": { "event": "ui-activate", "filter": { "action": "pick-tech-exploration_t2" } }, "do": [ { "call": "start_research", "with": { "tech_id": "exploration_t2", "techpoint": "@player.TechPoint.value", "known": "@colony.Research.known" } } ] },
+    { "id": "pick-tech-exploration_t3", "on": { "event": "ui-activate", "filter": { "action": "pick-tech-exploration_t3" } }, "do": [ { "call": "start_research", "with": { "tech_id": "exploration_t3", "techpoint": "@player.TechPoint.value", "known": "@colony.Research.known" } } ] },
+    { "id": "pick-tech-industry_t1",    "on": { "event": "ui-activate", "filter": { "action": "pick-tech-industry_t1" } },    "do": [ { "call": "start_research", "with": { "tech_id": "industry_t1",    "techpoint": "@player.TechPoint.value", "known": "@colony.Research.known" } } ] },
+    { "id": "pick-tech-industry_t2",    "on": { "event": "ui-activate", "filter": { "action": "pick-tech-industry_t2" } },    "do": [ { "call": "start_research", "with": { "tech_id": "industry_t2",    "techpoint": "@player.TechPoint.value", "known": "@colony.Research.known" } } ] },
+    { "id": "pick-tech-industry_t3",    "on": { "event": "ui-activate", "filter": { "action": "pick-tech-industry_t3" } },    "do": [ { "call": "start_research", "with": { "tech_id": "industry_t3",    "techpoint": "@player.TechPoint.value", "known": "@colony.Research.known" } } ] },
+
     { "id": "kb-plot",      "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "plot" } ] },
     { "id": "kb-wall",      "on": { "event": "input", "filter": { "action": "2", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "wall" } ] },
     { "id": "kb-conduit",   "on": { "event": "input", "filter": { "action": "3", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "conduit" } ] },
@@ -61,10 +96,24 @@
     { "id": "kb-mode-build",    "on": { "event": "input", "filter": { "action": "q", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "build" } ] },
     { "id": "kb-mode-interact", "on": { "event": "input", "filter": { "action": "r", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "interact" } ] },
     { "id": "kb-mode-craft",    "on": { "event": "input", "filter": { "action": "e", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "craft" } ] },
-    { "id": "kb-mode-upgrade", "comment": "u 键切升级模式:藏两个菜单(同 interact 模式),点击结构即调 upgrade_structure。",
+    {
+      "id": "kb-mode-upgrade",
+      "comment": "u 键切升级模式:藏三个菜单(同 interact 模式),点击结构即调 upgrade_structure。",
       "on": { "event": "input", "filter": { "action": "u", "phase": "pressed" } },
       "do": [
         { "set": "@uistate.Mode.value", "to": "upgrade" },
+        { "set": "@build_menu.Ui.ox", "to": -3000 },
+        { "set": "@craft_menu.Ui.ox", "to": -3000 },
+        { "set": "@tech_menu.Ui.ox", "to": -3000 }
+      ]
+    },
+    {
+      "id": "kb-mode-research",
+      "comment": "T 键切科研模式:显科技菜单,藏建造/制作菜单。",
+      "on": { "event": "input", "filter": { "action": "t", "phase": "pressed" } },
+      "do": [
+        { "set": "@uistate.Mode.value", "to": "research" },
+        { "set": "@tech_menu.Ui.ox", "to": 208 },
         { "set": "@build_menu.Ui.ox", "to": -3000 },
         { "set": "@craft_menu.Ui.ox", "to": -3000 }
       ]

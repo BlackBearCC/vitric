@@ -411,6 +411,14 @@
         "lamp": {
           "type": "int",
           "default": 0
+        },
+        "hide": {
+          "type": "int",
+          "default": 0
+        },
+        "crystal_core": {
+          "type": "int",
+          "default": 0
         }
       }
     },
@@ -422,7 +430,8 @@
             "build",
             "craft",
             "interact",
-            "upgrade"
+            "upgrade",
+            "research"
           ],
           "default": "build"
         }
@@ -938,6 +947,31 @@
         "h": { "type": "int", "default": 0 },
         "dormant_ticks": { "type": "int", "default": 0 },
         "spawn_timer": { "type": "number", "default": 7200 }
+      }
+    },
+    "Research": {
+      "fields": {
+        "known": { "type": "text", "default": "[]" },
+        "current": { "type": "text", "default": "" },
+        "progress": { "type": "number", "default": 0 },
+        "cost_total": { "type": "number", "default": 0 },
+        "has_survival_t1": { "type": "int", "default": 0 },
+        "has_survival_t2": { "type": "int", "default": 0 },
+        "has_survival_t3": { "type": "int", "default": 0 },
+        "has_agriculture_t1": { "type": "int", "default": 0 },
+        "has_agriculture_t2": { "type": "int", "default": 0 },
+        "has_agriculture_t3": { "type": "int", "default": 0 },
+        "has_exploration_t1": { "type": "int", "default": 0 },
+        "has_exploration_t2": { "type": "int", "default": 0 },
+        "has_exploration_t3": { "type": "int", "default": 0 },
+        "has_industry_t1": { "type": "int", "default": 0 },
+        "has_industry_t2": { "type": "int", "default": 0 },
+        "has_industry_t3": { "type": "int", "default": 0 }
+      }
+    },
+    "TechPoint": {
+      "fields": {
+        "value": { "type": "int", "default": 0 }
       }
     }
   }

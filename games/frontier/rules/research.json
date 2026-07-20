@@ -1,0 +1,22 @@
+{
+  "rules": [
+    {
+      "id": "research-unlock-mountain",
+      "comment": "On exploration_t1 complete: thaw mountain region (E1 API).",
+      "on": { "event": "researched", "filter": { "id": "exploration_t1" } },
+      "do": [ { "call": "unlock_region", "with": { "region_id": "mountain" } } ]
+    },
+    {
+      "id": "research-unlock-desert",
+      "comment": "On industry_t3 complete: thaw desert region (Task 12 adds the region entity — until then thaw_region is a silent no-op per Task 1 contract).",
+      "on": { "event": "researched", "filter": { "id": "industry_t3" } },
+      "do": [ { "call": "unlock_region", "with": { "region_id": "desert" } } ]
+    },
+    {
+      "id": "tp-apply",
+      "comment": "Apply TechPoint write-back from interact_poi / start_research (emit tp-set {value} -> @player.TechPoint.value).",
+      "on": { "event": "tp-set" },
+      "do": [ { "set": "@player.TechPoint.value", "to": "event.value" } ]
+    }
+  ]
+}

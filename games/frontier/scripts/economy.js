@@ -12,6 +12,7 @@
 //   - common structures plot/wall/conduit/extractor/plot2 = 1.0~1.1 (slightly raised above the tile)
 //   - quarters 1.1 (a bit taller than walls)
 //   - beacon 1.8 / monument 2.0 (landmarks, the largest and most visible on the field)
+//   - tier-2/3 entries carry `requires` (tech id); the build fn checks it against Research.known.
 const BUILD = {
   plot:      { cost: {},                              tier: 1, color: "#6b8f3a", label: "种植台", size: 1.0 },
   wall:      { cost: { wood: 1 },                     tier: 1, color: "#8a7a5c", label: "墙",     size: 1.0 },
@@ -19,8 +20,16 @@ const BUILD = {
   extractor: { cost: { ore: 1 },                      tier: 1, color: "#4aa6c8", label: "抽水机", size: 1.0 },
   quarters:  { cost: { plank: 2 },                    tier: 1, color: "#c08a4a", label: "住所",   size: 1.1 },
   beacon:    { cost: { ore: 2, plank: 2 },            tier: 1, color: "#f5b942", label: "信标",   size: 1.8 },
-  plot2:     { cost: { plank: 3, chair: 1 },          tier: 2, color: "#a8e85a", label: "良田",   size: 1.05 },
-  monument:  { cost: { ore: 4, plank: 4, lamp: 2, wheat: 4 }, tier: 3, color: "#ffe066", label: "丰碑", size: 2.0 },
+  // Tier 2+ (requires tech):
+  plot2:     { cost: { plank: 3, chair: 1 },          tier: 2, color: "#a8e85a", label: "良田",   size: 1.05, requires: "agriculture_t1" },
+  monument:  { cost: { ore: 4, plank: 4, lamp: 2, wheat: 4 }, tier: 3, color: "#ffe066", label: "丰碑", size: 2.0, requires: "industry_t2" },
+  // NEW tier-2/3 recipes unlocked by tech tree:
+  well2:       { cost: { ore: 2, plank: 1 },                   tier: 2, color: "#5fb8d8", label: "改良水井", size: 1.0,  requires: "survival_t1" },
+  recycler:    { cost: { ore: 3, plank: 2 },                   tier: 2, color: "#8a6bc8", label: "回收器",   size: 1.0,  requires: "survival_t2" },
+  dome:        { cost: { ore: 4, plank: 4, crystal_core: 1 },  tier: 3, color: "#88e0ff", label: "大气穹顶", size: 1.6,  requires: "survival_t3" },
+  hydroponics: { cost: { ore: 3, plank: 3, crystal_core: 1 },  tier: 3, color: "#88ffaa", label: "水培",     size: 1.2,  requires: "agriculture_t3" },
+  arc_gun:     { cost: { ore: 3, crystal_core: 1 },            tier: 2, color: "#ff6b6b", label: "电磁炮",   size: 1.0,  requires: "industry_t1" },
+  turret:      { cost: { ore: 4, plank: 2, crystal_core: 1 },  tier: 2, color: "#ff8a4a", label: "炮塔",     size: 1.0,  requires: "industry_t1" },
 };
 
 // Crafting recipes (GDD): output -> materials.
@@ -31,7 +40,8 @@ const CRAFT = {
 };
 
 // Full inventory field set (aligned with schema Inventory) — write-back always carries the full set of absolute values, the rule sets them one by one.
-const ITEMS = ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp"];
+// `hide` (Task 10 combat drops) + `crystal_core` (tech tree tier-3 cost) round-trip through inv-set.
+const ITEMS = ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp", "hide", "crystal_core"];
 
 // Read the current inventory from the incoming args (each item defaults to 0).
 function readInv(a) {
@@ -70,6 +80,16 @@ vitric.fn("build", (a, ctx) => {
   const def = BUILD[a.kind];
   if (!def) return; // Unknown kind (nothing selected) — ignore
   if (typeof a.entity !== "string" || !/^t_[0-9]+_[0-9]+$/.test(a.entity)) return; // Didn't click a surface tile
+  // Tier-2/3 recipes require a tech: check Research.known (passed in by the rule as `known`).
+  if (def.requires) {
+    let known = [];
+    try { known = JSON.parse(a.known || "[]"); } catch { known = []; }
+    if (!known.includes(def.requires)) {
+      ctx.emit("build-fail", { kind: a.kind, label: def.label });
+      ctx.emit("toast-show", { text: "需要科技: " + def.requires });
+      return;
+    }
+  }
   const inv = readInv(a);
   if (!canPay(inv, def.cost)) { ctx.emit("build-fail", { kind: a.kind, label: def.label }); return; } // insufficient materials → notify
   const gx = Math.round(a.x);
