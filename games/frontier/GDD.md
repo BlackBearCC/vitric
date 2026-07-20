@@ -1,7 +1,7 @@
 # 《星火 frontier》 — GDD 与全队合同（导演产出，改此文件=改合同）
 
 ## 一句话
-俯视角科幻拓荒经营:在荒星上种田、采集、制作家具把废墟修成家;走出家园去野外探索、撞见漂泊的旅人,聊几句把他请回来住下;跟着一条主线任务(修信标→种出第一茬→请到第一个伙伴→聚落兴旺)把小聚落带活。鼠标点 UI + 方向键走,达成"兴旺"即通关(发 `game-won`)。
+俯视角科幻拓荒经营:在荒星上种田、采集、制作家具把废墟修成家;走出家园去野外探索、撞见漂泊的旅人,聊几句把他请回来住下;跟着一条主线任务(修信标→种出第一茬→伙伴心愿达成→聚落兴旺)把小聚落带活,建立定居点后进入自由探索(发 `settlement-founded`),四个循环自驱,无限游玩。鼠标点 UI + 方向键走。
 
 **这一版是"完整可通关的纵切"**:每一层都真做(UI/物品/种田/采集/制作/两片地图/请伙伴/任务/求生底盘),内容收紧到能跑通、能过 `vitric gate`。内容量后续再扩,但骨不缺。
 
@@ -11,7 +11,7 @@
 - **物品/背包**:`Inventory{items:[{id,n}], ...}` 组件存数据,增减堆叠由玩法脚本系统管。
 - **对话**:`Dialogue{text}` 组件 + 话泡;伙伴脑沿用现有 `ctx.ask`(录制回放)。
 - **交互**:`Collider` + `collision{a,b}` 事件做"走到资源点/传送门/伙伴身边"的触发。
-- **任务/胜负**:引擎无内置任务,游戏侧用 `Quest/QuestLog` 组件 + 规则 + 事件做;交付证书=`gates.playthroughs.must_emit:"game-won"`。
+- **任务/胜负**:引擎无内置任务,游戏侧用 `Quest/QuestLog` 组件 + 规则 + 事件做;交付证书=`gates.playthroughs.must_emit:"settlement-founded"`(里程碑,不是结局;发完进入自由探索,四个循环自驱无限游玩)。
 
 > 沉引擎计划(本版不做,先在游戏里跑通形状):任务系统、伙伴邀请/作息框架里通用的那部分,等这版证明了形状,再开 `vitric-engine-dev` 一轮把通用核提进 `crates/`。本版严守"引擎不与游戏内容并行改"。
 
@@ -39,13 +39,33 @@
 
 **请伙伴(agent 控制层,沿用 ctx.ask)**:野外有 1 个漂泊旅人(`Drifter`,LLM 现生成人设)。走近(collision)→ 互动"搭话"→ `ctx.ask` 拼人设提示词→话泡回复(录制)。角色面板出现**"邀请他回家"**按钮→点→发 `companion-invited{name,persona}`,写一份待入住名单(`@home_state` 组件)。回到家园:`scene-loaded(home)` 时玩法据名单 spawn 该伙伴进家园,给他 `Wander`(白天逛/晚上回 quarters 的作息)+ `Need`(舒适,没住所就掉、可挽回)。这是动森的心:出门遇见→请回来→住下过日子。
 
-**任务(游戏侧)**:`@quest` 挂 `QuestLog{step}`。主线 4 环,任务栏显当前:
+**任务(游戏侧,里程碑制)**:`@quest` 挂 `QuestLog{step}`。主线 8 步:前 7 步是引导,第 8 步是结算里程碑(不是结局);任务栏显当前:
 1. **修复信标**:建造模式造 `beacon` 结构 → `built{kind:"beacon"}` → step→2,发 `quest-done{id:"beacon"}`。
 2. **种出第一茬**:`harvested{id:"wheat"}` 首次 → step→3。
-3. **请到一个伙伴住下**:`companion-moved-in` → step→4。
-4. **聚落兴旺**:结构数≥6 且 人手≥2 → 发 `settlement-thrived` → `game-won`。
+3. **伙伴心愿达成**:`wish-fulfilled` + 第一个伙伴 `Need.affinity>=60` → step→4。(完成伙伴心愿,如建造 3 座结构把好感推到 60 即过。)
+4. **立足脚跟**:`Colony.stage=="立足"`(day≥3 + 结构≥3 自动切)→ step→5。
+5. **食物富足**:day≥4 且 小麦存量≥5 → step→6。
+6. **多人聚居**:day≥5 + 人手≥3 + `companion_wish_count>=2` → step→7。
+7. **建造丰碑**:day≥6 + `monument_built>=1`(造 `monument` 结构)→ 发 `settlement-founded` → step→8。
+8. **自由探索中**:定居点已建立,四个循环自驱(资源再生 / 伙伴需求 / 心愿达成 / 耀斑夜威胁),无限游玩。任务栏显"自由探索中"。
 
-**求生底盘(轻)**:沿用现有殖民地 氧/电/食(消耗随人口涨,产出结构续命,夹0不死)。是背景压力不是主线,数值给宽,别盖过经营/任务节奏。耀斑事件本版**砍掉**(先把经营/探索/请人/任务这条主线打磨顺,事件后面再回来)。
+> 没有 `game-won`/`settlement-thrived` 硬结局;`settlement-founded` 是里程碑不是终点。
+
+**求生底盘(轻)**:沿用现有殖民地 氧/电/食(消耗随人口涨,产出结构续命,夹0不死)。是背景压力不是主线,数值给宽,别盖过经营/任务节奏。耀斑/夜循环已实装(见下"深化系统"),作为周期性压力源。
+
+## 深化系统(Tasks 1-9 增量,在机制之上叠的循环)
+
+**耀斑/夜循环**:`Colony.flare_timer` 倒计时(默认 240s),到 0 触发耀斑预警(`flare_warning=1`),耀斑冲击扣氧扣电;昼夜切换(`is_night`),夜间野外威胁(`wild_threat`)上升,toast 提示"夜幕降临,野外危险"。UI 侧 `flare-bar` 系统 + `hud-flare-bar` 规则 + `flare_lbl` 实体显示预警条。
+
+**POI 探索**:野外散布 `Poi{kind,state,cooldown,reward_table}` 组件实体。互动模式点击 POI → `interact_poi` fn 掷奖励表 → 标记 looted → emit `inv-set`(物品进背包)+ `entered-poi`;`poi_tick` 系统处理 cooldown 恢复。POI 是野外探索的钩子(撞宝箱/废墟/废弃营地)。
+
+**伙伴心愿**:每个伙伴 `Wish{items:JSON,fulfilled:n}`。9 种心愿类别:`build` / `build-lamp` / `harvest` / `harvest-wheat` / `gather-ore` / `enter-poi` / `upgrade` / `food-high` / `see-dawn`;`advance_wish` fn 在对应事件触发时推进进度;达成:`Need.affinity +30`(封顶 100)、`Colony.companion_wish_count+1`、emit `wish-fulfilled{companion,wish_desc,entity}`。`wish_food_check` 系统每日一次检测 food>=80 触发 `food-high` 事件。`rules/wish.json` 共 12 条规则覆盖推进 + 达成效果(toast / LLM 记忆)。
+
+**LLM 记忆对话**:心愿达成 → `triggerWishMemory` fn → `ctx.ask("llm", prompt, "onWishMemoryReply")` → 伙伴分享一段过去记忆(1-2 句),`Need.memory_unlocked+1`,toast 显示。LLM 离线或报错时走 `MEMORY_FALLBACKS`(按 archetype:builder/farmer/explorer 各 3 句兜底),保证录制确定性。
+
+**资源点再生**:`Node.cooldown` 字段,耗尽时(left→0)设 cooldown=90,`node_regrow` 系统每帧递减,到 0 恢复 `left=max`。野外采集点不再一次性耗竭。
+
+**结构升级**:`upgrade_structure` fn:`plot→greenhouse`(ore2+plank2)/ `conduit→solar-array`(ore3+plank1)/ `quarters→cabin`(plank4+lamp1),tier 1→2。键 "u" 切升级模式(`Mode.value="upgrade"`),点击结构升级;emit `upgrade-structure{id,kind}`。
 
 ## 数据表(实现者只翻译不发明)
 **物品**(id | 名 | 来源 | 用途)
@@ -64,10 +84,10 @@
 
 **建造**(kind | 料):plot(免费) | wall(wood×1) | conduit(ore×1) | extractor(ore×1) | quarters(plank×2) | beacon(ore×2+plank×2) | chair/lamp(制作产物,免费摆)
 
-**任务**:见机制4环。
+**任务**:见机制 8 步(里程碑制,`settlement-founded` 是里程碑不是结局)。
 
 ## 事件表(全队接口,只有导演能加改)
-`ui-activate{id,action}`(引擎发) / `item-gained{id,n}` / `item-spent{id,n}` / `built{kind,x,y}` / `planted{plot}` / `crop-ready{plot}` / `harvested{id,n}` / `gathered{node,id,n}` / `crafted{id,n}` / `load-scene{scene}`(引擎认) / `scene-loaded{scene}`(引擎发) / `drifter-talk{}` / `drifter-said{say,mood}` / `companion-invited{name,persona}` / `companion-moved-in{name}` / `companion-left{name}` / `quest-done{id}` / `settlement-thrived{}` / `game-won{}` / `llm-reply{id,text}`(引擎认,转 `__onReply`)
+`ui-activate{id,action}`(引擎发) / `item-gained{id,n}` / `item-spent{id,n}` / `built{kind,x,y}` / `planted{plot}` / `crop-ready{plot}` / `harvested{id,n}` / `gathered{node,id,n}` / `crafted{id,n}` / `load-scene{scene}`(引擎认) / `scene-loaded{scene}`(引擎发) / `drifter-talk{}` / `drifter-said{say,mood}` / `companion-invited{name,persona}` / `companion-moved-in{name}` / `companion-left{name}` / `quest-done{id}` / `settlement-founded{}`(里程碑,非结局) / `wish-fulfilled{companion,wish_desc,entity}` / `upgrade-structure{id,kind}` / `llm-reply{id,text}`(引擎认,转 `__onReply`)
 
 ## 美术方向(本版灰盒优先,先白模)
 - 风格词:**俯视角科幻拓荒,扁平像素白模**,先用纯色/简形占位;后续走"关卡截图→图生图"换贴图,**尺寸锁死见下表,换图不动尺寸**。
@@ -93,5 +113,5 @@ UI(像素,参考视口 1920×1080):
 - **玩法** = `rules/` + `scripts/`(移动/建造/制作/种田/采集/背包/求生/伙伴脑+作息+需求/任务机/区域切换/接 `ui-activate`)
 - **文案** = scenes 里 UiLabel/Text/Dialogue 内容(与关卡行级协商)+ `tools/fake_llm.py` 旅人人设 + 任务文案
 - **音频** = `sounds/`(本版可缓,后排)
-- **QA** = `qa/`(smoke + 断言集 + 通关录像 `qa/clear.json`)
+- **QA** = `qa/`(smoke + 断言集 + 通关录像 `qa/clear.json`,9 天 37247 tick,在 step 8 发 `settlement-founded`)
 - **导演** = `schema.json` + `vitric.json` + 本 `GDD.md` + `gates` 声明

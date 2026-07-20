@@ -2,9 +2,28 @@
 
 ## 总览
 
+> **状态(2026-07-17):全部完成。** 增量 3(请伙伴)+ 增量 4(任务通关)+ 收尾 已交付,`vitric gate` PASS。其后又叠了一轮"深化增量"(Tasks 1-9,见文末"深化增量"节)。本文件保留为历史实施计划,不再驱动后续工作。
+
 完成 GDD 中增量 3（请伙伴）+ 增量 4（任务通关）+ 收尾，使 `vitric gate` PASS。
 
-### 当前状态
+### 增量完成状态
+
+| 增量 | 状态 |
+|------|------|
+| 3a 野外区地图扩展 | ✅ 已完成 |
+| 3b 野外资源采集 | ✅ 已完成 |
+| 3c 伙伴游荡(Wander) | ✅ 已完成 |
+| 3d 伙伴舒适度/需求/离开 | ✅ 已完成 |
+| 3e 对话+邀请 | ✅ 已完成 |
+| 3f 多伙伴支持 | ✅ 已完成 |
+| 4a Quest Step 3 伙伴入住 | ✅ 已完成(后被里程碑制改写,见文末) |
+| 4b Quest Step 4 聚落兴旺 | ✅ 已完成(后被里程碑制改写,见文末) |
+| 4c settlement-thrived → game-won | ✅ 已完成(后被 `settlement-founded` 替换,见文末) |
+| 4d Gate 配置 | ✅ 已完成(`must_emit` 现为 `settlement-founded`) |
+| 4e 通关录像录制 | ✅ 已完成(`qa/clear.json`,9 天 37247 tick) |
+| 收尾(Polish) | ✅ 已完成 |
+
+### 当前状态（历史快照，实施前）
 - 家园 16×12 地图 + 完整 UI/建造/种田/制作/求生底盘
 - 伙伴 Pip 已在家园(6,7)，有 Persona/Wander/Need/Companion 组件但**无驱动逻辑**
 - 主线 step 1-2（信标→种麦）已完成
@@ -189,15 +208,39 @@ Gate 录制策略：
 
 ## 执行顺序
 
-1. **写 PLAN.md** ← 当前
-2. **扩展场景**：gen_scene.py → 28×12 + 野外节点 + drifter → check
-3. **采集脚本**：economy.js 加 Node 采集 → check
-4. **伙伴行为**：companion.js(wander/need/leave) + companion.json(rules) → check
-5. **对话+邀请**：companion.json(llm-ask/reply) + quest.json step 3 → check
-6. **通关**：quest.json step 4 + game-won + gates → check
-7. **录制通关录像**：模拟完整流程录 qa/clear.json
-8. **跑 gate**：vitric gate games/frontier
-9. **收尾修复**：HUD 标签 / 数值 / smoke 补全
-10. **创建 _GAME_DONE.txt**
+> 全部完成。
+
+1. ~~**写 PLAN.md**~~ ✅
+2. ~~**扩展场景**~~ ✅ gen_scene.py → 28×12 + 野外节点 + drifter
+3. ~~**采集脚本**~~ ✅ economy.js 加 Node 采集
+4. ~~**伙伴行为**~~ ✅ companion.js(wander/need/leave) + companion.json(rules)
+5. ~~**对话+邀请**~~ ✅ companion.json(llm-ask/reply) + quest.json step 3
+6. ~~**通关**~~ ✅ quest.json step 4 + game-won + gates(后被里程碑制改写,见文末)
+7. ~~**录制通关录像**~~ ✅ qa/clear.json
+8. ~~**跑 gate**~~ ✅ vitric gate games/frontier PASS
+9. ~~**收尾修复**~~ ✅ HUD 标签 / 数值 / smoke 补全
+10. ~~**创建 _GAME_DONE.txt**~~ ✅
 
 每一步的产出：check 绿 → cargo build --release (如果引擎源码改了) → vitric run + 控制面自测 → git commit → git push
+
+---
+
+## 深化增量 (2026-07-17,Tasks 1-9)
+
+在增量 3/4/收尾 之上又叠了一轮深化,把"完整可通关的纵切"扩成"有四个自驱循环的无限游玩"。GDD 的"深化系统"节是这一轮的合同。`vitric gate` 仍 PASS(`must_emit` 改为 `settlement-founded`)。
+
+| Task | 增量 | 状态 |
+|------|------|------|
+| 1 | 耀斑/夜循环:`Colony.flare_timer`/`flare_warning`/`is_night`/`wild_threat` 字段;flare 系统倒计时,夜落,野外威胁上升;`flare-bar` 系统 + `hud-flare-bar` 规则 + `flare_lbl` 实体 | ✅ |
+| 2 | POI 系统:`Poi{kind,state,cooldown,reward_table}` 组件;`interact_poi` fn;`poi_tick` 系统;互动模式点击 POI 拾取 | ✅ |
+| 3 | 伙伴需求/心愿脚手架;`apply_mood_drop` fn;`toast-show` 通用监听 | ✅ |
+| 4 | 心愿系统:`Wish{items,fulfilled}` 组件;`advance_wish` fn;12 条 `wish.json` 规则;`wish_food_check` 系统;9 种心愿类别 | ✅ |
+| 5 | LLM 记忆对话:心愿达成 → `triggerWishMemory` fn → `ctx.ask("llm",...)`;`onWishMemoryReply` 回调;`MEMORY_FALLBACKS` 兜底 | ✅ |
+| 6 | 任务转里程碑:step 3→4 门改为 `wish-fulfilled + affinity>=60`;step 6→7 门改为 `companion_wish_count>=2`;`game-won` 规则改名 `settlement-founded`(只发 `settlement-founded`);quest-banner-8 → "自由探索中";`vitric.json` gates.must_emit → `settlement-founded` | ✅ |
+| 7 | 资源点再生 + 结构升级:`Node.cooldown` + `node_regrow` 系统;`upgrade_structure` fn(plot→greenhouse / conduit→solar-array / quarters→cabin);`upgrade-button-click` 规则 | ✅ |
+| 8 | UI 钩子:`flare-bar` 系统 + `hud-flare-bar` 规则 + `flare_lbl`;`kb-mode-upgrade`(u 键 → 升级模式);`upgrade-click` 规则;`Mode.value` 加 `"upgrade"` 变体 | ✅ |
+| 9 | 重录 9 天通关录像:`tools/record_clear.py` 重录 `qa/clear.json`;gate PASS(37247 tick,发出 `settlement-founded`) | ✅ |
+
+### 设计转向
+
+这一轮把"硬结局"换成了"里程碑 + 自由探索":发完 `settlement-founded`(step 8)后游戏不结束,四个循环(资源再生 / 伙伴需求 / 心愿达成 / 耀斑夜威胁)继续自驱,玩家继续自己的故事。demo 录的是前 9 天到定居点建立为止。
