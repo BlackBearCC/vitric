@@ -700,6 +700,7 @@ pub fn inject_ui_click(sim, nx, ny, button) -> Result<Value, String>;  // UI 归
 | 输入 | `input/inject` | 注入 input 事件（pressed/released） |
 | 输入 | `input/click` | 世界坐标点击（拾取 + 注入事件） |
 | 输入 | `input/ui-click` | UI 归一化坐标点击 |
+| 输入 | `input/ui-click-by-name` | UI 按实体名点击（布局无关，fail-fast） |
 | 时间 | `sim/pause` / `sim/resume` / `sim/speed` / `sim/quit` | 时间控制 |
 | 时间 | `sim/step` | 暂停时单步 N tick（每 tick 跑断言） |
 | 热重载 | `project/reload` | 热重载规则/脚本/素材 |

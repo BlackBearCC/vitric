@@ -14,6 +14,6 @@ mod dispatcher;
 pub mod saves;
 mod server;
 
-pub use dispatcher::{inject_click, inject_ui_click, Dispatcher, LoopCtl};
+pub use dispatcher::{inject_click, inject_ui_click, inject_ui_click_by_name, Dispatcher, LoopCtl};
 pub use saves::SaveStore;
 pub use server::{ControlServer, PendingRequest};

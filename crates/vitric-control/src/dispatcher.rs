@@ -434,6 +434,16 @@ impl Dispatcher {
                 let button = params.get("button").and_then(|v| v.as_str()).unwrap_or("left");
                 inject_ui_click(sim, nx, ny, button)
             }
+            "input/ui-click-by-name" => {
+                // Headless agent's "UI click by entity name": activate a Button entity by its
+                // scene name (e.g. "mode_craft", "craft_plank") without hardcoding pixel coordinates.
+                // Picking is deferred to the in-tick UI interaction system, which looks up the
+                // entity by name and runs the same activate_button path as coordinate clicks.
+                // Goes through the reply channel, allowed during recording (name is deterministic).
+                let name = str_param(params, "name")?;
+                let button = params.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+                inject_ui_click_by_name(sim, &name, button)
+            }
 
             // ---- Control time ----
             "sim/pause" => {
@@ -647,7 +657,8 @@ impl Dispatcher {
 
             other => Err(format!(
                 "未知方法 {other:?}。可用方法: ping, world/entities, world/get, world/set, \
-                 world/spawn, world/despawn, input/inject, input/click, input/ui-click, sim/pause, sim/resume, sim/step, \
+                 world/spawn, world/despawn, input/inject, input/click, input/ui-click, input/ui-click-by-name, \
+                 sim/pause, sim/resume, sim/step, \
                  sim/speed, sim/quit, sim/snapshot, sim/restore, sim/hash, project/reload, \
                  save/write, save/load, save/list, \
                  inspect/selection, inspect/select, events/recent, perf/stats, render/describe, \
@@ -721,6 +732,37 @@ pub fn inject_ui_click(sim: &mut Sim, nx: f64, ny: f64, button: &str) -> Result<
     }
     sim.inject_reply("ui-click", json!({"nx": nx, "ny": ny, "button": button}));
     Ok(json!({"event": "ui-click", "nx": nx, "ny": ny, "button": button}))
+}
+
+/// Inject a **UI click by entity name** — same semantics as [`inject_ui_click`] but addresses
+/// the target Button by its scene name (e.g. `"mode_craft"`, `"craft_plank"`) instead of
+/// screen-normalized coordinates. The in-tick UI interaction system resolves the name to an
+/// entity and runs the same `activate_button` path (sets pressed state + press_t + moves focus
+/// + emits `ui-activate{id, action}`).
+///
+/// Why this exists: pixel coordinates in [`inject_ui_click`] are layout-dependent (changing the
+/// mode_row gap or button width shifts the click target). Naming the button decouples agent
+/// scripts / recording scripts from layout, so they keep working as the UI is reshuffled.
+///
+/// Determinism: entity names are part of the scene (stable across runs); for spawn-derived
+/// entities the handle text is deterministic too. The recording stores `{name, button}` and
+/// replays inject it at the original tick as-is, so replays are bit-for-bit identical — same
+/// recording-channel machinery as [`inject_click`] / [`inject_ui_click`].
+///
+/// Error policy: fail-fast at activate time (not at inject time — inject just queues the
+/// reply). The in-tick system returns an error if the name is not found, the entity has no
+/// `Button` component, or the button is `Disabled`. This is stricter than coordinate clicks
+/// (which silently miss on no-hit): by-name is an explicit semantic request, so an
+/// unfulfillable request is a script bug worth surfacing.
+pub fn inject_ui_click_by_name(sim: &mut Sim, name: &str, button: &str) -> Result<Value, String> {
+    if !matches!(button, "left" | "right") {
+        return Err(format!("button 必须是 left 或 right，拿到 {button:?}"));
+    }
+    sim.inject_reply(
+        "ui-click-by-name",
+        json!({"name": name, "button": button}),
+    );
+    Ok(json!({"event": "ui-click-by-name", "name": name, "button": button}))
 }
 
 /// Unified error when no save store is mounted (embedded/test harnesses may skip it; `vitric run` always mounts one).

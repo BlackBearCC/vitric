@@ -115,6 +115,11 @@ def ui_click(nx, ny):
     # Screen-normalized coords (0..1); picking deferred to in-tick UI system (1920×1080 ref frame).
     return rpc("input/ui-click", {"nx": nx, "ny": ny})
 
+def ui_click_by_name(name):
+    # Layout-independent: activate a Button by its scene entity name (e.g. "mode_craft", "craft_plank").
+    # Fail-fast on missing name / no Button / Disabled — preferred over ui_click when the target is known.
+    return rpc("input/ui-click-by-name", {"name": name})
+
 def wait_quest(stage_at_least, max_cycles=20, advance=21600):
     """等 quest step >= stage_at_least,大块推进 sim time。"""
     for i in range(max_cycles):
@@ -227,13 +232,11 @@ try:
     # NOTE: pressing "e" (kb-mode-craft) only sets Mode.value — it does NOT show the craft_menu.
     # Only the mode-craft ui-activate rule (triggered by clicking the mode_craft button) sets
     # craft_menu.Ui.ox=208. Without this, the craft_plank button stays off-screen and UI clicks miss.
-    # mode_craft button (mode_row HBox at ox=24/oy=100, gap=6, pad=9; 2nd child w=92/h=48)
-    #   center ≈ (177, 132) in 1920×1080 ref frame → nx≈0.092, ny≈0.122.
-    # craft_plank button (craft_menu VBox at ox=208/oy=176 when visible, pad=12, gap=8; 1st child w=222/h=42)
-    #   center ≈ (331, 209) in 1920×1080 ref frame → nx≈0.173, ny≈0.194.
-    ui_click(0.092, 0.122); step(3)   # click mode_craft → craft menu visible (Mode=craft, ox=208)
-    ui_click(0.173, 0.194); step(3)   # craft plank #1 (cost 2 wood → 1 plank)
-    ui_click(0.173, 0.194); step(3)   # craft plank #2 (cost 2 wood → 1 plank)
+    # Use ui_click_by_name (layout-independent) instead of hardcoded pixel coords — robust to
+    # future mode_row gap / button width changes.
+    ui_click_by_name("mode_craft"); step(3)   # craft menu visible (Mode=craft, ox=208)
+    ui_click_by_name("craft_plank"); step(3)  # craft plank #1 (cost 2 wood → 1 plank)
+    ui_click_by_name("craft_plank"); step(3)  # craft plank #2 (cost 2 wood → 1 plank)
     inp("r"); step(3)       # back to interact mode (menu stays visible but doesn't affect world clicks)
     inv = wget("@player")["result"]["components"]["Inventory"]
     print(f"  After recover: ore={inv['ore']} plank={inv['plank']} wood={inv['wood']}")

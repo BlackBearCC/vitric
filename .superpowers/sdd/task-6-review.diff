@@ -1,0 +1,147 @@
+=== git log --oneline eb0ac67..06464fb ===
+06464fb feat(frontier): convert quest to milestone-based (settlement-founded), gate on settlement-founded
+
+=== git diff --stat eb0ac67..06464fb ===
+ games/frontier/rules/quest.json | 26 ++++++++++++++------------
+ games/frontier/vitric.json      |  2 +-
+ 2 files changed, 15 insertions(+), 13 deletions(-)
+
+=== git diff -U10 eb0ac67..06464fb ===
+diff --git a/games/frontier/rules/quest.json b/games/frontier/rules/quest.json
+index 4de77f1..c895d44 100644
+--- a/games/frontier/rules/quest.json
++++ b/games/frontier/rules/quest.json
+@@ -15,23 +15,26 @@
+       "comment": "step2 种出第一茬:首次收麦 → step=3。守卫 step==2。",
+       "on": { "event": "harvested", "filter": { "id": "wheat" } },
+       "if": [ ["@quest.QuestLog.step", "==", 2] ],
+       "do": [
+         { "set": "@quest.QuestLog.step", "to": 3 },
+         { "emit": "quest-done", "data": { "id": "wheat" } }
+       ]
+     },
+     {
+       "id": "quest-step3-done",
+-      "comment": "step3 请第一个伙伴:companion-moved-in → step=4。守卫 step==3。",
+-      "on": { "event": "companion-moved-in" },
+-      "if": [ ["@quest.QuestLog.step", "==", 3] ],
++      "comment": "step3 请第一个伙伴:wish-fulfilled + 第一个伙伴(companion)好感>=60 -> step=4.",
++      "on": { "event": "wish-fulfilled" },
++      "if": [
++        ["@quest.QuestLog.step", "==", 3],
++        ["@companion.Need.affinity", ">=", 60]
++      ],
+       "do": [
+         { "set": "@quest.QuestLog.step", "to": 4 },
+         { "emit": "quest-done", "data": { "id": "first-companion" } }
+       ]
+     },
+     {
+       "id": "quest-step4-done",
+       "comment": "step4 立足:stage 已经是「立足」(stage 系统在 day≥3 且 结构≥3 时切)→ step=5。",
+       "on": "tick",
+       "if": [
+@@ -52,54 +55,53 @@
+         ["@colony.Colony.day", ">=", 4],
+         ["@player.Inventory.wheat", ">=", 5]
+       ],
+       "do": [
+         { "set": "@quest.QuestLog.step", "to": 6 },
+         { "emit": "quest-done", "data": { "id": "温饱" } }
+       ]
+     },
+     {
+       "id": "quest-step6-done",
+-      "comment": "step6 成群:day≥5 + 人手≥3 + 至少 1 位伙伴好感≥50(用心养到会帮忙那档)→ step=7。守卫 step==6 + day-floor + census + 关系闸门。",
++      "comment": "step6 成群:day>=5 + pop>=3 + 累计心愿达成>=2 -> step=7.",
+       "on": "tick",
+       "if": [
+         ["@quest.QuestLog.step", "==", 6],
+         ["@colony.Colony.day", ">=", 5],
+         ["@colony.Colony.pop", ">=", 3],
+-        ["@colony.Colony.companion_happy_count", ">=", 1]
++        ["@colony.Colony.companion_wish_count", ">=", 2]
+       ],
+       "do": [
+         { "set": "@quest.QuestLog.step", "to": 7 },
+         { "emit": "quest-done", "data": { "id": "成群" } }
+       ]
+     },
+     {
+       "id": "monument-built",
+       "comment": "step7 通路条件:monument 一立 → 标 @colony.Colony.monument_built=1。",
+       "on": { "event": "built", "filter": { "kind": "monument" } },
+       "do": [
+         { "set": "@colony.Colony.monument_built", "to": 1 }
+       ]
+     },
+     {
+-      "id": "game-won",
+-      "comment": "step7 → day≥6(走 stage「兴旺」闸门)+ 丰碑已立 → settlement-thrived → game-won。",
++      "id": "settlement-founded",
++      "comment": "step7 -> day>=6 + monument built -> settlement-founded (milestone, not ending). Game continues freely.",
+       "on": "tick",
+       "if": [
+         ["@quest.QuestLog.step", "==", 7],
+         ["@colony.Colony.day", ">=", 6],
+         ["@colony.Colony.monument_built", ">=", 1]
+       ],
+       "do": [
+-        { "emit": "settlement-thrived", "data": {} },
+-        { "set": "@quest.QuestLog.step", "to": 8 },
+-        { "emit": "game-won", "data": {} }
++        { "emit": "settlement-founded", "data": {} },
++        { "set": "@quest.QuestLog.step", "to": 8 }
+       ]
+     },
+ 
+     {
+       "id": "quest-banner-1",
+       "comment": "任务卡(右上)两行:目标名 + 一句怎么做。每帧刷。",
+       "on": "tick",
+       "if": [ ["@quest.QuestLog.step", "==", 1] ],
+       "do": [
+         { "set": "@quest_title_lbl.UiLabel.content", "to": "修复信标" },
+@@ -158,16 +160,16 @@
+       "do": [
+         { "set": "@quest_title_lbl.UiLabel.content", "to": "建造丰碑" },
+         { "set": "@quest_sub_lbl.UiLabel.content",   "to": "等过第 6 天,攒 ore×4+plank×4+lamp×2+wheat×4 立丰碑" }
+       ]
+     },
+     {
+       "id": "quest-banner-8",
+       "on": "tick",
+       "if": [ ["@quest.QuestLog.step", "==", 8] ],
+       "do": [
+-        { "set": "@quest_title_lbl.UiLabel.content", "to": "聚落兴旺" },
+-        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "通关!" }
++        { "set": "@quest_title_lbl.UiLabel.content", "to": "自由探索中" },
++        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "定居点已建立,四个循环自驱,继续你的故事" }
+       ]
+     }
+   ]
+ }
+diff --git a/games/frontier/vitric.json b/games/frontier/vitric.json
+index 1362ca2..99cbe2b 100644
+--- a/games/frontier/vitric.json
++++ b/games/frontier/vitric.json
+@@ -38,17 +38,17 @@
+   "seed": 1,
+   "render": {
+     "width": 1920,
+     "height": 1080,
+     "note": "渲染分辨率锁 1920x1080,与引擎 UI_REFERENCE_VIEWPORT 一致,所有 UI 尺寸/字号按此设计"
+   },
+   "gates": {
+     "playthroughs": [
+       {
+         "recording": "qa/clear.json",
+-        "must_emit": "game-won"
++        "must_emit": "settlement-founded"
+       }
+     ],
+     "check": true,
+     "max_ticks": 100000
+   }
+ }
+\ No newline at end of file

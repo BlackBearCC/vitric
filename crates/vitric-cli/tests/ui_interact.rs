@@ -177,6 +177,63 @@ fn click_on_disabled_button_does_not_respond() {
     assert_eq!(btn_state(&sim, "btn-options"), "disabled", "disabled 按钮点击不响应（仍 disabled）");
 }
 
+// ---- Click by name (layout-independent alternative to ui-click) ----
+
+#[test]
+fn click_by_name_activates_named_button_and_moves_focus() {
+    let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
+    step(&mut sim, &mut rt); // Layout solves first.
+
+    // Activate btn-quit by name — no coordinates needed.
+    vitric_control::inject_ui_click_by_name(&mut sim, "btn-quit", "left").unwrap();
+    step(&mut sim, &mut rt);
+    assert_eq!(btn_state(&sim, "btn-quit"), "pressed", "by-name 点击应激活 btn-quit");
+    assert_eq!(focus(&sim), "btn-quit", "by-name 点击也把焦点移过去");
+    // Other buttons are not pressed.
+    assert_ne!(btn_state(&sim, "btn-start"), "pressed");
+}
+
+#[test]
+fn click_by_name_missing_name_errors() {
+    let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
+    step(&mut sim, &mut rt);
+    vitric_control::inject_ui_click_by_name(&mut sim, "nonexistent-button", "left").unwrap();
+    // The error surfaces on the next tick (in-tick system resolves the name).
+    let err = sim.step(&mut rt).unwrap_err().to_string();
+    assert!(
+        err.contains("nonexistent-button"),
+        "error should mention the missing name, got: {err}"
+    );
+}
+
+#[test]
+fn click_by_name_on_non_button_entity_errors() {
+    let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
+    step(&mut sim, &mut rt);
+    // "ui" is the UiRoot entity — has no Button component. The in-tick system must refuse.
+    vitric_control::inject_ui_click_by_name(&mut sim, "ui", "left").unwrap();
+    let err = sim.step(&mut rt).unwrap_err().to_string();
+    assert!(
+        err.contains("Button"),
+        "error should explain the entity has no Button component, got: {err}"
+    );
+}
+
+#[test]
+fn click_by_name_on_disabled_button_errors() {
+    let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
+    step(&mut sim, &mut rt);
+    assert_eq!(btn_state(&sim, "btn-options"), "disabled");
+    vitric_control::inject_ui_click_by_name(&mut sim, "btn-options", "left").unwrap();
+    let err = sim.step(&mut rt).unwrap_err().to_string();
+    assert!(
+        err.contains("Disabled") || err.contains("disabled"),
+        "error should mention Disabled state, got: {err}"
+    );
+    // State unchanged.
+    assert_eq!(btn_state(&sim, "btn-options"), "disabled");
+}
+
 // ---- Press feedback analytic ----
 
 #[test]

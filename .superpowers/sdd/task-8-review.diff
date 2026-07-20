@@ -1,0 +1,121 @@
+=== git log --oneline 5a9870f..62c45fc ===
+62c45fc feat(frontier): UI hooks for upgrade mode + flare warning bar
+
+=== git diff --stat 5a9870f..62c45fc ===
+ games/frontier/rules/economy.json | 12 ++++++++++++
+ games/frontier/rules/hud.json     |  8 ++++++++
+ games/frontier/rules/ui.json      | 10 +++++++++-
+ games/frontier/scripts/hud.js     | 10 ++++++++++
+ 4 files changed, 39 insertions(+), 1 deletion(-)
+
+=== git diff -U10 5a9870f..62c45fc ===
+diff --git a/games/frontier/rules/economy.json b/games/frontier/rules/economy.json
+index 48547c3..96b0dbf 100644
+--- a/games/frontier/rules/economy.json
++++ b/games/frontier/rules/economy.json
+@@ -80,13 +80,25 @@
+       "comment": "Build mode right-click on tier-1 structure -> attempt upgrade. UI (hud.js) emits ui-activate{action:\"upgrade-prompt\", target_id:<entity>} — wired in Task 8.",
+       "on": { "event": "ui-activate", "filter": { "action": "upgrade-prompt" } },
+       "do": [
+         { "call": "upgrade_structure", "with": {
+           "entity": "event.target_id",
+           "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+           "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+           "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
+         } }
+       ]
++    },
++    {
++      "id": "upgrade-click",
++      "comment": "Upgrade mode + left-click on a structure -> call upgrade_structure. Passes hit entity + full inventory. The fn handles non-structure clicks gracefully (returns early).",
++      "on": { "event": "mouse" },
++      "if": [ ["@uistate.Mode.value", "==", "upgrade"] ],
++      "do": [ { "call": "upgrade_structure", "with": {
++        "entity": "event.entity",
++        "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
++        "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
++        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
++      } } ]
+     }
+   ]
+ }
+diff --git a/games/frontier/rules/hud.json b/games/frontier/rules/hud.json
+index e81e9f2..b0bab0f 100644
+--- a/games/frontier/rules/hud.json
++++ b/games/frontier/rules/hud.json
+@@ -46,13 +46,21 @@
+       "do": [
+         { "set": "@inv-ore_lbl.UiLabel.content",   "to": { "format": "矿 {}",  "args": ["@player.Inventory.ore"] } },
+         { "set": "@inv-wood_lbl.UiLabel.content",  "to": { "format": "木 {}",  "args": ["@player.Inventory.wood"] } },
+         { "set": "@inv-fiber_lbl.UiLabel.content", "to": { "format": "纤 {}",  "args": ["@player.Inventory.fiber"] } },
+         { "set": "@inv-seed_lbl.UiLabel.content",  "to": { "format": "种 {}",  "args": ["@player.Inventory.seed"] } },
+         { "set": "@inv-wheat_lbl.UiLabel.content", "to": { "format": "麦 {}",  "args": ["@player.Inventory.wheat"] } },
+         { "set": "@inv-plank_lbl.UiLabel.content", "to": { "format": "板 {}",  "args": ["@player.Inventory.plank"] } },
+         { "set": "@inv-chair_lbl.UiLabel.content", "to": { "format": "椅 {}",  "args": ["@player.Inventory.chair"] } },
+         { "set": "@inv-lamp_lbl.UiLabel.content",  "to": { "format": "灯 {}",  "args": ["@player.Inventory.lamp"] } }
+       ]
++    },
++    {
++      "id": "hud-flare-bar",
++      "comment": "耀斑预警条:flare-bar 系统写 Colony.flare_bar,这里拉到 @flare_lbl。@flare_lbl 实体在 Task 9 场景 polish 里加,届时该规则生效。",
++      "on": "tick",
++      "do": [
++        { "set": "@flare_lbl.UiLabel.content", "to": "@colony.Colony.flare_bar" }
++      ]
+     }
+   ]
+ }
+diff --git a/games/frontier/rules/ui.json b/games/frontier/rules/ui.json
+index 88a1bc7..cab4f52 100644
+--- a/games/frontier/rules/ui.json
++++ b/games/frontier/rules/ui.json
+@@ -53,13 +53,21 @@
+     { "id": "kb-wall",      "on": { "event": "input", "filter": { "action": "2", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "wall" } ] },
+     { "id": "kb-conduit",   "on": { "event": "input", "filter": { "action": "3", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "conduit" } ] },
+     { "id": "kb-extractor", "on": { "event": "input", "filter": { "action": "4", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "extractor" } ] },
+     { "id": "kb-quarters",  "on": { "event": "input", "filter": { "action": "5", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "quarters" } ] },
+     { "id": "kb-beacon",    "on": { "event": "input", "filter": { "action": "6", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "beacon" } ] },
+     { "id": "kb-plot2",     "on": { "event": "input", "filter": { "action": "7", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "plot2" } ] },
+     { "id": "kb-monument",  "on": { "event": "input", "filter": { "action": "8", "phase": "pressed" } }, "do": [ { "set": "@uistate.Build.kind", "to": "monument" } ] },
+ 
+     { "id": "kb-mode-build",    "on": { "event": "input", "filter": { "action": "q", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "build" } ] },
+     { "id": "kb-mode-interact", "on": { "event": "input", "filter": { "action": "r", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "interact" } ] },
+-    { "id": "kb-mode-craft",    "on": { "event": "input", "filter": { "action": "e", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "craft" } ] }
++    { "id": "kb-mode-craft",    "on": { "event": "input", "filter": { "action": "e", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "craft" } ] },
++    { "id": "kb-mode-upgrade", "comment": "u 键切升级模式:藏两个菜单(同 interact 模式),点击结构即调 upgrade_structure。",
++      "on": { "event": "input", "filter": { "action": "u", "phase": "pressed" } },
++      "do": [
++        { "set": "@uistate.Mode.value", "to": "upgrade" },
++        { "set": "@build_menu.Ui.ox", "to": -3000 },
++        { "set": "@craft_menu.Ui.ox", "to": -3000 }
++      ]
++    }
+   ]
+ }
+diff --git a/games/frontier/scripts/hud.js b/games/frontier/scripts/hud.js
+index 0e51364..20784b3 100644
+--- a/games/frontier/scripts/hud.js
++++ b/games/frontier/scripts/hud.js
+@@ -14,11 +14,21 @@ vitric.system("food-bar", { query: ["Colony"], writes: ["Colony"] }, (entities,
+   for (const e of entities) {
+     const food = Math.round(e.Colony.food_i || 0);
+     const clamped = food < 0 ? 0 : (food > 100 ? 100 : food);
+     const filled = Math.round((clamped / 100) * FOOD_BAR_CELLS);
+     let bar = "";
+     for (let i = 0; i < FOOD_BAR_CELLS; i++) {
+       bar += i < filled ? FOOD_BAR_FILLED : FOOD_BAR_EMPTY;
+     }
+     e.Colony.food_bar = "食 " + clamped + "/100 [" + bar + "]";
+   }
++});
++
++// Flare warning bar: shows a warning string when Colony.flare_warning == 1.
++// The rule in hud.json pulls Colony.flare_bar into @flare_lbl.UiLabel.content.
++// @flare_lbl entity is added in Task 9 scene polish; until then the rule's set silently no-ops.
++vitric.system("flare-bar", { query: ["Colony"], writes: ["Colony"] }, (entities, ctx) => {
++  for (const e of entities) {
++    const warn = e.Colony.flare_warning | 0;
++    e.Colony.flare_bar = warn ? "\u26a0 \u8000\u6591\u5373\u5c06\u6765\u88ad!" : "";
++  }
+ });
+\ No newline at end of file

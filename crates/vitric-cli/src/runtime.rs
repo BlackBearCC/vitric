@@ -628,6 +628,8 @@ pub fn advance_ui_layout(world: &mut World, viewport: (u32, u32)) -> Result<(), 
 /// - `input {action: "ui-confirm"}` → activate the currently focused button;
 /// - `ui-click {nx, ny, button}` → screen normalized coordinates (0..1) converted to the reference frame (×1920/×1080)
 ///   then check which button rectangle it falls into, hit = activate (also moves focus to it).
+/// - `ui-click-by-name {name, button}` → activate a Button by its scene name (fail-fast on
+///   missing name / no Button / Disabled). Layout-independent alternative to `ui-click`.
 ///
 /// **Coordinate conversion chain (key wiring)**: layout output rx/ry/rw/rh are pixel rectangles in the 1920×1080 reference frame
 /// (entering hash, decoupled from render resolution); the click source is physical screen/window pixels. The window/RPC injection side first
@@ -828,6 +830,49 @@ pub fn advance_ui_interaction(
             world.set_field(root, "UiRoot.focus", json!(name)).map_err(|e| e.to_string())?;
             activate_button(world, b.id, &b.action, &mut events)?;
         }
+    }
+
+    // 6) Click by name: activate a Button by its scene name. Stricter than coordinate clicks —
+    //    fail-fast on missing name / no Button component / Disabled. By-name is an explicit
+    //    semantic request, so silent miss would hide script bugs. Records store the name
+    //    (deterministic), replays inject the same name at the same tick.
+    for e in inbox {
+        if e.name != "ui-click-by-name" {
+            continue;
+        }
+        let Some(name) = e.data.get("name").and_then(|v| v.as_str()) else { continue };
+        let id = world.entity(name).map_err(|err| err.to_string())?;
+        // Must have a Button component — otherwise a script could "click" arbitrary entities.
+        if !world.has_component(id, "Button") {
+            return Err(format!(
+                "ui-click-by-name: 实体 {name:?} 没有 Button 组件（不能被点击）"
+            ));
+        }
+        // Disabled buttons refuse clicks (parity with coordinate clicks' disabled filter).
+        let state_name = world
+            .get_field(id, "Button.state")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "normal".to_string());
+        let state = vitric_render::ButtonState::parse(&state_name).ok_or_else(|| {
+            format!(
+                "实体 {id} 的 Button.state {state_name:?} 不是合法状态。可选: [{}]",
+                vitric_render::BUTTON_STATES.join(", ")
+            )
+        })?;
+        if state == vitric_render::ButtonState::Disabled {
+            return Err(format!(
+                "ui-click-by-name: 按钮 {name:?} 当前是 Disabled，不能点击"
+            ));
+        }
+        let action = world
+            .get_field(id, "Button.action")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        // Move focus to the named button (unify with coordinate clicks), then activate.
+        world.set_field(root, "UiRoot.focus", json!(name)).map_err(|err| err.to_string())?;
+        activate_button(world, id, &action, &mut events)?;
     }
 
     Ok(events)

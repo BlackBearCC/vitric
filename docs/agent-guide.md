@@ -521,6 +521,7 @@ schema 定义（字段名固定，默认值照抄）：
 
 - **焦点导航**：可聚焦按钮组成焦点环，方向输入 `ui-up`/`ui-down`/`ui-left`/`ui-right`（标准 `input/inject`）按**布局相邻关系**（矩形几何，对标 Godot 方向焦点）移焦点，到边停住不环绕；`ui-confirm` 激活当前焦点按钮。窗口模式下方向键/回车在有 UI 时自动注入 `ui-*`（游戏自己的 left/jump 不受影响）。
 - **点击激活**：注入屏幕**归一化坐标** `(nx, ny) ∈ [0,1]`（`input/ui-click` RPC，或窗口鼠标自动换算 = 物理像素 / 视口尺寸），运行时把它乘回参照系 1920×1080 再判断落在哪个按钮矩形（`rx/ry/rw/rh`）内——命中 = 激活，顺带把焦点移过去。**注意这和世界点击 `input/click` 是两套坐标系**：世界点击拾取 Sprite（经相机），UI 点击拾取屏幕空间叠加层（不经相机）。归一化 + 参照系换算让命中判定与真实分辨率解耦，点击走回复通道进录像、重放逐位一致。
+- **按名激活**：`input/ui-click-by-name {name, button?}` — 直接按场景里的实体名（如 `"mode_craft"`、`"craft_plank"`）激活按钮，跑和坐标点击同一条 `activate_button` 路径（设 pressed + press_t + 移焦点 + emit `ui-activate`）。**布局无关**：改 `mode_row` 的 gap 或按钮宽度不会让脚本失效。比坐标点击**更严格** —— name 不存在 / 实体没有 `Button` 组件 / 按钮 `Disabled` 都直接报错（坐标点击是边界外静默不命中）。录像里存 `{name, button}`，name 是确定性场景状态，重放逐位一致。Agent 脚本优先用 by-name，坐标点击留给"我不知道按钮叫什么，只知道大概位置"的探索场景。
 
 `Button{action, theme, state, press_t, min_scale}`：
 
