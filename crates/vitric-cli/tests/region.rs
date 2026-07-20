@@ -380,3 +380,126 @@ fn culling_preserves_byte_identical_output_for_onscreen_entities() {
         "on-screen entity's full 32x32 AABB must be magenta — culling must not skip any of it, got {} of {} pixels",
         magenta_in_aabb, 32 * 32);
 }
+
+// ---- Task 5 (E5): describe dormant dim + snapshot/replay plumbing ----
+
+#[test]
+fn describe_classifies_dormant_entities() {
+    // Isolated world: an entity with Position+Sprite inside a dormant region.
+    // describe_world must surface it in the `dormant` array — NOT in `visible` or `offscreen`.
+    let mut world = vitric_ecs::World::new();
+
+    let dormant_e = world.spawn_named("hidden_in_mountain").unwrap();
+    world.set_component(dormant_e, "Position", json!({"x": 15, "y": 20})).unwrap();
+    world.set_component(dormant_e, "Sprite", json!({"w": 1, "h": 1, "color": "#ff00ff"})).unwrap();
+    world.set_component(dormant_e, "Region", json!({
+        "id":"mountain","biome":"mountain","state":"dormant","discovered":0,
+        "anchor_x":0,"anchor_y":12,"w":30,"h":28,"dormant_ticks":0,"spawn_timer":7200
+    })).unwrap();
+
+    // Also spawn an active on-screen entity to verify visible still works.
+    let active_e = world.spawn_named("visible_ent").unwrap();
+    world.set_component(active_e, "Position", json!({"x": 0, "y": 0})).unwrap();
+    world.set_component(active_e, "Sprite", json!({"w": 1, "h": 1, "color": "#ffffff"})).unwrap();
+
+    let desc = describe_world(&world, 64, 64).unwrap();
+    let visible = desc["visible"].as_array().unwrap();
+    let offscreen = desc["offscreen"].as_array().unwrap();
+    let dormant = desc["dormant"].as_array().unwrap();
+
+    let visible_names: Vec<&str> = visible.iter()
+        .filter_map(|e| e.get("name").and_then(|v| v.as_str()))
+        .collect();
+    let dormant_names: Vec<&str> = dormant.iter()
+        .filter_map(|e| e.get("name").and_then(|v| v.as_str()))
+        .collect();
+
+    assert!(visible_names.contains(&"visible_ent"), "active entity should be in visible: {:?}", visible_names);
+    assert!(!visible_names.contains(&"hidden_in_mountain"), "dormant entity should NOT be in visible: {:?}", visible_names);
+    assert!(!offscreen.iter().any(|e| e.get("name").and_then(|v| v.as_str()) == Some("hidden_in_mountain")),
+        "dormant entity should NOT be in offscreen");
+    assert!(dormant_names.contains(&"hidden_in_mountain"), "dormant entity should be in dormant array: {:?}", dormant_names);
+
+    // The dormant entry should include region info so the agent knows which region it belongs to.
+    let dormant_entry = dormant.iter()
+        .find(|e| e.get("name").and_then(|v| v.as_str()) == Some("hidden_in_mountain"))
+        .expect("dormant entry missing");
+    assert_eq!(dormant_entry["region"]["id"].as_str(), Some("mountain"));
+    assert_eq!(dormant_entry["region"]["state"].as_str(), Some("dormant"));
+    assert_eq!(dormant_entry["world"]["x"].as_f64(), Some(15.0));
+    assert_eq!(dormant_entry["world"]["y"].as_f64(), Some(20.0));
+}
+
+#[test]
+fn snapshot_preserves_dormant_state() {
+    // Region.state is a World component, so snapshot/restore round-trips it automatically.
+    // This test locks the contract: if a future refactor breaks World::snapshot for Region
+    // components, this test fails.
+    let (mut sim, rt) = Runtime::boot(&frontier_dir()).unwrap();
+
+    // Mountain region starts dormant in scenes/main.json. Freeze it to verify a non-default
+    // state round-trips (dormant→frozen is a state the host can set via set_component).
+    let mountain_e = sim.world.entity("mountain").expect("mountain region entity should exist");
+    let mut region = sim.world.get_component(mountain_e, "Region").unwrap().clone();
+    region["state"] = json!("frozen");
+    region["discovered"] = json!(1);
+    sim.world.set_component(mountain_e, "Region", region).unwrap();
+
+    let snap = sim.snapshot(&rt);
+
+    // Boot a fresh sim and restore.
+    let (mut sim2, mut rt2) = Runtime::boot(&frontier_dir()).unwrap();
+    sim2.restore(&snap, &mut rt2).unwrap();
+
+    let mountain_e2 = sim2.world.entity("mountain").expect("mountain region entity should exist after restore");
+    let region2 = sim2.world.get_component(mountain_e2, "Region").unwrap();
+    assert_eq!(region2.get("state").and_then(|v| v.as_str()), Some("frozen"),
+        "Region.state must round-trip through snapshot/restore");
+    assert_eq!(region2.get("discovered").and_then(|v| v.as_i64()), Some(1),
+        "Region.discovered must round-trip through snapshot/restore");
+}
+
+#[test]
+fn replay_with_dormant_region_is_hash_identical() {
+    // A recording that starts with a dormant region (the default frontier scene) must replay
+    // hash-identically: the dormant state is part of world.state_hash(), and since nothing
+    // triggers a thaw during the recording, replay reproduces the same trajectory.
+    let (mut sim, mut rt) = Runtime::boot(&frontier_dir()).unwrap();
+    sim.start_recording();
+    for _ in 0..60 {
+        sim.step(&mut rt).unwrap();
+    }
+    let rec = sim.stop_recording().unwrap();
+    let final_hash = rec.final_hash;
+
+    // Boot fresh sim and replay.
+    let (mut sim2, mut rt2) = Runtime::boot(&frontier_dir()).unwrap();
+    sim2.replay(&rec, &mut rt2).unwrap();
+    // replay() already asserts final_hash matches; this explicit check is for clarity.
+    assert_eq!(sim2.world.state_hash(), final_hash,
+        "replay final hash must match recording final hash");
+}
+
+#[test]
+fn replay_after_pre_recording_thaw_is_hash_identical() {
+    // thaw_region is a host API call — NOT recorded by the recording. The contract (per
+    // sim.rs line 362-365 comment) is: the host re-runs the same thaw_region calls at the
+    // same ticks during replay. This test verifies that contract: thaw BEFORE start_recording
+    // (so the thawed state is in the initial checkpoint), then thaw BEFORE replay (same host
+    // call, same tick 0). The recording replays hash-identically.
+    let (mut sim, mut rt) = Runtime::boot(&frontier_dir()).unwrap();
+    sim.thaw_region("mountain"); // Host API call at tick 0, before recording starts.
+    sim.start_recording();
+    for _ in 0..60 {
+        sim.step(&mut rt).unwrap();
+    }
+    let rec = sim.stop_recording().unwrap();
+    let final_hash = rec.final_hash;
+
+    // Boot fresh sim and replay. The host re-runs the same thaw_region call before replay.
+    let (mut sim2, mut rt2) = Runtime::boot(&frontier_dir()).unwrap();
+    sim2.thaw_region("mountain"); // Same host call, same tick 0.
+    sim2.replay(&rec, &mut rt2).unwrap();
+    assert_eq!(sim2.world.state_hash(), final_hash,
+        "replay after pre-recording thaw must be hash-identical");
+}

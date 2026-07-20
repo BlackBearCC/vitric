@@ -2847,6 +2847,70 @@ pub fn describe_world_with_assets(
         }
     }
 
+    // Dormant entities: surfaced in a separate `dormant` array so the agent can reason about
+    // what's in unexplored regions. These entities are NOT in `visible` or `offscreen` (the
+    // query loop above already skips them via world.query's dormant filter). We iterate all
+    // entities (world.entities, NOT world.query) because query filters dormant — to list them
+    // we must bypass the filter.
+    let mut dormant: Vec<DescribeRow> = Vec::new();
+    for id in world.entities() {
+        if !world.is_dormant(id) { continue; }
+        // Only include entities that have Position+Sprite (same minimal components as visible/offscreen).
+        if !world.has_component(id, "Position") || !world.has_component(id, "Sprite") { continue; }
+
+        let px = num(world, id, "Position.x")?;
+        let py = num(world, id, "Position.y")?;
+        let sw = num(world, id, "Sprite.w")?;
+        let sh = num(world, id, "Sprite.h")?;
+        let color = world
+            .get_field(id, "Sprite.color")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "#ffffff".to_string());
+        let image = world
+            .get_field(id, "Sprite.image")
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        let name = world.name_of(id).map(String::from);
+        let rot = rot_of(world, id)?;
+
+        // Region info: which dormant region this entity belongs to.
+        let region_info = world
+            .get_component(id, "Region")
+            .ok()
+            .and_then(|r| {
+                Some(serde_json::json!({
+                    "id": r.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                    "state": r.get("state").and_then(|v| v.as_str()).unwrap_or(""),
+                }))
+            })
+            .unwrap_or(serde_json::json!({}));
+
+        let mut entry = serde_json::Map::new();
+        entry.insert("id".into(), json!(id.to_string()));
+        if let Some(n) = &name {
+            entry.insert("name".into(), json!(n));
+        }
+        entry.insert("world".into(), json!({"x": px, "y": py}));
+        let mut sprite = json!({"w": sw, "h": sh, "color": color});
+        if !image.is_empty() {
+            sprite["image"] = json!(image);
+        }
+        if rot != 0.0 {
+            sprite["rot"] = json!(rot);
+        }
+        entry.insert("sprite".into(), sprite);
+        entry.insert("region".into(), region_info);
+
+        dormant.push(DescribeRow {
+            named: name.is_some(),
+            dist: 0.0, // No focal-point distance for dormant entities (they're not on-screen).
+            id,
+            value: serde_json::Value::Object(entry),
+        });
+    }
+
     // Primary/secondary sort (only enabled when there is a focal point — without one the sort key
     // is meaningless, slot order is kept for backward compatibility): named first, then ascending
     // by distance-to-focal, ties broken by id — deterministic key → deterministic result per frame.
@@ -2861,9 +2925,11 @@ pub fn describe_world_with_assets(
         };
         sort_rows(&mut visible);
         sort_rows(&mut offscreen);
+        sort_rows(&mut dormant);
     }
     let visible: Vec<serde_json::Value> = visible.into_iter().map(|r| r.value).collect();
     let offscreen: Vec<serde_json::Value> = offscreen.into_iter().map(|r| r.value).collect();
+    let dormant: Vec<serde_json::Value> = dormant.into_iter().map(|r| r.value).collect();
 
     // On-screen text: the content itself is the semantics, the agent does not OCR the screenshot
     let mut texts = Vec::new();
@@ -3163,6 +3229,7 @@ pub fn describe_world_with_assets(
         "viewport": {"width": width, "height": height},
         "visible": visible,
         "offscreen": offscreen,
+        "dormant": dormant,
         "texts": texts,
         "overlaps": overlaps,
         "text": lines.join("\n"),
