@@ -331,6 +331,41 @@
         }
       }
     },
+    "Season": {
+      "fields": {
+        "current": {
+          "type": "enum",
+          "variants": ["spring", "summer", "autumn", "winter"],
+          "default": "spring"
+        },
+        "day_in_season": {
+          "type": "int",
+          "default": 0
+        },
+        "year": {
+          "type": "int",
+          "default": 1
+        }
+      }
+    },
+    "Weather": {
+      "fields": {
+        "current": {
+          "type": "enum",
+          "variants": ["clear", "cloudy", "rain", "storm", "flare"],
+          "default": "clear"
+        },
+        "timer": {
+          "type": "number",
+          "default": 30
+        },
+        "next": {
+          "type": "enum",
+          "variants": ["clear", "cloudy", "rain", "storm", "flare"],
+          "default": "clear"
+        }
+      }
+    },
     "Inventory": {
       "fields": {
         "ore": {

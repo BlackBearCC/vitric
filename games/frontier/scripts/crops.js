@@ -6,6 +6,10 @@
 // Each frame timer += dt (frozen at night); at 4s it advances a stage and resets timer; at stage 3 it stops and waits for harvest.
 //
 // Time of day is derived from ctx.tick (same source as DAY_SEC in clock.js; the two must stay in sync).
+//
+// Season multiplier (Task 6): spring 1.2, summer 1.0, autumn 1.5, winter 0.3. Applied to dt BEFORE
+//   the timer increment, so growth rate scales with season. Same multiplier applies to the catch_up
+//   dormant-tick budget (using the season at thaw time — approximation noted in task-6-report.md).
 
 const STAGE_SECONDS = 4.0;
 const RIPE_STAGE = 3;
@@ -13,6 +17,12 @@ const PLOT_COLOR = "#6b8f3a";
 const STAGE_COLOR = ["#7fbf5a", "#5fa83a", "#3f8f2a", "#e8c83a"];
 const CROP_DAY_SEC = 60.0;
 const CROP_TICK_PER_SEC = 60;
+
+// Season multipliers on crop growth rate. Spring is lush, autumn is peak harvest,
+// summer is normal, winter is near-dormant.
+const SEASON_CROP_MULT = {
+  spring: 1.2, summer: 1.0, autumn: 1.5, winter: 0.3
+};
 
 function cropTodOf(tick) {
   const secOfDay = (tick / CROP_TICK_PER_SEC) % CROP_DAY_SEC;
@@ -25,6 +35,10 @@ function cropTodOf(tick) {
 
 vitric.system("crop-grow", { query: ["Crop", "Sprite"], writes: ["Crop", "Sprite"] }, (entities, ctx) => {
   const isNight = cropTodOf(ctx.tick) === "夜";
+  // Fetch the season multiplier once per tick (not per entity).
+  const season = ctx.getField("colony", "Season.current");
+  const mult = SEASON_CROP_MULT[season] || 1.0;
+  const dt = ctx.dt * mult;
   for (const e of entities) {
     const c = e.Crop;
     if (c.kind === "") {
@@ -33,7 +47,7 @@ vitric.system("crop-grow", { query: ["Crop", "Sprite"], writes: ["Crop", "Sprite
     }
     if (isNight) continue; // night: crop dormant, timer frozen, color preserved
     if (c.stage < RIPE_STAGE) {
-      c.timer += ctx.dt;
+      c.timer += dt;
       if (c.timer >= STAGE_SECONDS) {
         c.timer = 0;
         c.stage += 1;
@@ -44,15 +58,15 @@ vitric.system("crop-grow", { query: ["Crop", "Sprite"], writes: ["Crop", "Sprite
     if (e.Sprite.color !== color) e.Sprite.color = color;
   }
 },
-// catch_up: fast-forward Crop.timer/stage by the dormant tick budget when a region thaws.
-// Simplified reconciliation — ONLY advances timer and stage, NOT other side effects:
-// no emit (crop-ready will fire on the next regular tick if the crop reached ripe),
-// no Sprite.color update (the main fn paints that next tick), no night check (dormant
-// time is treated as continuous growth, since the regular fn already paused at night).
-// dormant_ticks is in ticks (60 ticks = 1 second); convert to seconds and roll stages.
+// catch_up: apply the same season multiplier to the dormant tick budget.
+// The season at thaw time determines the growth rate for the entire dormant period
+// (simplification: doesn't model season transitions during dormancy — that's a known
+// approximation, noted in the report).
 (entityHandle, ctx, dormantTicks) => {
   const dormantSec = dormantTicks / CROP_TICK_PER_SEC;
-  let t = (ctx.getField(entityHandle, "Crop.timer") || 0) + dormantSec;
+  const season = ctx.getField("colony", "Season.current");
+  const mult = SEASON_CROP_MULT[season] || 1.0;
+  let t = (ctx.getField(entityHandle, "Crop.timer") || 0) + dormantSec * mult;
   let s = ctx.getField(entityHandle, "Crop.stage") || 0;
   while (t >= STAGE_SECONDS && s < RIPE_STAGE) {
     t -= STAGE_SECONDS;

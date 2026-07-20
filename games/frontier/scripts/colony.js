@@ -7,9 +7,27 @@
 //   census      count companions -> emit "census-tick" -> rules writes @colony.Colony.pop
 //   stage       stage milestones: startup -> foothold -> taking shape -> warmth -> crowd -> prosperity
 //   colony      each frame adjust stockpile by (output - base consumption), clamped to [0,100], no death
+//
+// Task 6: tally now applies weather + season multipliers to the EMITTED rates (before the apply-rates
+//   rule writes them to @colony.*_rate). This keeps rules/colony.json unchanged — the multipliers
+//   flow through the event payload. The colony stockpile system below is unchanged (applies rates as-is).
 
 const BASE_USE = 1.4;
 const PER = 3.0;
+
+// Weather multipliers on colony production rates.
+const WEATHER_RATE_MULT = {
+  clear:  { power: 1.0, water: 1.0 },
+  cloudy: { power: 0.7, water: 1.0 },
+  rain:   { power: 0.7, water: 1.5 },
+  storm:  { power: 0.3, water: 1.0 },
+  flare:  { power: 0.0, water: 1.0 }
+};
+
+// Season multipliers on overall resource yield.
+const SEASON_RESOURCE_MULT = {
+  spring: 1.0, summer: 0.8, autumn: 1.2, winter: 0.5
+};
 
 function clamp(v) {
   return v < 0 ? 0 : (v > 100 ? 100 : v);
@@ -24,11 +42,22 @@ vitric.system("tally", { query: ["Structure"], writes: [] }, (entities, ctx) => 
     else if (k === "extractor") extractor += 1;
     else if (k === "monument") monument += 1;
   }
+  // Fetch weather + season multipliers.
+  const weather = ctx.getField("colony", "Weather.current");
+  const season = ctx.getField("colony", "Season.current");
+  const wmult = WEATHER_RATE_MULT[weather] || WEATHER_RATE_MULT.clear;
+  const smult = SEASON_RESOURCE_MULT[season] || 1.0;
+
+  // Apply multipliers to the emitted rates — the apply-rates rule is unchanged.
+  // Sources match the original tally (o2 from plots, water from extractors) — only the
+  // multipliers are new. The brief's pseudocode showed o2 from extractors, but the brief's
+  // text explicitly says "o2 gets only smult" (multiplier only, no source change). Keeping
+  // the original plot source to avoid an unintended behavior change.
   ctx.emit("tally", {
-    pow: conduit * PER,
-    food: plot * PER,
-    o2: plot * PER,
-    water: extractor * PER,
+    pow: conduit * PER * wmult.power * smult,
+    food: plot * PER * smult,
+    o2: plot * PER * smult,
+    water: extractor * PER * wmult.water * smult,
     total: entities.length,
     monument: monument,
   });

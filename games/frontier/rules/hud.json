@@ -61,6 +61,22 @@
       "do": [
         { "set": "@flare_lbl.UiLabel.content", "to": "@colony.Colony.flare_bar" }
       ]
+    },
+    {
+      "id": "hud-season",
+      "comment": "季节段:第 N 年 · season。每帧刷 @colony.Season。",
+      "on": "tick",
+      "do": [
+        { "set": "@season_lbl.UiLabel.content", "to": { "format": "第 {} 年 · {}", "args": ["@colony.Season.year", "@colony.Season.current"] } }
+      ]
+    },
+    {
+      "id": "hud-weather",
+      "comment": "天气段:天气：weather。每帧刷 @colony.Weather。",
+      "on": "tick",
+      "do": [
+        { "set": "@weather_lbl.UiLabel.content", "to": { "format": "天气：{}", "args": ["@colony.Weather.current"] } }
+      ]
     }
   ]
 }

@@ -15,6 +15,10 @@
     { "id": "toast-dawn-break", "on": { "event": "dawn-break" }, "do": [
       { "set": "@toast_lbl.UiLabel.content", "to": "天亮了,新的一天" },
       { "set": "@toast_lbl.Toast.timer", "to": 2.5 }
+    ] },
+    { "id": "toast-weather-change", "on": { "event": "weather-change" }, "do": [
+      { "set": "@toast_lbl.UiLabel.content", "to": { "format": "天气变化：{}", "args": ["event.weather"] } },
+      { "set": "@toast_lbl.Toast.timer", "to": 2.0 }
     ] }
   ]
 }
