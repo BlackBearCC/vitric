@@ -57,6 +57,26 @@ pub trait GameLogic {
     fn available_actions(&self) -> Vec<(String, Vec<String>)> {
         Vec::new()
     }
+
+    /// Run catch-up for entities in the given region. Called by `Sim::step` when a region thaws
+    /// after being dormant — each system with an optional `catch_up` fn fast-forwards entity
+    /// state by the dormant tick budget (e.g. crop-grow advances `Crop.timer`/`Crop.stage`).
+    /// Default no-op: only Runtime (which holds `ScriptEngine`) actually runs the catch_up fns;
+    /// other `GameLogic` impls (e.g. `()`, test stubs) have no systems to catch up.
+    ///
+    /// `dormant_ticks` is the budget (in ticks) the region spent dormant — read from
+    /// `Region.dormant_ticks` by the caller and reset to 0 after this returns. `tick` is the
+    /// current simulation tick (same value `on_tick` will receive this step).
+    fn catch_up_region(
+        &mut self,
+        _world: &mut World,
+        _rng: &mut Pcg32,
+        _region_id: &str,
+        _dormant_ticks: u32,
+        _tick: u64,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Empty logic (for pure physics simulation).
@@ -124,6 +144,14 @@ pub struct Sim {
     /// tick). If a recording must capture an externally-injected event, use `inject_reply`
     /// (which IS recorded, same channel as LLM replies).
     pending_events: Vec<Event>,
+    /// Region IDs queued by [`Sim::thaw_region`] for catch-up. Drained at the start of the next
+    /// step (before `logic.on_tick`): for each region ID, the engine reads `Region.dormant_ticks`
+    /// from the region entity, calls `logic.catch_up_region(region_id, dormant_ticks)`, then
+    /// resets `dormant_ticks` to 0 (the budget is consumed). Same determinism reasoning as
+    /// `pending_events`: a host API call is deterministic given the same host program, so this
+    /// vector does not need to be recorded by the recording. It IS snapshotted/restored so a
+    /// mid-thaw save/load round-trips the pending catch-up.
+    pending_catch_ups: Vec<String>,
     recorder: Option<Recording>,
 }
 
@@ -137,6 +165,7 @@ impl Sim {
             pending_inputs: Vec::new(),
             pending_replies: Vec::new(),
             pending_events: Vec::new(),
+            pending_catch_ups: Vec::new(),
             recorder: None,
         }
     }
@@ -168,22 +197,27 @@ impl Sim {
     /// already-active regions — the state is re-set to "active" (no-op) and the event is still
     /// emitted (rules can decide whether to dedupe based on `discovered`).
     ///
-    /// Catch-up logic for previously-discovered regions is Task 2 (out of scope here).
+    /// Catch-up is queued whenever the region WAS dormant or frozen (i.e. it accumulated
+    /// `dormant_ticks` that need to be reconciled). This covers both first-thaw (state was
+    /// "dormant", discovered 0→1) and re-thaw (state was "frozen", discovered already 1).
+    /// Already-active regions do not queue catch-up (dormant_ticks is 0, nothing to reconcile).
+    /// The next step flushes `pending_catch_ups` before `logic.on_tick`, calling each system's
+    /// optional catch_up fn to fast-forward entity state by the dormant tick budget (Task 2).
     pub fn thaw_region(&mut self, id: &str) {
         let Ok(region_e) = self.world.entity(id) else { return; };
         let Ok(mut region) = self.world.get_component(region_e, "Region").cloned() else { return; };
-        let was_discovered = region.get("discovered").and_then(|v| v.as_i64()).unwrap_or(0) == 1;
+        let was_dormant = matches!(
+            region.get("state").and_then(|v| v.as_str()),
+            Some("dormant") | Some("frozen")
+        );
         region["state"] = json!("active");
         region["discovered"] = json!(1);
         let _ = self.world.set_component(region_e, "Region", region);
         self.pending_events.push(Event::new("region-thaw", json!({"id": id})));
-        if was_discovered {
-            self.invoke_catch_up_for_region(id);
+        if was_dormant {
+            self.pending_catch_ups.push(id.to_string());
         }
     }
-
-    /// Catch-up scheduling for a re-thawed region. Stub — implemented in Task 2.
-    fn invoke_catch_up_for_region(&mut self, _region_id: &str) {}
 
     /// Start recording (records from the current state).
     pub fn start_recording(&mut self) {
@@ -273,6 +307,39 @@ impl Sim {
 
         // 4. Collisions
         self.detect_collisions(&mut events)?;
+
+        // 4.5 Flush pending catch-ups (region thaws queued by host API since the last step).
+        // For each region ID, read `Region.dormant_ticks` from the region entity, call
+        // `logic.catch_up_region(region_id, dormant_ticks)`, then reset `dormant_ticks` to 0
+        // (the budget is consumed). Runs BEFORE `logic.on_tick` so the regular systems see the
+        // post-catch-up state and continue from there (e.g. crop-grow's main fn sees the
+        // fast-forwarded Crop.timer and doesn't re-advance it).
+        //
+        // Determinism: pending_catch_ups is populated by `thaw_region` (a host API call). Replay
+        // re-runs the same host program, so the same `thaw_region` calls happen at the same ticks,
+        // producing the same pending_catch_ups in the same order — bit-identical catch-up.
+        for region_id in std::mem::take(&mut self.pending_catch_ups) {
+            let Ok(region_e) = self.world.entity(&region_id) else { continue; };
+            let dormant_ticks = self
+                .world
+                .get_field(region_e, "Region.dormant_ticks")
+                .ok()
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0)
+                .max(0) as u32;
+            logic
+                .catch_up_region(
+                    &mut self.world,
+                    &mut self.rng,
+                    &region_id,
+                    dormant_ticks,
+                    self.tick,
+                )
+                .map_err(|message| SimError::Logic { tick: self.tick, message })?;
+            // Consume the budget: dormant_ticks resets to 0 after catch-up. The region is now
+            // active, so accumulate_dormant_ticks won't touch it anymore.
+            let _ = self.world.set_field(region_e, "Region.dormant_ticks", json!(0));
+        }
 
         // 5. Logic
         logic
@@ -367,6 +434,9 @@ impl Sim {
             "pending_events": self.pending_events.iter()
                 .map(|e| json!({"name": e.name, "data": serde_json::Value::Object(e.data.clone())}))
                 .collect::<Vec<_>>(),
+            // Region IDs queued for catch-up by thaw_region since the last step. Same lifecycle
+            // as pending_events — drained into logic.catch_up_region at the start of the next step.
+            "pending_catch_ups": self.pending_catch_ups,
             // Logic layer stashed state (events emitted by the script last tick, etc.)
             "logic": logic.snapshot_state(),
         })
@@ -409,6 +479,17 @@ impl Sim {
                 pending_events.push(Event::new(name, data));
             }
         }
+        // pending_catch_ups: region IDs queued by thaw_region since the last step. Old snapshots
+        // predating this field → treat as empty (forward compatibility).
+        let pending_catch_ups: Vec<String> = snap
+            .get("pending_catch_ups")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
         logic.restore_state(snap.get("logic").ok_or("快照缺 logic 状态")?)?;
         self.tick = tick;
         self.seed = seed;
@@ -417,6 +498,7 @@ impl Sim {
         self.pending_inputs = pending;
         self.pending_replies = pending_replies;
         self.pending_events = pending_events;
+        self.pending_catch_ups = pending_catch_ups;
         // The timeline is broken, so an in-progress recording is necessarily non-replayable — invalidate it directly, no silently corrupted recording left behind
         self.recorder = None;
         Ok(())

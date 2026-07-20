@@ -44,6 +44,10 @@ pub struct SystemDecl {
     pub query: Vec<String>,
     /// Set of writable components (⊆ query).
     pub writes: Vec<String>,
+    /// Whether the system declared an optional `catch_up(entity, ctx, dormant_ticks)` fn.
+    /// Set at registration time (4th arg to `vitric.system`); the engine uses this flag to
+    /// skip systems without catch_up when iterating for region thaw catch-up.
+    pub has_catch_up: bool,
 }
 
 /// Script execution output.
@@ -179,6 +183,84 @@ impl ScriptEngine {
         let mut out = ScriptOutput::default();
         for idx in 0..self.systems.len() {
             self.run_one_system(idx, world, rng, tick, &mut out)?;
+        }
+        Ok(out)
+    }
+
+    /// Run each system's optional `catch_up` fn for entities in the given region. Invoked by
+    /// the runtime when a region thaws after being dormant — each system that declared a
+    /// catch_up fn fast-forwards entity state by the dormant tick budget (e.g. crop-grow
+    /// advances Crop.timer/stage so a crop frozen for 60s of sim time doesn't stay at timer=0).
+    ///
+    /// Entity iteration uses `world.entities()` (NOT `query`) because `query` filters dormant
+    /// entities — the just-thawed entities are now "active" at the region-entity level, but
+    /// individual entities carrying a Region component may still have state="dormant" on their
+    /// own Region component (the engine's thaw_region only updates the region entity named by
+    /// `region_id`, not every entity in that region). The system's `query` filter is applied
+    /// on top: an entity must have all query components to be matched.
+    ///
+    /// Each matching entity triggers one `__runCatchUp` call (per-entity, not per-batch). The
+    /// catch_up fn reads/writes via ctx.getField/ctx.setField — the deferred-op channel — so
+    /// writes are subject to schema validation but NOT to the system's `writes` declaration
+    /// (catch_up is best-effort reconciliation, the writes declaration governs the main fn only).
+    pub fn run_catch_up_for_region(
+        &mut self,
+        region_id: &str,
+        dormant_ticks: u32,
+        world: &mut World,
+        rng: &mut Pcg32,
+        tick: u64,
+    ) -> Result<ScriptOutput, ScriptError> {
+        let mut out = ScriptOutput::default();
+        for idx in 0..self.systems.len() {
+            let decl = self.systems[idx].clone();
+            if !decl.has_catch_up {
+                continue;
+            }
+            let location = format!("系统 {:?} 的 catch_up", decl.name);
+            let query: Vec<&str> = decl.query.iter().map(|s| s.as_str()).collect();
+
+            // Find entities in this region (Region.id == region_id) that have all query components.
+            // Use entities() (not query()) because query filters dormant — we want the just-thawed
+            // entities even if their own Region component still says "dormant".
+            let mut matching: Vec<EntityId> = Vec::new();
+            for id in world.entities() {
+                let Ok(region) = world.get_component(id, "Region") else { continue; };
+                let Some(id_str) = region.get("id").and_then(|v| v.as_str()) else { continue; };
+                if id_str != region_id {
+                    continue;
+                }
+                if !query.iter().all(|c| world.has_component(id, c)) {
+                    continue;
+                }
+                matching.push(id);
+            }
+
+            for id in matching {
+                let payload = json!({
+                    "dt": vitric_sim::DT,
+                    "tick": tick,
+                    "rng": rng_to_json(rng),
+                });
+                // Open the getField read-live-World window for this JS call, close it immediately after.
+                WORLD_PTR.with(|p| p.set(world as *const World));
+                let call = self.call_js(
+                    "__runCatchUp",
+                    (idx as i32, id.to_string(), dormant_ticks as i32, payload.to_string()),
+                    &location,
+                );
+                WORLD_PTR.with(|p| p.set(std::ptr::null()));
+                let result_str = call?;
+                let mut result: Value = serde_json::from_str(&result_str).map_err(|e| {
+                    ScriptError::Op {
+                        location: location.clone(),
+                        message: format!("返回值不是合法 JSON: {e}"),
+                    }
+                })?;
+                revive_f64(&mut result, &location)?;
+                *rng = rng_from_json(result.get("rng"), &location)?;
+                self.apply_ops(result.get("ops"), world, &mut out, &location)?;
+            }
         }
         Ok(out)
     }
@@ -455,6 +537,8 @@ impl ScriptEngine {
                 name: s["name"].as_str().expect("name").to_string(),
                 query: to_string_vec(&s["query"]),
                 writes: to_string_vec(&s["writes"]),
+                // Prelude's __list reports `catch_up: true/false` per system; missing/false = no catch_up.
+                has_catch_up: s.get("catch_up").and_then(|v| v.as_bool()).unwrap_or(false),
             })
             .collect();
         self.fns = to_string_vec(&v["fns"]);

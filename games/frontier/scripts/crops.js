@@ -43,4 +43,21 @@ vitric.system("crop-grow", { query: ["Crop", "Sprite"], writes: ["Crop", "Sprite
     const color = STAGE_COLOR[c.stage] || STAGE_COLOR[RIPE_STAGE];
     if (e.Sprite.color !== color) e.Sprite.color = color;
   }
+},
+// catch_up: fast-forward Crop.timer/stage by the dormant tick budget when a region thaws.
+// Simplified reconciliation — ONLY advances timer and stage, NOT other side effects:
+// no emit (crop-ready will fire on the next regular tick if the crop reached ripe),
+// no Sprite.color update (the main fn paints that next tick), no night check (dormant
+// time is treated as continuous growth, since the regular fn already paused at night).
+// dormant_ticks is in ticks (60 ticks = 1 second); convert to seconds and roll stages.
+(entityHandle, ctx, dormantTicks) => {
+  const dormantSec = dormantTicks / CROP_TICK_PER_SEC;
+  let t = (ctx.getField(entityHandle, "Crop.timer") || 0) + dormantSec;
+  let s = ctx.getField(entityHandle, "Crop.stage") || 0;
+  while (t >= STAGE_SECONDS && s < RIPE_STAGE) {
+    t -= STAGE_SECONDS;
+    s += 1;
+  }
+  ctx.setField(entityHandle, "Crop.timer", t);
+  ctx.setField(entityHandle, "Crop.stage", s);
 });

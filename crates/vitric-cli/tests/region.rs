@@ -127,3 +127,58 @@ fn thaw_region_activates_entities() {
         .unwrap().as_i64().unwrap();
     assert_eq!(dormant_ticks, 0, "active region should not accumulate dormant_ticks");
 }
+
+#[test]
+fn catch_up_advances_dormant_crop_on_thaw() {
+    // A Crop entity inside a dormant region accumulates `dormant_ticks` while frozen out
+    // of the regular crop-grow system (the dormant filter excludes it from the query).
+    // On thaw, the engine queues a catch-up; the next step flushes it, invoking each
+    // system's optional catch_up function for entities in the thawed region. crop-grow
+    // declares a catch_up that fast-forwards `Crop.timer`/`Crop.stage` by the dormant
+    // tick budget — so the timer must jump from 0 to ~elapsed_seconds after the flush.
+    //
+    // The crop-grow system queries ["Crop","Sprite"] (see games/frontier/scripts/crops.js),
+    // so the test entity must carry both components to be matched by the catch_up filter.
+    let (mut sim, mut rt) = Runtime::boot(&frontier_dir()).unwrap();
+    let crop_e = sim.world.spawn_named("mountain_crop").unwrap();
+    sim.world.set_component(crop_e, "Position", json!({"x":15,"y":15})).unwrap();
+    sim.world.set_component(crop_e, "Sprite", json!({"w":1,"h":1,"color":"#7fbf5a"})).unwrap();
+    sim.world.set_component(crop_e, "Crop", json!({"kind":"wheat","stage":0,"timer":0,"_tend_t":0})).unwrap();
+    sim.world.set_component(crop_e, "Region", json!({
+        "id":"mountain","biome":"mountain","state":"dormant","discovered":0,
+        "anchor_x":0,"anchor_y":12,"w":30,"h":28,
+        "dormant_ticks":0,"spawn_timer":7200
+    })).unwrap();
+
+    // 3600 ticks = 60 seconds of sim time. The mountain region accumulates dormant_ticks
+    // each tick (Task 1's accumulate_dormant_ticks). The crop-grow system skips the dormant
+    // entity, so Crop.timer stays at 0.
+    for _ in 0..3600 {
+        sim.step(&mut rt).unwrap();
+    }
+    let timer_before = sim.world.get_field(crop_e, "Crop.timer")
+        .unwrap().as_f64().unwrap();
+    assert_eq!(timer_before, 0.0,
+        "dormant crop's timer must not advance before thaw");
+
+    // Mountain region's dormant_ticks is now 3600. thaw_region queues a catch-up; the
+    // catch_up itself does NOT run inline — it runs on the NEXT step (when pending_catch_ups
+    // is flushed before logic.on_tick). So we must step at least once before checking.
+    sim.thaw_region("mountain");
+    sim.step(&mut rt).unwrap(); // Flushes pending_catch_ups → catch_up runs
+
+    let timer_after = sim.world.get_field(crop_e, "Crop.timer")
+        .unwrap().as_f64().unwrap();
+    assert!(timer_after > 0.0,
+        "catch_up should advance timer by ~60s of dormant budget, got {}", timer_after);
+
+    // dormant_ticks on the mountain region must be reset to 0 after catch-up (the budget
+    // was consumed). The mountain_crop marker's own Region.dormant_ticks is NOT reset
+    // (it's a separate Region component on a separate entity — only the region entity
+    // named in thaw_region is reset).
+    let mountain_e = sim.world.entity("mountain").unwrap();
+    let dormant_ticks = sim.world.get_field(mountain_e, "Region.dormant_ticks")
+        .unwrap().as_i64().unwrap();
+    assert_eq!(dormant_ticks, 0,
+        "dormant_ticks must be reset to 0 after catch-up consumes the budget");
+}

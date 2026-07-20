@@ -5,9 +5,13 @@ globalThis.__systems = [];
 globalThis.__fns = {};
 
 globalThis.vitric = {
-  // Register a system: vitric.system("name", {query: [components...], writes: [components...]}, (entities, ctx) => {...})
+  // Register a system: vitric.system("name", {query: [components...], writes: [components...]}, (entities, ctx) => {...} [, catch_up_fn])
   // query is the entity filter (the system can read these components); writes must be a subset of query (which it can change).
-  system(name, decl, fn) {
+  // catch_up_fn is optional: (entity, ctx, dormant_ticks) => {...}. Invoked per matching entity when a region thaws after
+  // being dormant, so the system can fast-forward entity state by the dormant tick budget instead of leaving it stale.
+  // The catch_up_fn uses ctx.getField/ctx.setField (same as a rule `call` fn) — it does NOT receive the entity batch,
+  // and writes via setField are NOT subject to the system's `writes` declaration (setField is the deferred-op channel).
+  system(name, decl, fn, catch_up_fn) {
     if (typeof name !== "string" || !name) {
       throw new Error("vitric.system: 第一个参数必须是非空系统名");
     }
@@ -23,10 +27,15 @@ globalThis.vitric = {
     if (typeof fn !== "function") {
       throw new Error("vitric.system(\"" + name + "\"): 第三个参数必须是函数 (entities, ctx) => {...}");
     }
+    // Optional 4th arg: catch_up(entity, ctx, dormant_ticks). null/undefined = system has no catch_up.
+    // Any other type is an explicit error (catches `vitric.system(name, decl, fn, someNonFn)` typos).
+    if (catch_up_fn !== undefined && catch_up_fn !== null && typeof catch_up_fn !== "function") {
+      throw new Error("vitric.system(\"" + name + "\"): 第四个参数（可选 catch_up）必须是函数 (entity, ctx, dormant_ticks) => {...}，或省略/null");
+    }
     if (__systems.some((s) => s.name === name)) {
       throw new Error("vitric.system: 系统名 \"" + name + "\" 已注册过，系统名全局唯一");
     }
-    __systems.push({ name, query: decl.query, writes, fn });
+    __systems.push({ name, query: decl.query, writes, fn, catch_up: catch_up_fn || null });
   },
   // Register a function callable by the rule `call` action: vitric.fn("name", (args, ctx) => {...})
   fn(name, f) {
@@ -206,6 +215,28 @@ globalThis.__runSystem = function (idx, payloadJson) {
   });
 };
 
+// Rust-side entry: run the catch_up fn of system `idx` for a single entity. The entity is
+// passed by handle (string like "e3v0"); the catch_up fn reads/writes via ctx.getField/ctx.setField
+// (NOT via the entity batch — catch_up is per-entity, not per-query-batch). dormant_ticks is the
+// number of ticks the entity's region spent dormant, the budget the fn fast-forwards by.
+// Returns the same shape as __runSystem: {ops, rng} — ops are applied to the world by the Rust side.
+globalThis.__runCatchUp = function (idx, entityHandle, dormantTicks, payloadJson) {
+  const sys = __systems[idx];
+  if (!sys.catch_up) {
+    throw new Error("系统 " + JSON.stringify(sys.name) + " 没有 catch_up 函数，不应被调度");
+  }
+  const payload = JSON.parse(payloadJson);
+  const rng = { state: BigInt(payload.rng.state), inc: BigInt(payload.rng.inc) };
+  const ops = [];
+  const ctx = __makeCtx(payload, ops, rng);
+  // The entity is exposed to the fn as a handle string (e3v0) — same shape ctx.setField/ctx.getField take.
+  sys.catch_up(entityHandle, ctx, dormantTicks);
+  return __jsonStr({
+    ops,
+    rng: { state: rng.state.toString(), inc: rng.inc.toString() },
+  });
+};
+
 // Rust-side entry: run the function targeted by a rule's `call` action
 globalThis.__callFn = function (name, payloadJson) {
   const f = __fns[name];
@@ -227,7 +258,14 @@ globalThis.__callFn = function (name, payloadJson) {
 // Rust-side entry: enumerate registration results
 globalThis.__list = function () {
   return JSON.stringify({
-    systems: __systems.map((s) => ({ name: s.name, query: s.query, writes: s.writes })),
+    systems: __systems.map((s) => ({
+      name: s.name,
+      query: s.query,
+      writes: s.writes,
+      // Whether this system declared a catch_up fn (4th arg to vitric.system). The Rust side
+      // uses this to skip systems without catch_up when iterating for region thaw catch-up.
+      catch_up: !!s.catch_up,
+    })),
     fns: Object.keys(__fns),
   });
 };

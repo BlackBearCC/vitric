@@ -300,6 +300,27 @@ impl GameLogic for Runtime {
             .collect()
     }
 
+    /// Run catch_up for each system that declared one, for entities in the thawed region.
+    /// Delegates to `ScriptEngine::run_catch_up_for_region`. Events emitted by catch_up fns
+    /// (rare — catch_up is typically a pure timer/stage fast-forward) enter carryover so the
+    /// next tick's rules can react, mirroring how `run_systems` events are handled.
+    fn catch_up_region(
+        &mut self,
+        world: &mut vitric_ecs::World,
+        rng: &mut Pcg32,
+        region_id: &str,
+        dormant_ticks: u32,
+        tick: u64,
+    ) -> Result<(), String> {
+        let so = self
+            .scripts
+            .run_catch_up_for_region(region_id, dormant_ticks, world, rng, tick)
+            .map_err(|e| e.to_string())?;
+        self.observed.extend(so.events.iter().cloned());
+        self.carryover.extend(so.events);
+        Ok(())
+    }
+
     /// Hot reload: re-read rules + scripts from disk, rebuild as a whole and atomically replace;
     /// any step failure keeps the old logic untouched (no half-dead state).
     /// Note: schema/scene changes are not in hot reload's scope (they define the world's shape, changes require restart).
