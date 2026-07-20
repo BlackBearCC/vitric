@@ -77,6 +77,14 @@
       "do": [
         { "set": "@weather_lbl.UiLabel.content", "to": { "format": "天气：{}", "args": ["@colony.Weather.current"] } }
       ]
+    },
+    {
+      "id": "hud-forecast",
+      "comment": "7-day weather forecast bar. forecast-update system writes Forecast.days once per day.",
+      "on": "tick",
+      "do": [
+        { "set": "@forecast_lbl.UiLabel.content", "to": "@colony.Forecast.days" }
+      ]
     }
   ]
 }

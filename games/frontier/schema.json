@@ -366,6 +366,18 @@
         }
       }
     },
+    "Forecast": {
+      "fields": {
+        "days": {
+          "type": "text",
+          "default": ""
+        },
+        "last_day": {
+          "type": "int",
+          "default": 0
+        }
+      }
+    },
     "Inventory": {
       "fields": {
         "ore": {
