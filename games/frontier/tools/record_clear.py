@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""驱动 frontier 从开局到 game-won(step=8)的通关录像,写入 qa/clear.json。
+"""Drive frontier from start to settlement-founded (step=8) playthrough recording, writes qa/clear.json.
 
-完整的多日游戏流程:Day 1 修信标+建田+种麦 → Day 3 立足 → Day 4 温饱 →
-Day 5 成群 → Day 6 兴旺(game-won)。
-录制约束:world/set 在录制中被禁(只录输入流),所以资源/状态只能靠真实玩法达成。
-起步料(seed-start 规则)已经给到能一路打到丰碑通关:ore6/plank4/lamp2/wood8/seed10。
+Multi-day flow: Day 1 fix beacon + build plots + harvest → Day 3 foothold → Day 4 food →
+Day 5 crowd → Day 6 monument (settlement-founded).
+Recording constraint: world/set is rejected during recording (only input stream is captured),
+so resources/state must be achieved through real gameplay.
+The seed-start inventory (ore6/plank6/lamp2/wood8/seed10) covers the full run including
+a structure upgrade (plot→greenhouse) to fulfill Pip's upgrade wish; ore+plank spent on the
+upgrade are recovered by gathering ore from a node and crafting planks from wood before the monument.
 """
 import json, os, subprocess, sys, time, urllib.request
 
@@ -77,7 +80,7 @@ def dump_companions(tag):
     try:
         pp = wget("@player")["result"]["components"]["Position"]; pps = f"({pp.get('x')},{pp.get('y')})"
     except Exception: pps = "?"
-    print(f"[DUMP {tag}] happy_count={c.get('companion_happy_count')} pop={c.get('pop')} day={c.get('day')} player={pps}")
+    print(f"[DUMP {tag}] happy_count={c.get('companion_happy_count')} wish_count={c.get('companion_wish_count')} pop={c.get('pop')} day={c.get('day')} player={pps}")
     for e in ents:
         comp = e.get("components", {})
         n = comp.get("Need", {}); p = comp.get("Position", {})
@@ -108,6 +111,10 @@ def build_monument(x, y):
 def invite():
     inp("i"); step(20)
 
+def ui_click(nx, ny):
+    # Screen-normalized coords (0..1); picking deferred to in-tick UI system (1920×1080 ref frame).
+    return rpc("input/ui-click", {"nx": nx, "ny": ny})
+
 def wait_quest(stage_at_least, max_cycles=20, advance=21600):
     """等 quest step >= stage_at_least,大块推进 sim time。"""
     for i in range(max_cycles):
@@ -126,7 +133,7 @@ PLOT_CYCLE = 1500  # one crop matures in ~12 sim sec, leave margin
 
 print("=== frontier 多日通关录像 ===")
 proc = subprocess.Popen(
-    [os.path.join(ROOT, "target/release/vitric.exe"),
+    [os.path.join(ROOT, "target/release/vitric"),
      "run", "games/frontier", "--port", str(PORT), "--record", QA],
     cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:
@@ -137,39 +144,53 @@ try:
     rpc("sim/pause")
     step(3)
 
-    # === Day 1: fix beacon + build 4 plots + plant wheat ===
-    print("\n--- Day 1: 修信标 + 建田 + 收第一茬 ---")
+    # === Day 1: fix beacon + 1 plot + plant/harvest → step 3, then 3rd build → step 4 ===
+    # Build order matters: the 3rd build must fire AFTER step reaches 3, so the wish-fulfilled
+    # event triggers the step 3→4 gate (wish-fulfilled + affinity>=60). Building 3 structures
+    # before harvest would fulfill Pip's "build 3" wish while step==2 → gate fails.
+    print("\n--- Day 1: 修信标 + 1田 + 收第一茬 → step 3 → 第3建(wish) → step 4 ---")
     build_beacon(9, 5)
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
     check("step==2 (信标)", s == 2, f"actual={s}")
 
-    for (px, py) in PLOTS:
-        build_plot(px, py)
-    for (px, py) in PLOTS:
-        plant(px, py)
+    # 2nd build (beacon was 1st): wish progress 2/3
+    build_plot(9, 6)
+    plant(9, 6)
     big_step(PLOT_CYCLE)
-    for (px, py) in PLOTS:
-        harvest(px, py)
+    harvest(9, 6)
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
     inv = wget("@player")["result"]["components"]["Inventory"]
     print(f"  After first harvest: wheat={inv['wheat']} seed={inv['seed']} step={s}")
     check("step==3 (首收)", s == 3, f"actual={s}")
 
-    # === Walk to Lio and invite ===
-    print("\n--- Day 1 末尾: 邀请 Lio ---")
+    # 3rd build → Pip's "build 3 structures" wish fulfilled (+30 affinity → 60) → wish_count=1
+    # → step 3→4 gate passes (wish-fulfilled + affinity>=60)
+    build_plot(9, 7)
+    s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
+    c = wget("@colony")["result"]["components"]["Colony"]
+    print(f"  After 3rd build: step={s} wish_count={c.get('companion_wish_count')}")
+    check("step==4 (wish-fulfilled)", s == 4, f"actual={s}")
+
+    # Build remaining plots and plant on all
+    build_plot(9, 8)
+    build_plot(9, 9)
+    for (px, py) in PLOTS:
+        plant(px, py)
+
+    # === Walk to Lio and invite (for pop>=3 later; step 4 already reached via wish) ===
+    print("\n--- Day 1 末尾: 邀请 Lio (为后续 pop>=3) ---")
     inp("right"); step(250)
     inp("right", "released"); step(5)
     invite()
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
-    check("step==4 (Lio 入住)", s == 4, f"actual={s}")
+    print(f"  After invite: step={s} (already 4 from wish-fulfilled)")
 
     # Walk home first: after Lio joins he lives in the colony (home 5~9), but the player is still out in the wild (x~23); gift/talk can't reach him in the wild.
-    # Back at the colony both are at the home base, so interactions can land.
     inp("left"); step(250)
     inp("left", "released"); step(5)
-    # iter2: at home, raise Lio to happy (affinity>=50). Gift preferred (wheat/seed) +12×2 + talk +3×3 = +33 (25→58).
-    # After each interaction, step forward: +affinity goes through setField with delayed landing; too close in time reads stale values and they overwrite each other, so the bonus doesn't accumulate.
-    print("    iter2 关系:在家 gift×2 + talk×3 把 Lio 养到 happy(>=50)")
+    # iter2: raise Lio affinity (gift×2 + talk×3). Not strictly required by new wish-based gates,
+    # but kept for relationship health (prevents companions from leaving due to low affinity).
+    print("    iter2 关系:在家 gift×2 + talk×3")
     goto_companion()
     for _ in range(2):
         inp("g"); step(15)
@@ -177,6 +198,47 @@ try:
         inp("t"); step(15)
     step(10)
     dump_companions("Day1-after-care")
+
+    # === Upgrade a plot to greenhouse (Pip's "upgrade" wish → wish_count=2) ===
+    # Must happen before day 5 (step 6→7 gate: day>=5 + pop>=3 + wish_count>=2).
+    # Upgrade cost: plot→greenhouse {ore:2, plank:2}. After beacon(ore2+plank2) we have ore4/plank4;
+    # after upgrade we have ore2/plank2 — recovered below before the monument.
+    print("\n--- 升级种植台 → Pip 升级心愿达成 (wish_count=2) ---")
+    inp("u"); step(3)       # enter upgrade mode
+    click(9, 6); step(5)    # click plot at (9,6) → upgrade to greenhouse (cost ore2+plank2)
+    inp("r"); step(3)       # back to interact mode
+    c = wget("@colony")["result"]["components"]["Colony"]
+    inv = wget("@player")["result"]["components"]["Inventory"]
+    print(f"  After upgrade: wish_count={c.get('companion_wish_count')} ore={inv['ore']} plank={inv['plank']}")
+    check("wish_count>=2 (upgrade wish)", c.get("companion_wish_count", 0) >= 2, f"actual={c.get('companion_wish_count')}")
+    dump_companions("after-upgrade")
+
+    # === Recover upgrade cost: gather 4 ore + craft 2 planks ===
+    # After upgrade + 2 gifts (gifts consume the first ITEM_KINDS item = ore): ore0/plank2.
+    # Monument needs ore4/plank4. Gather 4 ore from node at (18,3), craft 2 planks from 4 wood
+    # (CRAFT.plank = {wood:2}→1 plank). End state: ore4/plank4/wood4.
+    print("\n--- 采集矿石 + 制作木板 (补回升级消耗 + 礼物消耗) ---")
+    # Gather 4 ore from the ore node at (18,3) — interact mode, click the node tile.
+    click(18, 3); step(3)   # gather +1 ore
+    click(18, 3); step(3)   # gather +1 ore
+    click(18, 3); step(3)   # gather +1 ore
+    click(18, 3); step(3)   # gather +1 ore
+    # Craft 2 planks: click the mode_craft button (shows craft_menu), then click craft_plank button.
+    # NOTE: pressing "e" (kb-mode-craft) only sets Mode.value — it does NOT show the craft_menu.
+    # Only the mode-craft ui-activate rule (triggered by clicking the mode_craft button) sets
+    # craft_menu.Ui.ox=208. Without this, the craft_plank button stays off-screen and UI clicks miss.
+    # mode_craft button (mode_row HBox at ox=24/oy=100, gap=6, pad=9; 2nd child w=92/h=48)
+    #   center ≈ (177, 132) in 1920×1080 ref frame → nx≈0.092, ny≈0.122.
+    # craft_plank button (craft_menu VBox at ox=208/oy=176 when visible, pad=12, gap=8; 1st child w=222/h=42)
+    #   center ≈ (331, 209) in 1920×1080 ref frame → nx≈0.173, ny≈0.194.
+    ui_click(0.092, 0.122); step(3)   # click mode_craft → craft menu visible (Mode=craft, ox=208)
+    ui_click(0.173, 0.194); step(3)   # craft plank #1 (cost 2 wood → 1 plank)
+    ui_click(0.173, 0.194); step(3)   # craft plank #2 (cost 2 wood → 1 plank)
+    inp("r"); step(3)       # back to interact mode (menu stays visible but doesn't affect world clicks)
+    inv = wget("@player")["result"]["components"]["Inventory"]
+    print(f"  After recover: ore={inv['ore']} plank={inv['plank']} wood={inv['wood']}")
+    check("ore>=4 (monument budget)", inv["ore"] >= 4, f"actual={inv['ore']}")
+    check("plank>=4 (monument budget)", inv["plank"] >= 4, f"actual={inv['plank']}")
 
     # === Wait until Day 3 (foothold) ===
     print("\n--- 等到 Day 3 (立足) ---")
@@ -243,8 +305,8 @@ try:
     dump_companions("Day5-成群-check")
     check("step>=7 (成群)", s >= 7, f"actual={s}")
 
-    # === Day 6: raise monument → game-won ===
-    print("\n--- Day 6: 立丰碑 → game-won ---")
+    # === Day 6: raise monument → settlement-founded ===
+    print("\n--- Day 6: 立丰碑 → settlement-founded ---")
     inv = wget("@player")["result"]["components"]["Inventory"]
     print(f"  Resources: ore={inv['ore']} plank={inv['plank']} lamp={inv['lamp']} wheat={inv['wheat']}")
 
@@ -266,7 +328,7 @@ try:
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
     c = wget("@colony")["result"]["components"]["Colony"]
     print(f"  day={c['day']} step={s} monument={c['monument_built']}")
-    check("step==8 (game-won)", s == 8, f"actual={s}")
+    check("step==8 (settlement-founded)", s == 8, f"actual={s}")
 
     print("\n=== 通关录像完成 ===")
 finally:
