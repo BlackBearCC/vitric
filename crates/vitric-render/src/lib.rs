@@ -238,6 +238,14 @@ pub const BACKGROUND: [u8; 4] = [24, 26, 33, 255];
 /// (false positives would teach the agent to ignore warnings, which is worse than missing some).
 pub const TEXT_CONTRAST_MIN: f64 = 2.5;
 
+/// Whether an entity should be considered for rendering / describing. Currently just the
+/// negation of `world::is_dormant` — kept as a separate helper so the render layer's intent
+/// ("don't draw dormant entities") is locally readable and survives future iteration refactors.
+/// Cheap: one component lookup + one field read.
+fn is_renderable(world: &World, id: vitric_ecs::EntityId) -> bool {
+    !world.is_dormant(id)
+}
+
 /// Render one frame: returns RGBA8 pixels (row-major, top-left origin).
 /// `tick` is only fed to screen shake ([`camera_of`]) — the bytes rendered from the same world at
 /// the same tick are bit-identical.
@@ -301,6 +309,10 @@ fn render_with(
 
     // Draw in entity order (deterministic; later draws cover earlier ones)
     for id in world.query(&["Position", "Sprite"]) {
+        // Defensive dormant check: world.query already filters dormant entities, but keep the
+        // explicit guard here too so the render invariant is locally visible and survives any
+        // future iteration refactor.
+        if !is_renderable(world, id) { continue; }
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;
         let sw = num(world, id, "Sprite.w")?;
@@ -2709,6 +2721,9 @@ pub fn describe_world_with_assets(
     let mut rects: Vec<(String, f64, f64, f64, f64)> = Vec::new(); // (id, x, y, w, h) world coordinates
 
     for id in world.query(&["Position", "Sprite"]) {
+        // Defensive dormant check (same as render_with): describe should never surface dormant
+        // entities. world.query already filters, but the local guard documents the invariant.
+        if !is_renderable(world, id) { continue; }
         let px = num(world, id, "Position.x")?;
         let py = num(world, id, "Position.y")?;
         let sw = num(world, id, "Sprite.w")?;

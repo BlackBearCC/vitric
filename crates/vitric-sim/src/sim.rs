@@ -117,6 +117,13 @@ pub struct Sim {
     /// Injected but unconsumed external replies (LLM replies, etc.). A second recording channel at the
     /// same level as pending_inputs: enters step as events + enters the recording, enters the snapshot.
     pending_replies: Vec<(String, serde_json::Value)>,
+    /// Events queued by host API calls (e.g. [`Sim::thaw_region`]) between steps. Same lifecycle
+    /// as `pending_replies` — drained into the logic inbox at the start of the next step. NOT
+    /// recorded by the recording: a host API call is deterministic given the same host program
+    /// (replay re-runs the same host program, so the same `thaw_region` call happens at the same
+    /// tick). If a recording must capture an externally-injected event, use `inject_reply`
+    /// (which IS recorded, same channel as LLM replies).
+    pending_events: Vec<Event>,
     recorder: Option<Recording>,
 }
 
@@ -129,6 +136,7 @@ impl Sim {
             seed,
             pending_inputs: Vec::new(),
             pending_replies: Vec::new(),
+            pending_events: Vec::new(),
             recorder: None,
         }
     }
@@ -149,6 +157,25 @@ impl Sim {
     /// Convention: `data` is a JSON object (non-objects are dropped to empty object by Event; caller must guarantee this).
     pub fn inject_reply(&mut self, name: &str, data: serde_json::Value) {
         self.pending_replies.push((name.to_string(), data));
+    }
+
+    /// Transition a Region entity from dormant/frozen to active, mark it discovered, and queue
+    /// a `region-thaw` event for the next step. The event carries `{"id": <region_id>}` and
+    /// reaches the logic inbox on the next step (where rules can react to it).
+    ///
+    /// Safe to call on a non-existent region or an entity without a Region component — both
+    /// are silent no-ops (defensive: the host may call this speculatively). Not idempotent on
+    /// already-active regions — the state is re-set to "active" (no-op) and the event is still
+    /// emitted (rules can decide whether to dedupe based on `discovered`).
+    ///
+    /// Catch-up logic for previously-discovered regions is Task 2 (out of scope here).
+    pub fn thaw_region(&mut self, id: &str) {
+        let Ok(region_e) = self.world.entity(id) else { return; };
+        let Ok(mut region) = self.world.get_component(region_e, "Region").cloned() else { return; };
+        region["state"] = json!("active");
+        region["discovered"] = json!(1);
+        let _ = self.world.set_component(region_e, "Region", region);
+        self.pending_events.push(Event::new("region-thaw", json!({"id": id})));
     }
 
     /// Start recording (records from the current state).
@@ -217,6 +244,14 @@ impl Sim {
             events.push(Event::new(&name, data));
         }
 
+        // 1.6 Host API events (thaw_region, etc.). NOT recorded — host API calls are deterministic
+        // given the same host program, so replay re-runs the same calls at the same ticks. Order:
+        // after external replies, so a region-thaw event arrives at the logic layer this tick and
+        // can be combined with whatever rule/script logic that tick produces.
+        for ev in std::mem::take(&mut self.pending_events) {
+            events.push(ev);
+        }
+
         // 2. Gravity + motion
         self.apply_gravity()?;
         self.integrate_motion()?;
@@ -236,6 +271,12 @@ impl Sim {
         logic
             .on_tick(&mut self.world, events.clone(), &mut self.rng, self.tick)
             .map_err(|message| SimError::Logic { tick: self.tick, message })?;
+
+        // 5.5 Region dormant accounting: every step, dormant/frozen regions accumulate one tick
+        // of `dormant_ticks` — used by catch-up logic (Task 2) to decide how much sim time to
+        // fast-forward when the region thaws. Runs after logic so rule/script state mutations
+        // this tick are visible; uses `entities()` (not `query`) because query filters dormant.
+        self.accumulate_dormant_ticks();
 
         // 6. Time advance + recording checkpoint
         self.tick += 1;
@@ -314,6 +355,11 @@ impl Sim {
             // Injected but unconsumed inputs/external replies. Dropping any of them makes them vanish on restore, causing silent trajectory divergence
             "pending_inputs": self.pending_inputs,
             "pending_replies": self.pending_replies,
+            // Host API events queued between save and next step (region-thaw etc.). Serialized
+            // manually because Event doesn't derive Serialize — keep shape in sync with restore.
+            "pending_events": self.pending_events.iter()
+                .map(|e| json!({"name": e.name, "data": serde_json::Value::Object(e.data.clone())}))
+                .collect::<Vec<_>>(),
             // Logic layer stashed state (events emitted by the script last tick, etc.)
             "logic": logic.snapshot_state(),
         })
@@ -343,6 +389,19 @@ impl Sim {
                 .ok_or("快照缺 pending_replies（旧版快照与当前版本不兼容，重新 sim/snapshot）")?,
         )
         .map_err(|e| format!("pending_replies 解析失败: {e}"))?;
+        // pending_events: manual deserialization (Event has no Deserialize derive).
+        // Old snapshots predating this field → treat as empty (forward compatibility: no
+        // host API events could have been queued before the field existed).
+        let pending_events_arr = snap.get("pending_events").and_then(|v| v.as_array());
+        let mut pending_events: Vec<Event> = Vec::new();
+        if let Some(arr) = pending_events_arr {
+            for ev in arr {
+                let name = ev.get("name").and_then(|v| v.as_str())
+                    .ok_or("pending_events 缺 name 字段")?;
+                let data = ev.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                pending_events.push(Event::new(name, data));
+            }
+        }
         logic.restore_state(snap.get("logic").ok_or("快照缺 logic 状态")?)?;
         self.tick = tick;
         self.seed = seed;
@@ -350,12 +409,27 @@ impl Sim {
         self.world = world;
         self.pending_inputs = pending;
         self.pending_replies = pending_replies;
+        self.pending_events = pending_events;
         // The timeline is broken, so an in-progress recording is necessarily non-replayable — invalidate it directly, no silently corrupted recording left behind
         self.recorder = None;
         Ok(())
     }
 
     // ---- Built-in systems ----
+
+    /// Increment `Region.dormant_ticks` on every Region entity currently in dormant or frozen
+    /// state. Uses `entities()` (not `query`) because `query` filters dormant — we explicitly
+    /// want to find dormant entities to increment their counter. Used by catch-up logic (Task 2)
+    /// to decide how much sim time to fast-forward when the region thaws.
+    fn accumulate_dormant_ticks(&mut self) {
+        for id in self.world.entities() {
+            let Ok(region) = self.world.get_component(id, "Region") else { continue; };
+            let Some(state) = region.get("state").and_then(|v| v.as_str()) else { continue; };
+            if state != "dormant" && state != "frozen" { continue; }
+            let dt = region.get("dormant_ticks").and_then(|v| v.as_i64()).unwrap_or(0);
+            let _ = self.world.set_field(id, "Region.dormant_ticks", json!(dt + 1));
+        }
+    }
 
     /// Gravity: Body entities add gravity * DT to Velocity.y each tick (world y points up, gravity is usually negative).
     fn apply_gravity(&mut self) -> Result<(), SimError> {

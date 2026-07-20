@@ -878,6 +878,20 @@
           "default": 0
         }
       }
+    },
+    "Region": {
+      "fields": {
+        "id": { "type": "text", "default": "" },
+        "biome": { "type": "text", "default": "home" },
+        "state": { "type": "enum", "variants": ["dormant", "active", "frozen"], "default": "active" },
+        "discovered": { "type": "int", "default": 0 },
+        "anchor_x": { "type": "number", "default": 0 },
+        "anchor_y": { "type": "number", "default": 0 },
+        "w": { "type": "int", "default": 0 },
+        "h": { "type": "int", "default": 0 },
+        "dormant_ticks": { "type": "int", "default": 0 },
+        "spawn_timer": { "type": "number", "default": 7200 }
+      }
     }
   }
 }

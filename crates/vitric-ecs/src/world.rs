@@ -229,11 +229,29 @@ impl World {
     // ---- Query ----
 
     /// Entities that have all the specified components, in slot order (deterministic).
+    ///
+    /// Entities carrying a `Region` component with `state` = "dormant" or "frozen" are excluded:
+    /// dormant regions are "not yet simulated" — their systems, render, and describe all skip them.
+    /// `state_hash` still covers them (the world's full state includes dormant entities); only
+    /// query-based iteration skips them, so the dormant state itself is part of the recorded state.
     pub fn query(&self, required: &[&str]) -> Vec<EntityId> {
         self.entities()
             .into_iter()
             .filter(|&id| required.iter().all(|c| self.has_component(id, c)))
+            .filter(|&id| !self.is_dormant(id))
             .collect()
+    }
+
+    /// Whether the entity is in a dormant region (Region.state = "dormant" or "frozen").
+    /// Cheap: one component lookup + one field read. Entities without a Region component are
+    /// never dormant (returns false). Used by `query` and the render layer's defensive filter.
+    pub fn is_dormant(&self, id: EntityId) -> bool {
+        if let Ok(region) = self.get_component(id, "Region") {
+            if let Some(state) = region.get("state").and_then(|v| v.as_str()) {
+                return state == "dormant" || state == "frozen";
+            }
+        }
+        false
     }
 
     // ---- Snapshot / hash ----
