@@ -172,11 +172,18 @@ impl Sim {
     pub fn thaw_region(&mut self, id: &str) {
         let Ok(region_e) = self.world.entity(id) else { return; };
         let Ok(mut region) = self.world.get_component(region_e, "Region").cloned() else { return; };
+        let was_discovered = region.get("discovered").and_then(|v| v.as_i64()).unwrap_or(0) == 1;
         region["state"] = json!("active");
         region["discovered"] = json!(1);
         let _ = self.world.set_component(region_e, "Region", region);
         self.pending_events.push(Event::new("region-thaw", json!({"id": id})));
+        if was_discovered {
+            self.invoke_catch_up_for_region(id);
+        }
     }
+
+    /// Catch-up scheduling for a re-thawed region. Stub — implemented in Task 2.
+    fn invoke_catch_up_for_region(&mut self, _region_id: &str) {}
 
     /// Start recording (records from the current state).
     pub fn start_recording(&mut self) {
