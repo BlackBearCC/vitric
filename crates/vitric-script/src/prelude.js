@@ -111,6 +111,45 @@ function __makeCtx(payload, ops, rng) {
     dt: payload.dt,
     tick: payload.tick,
     random: () => __pcgF64(rng),
+    // Returns a named deterministic RNG substream: {next(), nextInt(min, max)}.
+    // Same (world_seed, name) always produces the same sequence regardless of when this is
+    // first called — replay-safe even if region thaw happens at different ticks across runs.
+    // The state lives on the Rust Sim (HashMap<String, Substream>), persisted in snapshot and
+    // restored exactly; the JS side is stateless, each call crosses the native bridge
+    // __randomStreamNext → sim.random_stream(name).next_u32().
+    //
+    // Why a native bridge instead of a pure-JS PCG like ctx.random: the substream state must
+    // persist across JS calls AND enter the snapshot (which lives on Sim, not on a JS object).
+    // Crossing the boundary per-draw is the simplest way to keep state and snapshot in lockstep.
+    random_stream: (name) => {
+      if (typeof name !== "string" || !name) {
+        throw new Error("ctx.random_stream: name 必须是非空字符串");
+      }
+      return {
+        // [0, 1) float. u32 / 2^32 — matches Rust's Substream::next_f64.
+        // Number(raw) is safe: u32 max (4294967295) < 2^53, no precision loss.
+        next: () => {
+          const raw = __randomStreamNext(name);
+          return Number(raw) / 4294967296;
+        },
+        // [min, max] closed-interval integer. Mirrors Rust's Pcg32::range_i64:
+        //   span = max - min + 1; min + (next_u32() % span)
+        nextInt: (min, max) => {
+          if (!Number.isInteger(min) || !Number.isInteger(max)) {
+            throw new Error("ctx.random_stream.nextInt: min 和 max 必须是整数");
+          }
+          if (min > max) {
+            throw new Error("ctx.random_stream.nextInt: min(" + min + ") > max(" + max + ")");
+          }
+          const raw = __randomStreamNext(name);
+          const u = Number(raw);
+          const span = max - min + 1;
+          // Number is safe up to 2^53; span here is at most ~2^32 (u32 range), well within.
+          // % on f64 is exact for integer operands < 2^53.
+          return min + (u % span);
+        },
+      };
+    },
     emit: (name, data) => {
       if (typeof name !== "string" || !name) throw new Error("ctx.emit: 事件名必须是非空字符串");
       ops.push({ op: "emit", name, data: data === undefined ? {} : data });

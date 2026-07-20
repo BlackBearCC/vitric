@@ -44,6 +44,65 @@ impl Pcg32 {
     }
 }
 
+/// A named deterministic RNG substream, independent of the main `Pcg32` stream.
+///
+/// Each substream is seeded by `(world_seed, name)`: the name is FNV-1a hashed (seeded with
+/// `world_seed`) into a per-name `increment`, then the same PCG32 seeding flow runs with that
+/// increment. Two substreams with different names (or different world seeds) produce
+/// independent sequences; the same `(world_seed, name)` always produces the same sequence
+/// regardless of when the substream is first accessed.
+///
+/// This is the foundation of replay-safe PCG for dormant regions: a region thawing at tick
+/// 100 vs tick 1000 generates the same content because the substream seed doesn't depend on
+/// call timing — only on (world_seed, name).
+///
+/// Inlined PCG32 init (instead of delegating to `Pcg32::new`) because `Pcg32::new` hardcodes
+/// `inc = (54 << 1) | 1`; substreams need their own per-name increment. The algorithm (MULT,
+/// xorshift+rotate) is identical to `Pcg32` — only the seeding flow differs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Substream {
+    state: u64,
+    increment: u64,
+}
+
+impl Substream {
+    /// Seed a new substream from `(world_seed, name)`. The name is hashed (FNV-1a, seeded
+    /// with `world_seed`) into an odd `increment`; the PCG32 seeding flow then runs with that
+    /// increment and `world_seed` as the seed. Same `(world_seed, name)` → same initial state.
+    pub fn new(world_seed: u64, name: &str) -> Self {
+        // FNV-1a hash the name, mixing in the world_seed so different worlds produce
+        // different substream sequences even for the same name.
+        let mut hash = world_seed;
+        for byte in name.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        // PCG requires an odd increment (lowest bit = 1).
+        let increment = hash | 1;
+        // Inline PCG32 seeding flow (same as Pcg32::new, but with a custom increment):
+        //   state = 0; next_u32(); state += seed; next_u32();
+        let mut s = Substream { state: 0, increment };
+        s.next_u32();
+        s.state = s.state.wrapping_add(world_seed);
+        s.next_u32();
+        s
+    }
+
+    pub fn next_u32(&mut self) -> u32 {
+        let old = self.state;
+        self.state = old.wrapping_mul(MULT).wrapping_add(self.increment);
+        let xorshifted = (((old >> 18) ^ old) >> 27) as u32;
+        let rot = (old >> 59) as u32;
+        xorshifted.rotate_right(rot)
+    }
+
+    /// [0, 1) floating-point (32-bit precision — half the precision of `Pcg32::next_f64`,
+    /// sufficient for PCG content generation where nextInt is the primary consumer).
+    pub fn next_f64(&mut self) -> f64 {
+        (self.next_u32() as f64) / (u32::MAX as f64 + 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +146,59 @@ mod tests {
         for _ in 0..1000 {
             let x = r.range_i64(-3, 3);
             assert!((-3..=3).contains(&x));
+        }
+    }
+
+    // ---- Substream ----
+
+    #[test]
+    fn substream_same_seed_and_name_produces_same_sequence() {
+        let mut a = Substream::new(42, "region:mountain");
+        let mut b = Substream::new(42, "region:mountain");
+        for _ in 0..1000 {
+            assert_eq!(a.next_u32(), b.next_u32(),
+                "same (seed, name) must produce identical sequences");
+        }
+    }
+
+    #[test]
+    fn substream_different_name_produces_different_sequence() {
+        let mut a = Substream::new(42, "region:mountain");
+        let mut b = Substream::new(42, "region:forest");
+        // Different names → different increments → almost certainly different first draw.
+        // (Not a hard mathematical guarantee, but the hash space is 2^64; collision is astronomically unlikely.)
+        assert_ne!(a.next_u32(), b.next_u32(),
+            "different names must produce different sequences");
+    }
+
+    #[test]
+    fn substream_different_seed_produces_different_sequence() {
+        let mut a = Substream::new(42, "region:mountain");
+        let mut b = Substream::new(99, "region:mountain");
+        assert_ne!(a.next_u32(), b.next_u32(),
+            "different world seeds must produce different sequences");
+    }
+
+    #[test]
+    fn substream_snapshot_round_trips() {
+        let mut a = Substream::new(7, "region:mountain");
+        for _ in 0..123 {
+            a.next_u32();
+        }
+        let snap = serde_json::to_value(&a).unwrap();
+        let mut b: Substream = serde_json::from_value(snap).unwrap();
+        for _ in 0..100 {
+            assert_eq!(a.next_u32(), b.next_u32(),
+                "restored substream must resume exactly");
+        }
+    }
+
+    #[test]
+    fn substream_next_f64_in_unit_interval() {
+        let mut r = Substream::new(1, "test");
+        for _ in 0..1000 {
+            let x = r.next_f64();
+            assert!((0.0..1.0).contains(&x), "next_f64 out of [0, 1): {x}");
         }
     }
 }

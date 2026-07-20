@@ -126,8 +126,16 @@ impl ScriptEngine {
         Ok(engine)
     }
 
-    /// Register native functions for the script. Currently only __getFieldRaw(ref, path) → JSON string, called by prelude's
-    /// ctx.getField: looks up a single field on the live World directly; missing returns the literal "undefined".
+    /// Register native functions for the script:
+    /// - `__getFieldRaw(ref, path) → JSON string` — called by prelude's `ctx.getField`; looks
+    ///   up a single field on the live World directly; missing returns the literal `"undefined"`.
+    /// - `__randomStreamNext(name) → decimal string` — called by prelude's
+    ///   `ctx.random_stream(name).next()` / `nextInt(min, max)`; draws the next u32 from the
+    ///   named deterministic substream on the current Sim (reachable via `SIM_PTR` set by
+    ///   `Sim::step` around `logic.on_tick` / `logic.catch_up_region`). Returns the u32 as a
+    ///   decimal string — QuickJS numbers are f64 (53-bit mantissa), so a raw u32 would lose
+    ///   precision when above 2^53; the prelude parses the string with `Number(raw)` (safe
+    ///   because u32 fits in f64 exactly).
     fn register_natives(&self) -> Result<(), ScriptError> {
         self.context.with(|ctx| {
             let make_err = |e: rquickjs::Error| ScriptError::Load {
@@ -152,7 +160,20 @@ impl ScriptEngine {
                 })
             })
             .map_err(make_err)?;
-            ctx.globals().set("__getFieldRaw", f).map_err(make_err)
+            ctx.globals().set("__getFieldRaw", f).map_err(make_err)?;
+
+            // __randomStreamNext(name) → decimal u32 string. Reads the thread-local SIM_PTR set
+            // by Sim::step (via vitric_sim::set_sim_ptr) — same pattern as __getFieldRaw reading
+            // WORLD_PTR. Panics if SIM_PTR is null (ctx.random_stream called outside a sim step);
+            // the panic propagates through QuickJS as a JS exception.
+            let f_rand = Function::new(ctx.clone(), |name: String| -> String {
+                vitric_sim::with_sim_ptr(|sim| {
+                    let v = sim.random_stream(&name).next_u32();
+                    v.to_string()
+                })
+            })
+            .map_err(make_err)?;
+            ctx.globals().set("__randomStreamNext", f_rand).map_err(make_err)
         })
     }
 

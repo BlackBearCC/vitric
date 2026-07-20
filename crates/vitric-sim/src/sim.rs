@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fmt;
 
 use serde_json::json;
@@ -6,6 +7,7 @@ use serde_json::json;
 use vitric_ecs::World;
 use vitric_rules::Event;
 
+use crate::pcg::Substream;
 use crate::tween::{tween_value, Ease};
 use crate::{InputRecord, Pcg32, Recording, ReplyRecord};
 
@@ -15,6 +17,52 @@ pub const DT: f64 = 1.0 / TICKS_PER_SECOND as f64;
 
 /// State hash checkpoint interval (in ticks).
 const CHECKPOINT_INTERVAL: u64 = 60;
+
+thread_local! {
+    /// Bare pointer to the `Sim` readable during the current JS call. Set by [`set_sim_ptr`]
+    /// before `Sim::step` calls into the logic layer (which in turn calls scripts); cleared by
+    /// [`clear_sim_ptr`] after. Null outside that window. QuickJS is single-threaded and
+    /// synchronous; `__randomStreamNext` only reads it within the window.
+    ///
+    /// Mirrors the `WORLD_PTR` pattern in vitric-script. Lives in vitric-sim (not vitric-script)
+    /// to avoid a circular dependency: `Sim::step` sets it, vitric-script's native
+    /// `__randomStreamNext` reads it via [`with_sim_ptr`].
+    static SIM_PTR: std::cell::Cell<*mut Sim> = std::cell::Cell::new(std::ptr::null_mut());
+}
+
+/// Set the thread-local `Sim` pointer. Must be paired with [`clear_sim_ptr`] after the JS call
+/// returns. Called by `Sim::step` around `logic.on_tick` and `logic.catch_up_region` (which
+/// encapsulate all script entry points: `run_systems`, `call_fn`, `run_catch_up_for_region`).
+/// Tests that call `ScriptEngine::call_fn` directly (bypassing `Sim::step`) must set/clear
+/// manually.
+pub fn set_sim_ptr(sim: &mut Sim) {
+    SIM_PTR.with(|p| p.set(sim as *mut Sim));
+}
+
+/// Clear the thread-local `Sim` pointer. Must be called after every [`set_sim_ptr`] once the
+/// JS call returns.
+pub fn clear_sim_ptr() {
+    SIM_PTR.with(|p| p.set(std::ptr::null_mut()));
+}
+
+/// Run `f` with the current `Sim` borrowed mutably from the thread-local pointer. Panics if
+/// `SIM_PTR` is null (i.e. called outside a `set_sim_ptr`/`clear_sim_ptr` window) — this is
+/// the fail-fast contract that catches "random_stream called outside a sim step" bugs.
+pub fn with_sim_ptr<R>(f: impl FnOnce(&mut Sim) -> R) -> R {
+    SIM_PTR.with(|p| {
+        let ptr = p.get();
+        if ptr.is_null() {
+            panic!("with_sim_ptr: SIM_PTR is null — ctx.random_stream was called outside a Sim::step window (or without set_sim_ptr in a test)");
+        }
+        // Safety: the pointer is only non-null within the synchronous window set by
+        // set_sim_ptr → clear_sim_ptr. QuickJS is single-threaded; no concurrency. The closure
+        // only touches `sim.substreams` (or other fields not currently borrowed by the caller);
+        // `Sim::step` passes `&mut self.world` / `&mut self.rng` to logic, not `&mut self`,
+        // so the `&mut Sim` here does not alias any live `&mut Sim` borrow.
+        let sim: &mut Sim = unsafe { &mut *ptr };
+        f(sim)
+    })
+}
 
 /// Game logic mount point. The rules engine and script layer are wrapped as a GameLogic at the runtime layer;
 /// sim only deterministically "feeds events and advances time" — it knows nothing about rules and scripts.
@@ -152,6 +200,16 @@ pub struct Sim {
     /// vector does not need to be recorded by the recording. It IS snapshotted/restored so a
     /// mid-thaw save/load round-trips the pending catch-up.
     pending_catch_ups: Vec<String>,
+    /// Named deterministic RNG substreams, keyed by name. Each substream is seeded by
+    /// `(world_seed, name)` (see [`Substream::new`]) — independent of the main `rng` stream and
+    /// of call timing. This is the foundation of replay-safe PCG for dormant regions: a region
+    /// thawing at tick 100 vs tick 1000 generates bit-identical content because the substream
+    /// seed doesn't depend on when the region first thawed.
+    ///
+    /// Populated lazily by [`Sim::random_stream`]; persists across snapshot/restore; does NOT
+    /// enter `world.state_hash()` (substreams are Sim state, not World state — the recording's
+    /// final_hash is the world hash, so substream state doesn't break existing recordings).
+    substreams: HashMap<String, Substream>,
     recorder: Option<Recording>,
 }
 
@@ -166,8 +224,24 @@ impl Sim {
             pending_replies: Vec::new(),
             pending_events: Vec::new(),
             pending_catch_ups: Vec::new(),
+            substreams: HashMap::new(),
             recorder: None,
         }
+    }
+
+    /// Look up (or lazily create) the named deterministic substream. Same `(world_seed, name)`
+    /// always produces the same sequence regardless of when this method is first called —
+    /// this is the determinism guarantee that makes PCG for dormant regions replay-safe.
+    ///
+    /// The first call for a given name seeds a new [`Substream`] via `Substream::new(self.seed, name)`;
+    /// subsequent calls return the existing entry, advancing its state in place. Used by the
+    /// native `__randomStreamNext` bridge (vitric-script) which `ctx.random_stream(name)` calls
+    /// into from JS.
+    pub fn random_stream(&mut self, name: &str) -> &mut Substream {
+        let seed = self.seed;
+        self.substreams
+            .entry(name.to_string())
+            .or_insert_with(|| Substream::new(seed, name))
     }
 
     /// Seed of this run (set at construction, overwritten by snapshot on restore). When manually assembling a recording, use it as `Recording.seed`.
@@ -327,24 +401,34 @@ impl Sim {
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0)
                 .max(0) as u32;
-            logic
-                .catch_up_region(
-                    &mut self.world,
-                    &mut self.rng,
-                    &region_id,
-                    dormant_ticks,
-                    self.tick,
-                )
-                .map_err(|message| SimError::Logic { tick: self.tick, message })?;
+            // SIM_PTR window: catch_up_region runs scripts (each system's optional catch_up fn),
+            // which may call ctx.random_stream → __randomStreamNext → with_sim_ptr. Set before,
+            // clear after — same pattern as the on_tick window below.
+            set_sim_ptr(self);
+            let catch_up_result = logic.catch_up_region(
+                &mut self.world,
+                &mut self.rng,
+                &region_id,
+                dormant_ticks,
+                self.tick,
+            );
+            clear_sim_ptr();
+            catch_up_result.map_err(|message| SimError::Logic { tick: self.tick, message })?;
             // Consume the budget: dormant_ticks resets to 0 after catch-up. The region is now
             // active, so accumulate_dormant_ticks won't touch it anymore.
             let _ = self.world.set_field(region_e, "Region.dormant_ticks", json!(0));
         }
 
         // 5. Logic
-        logic
-            .on_tick(&mut self.world, events.clone(), &mut self.rng, self.tick)
-            .map_err(|message| SimError::Logic { tick: self.tick, message })?;
+        // SIM_PTR window: on_tick runs all script systems, which may call ctx.random_stream →
+        // __randomStreamNext → with_sim_ptr. Set before, clear after — the pointer is null
+        // outside this synchronous window (QuickJS is single-threaded; no concurrency, no
+        // aliasing with the &mut self.world / &mut self.rng borrows passed to logic).
+        set_sim_ptr(self);
+        let on_tick_result =
+            logic.on_tick(&mut self.world, events.clone(), &mut self.rng, self.tick);
+        clear_sim_ptr();
+        on_tick_result.map_err(|message| SimError::Logic { tick: self.tick, message })?;
 
         // 5.5 Region dormant accounting: every step, dormant/frozen regions accumulate one tick
         // of `dormant_ticks` — used by catch-up logic (Task 2) to decide how much sim time to
@@ -437,6 +521,15 @@ impl Sim {
             // Region IDs queued for catch-up by thaw_region since the last step. Same lifecycle
             // as pending_events — drained into logic.catch_up_region at the start of the next step.
             "pending_catch_ups": self.pending_catch_ups,
+            // Named RNG substreams (state of each substream). HashMap<String, Substream>;
+            // serde_json sorts object keys on serialize (under the default preserve_order feature
+            // is OFF — `serde_json::to_value` on a Map produces sorted-key output by default),
+            // so the snapshot is byte-stable. Old snapshots predating this field restore as empty
+            // (forward compat — substreams are lazily re-seeded on first access, but the
+            // restored-from-empty sim won't reproduce pre-snapshot draws; that's acceptable
+            // because pre-Task-3 sims never wrote substreams at all).
+            "substreams": serde_json::to_value(&self.substreams)
+                .expect("substreams 可序列化"),
             // Logic layer stashed state (events emitted by the script last tick, etc.)
             "logic": logic.snapshot_state(),
         })
@@ -490,6 +583,16 @@ impl Sim {
                     .collect()
             })
             .unwrap_or_default();
+        // substreams: named RNG substream state. Old snapshots predating this field → treat as
+        // empty (forward compatibility — pre-Task-3 sims never wrote substreams, and the lazily
+        // re-seeded substreams on first access will produce the same sequence as a fresh sim
+        // because the seed (world_seed, name) is the same). Missing field does NOT cause a hard
+        // error, unlike pending_replies: substreams are a deterministic function of (seed, name),
+        // so an empty restore still reproduces correctly as long as the world seed is restored.
+        let substreams: HashMap<String, Substream> = snap
+            .get("substreams")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
         logic.restore_state(snap.get("logic").ok_or("快照缺 logic 状态")?)?;
         self.tick = tick;
         self.seed = seed;
@@ -499,6 +602,7 @@ impl Sim {
         self.pending_replies = pending_replies;
         self.pending_events = pending_events;
         self.pending_catch_ups = pending_catch_ups;
+        self.substreams = substreams;
         // The timeline is broken, so an in-progress recording is necessarily non-replayable — invalidate it directly, no silently corrupted recording left behind
         self.recorder = None;
         Ok(())

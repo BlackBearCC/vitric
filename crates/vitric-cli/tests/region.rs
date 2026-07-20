@@ -1,8 +1,10 @@
-//! Region dormant/active/frozen state — Task 1 (E1) tests.
+//! Region dormant/active/frozen state — Task 1 (E1) tests, plus Task 3 (E3) seeded RNG
+//! substream tests.
 //!
 //! Validates: (a) world.query filters dormant entities; (b) describe_world skips dormant
 //! entities; (c) Sim::thaw_region transitions state + emits region-thaw event; (d) dormant
-//! entities skip logic dispatch.
+//! entities skip logic dispatch; (e) ctx.random_stream(name) is deterministic regardless of
+//! call timing and snapshot/restore round-trips its state.
 //!
 //! Test setup follows the existing `saves.rs` / `glow.rs` pattern: `Runtime::boot(dir)` for
 //! full scene + logic, or direct `World::new()` for isolated world-level checks (no schema
@@ -181,4 +183,111 @@ fn catch_up_advances_dormant_crop_on_thaw() {
         .unwrap().as_i64().unwrap();
     assert_eq!(dormant_ticks, 0,
         "dormant_ticks must be reset to 0 after catch-up consumes the budget");
+}
+
+// ---- Task 3 (E3): Seeded RNG substreams ----
+
+/// Register a test-only script function that calls `ctx.random_stream(name).nextInt(min, max)`
+/// and writes the result to a marker entity's `TestResult.value` field. The marker must be
+/// spawned first (World::set_component accepts any JSON — no schema validation needed).
+///
+/// Why a side-effect channel instead of a return value: `ScriptEngine::call_fn` collects ops
+/// and events, not the function's return value (prelude's `__callFn` discards it). Writing to
+/// a known field is the simplest way to get the integer back in Rust.
+fn setup_random_stream_test_fn(rt: &mut Runtime) {
+    rt.scripts.load(
+        "test_random_stream.js",
+        r#"
+        vitric.fn("__testRandomStreamNext", (args, ctx) => {
+            const v = ctx.random_stream(args.name).nextInt(args.min, args.max);
+            ctx.setField("test_marker", "TestResult.value", v);
+        });
+        "#,
+    ).expect("test fn 加载失败");
+}
+
+/// Spawn a marker entity carrying `TestResult: {value: 0}` so `ctx.setField` has a target.
+fn spawn_test_marker(sim: &mut vitric_sim::Sim) {
+    let e = sim.world.spawn_named("test_marker").expect("test_marker spawn");
+    sim.world.set_component(e, "TestResult", json!({"value": 0}))
+        .expect("test_marker set TestResult");
+}
+
+/// Call the test fn and read the written value back from the marker. Sets/clears SIM_PTR so
+/// the native `__randomStreamNext` can reach `sim.substreams` — production code sets this in
+/// `Sim::step`, but tests calling `call_fn` directly must set it themselves.
+fn call_next_int(sim: &mut vitric_sim::Sim, rt: &mut Runtime, name: &str, min: i64, max: i64) -> i64 {
+    vitric_sim::set_sim_ptr(sim);
+    let out = rt.scripts
+        .call_fn(
+            "__testRandomStreamNext",
+            &json!({"name": name, "min": min, "max": max}),
+            None,
+            &mut sim.world,
+            &mut sim.rng,
+            sim.tick,
+        )
+        .expect("call_fn __testRandomStreamNext");
+    vitric_sim::clear_sim_ptr();
+    let _ = out;
+    let marker = sim.world.entity("test_marker").expect("test_marker exists");
+    sim.world.get_field(marker, "TestResult.value")
+        .expect("TestResult.value readable")
+        .as_i64()
+        .expect("TestResult.value is integer")
+}
+
+#[test]
+fn random_stream_same_seed_regardless_of_call_timing() {
+    // Two sims booted from the same scene share the same world seed. The substream seeded by
+    // (world_seed, name) must produce the same sequence regardless of when it's first accessed
+    // — whether at tick 0 or after 1000 ticks of regular stepping. This is the determinism
+    // guarantee that makes PCG for dormant regions replay-safe: even if region thaw happens at
+    // different ticks across runs, the generated content is bit-identical.
+    let (mut sim1, mut rt1) = Runtime::boot(&frontier_dir()).unwrap();
+    setup_random_stream_test_fn(&mut rt1);
+    spawn_test_marker(&mut sim1);
+    let r1: Vec<i64> = (0..5).map(|_| {
+        call_next_int(&mut sim1, &mut rt1, "region:mountain", 0, 100)
+    }).collect();
+
+    let (mut sim2, mut rt2) = Runtime::boot(&frontier_dir()).unwrap();
+    setup_random_stream_test_fn(&mut rt2);
+    spawn_test_marker(&mut sim2);
+    // Step 1000 ticks first. Frontier scripts don't call ctx.random_stream, so the substream
+    // is untouched by regular stepping — the first nextInt after 1000 ticks must match the
+    // first nextInt without any stepping.
+    for _ in 0..1000 {
+        sim2.step(&mut rt2).unwrap();
+    }
+    let r2: Vec<i64> = (0..5).map(|_| {
+        call_next_int(&mut sim2, &mut rt2, "region:mountain", 0, 100)
+    }).collect();
+
+    assert_eq!(r1, r2,
+        "substream must be deterministic regardless of call timing: {:?} vs {:?}", r1, r2);
+}
+
+#[test]
+fn random_stream_state_in_snapshot() {
+    // Substream state must enter the snapshot and be restored exactly. After 2 nextInt draws,
+    // snapshot → restore into a fresh sim → both sims' next nextInt call must produce the same
+    // value (the restored sim resumes the substream from the exact pre-snapshot state).
+    let (mut sim, mut rt) = Runtime::boot(&frontier_dir()).unwrap();
+    setup_random_stream_test_fn(&mut rt);
+    spawn_test_marker(&mut sim);
+    // Two draws to advance the substream state past its initial value.
+    call_next_int(&mut sim, &mut rt, "region:mountain", 0, 100);
+    call_next_int(&mut sim, &mut rt, "region:mountain", 0, 100);
+
+    let snap = sim.snapshot(&rt);
+    let (mut sim2, mut rt2) = Runtime::boot(&frontier_dir()).unwrap();
+    setup_random_stream_test_fn(&mut rt2);
+    // No spawn_test_marker — restore replaces the world, including test_marker.
+    sim2.restore(&snap, &mut rt2).unwrap();
+
+    let v1 = call_next_int(&mut sim, &mut rt, "region:mountain", 0, 100);
+    let v2 = call_next_int(&mut sim2, &mut rt2, "region:mountain", 0, 100);
+    assert_eq!(v1, v2,
+        "restored sim must resume the substream at the same state: {} vs {}", v1, v2);
 }
