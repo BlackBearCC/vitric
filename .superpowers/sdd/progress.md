@@ -6,6 +6,18 @@ Branch: main (per user preference: auto-commit + push to main)
 
 ## Tasks
 
+- Task 7: complete (commit f82d5ba, APPROVED with 0 Critical/Important, 2 Minor)
+  - Seasons/Weather HUD — 7-day forecast bar: `Forecast` component (days text + last_day int) added to schema. Attached to `colony` entity. `forecast_lbl` HUD entity added to scene (oy:258, h:28, anchor/parent pattern matching season_lbl/weather_lbl).
+  - `forecast-update` system in hud.js: query `["Clock","Season","Forecast"]`, writes `["Forecast"]`. Daily update gate (`if (e.Clock.day === e.Forecast.last_day) continue`). 7-label weighted-pick loop via `ctx.random_stream("forecast")` — isolated substream from flare.js's `"weather"` stream (7 draws/day don't perturb weather trajectory). `FORECAST_SEASONAL_WEIGHTS` duplicated from flare.js (brief-accepted DRY violation — extracting to shared module out of scope). `FORECAST_LABELS` maps weather keys to 晴/阴/雨/暴风/耀斑.
+  - `hud-forecast` rule in hud.json: direct field copy `"to": "@colony.Forecast.days"` → `@forecast_lbl.UiLabel.content`. Uses the `{format, args}` rule engine API (NOT the brief pseudocode's `{call, with}` which was fictional — same correction as Task 6).
+  - **Schema field audit PASS**: `Forecast.days`, `Forecast.last_day` declared; `Clock.day`, `Season.current` already declared in Task 6. No silent schema regressions (Task 8 lesson applied).
+  - **UI layout PASS**: forecast_lbl at oy:258 has clean 6px gap above weather_lbl (oy:224 + h:24 = 248, then 10px gap to 258). No overlap.
+  - **Tests**: seasons 4/4 PASS, region 14/14 PASS (no regression), schema check exit 0. Controller verified.
+  - **Gate EXPECTED-FAIL**: `ReplayDiverged at tick 0` — Forecast on colony changes tick-0 world hash. Accepted per brief — `qa/clear.json` re-recorded in Task 15.
+  - **Approved deviations**: (1) forecast_lbl Ui shape `anchor/parent/oy/w/h` (matches season_lbl/weather_lbl pattern) instead of brief's `x/y/ox/mode`. (2) `h:28` instead of brief's `h:0` (cosmetic). (3) Added `align:"center"` to match siblings.
+  - Minor: M1 `FORECAST_SEASONAL_WEIGHTS` duplication from flare.js (brief-accepted); M2 forecast_lbl Ui shape deviation (approved per existing pattern).
+  - Cannot-verify items resolved by controller: seasons/region tests PASS verified; schema check exit 0 verified; gate failure mode confirmed (`ReplayDiverged` at tick 0 — expected).
+
 - Task 6: complete (commits 0b6adb9..e24d28f, APPROVED with 0 Critical, 1 Important resolved, 4 Minor)
   - Seasons & Weather: `Season` component (spring/summer/autumn/winter, 12 days each, 48-day year) + `Weather` component (clear/cloudy/rain/storm/flare) added to schema. Both components attached to `colony` entity (NOT a separate `clock` entity — the plan's pseudocode was fictional). `season_lbl` + `weather_lbl` HUD entities added to scene.
   - `clock.js` extended: query `["Clock","Season"]`, writes `["Clock","Season"]`. Season advance inlines inside `if (dayJustWrapped)` — `day_in_season += 1`, rolls over at 12 days, `season-change` event on rollover, `year += 1` on winter→spring wrap.
