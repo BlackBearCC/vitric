@@ -29,7 +29,6 @@ const STRUCTURE_HP_BY_TIER = { 1: 50, 2: 100, 3: 200 };
 // Enemy constants.
 const ENEMY_SPEED = 0.8;        // tiles per second
 const ENEMY_ATTACK_RANGE = 1.5; // distance at which enemy attacks (player or structure)
-const PLAYER_ATTACK_RANGE = 2;  // weapon range (mirrors Weapon.range default)
 
 // Player respawn constants.
 const RESPAWN_X = 7;
