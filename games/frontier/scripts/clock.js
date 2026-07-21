@@ -2,7 +2,7 @@
 //   @colony carries a Clock component -> day/time/tod three fields keep advancing, emitting day-start each day.
 //   dt comes from the engine, 1 unit = 1 second of game time (at 60 tick/sec, one tick is 1/60 second).
 //   1 game day = DAY_SEC seconds; in this version DAY_SEC = 90 — sandbox pacing, 90s/day,
-//   12-day seasons, 48-day years, ~96 days to 兴旺 milestone (~90 min real-time).
+//   12-day seasons, 48-day years, ~96 days to 兴旺 milestone (~144 min real-time = 8640s).
 //
 // Time of day:
 //   morning    0% – 25%   wake up, farm, gather, build

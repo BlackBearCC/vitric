@@ -121,5 +121,5 @@ UI(像素,参考视口 1920×1080):
 - **玩法** = `rules/` + `scripts/`(移动/建造/制作/种田/采集/背包/求生/伙伴脑+作息+需求/任务机/区域切换/接 `ui-activate`)
 - **文案** = scenes 里 UiLabel/Text/Dialogue 内容(与关卡行级协商)+ `tools/fake_llm.py` 旅人人设 + 任务文案
 - **音频** = `sounds/`(本版可缓,后排)
-- **QA** = `qa/`(smoke + 断言集 + 通关录像 `qa/clear.json`,96 天 ~5760s real-time at 90s/day (Task 15 re-records),在 step 8 发 `settlement-founded`)
+- **QA** = `qa/`(smoke + 断言集 + 通关录像 `qa/clear.json`,96 天 ~8640s real-time at 90s/day (Task 15 re-records),在 step 8 发 `settlement-founded`)
 - **导演** = `schema.json` + `vitric.json` + 本 `GDD.md` + `gates` 声明
