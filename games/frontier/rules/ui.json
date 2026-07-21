@@ -2,56 +2,61 @@
   "rules": [
     {
       "id": "ui-init",
-      "comment": "开局默认建造模式：显建造菜单(ox 208)、藏制作菜单(ox -3000 推出屏外,子按钮跟着没)。科技菜单也藏起来。",
+      "comment": "开局默认建造模式：显建造菜单(ox 208)、藏制作菜单(ox -3000 推出屏外,子按钮跟着没)。科技/交易菜单也藏起来。",
       "on": { "event": "start" },
       "do": [
         { "set": "@build_menu.Ui.ox", "to": 208 },
         { "set": "@craft_menu.Ui.ox", "to": -3000 },
-        { "set": "@tech_menu.Ui.ox", "to": -3000 }
+        { "set": "@tech_menu.Ui.ox", "to": -3000 },
+        { "set": "@trade_menu.Ui.ox", "to": -3000 }
       ]
     },
     {
       "id": "mode-build",
-      "comment": "切建造模式：set 模式 + 显建造菜单 + 藏制作/科技菜单。",
+      "comment": "切建造模式：set 模式 + 显建造菜单 + 藏制作/科技/交易菜单。",
       "on": { "event": "ui-activate", "filter": { "action": "mode-build" } },
       "do": [
         { "set": "@uistate.Mode.value", "to": "build" },
         { "set": "@build_menu.Ui.ox", "to": 208 },
         { "set": "@craft_menu.Ui.ox", "to": -3000 },
-        { "set": "@tech_menu.Ui.ox", "to": -3000 }
+        { "set": "@tech_menu.Ui.ox", "to": -3000 },
+        { "set": "@trade_menu.Ui.ox", "to": -3000 }
       ]
     },
     {
       "id": "mode-craft",
-      "comment": "切制作模式：set 模式 + 显制作菜单 + 藏建造/科技菜单。",
+      "comment": "切制作模式：set 模式 + 显制作菜单 + 藏建造/科技/交易菜单。",
       "on": { "event": "ui-activate", "filter": { "action": "mode-craft" } },
       "do": [
         { "set": "@uistate.Mode.value", "to": "craft" },
         { "set": "@craft_menu.Ui.ox", "to": 208 },
         { "set": "@build_menu.Ui.ox", "to": -3000 },
-        { "set": "@tech_menu.Ui.ox", "to": -3000 }
+        { "set": "@tech_menu.Ui.ox", "to": -3000 },
+        { "set": "@trade_menu.Ui.ox", "to": -3000 }
       ]
     },
     {
       "id": "mode-interact",
-      "comment": "切互动模式：三个菜单都藏(互动靠点地里的 plot/作物)。",
+      "comment": "切互动模式：四个菜单都藏(互动靠点地里的 plot/作物)。",
       "on": { "event": "ui-activate", "filter": { "action": "mode-interact" } },
       "do": [
         { "set": "@uistate.Mode.value", "to": "interact" },
         { "set": "@build_menu.Ui.ox", "to": -3000 },
         { "set": "@craft_menu.Ui.ox", "to": -3000 },
-        { "set": "@tech_menu.Ui.ox", "to": -3000 }
+        { "set": "@tech_menu.Ui.ox", "to": -3000 },
+        { "set": "@trade_menu.Ui.ox", "to": -3000 }
       ]
     },
     {
       "id": "mode-research",
-      "comment": "切科研模式：set 模式 + 显科技菜单 + 藏建造/制作菜单。",
+      "comment": "切科研模式：set 模式 + 显科技菜单 + 藏建造/制作/交易菜单。",
       "on": { "event": "ui-activate", "filter": { "action": "mode-research" } },
       "do": [
         { "set": "@uistate.Mode.value", "to": "research" },
         { "set": "@tech_menu.Ui.ox", "to": 208 },
         { "set": "@build_menu.Ui.ox", "to": -3000 },
-        { "set": "@craft_menu.Ui.ox", "to": -3000 }
+        { "set": "@craft_menu.Ui.ox", "to": -3000 },
+        { "set": "@trade_menu.Ui.ox", "to": -3000 }
       ]
     },
     {
@@ -60,6 +65,19 @@
       "on": { "event": "ui-activate", "filter": { "action": "mode-combat" } },
       "do": [
         { "set": "@uistate.Mode.value", "to": "combat" },
+        { "set": "@build_menu.Ui.ox", "to": -3000 },
+        { "set": "@craft_menu.Ui.ox", "to": -3000 },
+        { "set": "@tech_menu.Ui.ox", "to": -3000 },
+        { "set": "@trade_menu.Ui.ox", "to": -3000 }
+      ]
+    },
+    {
+      "id": "mode-trade",
+      "comment": "切交易模式：显 trade_menu,藏 build/craft/tech 菜单。",
+      "on": { "event": "ui-activate", "filter": { "action": "mode-trade" } },
+      "do": [
+        { "set": "@uistate.Mode.value", "to": "trade" },
+        { "set": "@trade_menu.Ui.ox", "to": 208 },
         { "set": "@build_menu.Ui.ox", "to": -3000 },
         { "set": "@craft_menu.Ui.ox", "to": -3000 },
         { "set": "@tech_menu.Ui.ox", "to": -3000 }
@@ -109,32 +127,47 @@
     { "id": "kb-mode-craft",    "on": { "event": "input", "filter": { "action": "e", "phase": "pressed" } }, "do": [ { "set": "@uistate.Mode.value", "to": "craft" } ] },
     {
       "id": "kb-mode-upgrade",
-      "comment": "u 键切升级模式:藏三个菜单(同 interact 模式),点击结构即调 upgrade_structure。",
+      "comment": "u 键切升级模式:藏四个菜单(同 interact 模式),点击结构即调 upgrade_structure。",
       "on": { "event": "input", "filter": { "action": "u", "phase": "pressed" } },
       "do": [
         { "set": "@uistate.Mode.value", "to": "upgrade" },
         { "set": "@build_menu.Ui.ox", "to": -3000 },
         { "set": "@craft_menu.Ui.ox", "to": -3000 },
-        { "set": "@tech_menu.Ui.ox", "to": -3000 }
+        { "set": "@tech_menu.Ui.ox", "to": -3000 },
+        { "set": "@trade_menu.Ui.ox", "to": -3000 }
       ]
     },
     {
       "id": "kb-mode-research",
-      "comment": "T 键切科研模式:显科技菜单,藏建造/制作菜单。",
+      "comment": "T 键切科研模式:显科技菜单,藏建造/制作/交易菜单。",
       "on": { "event": "input", "filter": { "action": "t", "phase": "pressed" } },
       "do": [
         { "set": "@uistate.Mode.value", "to": "research" },
         { "set": "@tech_menu.Ui.ox", "to": 208 },
         { "set": "@build_menu.Ui.ox", "to": -3000 },
-        { "set": "@craft_menu.Ui.ox", "to": -3000 }
+        { "set": "@craft_menu.Ui.ox", "to": -3000 },
+        { "set": "@trade_menu.Ui.ox", "to": -3000 }
       ]
     },
     {
       "id": "kb-mode-combat",
-      "comment": "F 键切战斗模式:藏三个菜单(同 interact 模式)。左键挥击武器由 rules/combat.json 处理。",
+      "comment": "F 键切战斗模式:藏四个菜单(同 interact 模式)。左键挥击武器由 rules/combat.json 处理。",
       "on": { "event": "input", "filter": { "action": "f", "phase": "pressed" } },
       "do": [
         { "set": "@uistate.Mode.value", "to": "combat" },
+        { "set": "@build_menu.Ui.ox", "to": -3000 },
+        { "set": "@craft_menu.Ui.ox", "to": -3000 },
+        { "set": "@tech_menu.Ui.ox", "to": -3000 },
+        { "set": "@trade_menu.Ui.ox", "to": -3000 }
+      ]
+    },
+    {
+      "id": "kb-mode-trade",
+      "comment": "B 键切交易模式:显 trade_menu,藏其他菜单。",
+      "on": { "event": "input", "filter": { "action": "b", "phase": "pressed" } },
+      "do": [
+        { "set": "@uistate.Mode.value", "to": "trade" },
+        { "set": "@trade_menu.Ui.ox", "to": 208 },
         { "set": "@build_menu.Ui.ox", "to": -3000 },
         { "set": "@craft_menu.Ui.ox", "to": -3000 },
         { "set": "@tech_menu.Ui.ox", "to": -3000 }

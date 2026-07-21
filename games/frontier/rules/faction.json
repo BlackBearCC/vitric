@@ -1,0 +1,39 @@
+{
+  "rules": [
+    {
+      "id": "trader-companion-relation",
+      "comment": "Task 9 trader companion emits trade-available -> +1 nomad relation (trader maintains nomad ties).",
+      "on": { "event": "trade-available" },
+      "do": [ { "call": "change_relation", "with": { "faction": "nomads", "delta": 1 } } ]
+    },
+    {
+      "id": "negotiate-nomads",
+      "comment": "Trade menu negotiate button -> negotiate with nomads.",
+      "on": { "event": "ui-activate", "filter": { "action": "negotiate-nomads" } },
+      "do": [ { "call": "negotiate", "with": { "faction": "nomads" } } ]
+    },
+    {
+      "id": "negotiate-caravan",
+      "on": { "event": "ui-activate", "filter": { "action": "negotiate-caravan" } },
+      "do": [ { "call": "negotiate", "with": { "faction": "caravan" } } ]
+    },
+    {
+      "id": "negotiate-remnant",
+      "on": { "event": "ui-activate", "filter": { "action": "negotiate-remnant" } },
+      "do": [ { "call": "negotiate", "with": { "faction": "remnant" } } ]
+    },
+    {
+      "id": "faction-allied-notify",
+      "comment": "When relation transitions INTO allied (76+), emit faction-allied (forward-compat hook for Task 12 region unlock).",
+      "on": { "event": "relation-change" },
+      "if": [ ["event.new", ">=", 76], ["event.old", "<", 76] ],
+      "do": [ { "set": "@toast_lbl.UiLabel.content", "to": { "format": "{} 派系达成同盟!", "args": ["event.faction"] } }, { "set": "@toast_lbl.Toast.timer", "to": 3.0 } ]
+    },
+    {
+      "id": "faction-reinforcements-hook",
+      "comment": "Forward-compat: on night-fall, if any faction is allied, emit faction-reinforcements-available (Task 10/13 can consume for joint defense). Deterministic — no logic, just a hook.",
+      "on": { "event": "night-fall" },
+      "do": [ { "call": "emit_reinforcement_hook", "with": {} } ]
+    }
+  ]
+}

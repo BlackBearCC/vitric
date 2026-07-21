@@ -512,7 +512,8 @@
             "interact",
             "upgrade",
             "research",
-            "combat"
+            "combat",
+            "trade"
           ],
           "default": "build"
         }
@@ -821,6 +822,10 @@
         "last_threat": {
           "type": "int",
           "default": 0
+        },
+        "_negotiate_target": {
+          "type": "text",
+          "default": ""
         }
       }
     },
@@ -1070,6 +1075,14 @@
     "TechPoint": {
       "fields": {
         "value": { "type": "int", "default": 0 }
+      }
+    },
+    "Faction": {
+      "fields": {
+        "relations": { "type": "text", "default": "{\"nomads\":30,\"caravan\":0,\"remnant\":-10}" },
+        "tier_nomads": { "type": "text", "default": "neutral" },
+        "tier_caravan": { "type": "text", "default": "wary" },
+        "tier_remnant": { "type": "text", "default": "wary" }
       }
     }
   }

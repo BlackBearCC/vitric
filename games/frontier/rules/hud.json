@@ -127,6 +127,15 @@
       "do": [
         { "set": "@hp_lbl.UiLabel.content", "to": { "format": "HP {}/{}", "args": ["@player.Hp.value", "@player.Hp.max"] } }
       ]
+    },
+    {
+      "id": "hud-faction-relation",
+      "comment": "派系关系 HUD:游民[tier] 商队[tier] 遗民[tier]。每帧刷 @colony.Faction 派生 tier_<f> 字段(faction-tick 系统每 tick 更新)。",
+      "on": "tick",
+      "do": [
+        { "set": "@relation_lbl.UiLabel.content", "to": { "format": "游民[{}] 商队[{}] 遗民[{}]",
+          "args": [ "@colony.Faction.tier_nomads", "@colony.Faction.tier_caravan", "@colony.Faction.tier_remnant" ] } }
+      ]
     }
   ]
 }

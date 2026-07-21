@@ -1,0 +1,38 @@
+{
+  "rules": [
+    {
+      "id": "trade-nomads",
+      "comment": "Trade menu: trade with nomads (give 3 wheat -> receive 2 fiber base). Passes full inventory.",
+      "on": { "event": "ui-activate", "filter": { "action": "trade-nomads" } },
+      "do": [ { "call": "complete_trade", "with": {
+        "faction": "nomads",
+        "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+        "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
+      } } ]
+    },
+    {
+      "id": "trade-caravan",
+      "on": { "event": "ui-activate", "filter": { "action": "trade-caravan" } },
+      "do": [ { "call": "complete_trade", "with": {
+        "faction": "caravan",
+        "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+        "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
+      } } ]
+    },
+    {
+      "id": "trade-remnant",
+      "on": { "event": "ui-activate", "filter": { "action": "trade-remnant" } },
+      "do": [ { "call": "complete_trade", "with": {
+        "faction": "remnant",
+        "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+        "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
+      } } ]
+    }
+  ]
+}

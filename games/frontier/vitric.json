@@ -23,7 +23,9 @@
     "rules/affordability.json",
     "rules/wish.json",
     "rules/research.json",
-    "rules/combat.json"
+    "rules/combat.json",
+    "rules/faction.json",
+    "rules/trade.json"
   ],
   "scripts": [
     "scripts/colony.js",
@@ -37,7 +39,8 @@
     "scripts/flare.js",
     "scripts/poi.js",
     "scripts/wish.js",
-    "scripts/research.js"
+    "scripts/research.js",
+    "scripts/faction.js"
   ],
   "seed": 1,
   "render": {
