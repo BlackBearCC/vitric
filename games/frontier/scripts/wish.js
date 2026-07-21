@@ -158,6 +158,23 @@ vitric.fn("apply_mood_drop", (a, ctx) => {
   }
 });
 
+// Apply a mood-boost to all companions (e.g. oasis POI). Mirrors apply_mood_drop
+// but adds amount, capped at 100. Consumes the companion-mood-boost event emitted
+// by the oasis POI handler in poi.js (Task 13 post-review fix).
+vitric.fn("apply_mood_boost", (a, ctx) => {
+  const amount = (a.amount | 0) || 0;
+  if (amount <= 0) return;
+  const handles = ctx.getField("colony", "Colony.companion_handles") || [];
+  for (const h of handles) {
+    if (!h) continue;
+    const cur = ctx.getField(h, "Need.comfort");
+    const curNum = (typeof cur === "number" && !isNaN(cur)) ? cur : 50;
+    const next = Math.min(100, curNum + amount);
+    ctx.setField(h, "Need.comfort", next);
+    ctx.setField(h, "Need.comfort_i", Math.round(next));
+  }
+});
+
 // Food-high wish: emit a `food-high` event once per day when Colony.food >= 80.
 // A rule in wish.json catches it and calls advance_wish. Guarded by Colony._wish_food_day
 // to fire at most once per day (avoids spamming every tick while food stays high).

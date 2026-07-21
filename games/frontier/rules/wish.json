@@ -87,6 +87,12 @@
       "comment": "companion-mood-drop event (resolves Task 3 F3): decrement all companions' Need.comfort by event.amount. Uses a fn because rules can't iterate companion_handles.",
       "on": { "event": "companion-mood-drop" },
       "do": [ { "call": "apply_mood_drop", "with": { "amount": "event.amount" } } ]
+    },
+    {
+      "id": "companion-mood-boost-apply",
+      "comment": "companion-mood-boost event (Task 13 post-review fix): increment all companions' Need.comfort by event.amount, capped at 100. Emitted by oasis POI handler.",
+      "on": { "event": "companion-mood-boost" },
+      "do": [ { "call": "apply_mood_boost", "with": { "amount": "event.amount" } } ]
     }
   ]
 }
