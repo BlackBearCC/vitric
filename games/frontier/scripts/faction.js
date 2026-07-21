@@ -71,7 +71,10 @@ const NEGOTIATION_FALLBACKS = {
   ],
 };
 
-// LLM_ERROR_FALLBACK is declared in wish.js (shared QuickJS global scope); reused here.
+// LLM error fallback text (same value as wish.js; declared locally so faction.js is self-contained
+// and doesn't depend on script load order).
+const FACTION_LLM_ERROR_FALLBACK = "（旅人沉默片刻,点了点头）";
+
 // ---- System: faction-tick — derive tier_<f> from relations JSON each tick ----
 vitric.system("faction-tick", { query: ["Colony", "Faction"], writes: ["Faction"] }, (entities, ctx) => {
   const c = entities[0];
@@ -173,7 +176,7 @@ vitric.fn("onNegotiateReply", (reply, ctx) => {
   const f = ctx.getField("colony", "Colony._negotiate_target") || "";
   if (!f) return;
   let text = (reply && reply.text) || "";
-  if (!text || text === LLM_ERROR_FALLBACK) {
+  if (!text || text === FACTION_LLM_ERROR_FALLBACK) {
     const list = NEGOTIATION_FALLBACKS[f] || NEGOTIATION_FALLBACKS.nomads;
     // Pick line based on current relation (deterministic — not random).
     const curJson = ctx.getField("colony", "Faction.relations") || "{}";
