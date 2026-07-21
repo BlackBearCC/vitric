@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "id": "region-thaw-content",
+      "comment": "On region-thaw: generate region content (tiles, nodes, POIs) using E3 substream.",
+      "on": { "event": "region-thaw" },
+      "do": [ { "call": "gen_region_content", "with": { "region_id": "event.id" } } ]
+    },
+    {
+      "id": "region-thaw-bounds",
+      "comment": "On region-thaw: update Camera.world_bounds to union of all active regions.",
+      "on": { "event": "region-thaw" },
+      "do": [ { "call": "update_camera_bounds", "with": {} } ]
+    }
+  ]
+}

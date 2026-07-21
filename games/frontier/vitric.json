@@ -25,7 +25,8 @@
     "rules/research.json",
     "rules/combat.json",
     "rules/faction.json",
-    "rules/trade.json"
+    "rules/trade.json",
+    "rules/region.json"
   ],
   "scripts": [
     "scripts/colony.js",
@@ -40,7 +41,8 @@
     "scripts/poi.js",
     "scripts/wish.js",
     "scripts/research.js",
-    "scripts/faction.js"
+    "scripts/faction.js",
+    "scripts/region.js"
   ],
   "seed": 1,
   "render": {

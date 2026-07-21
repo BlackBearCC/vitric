@@ -503,3 +503,155 @@ fn replay_after_pre_recording_thaw_is_hash_identical() {
     assert_eq!(sim2.world.state_hash(), final_hash,
         "replay after pre-recording thaw must be hash-identical");
 }
+
+// ---- Task 12: Map Expansion & Region Content ----
+//
+// Verifies the ctx.thaw_region JS bridge (added in Task 12 to fix the pre-existing dead
+// unlock_region fn from Task 8), determinism of region content generation across thaw
+// timing (the E3 seeded substream contract), and Camera.world_bounds clamping of the
+// player position.
+
+#[test]
+fn ctx_thaw_region_bridge_works_from_js() {
+    // The unlock_region fn in research.js calls ctx.thaw_region(region_id).
+    // Before Task 12, ctx.thaw_region was not exposed — the fn would throw TypeError.
+    // This test verifies the bridge works: calling unlock_region via call_fn thaws the region.
+    let (mut sim, mut rt) = Runtime::boot(&frontier_dir()).unwrap();
+
+    // Mountain starts dormant.
+    let mountain_e = sim.world.entity("mountain").unwrap();
+    let state_before = sim.world.get_field(mountain_e, "Region.state")
+        .unwrap().as_str().unwrap().to_string();
+    assert_eq!(state_before, "dormant");
+
+    // Call unlock_region fn (same fn that rules/research.json calls on exploration_t1).
+    vitric_sim::set_sim_ptr(&mut sim);
+    rt.scripts.call_fn(
+        "unlock_region",
+        &json!({"region_id": "mountain"}),
+        None,
+        &mut sim.world,
+        &mut sim.rng,
+        sim.tick,
+    ).expect("unlock_region call_fn");
+    vitric_sim::clear_sim_ptr();
+
+    // Region state must flip to active immediately (thaw_region is synchronous).
+    let state_after = sim.world.get_field(mountain_e, "Region.state")
+        .unwrap().as_str().unwrap().to_string();
+    assert_eq!(state_after, "active",
+        "ctx.thaw_region bridge must flip Region.state to active");
+
+    // Step to flush the region-thaw event + run gen_region_content rule.
+    sim.step(&mut rt).unwrap();
+
+    // After step, region content should be generated: mountain_node_0 must exist.
+    let node_e = sim.world.entity("mountain_node_0");
+    assert!(node_e.is_ok(),
+        "gen_region_content must spawn mountain_node_0 after region-thaw: {:?}",
+        node_e.err());
+}
+
+#[test]
+fn region_content_deterministic_across_thaw_timing() {
+    // Two sims booted from the same scene share world_seed=1. The substream seeded by
+    // (world_seed, "region:mountain") must produce the same sequence regardless of when
+    // it's first accessed — thawing at tick 0 vs tick 1000 generates bit-identical content.
+    //
+    // This is the replay-safety guarantee for dormant regions: even if region thaw happens
+    // at different ticks across runs (player reaches the boundary earlier or later), the
+    // generated content is identical.
+    let (mut sim1, mut rt1) = Runtime::boot(&frontier_dir()).unwrap();
+
+    // Sim 1: thaw mountain at tick 0.
+    vitric_sim::set_sim_ptr(&mut sim1);
+    rt1.scripts.call_fn(
+        "unlock_region",
+        &json!({"region_id": "mountain"}),
+        None,
+        &mut sim1.world,
+        &mut sim1.rng,
+        sim1.tick,
+    ).expect("sim1 unlock_region");
+    vitric_sim::clear_sim_ptr();
+    sim1.step(&mut rt1).unwrap(); // Flush region-thaw → gen_region_content runs
+
+    // Read mountain_node_0..5 positions from sim1.
+    let mut pos1: Vec<(f64, f64)> = Vec::new();
+    for i in 0..6 {
+        let name = format!("mountain_node_{}", i);
+        let e = sim1.world.entity(&name).expect(&format!("{} exists in sim1", name));
+        let x = sim1.world.get_field(e, "Position.x").unwrap().as_f64().unwrap();
+        let y = sim1.world.get_field(e, "Position.y").unwrap().as_f64().unwrap();
+        pos1.push((x, y));
+    }
+    // Also read POI position.
+    let poi_e = sim1.world.entity("mountain_poi_0").expect("mountain_poi_0 exists in sim1");
+    let poi_x = sim1.world.get_field(poi_e, "Position.x").unwrap().as_f64().unwrap();
+    let poi_y = sim1.world.get_field(poi_e, "Position.y").unwrap().as_f64().unwrap();
+    pos1.push((poi_x, poi_y));
+
+    // Sim 2: step 1000 ticks first, THEN thaw mountain.
+    let (mut sim2, mut rt2) = Runtime::boot(&frontier_dir()).unwrap();
+    for _ in 0..1000 {
+        sim2.step(&mut rt2).unwrap();
+    }
+    vitric_sim::set_sim_ptr(&mut sim2);
+    rt2.scripts.call_fn(
+        "unlock_region",
+        &json!({"region_id": "mountain"}),
+        None,
+        &mut sim2.world,
+        &mut sim2.rng,
+        sim2.tick,
+    ).expect("sim2 unlock_region");
+    vitric_sim::clear_sim_ptr();
+    sim2.step(&mut rt2).unwrap(); // Flush region-thaw → gen_region_content runs
+
+    // Read mountain_node_0..5 + poi_0 positions from sim2.
+    let mut pos2: Vec<(f64, f64)> = Vec::new();
+    for i in 0..6 {
+        let name = format!("mountain_node_{}", i);
+        let e = sim2.world.entity(&name).expect(&format!("{} exists in sim2", name));
+        let x = sim2.world.get_field(e, "Position.x").unwrap().as_f64().unwrap();
+        let y = sim2.world.get_field(e, "Position.y").unwrap().as_f64().unwrap();
+        pos2.push((x, y));
+    }
+    let poi_e = sim2.world.entity("mountain_poi_0").expect("mountain_poi_0 exists in sim2");
+    let poi_x = sim2.world.get_field(poi_e, "Position.x").unwrap().as_f64().unwrap();
+    let poi_y = sim2.world.get_field(poi_e, "Position.y").unwrap().as_f64().unwrap();
+    pos2.push((poi_x, poi_y));
+
+    assert_eq!(pos1, pos2,
+        "region content must be deterministic regardless of thaw timing:\n  tick 0:   {:?}\n  tick 1000: {:?}",
+        pos1, pos2);
+}
+
+#[test]
+fn camera_world_bounds_clamps_player_position() {
+    // Set Camera.world_bounds to [0, 0, 20, 20]. Give the player a velocity that would move
+    // them beyond x=20. After step, the player's Position.x must be clamped to 20 and
+    // Velocity.x zeroed.
+    let (mut sim, mut rt) = Runtime::boot(&frontier_dir()).unwrap();
+
+    // Set camera world_bounds to [0, 0, 20, 20].
+    let cam_e = sim.world.entity("camera").unwrap();
+    sim.world.set_field(cam_e, "Camera.world_bounds", json!("[0,0,20,20]")).unwrap();
+
+    // Place player at x=19.9, give velocity x=+10 (would move to 19.9 + 10/60 ≈ 20.06).
+    let player_e = sim.world.entity("player").unwrap();
+    sim.world.set_field(player_e, "Position.x", json!(19.9)).unwrap();
+    sim.world.set_field(player_e, "Position.y", json!(10.0)).unwrap();
+    sim.world.set_field(player_e, "Velocity.x", json!(10.0)).unwrap();
+    sim.world.set_field(player_e, "Velocity.y", json!(0.0)).unwrap();
+
+    sim.step(&mut rt).unwrap();
+
+    let px = sim.world.get_field(player_e, "Position.x").unwrap().as_f64().unwrap();
+    let vx = sim.world.get_field(player_e, "Velocity.x").unwrap().as_f64().unwrap();
+
+    assert!(px <= 20.0,
+        "player x must be clamped to world_bounds max_x=20, got {}", px);
+    assert_eq!(vx, 0.0,
+        "player vx must be zeroed after clamping, got {}", vx);
+}

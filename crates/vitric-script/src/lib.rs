@@ -173,7 +173,18 @@ impl ScriptEngine {
                 })
             })
             .map_err(make_err)?;
-            ctx.globals().set("__randomStreamNext", f_rand).map_err(make_err)
+            ctx.globals().set("__randomStreamNext", f_rand).map_err(make_err)?;
+
+            // ctx.thaw_region bridge: JS calls ctx.thaw_region(id) → __thawRegion(id) →
+            // with_sim_ptr(|sim| sim.thaw_region(id)). Mirrors __randomStreamNext's SIM_PTR pattern.
+            // Panics if SIM_PTR is null (ctx.thaw_region called outside a Sim::step window).
+            let f_thaw = Function::new(ctx.clone(), |id: String| {
+                vitric_sim::with_sim_ptr(|sim| {
+                    sim.thaw_region(&id);
+                });
+            })
+            .map_err(make_err)?;
+            ctx.globals().set("__thawRegion", f_thaw).map_err(make_err)
         })
     }
 

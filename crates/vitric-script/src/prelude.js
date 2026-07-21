@@ -195,6 +195,15 @@ function __makeCtx(payload, ops, rng) {
       ops.push({ op: "emit", name: service + "-ask", data: { id: id, prompt: prompt } });
       return id;
     },
+    // Thaw a dormant region: transitions Region.state → "active", sets discovered=1, queues
+    // region-thaw event for the next step. Same host-API semantics as Sim::thaw_region (Rust).
+    // Called by the region-approach-check system and by unlock_region fn (research.js).
+    // Idempotent on already-active regions (re-sets state, re-emits event — rules decide whether
+    // to dedupe based on discovered flag).
+    thaw_region: (id) => {
+      if (typeof id !== "string" || !id) throw new Error("ctx.thaw_region: id 必须是非空字符串");
+      __thawRegion(id);
+    },
   };
 }
 

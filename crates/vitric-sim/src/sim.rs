@@ -721,6 +721,54 @@ impl Sim {
                 }
             })?;
         }
+
+        // Camera world_bounds clamping: if a Camera has a non-empty world_bounds (JSON "[min_x,min_y,max_x,max_y]")
+        // and names a follow target, clamp that target's Position to the bounds and zero the clamped axis velocity.
+        // Only the follow target is clamped (other entities — enemies, particles, NPCs — roam freely).
+        // Empty world_bounds = no clamping (backward-compatible with scenes that don't set it).
+        for cam_id in self.world.query(&["Camera"]) {
+            let bounds_str = match self.world.get_field(cam_id, "Camera.world_bounds") {
+                Ok(v) => match v.as_str() { Some(s) if !s.is_empty() => s, _ => continue },
+                Err(_) => continue,
+            };
+            let bounds: Vec<f64> = match serde_json::from_str::<Vec<f64>>(bounds_str) {
+                Ok(b) if b.len() == 4 => b,
+                _ => continue, // Malformed bounds — silently skip (defensive; schema doesn't validate JSON shape)
+            };
+            let (min_x, min_y, max_x, max_y) = (bounds[0], bounds[1], bounds[2], bounds[3]);
+            let follow = match self.world.get_field(cam_id, "Camera.follow") {
+                Ok(v) => match v.as_str() { Some(s) if !s.is_empty() => s.to_string(), _ => continue },
+                Err(_) => continue,
+            };
+            let target = match self.world.entity(&follow) {
+                Ok(id) => id,
+                Err(_) => continue, // Follow target doesn't exist — follow_camera will error on its own
+            };
+            let px = self.num_field(target, "Position", "x")?;
+            let py = self.num_field(target, "Position", "y")?;
+            let nx = px.clamp(min_x, max_x);
+            let ny = py.clamp(min_y, max_y);
+            if nx != px {
+                self.world.set_field(target, "Position.x", json!(nx))
+                    .expect("字段刚读过必然存在");
+                if let Ok(vx) = self.num_field(target, "Velocity", "x") {
+                    if vx != 0.0 {
+                        self.world.set_field(target, "Velocity.x", json!(0.0))
+                            .expect("字段刚读过必然存在");
+                    }
+                }
+            }
+            if ny != py {
+                self.world.set_field(target, "Position.y", json!(ny))
+                    .expect("字段刚读过必然存在");
+                if let Ok(vy) = self.num_field(target, "Velocity", "y") {
+                    if vy != 0.0 {
+                        self.world.set_field(target, "Velocity.y", json!(0.0))
+                            .expect("字段刚读过必然存在");
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

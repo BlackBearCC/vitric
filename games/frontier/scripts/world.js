@@ -4,9 +4,10 @@
 // Here we only: ① lay wild terrain + place resource nodes; ② apply a short cooldown to resource nodes after gathering (prevents spam-clicking).
 
 vitric.fn("genWild", (a, ctx) => {
-  // Wild terrain: x16..27, y0..11, dark rocky earth (x16 boundary slightly brighter, hinting the transition from home to wild).
-  for (let gx = 16; gx <= 27; gx++) {
-    for (let gy = 0; gy <= 11; gy++) {
+  // Wild terrain: x16..59, y0..29 (home transition x16..27 + expanded wild x28..59).
+  // x16 boundary slightly brighter (transition hint from home to wild).
+  for (let gx = 16; gx <= 59; gx++) {
+    for (let gy = 0; gy <= 29; gy++) {
       ctx.spawn({
         Cell: { kind: "wild" },
         Position: { x: gx, y: gy },
@@ -14,11 +15,16 @@ vitric.fn("genWild", (a, ctx) => {
       });
     }
   }
-  // Resource nodes: kind maps directly to inventory field (ore/wood/fiber); left = gatherable count. Tagged with names.
+  // Resource nodes: original 6 + 4 new in expanded wild.
   const NODES = [
     ["ore", 19, 3, "矿脉", "#caa45a"], ["ore", 25, 9, "矿脉", "#caa45a"],
     ["wood", 22, 2, "林木", "#5f8f3a"], ["wood", 24, 10, "林木", "#5f8f3a"],
     ["fiber", 20, 7, "纤维丛", "#9aac5a"], ["fiber", 26, 5, "纤维丛", "#9aac5a"],
+    // Expanded wild nodes (x28..59, y0..29):
+    ["ore", 45, 18, "矿脉", "#caa45a"],
+    ["wood", 38, 22, "林木", "#5f8f3a"],
+    ["fiber", 52, 8, "纤维丛", "#9aac5a"],
+    ["wood", 33, 15, "林木", "#5f8f3a"],
   ];
   for (const n of NODES) {
     ctx.spawn({

@@ -245,6 +245,10 @@
         "view_h": {
           "type": "number",
           "default": 0
+        },
+        "world_bounds": {
+          "type": "text",
+          "default": ""
         }
       }
     },
