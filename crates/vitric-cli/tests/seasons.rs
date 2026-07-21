@@ -14,14 +14,14 @@ fn frontier_dir() -> PathBuf {
 
 #[test]
 fn season_advances_on_day_boundary() {
-    // Fast test: set Clock.time to just below CLOCK_DAY_SEC (60.0) and Season.day_in_season
+    // Fast test: set Clock.time to just below CLOCK_DAY_SEC (90.0) and Season.day_in_season
     // to 0, then step 1 tick. The day-wrap fires, day_in_season increments to 1.
     let (mut sim, mut rt) = Runtime::boot(&frontier_dir()).unwrap();
     let colony_e = sim.world.entity("colony").unwrap();
 
-    // Set time to 59.99 — one tick (dt=1/60≈0.0167) will push it past 60.0, triggering day-wrap.
+    // Set time to 89.99 — one tick (dt=1/60≈0.0167) will push it past 90.0, triggering day-wrap.
     let mut clock = sim.world.get_component(colony_e, "Clock").unwrap().clone();
-    clock["time"] = json!(59.99);
+    clock["time"] = json!(89.99);
     clock["day"] = json!(1);
     clock["last_day_emit"] = json!(1); // Suppress day-start emission noise.
     sim.world.set_component(colony_e, "Clock", clock).unwrap();
@@ -51,7 +51,7 @@ fn season_rolls_over_at_12_days() {
     let colony_e = sim.world.entity("colony").unwrap();
 
     let mut clock = sim.world.get_component(colony_e, "Clock").unwrap().clone();
-    clock["time"] = json!(59.99);
+    clock["time"] = json!(89.99);
     clock["day"] = json!(12);
     clock["last_day_emit"] = json!(12);
     sim.world.set_component(colony_e, "Clock", clock).unwrap();
@@ -81,7 +81,7 @@ fn year_increments_on_spring_wrap() {
     let colony_e = sim.world.entity("colony").unwrap();
 
     let mut clock = sim.world.get_component(colony_e, "Clock").unwrap().clone();
-    clock["time"] = json!(59.99);
+    clock["time"] = json!(89.99);
     clock["day"] = json!(48);
     clock["last_day_emit"] = json!(48);
     sim.world.set_component(colony_e, "Clock", clock).unwrap();

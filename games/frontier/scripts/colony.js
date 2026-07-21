@@ -72,23 +72,49 @@ vitric.system("census", { query: ["Census"], writes: [] }, (entities, ctx) => {
   ctx.emit("census-tick", { pop: pop });
 });
 
-// Stages: days + multi-dimensional judgment.
-//   startup         (default, day 1)
-//   foothold        (day>=3 and structures>=3)
-//   taking shape    (day>=4 and structures>=5)
-//   crowd           (day>=5 and hands>=3)
-//   prosperity      (day>=6 and monument built)
+// Stages: compound conditions tied to seasons/years (spec §4.7).
+//   起步 (day 1-3)          — default, no requirement
+//   立足 (end of spring, day>=12)  — survival_t1 researched AND struct >= 5
+//   成形 (end of summer, day>=24)  — pop >= 3 AND agriculture_t1 researched
+//   成群 (end of year 1, day>=48)  — pop >= 5 AND any faction tier >= neutral
+//   兴旺 (end of year 2, day>=96)  — all 4 branches T2+ AND monument built AND any faction allied
+// Sandbox continues after 兴旺 — no ending stage.
+// Transitions are monotonic by day-floor: if day >= 96 but 兴旺 conditions not met, stage stays at 成群
+// (the highest stage whose day-floor + conditions are both satisfied).
 vitric.system("stage", { query: ["Colony", "Clock"], writes: ["Colony"] }, (entities, ctx) => {
   const c = entities[0];
   if (!c) return;
   const day = c.Clock.day;
   const s = c.Colony.struct_count;
   const pop = c.Colony.pop;
+  const monument = c.Colony.monument_built | 0;
+
+  // Read Research fields (on the same colony entity — Colony+Research are both attached to "colony").
+  const hasSurvivalT1 = (ctx.getField("colony", "Research.has_survival_t1") | 0) === 1;
+  const hasSurvivalT2 = (ctx.getField("colony", "Research.has_survival_t2") | 0) === 1;
+  const hasAgriT1 = (ctx.getField("colony", "Research.has_agriculture_t1") | 0) === 1;
+  const hasAgriT2 = (ctx.getField("colony", "Research.has_agriculture_t2") | 0) === 1;
+  const hasExplT2 = (ctx.getField("colony", "Research.has_exploration_t2") | 0) === 1;
+  const hasIndT2 = (ctx.getField("colony", "Research.has_industry_t2") | 0) === 1;
+
+  // Read Faction tiers (on the same colony entity — Faction is attached to "colony").
+  const tierNomads = ctx.getField("colony", "Faction.tier_nomads") || "wary";
+  const tierCaravan = ctx.getField("colony", "Faction.tier_caravan") || "wary";
+  const tierRemnant = ctx.getField("colony", "Faction.tier_remnant") || "wary";
+  const anyFactionNeutralOrBetter = ["neutral", "friendly", "allied"].includes(tierNomads)
+    || ["neutral", "friendly", "allied"].includes(tierCaravan)
+    || ["neutral", "friendly", "allied"].includes(tierRemnant);
+  const anyFactionAllied = tierNomads === "allied" || tierCaravan === "allied" || tierRemnant === "allied";
+
+  const allT2 = hasSurvivalT2 && hasAgriT2 && hasExplT2 && hasIndT2;
+
+  // Check from highest stage downward; first match wins.
   let stage = "起步";
-  if (c.Colony.monument_built && day >= 6) stage = "兴旺";
-  else if (day >= 5 && pop >= 3) stage = "成群";
-  else if (day >= 4 && s >= 5) stage = "成形";
-  else if (day >= 3 && s >= 3) stage = "立足";
+  if (day >= 96 && allT2 && monument >= 1 && anyFactionAllied) stage = "兴旺";
+  else if (day >= 48 && pop >= 5 && anyFactionNeutralOrBetter) stage = "成群";
+  else if (day >= 24 && pop >= 3 && hasAgriT1) stage = "成形";
+  else if (day >= 12 && hasSurvivalT1 && s >= 5) stage = "立足";
+
   if (c.Colony.stage !== stage) c.Colony.stage = stage;
 });
 

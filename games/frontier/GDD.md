@@ -43,10 +43,10 @@
 1. **修复信标**:建造模式造 `beacon` 结构 → `built{kind:"beacon"}` → step→2,发 `quest-done{id:"beacon"}`。
 2. **种出第一茬**:`harvested{id:"wheat"}` 首次 → step→3。
 3. **伙伴心愿达成**:`wish-fulfilled` + 第一个伙伴 `Need.affinity>=60` → step→4。(完成伙伴心愿,如建造 3 座结构把好感推到 60 即过。)
-4. **立足脚跟**:`Colony.stage=="立足"`(day≥3 + 结构≥3 自动切)→ step→5。
-5. **食物富足**:day≥4 且 小麦存量≥5 → step→6。
-6. **多人聚居**:day≥5 + 人手≥3 + `companion_wish_count>=2` → step→7。
-7. **建造丰碑**:day≥6 + `monument_built>=1`(造 `monument` 结构)→ 发 `settlement-founded` → step→8。
+4. **立足脚跟**:`Colony.stage=="立足"`(day≥12 (春末) + survival_t1 研究 + 结构≥5 自动切)→ step→5。
+5. **食物富足**:day≥12 (春末) + 小麦存量≥5 → step→6。
+6. **多人聚居**:day≥24 (夏末) + 人手≥3 + `companion_wish_count>=2` → step→7。
+7. **建造丰碑**:`Colony.stage==兴旺`(day≥96 + 全 T2 科技 + 丰碑 + 派系结盟)→ 发 `settlement-founded` → step→8。
 8. **自由探索中**:定居点已建立,四个循环自驱(资源再生 / 伙伴需求 / 心愿达成 / 耀斑夜威胁),无限游玩。任务栏显"自由探索中"。
 
 > 没有 `game-won`/`settlement-thrived` 硬结局;`settlement-founded` 是里程碑不是终点。
@@ -66,6 +66,14 @@
 **资源点再生**:`Node.cooldown` 字段,耗尽时(left→0)设 cooldown=90,`node_regrow` 系统每帧递减,到 0 恢复 `left=max`。野外采集点不再一次性耗竭。
 
 **结构升级**:`upgrade_structure` fn:`plot→greenhouse`(ore2+plank2)/ `conduit→solar-array`(ore3+plank1)/ `quarters→cabin`(plank4+lamp1),tier 1→2。键 "u" 切升级模式(`Mode.value="upgrade"`),点击结构升级;emit `upgrade-structure{id,kind}`。
+
+**沙盒节奏(Task 14)**:DAY_SEC 60→90s,12 天/季,48 天/年,兴旺里程碑在第 96 天(两年末)。阶段条件从单维度(day+结构)改为复合维度(day+科技+人口+派系):
+- 起步(day 1-3):无要求
+- 立足(春末 day≥12):survival_t1 + 结构≥5
+- 成形(夏末 day≥24):pop≥3 + agriculture_t1
+- 成群(第一年末 day≥48):pop≥5 + 任一派系 neutral+
+- 兴旺(第二年末 day≥96):全 T2 科技 + 丰碑 + 任一派系 allied → emit `settlement-founded`
+兴旺后无限沙盒,四循环自驱。
 
 ## 数据表(实现者只翻译不发明)
 **物品**(id | 名 | 来源 | 用途)
@@ -113,5 +121,5 @@ UI(像素,参考视口 1920×1080):
 - **玩法** = `rules/` + `scripts/`(移动/建造/制作/种田/采集/背包/求生/伙伴脑+作息+需求/任务机/区域切换/接 `ui-activate`)
 - **文案** = scenes 里 UiLabel/Text/Dialogue 内容(与关卡行级协商)+ `tools/fake_llm.py` 旅人人设 + 任务文案
 - **音频** = `sounds/`(本版可缓,后排)
-- **QA** = `qa/`(smoke + 断言集 + 通关录像 `qa/clear.json`,9 天 37247 tick,在 step 8 发 `settlement-founded`)
+- **QA** = `qa/`(smoke + 断言集 + 通关录像 `qa/clear.json`,96 天 ~5760s real-time at 90s/day (Task 15 re-records),在 step 8 发 `settlement-founded`)
 - **导演** = `schema.json` + `vitric.json` + 本 `GDD.md` + `gates` 声明

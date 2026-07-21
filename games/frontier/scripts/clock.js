@@ -1,8 +1,8 @@
 // Time / day-night cycle: the pacing backbone of the whole game.
 //   @colony carries a Clock component -> day/time/tod three fields keep advancing, emitting day-start each day.
 //   dt comes from the engine, 1 unit = 1 second of game time (at 60 tick/sec, one tick is 1/60 second).
-//   1 game day = DAY_SEC seconds; in this version DAY_SEC = 60 — measured at about 1 minute/day,
-//   10-15 minutes per session fits a 5-7 day vertical slice nicely.
+//   1 game day = DAY_SEC seconds; in this version DAY_SEC = 90 — sandbox pacing, 90s/day,
+//   12-day seasons, 48-day years, ~96 days to 兴旺 milestone (~90 min real-time).
 //
 // Time of day:
 //   morning    0% – 25%   wake up, farm, gather, build
@@ -16,7 +16,7 @@
 //   Season.day_in_season; when it reaches SEASON_DAYS (12) the season rolls over
 //   (spring→summer→autumn→winter→spring) and year increments on the winter→spring wrap.
 
-const CLOCK_DAY_SEC = 60.0;
+const CLOCK_DAY_SEC = 90.0;
 const SEASON_DAYS = 12;
 const SEASONS = ["spring", "summer", "autumn", "winter"];
 

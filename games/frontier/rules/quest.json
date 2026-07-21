@@ -48,11 +48,11 @@
     },
     {
       "id": "quest-step5-done",
-      "comment": "step5 温饱:day≥4 且 小麦存量≥5 → step=6。守卫 step==5 + day-floor + inventory 闸门。",
+      "comment": "step5 温饱:day≥12 (春末) 且 小麦存量≥5 → step=6。守卫 step==5 + day-floor + inventory 闸门。",
       "on": "tick",
       "if": [
         ["@quest.QuestLog.step", "==", 5],
-        ["@colony.Colony.day", ">=", 4],
+        ["@colony.Colony.day", ">=", 12],
         ["@player.Inventory.wheat", ">=", 5]
       ],
       "do": [
@@ -62,11 +62,11 @@
     },
     {
       "id": "quest-step6-done",
-      "comment": "step6 成群:day>=5 + pop>=3 + 累计心愿达成>=2 -> step=7.",
+      "comment": "step6 成群:day>=24 (夏末) + pop>=3 + 累计心愿达成>=2 -> step=7.",
       "on": "tick",
       "if": [
         ["@quest.QuestLog.step", "==", 6],
-        ["@colony.Colony.day", ">=", 5],
+        ["@colony.Colony.day", ">=", 24],
         ["@colony.Colony.pop", ">=", 3],
         ["@colony.Colony.companion_wish_count", ">=", 2]
       ],
@@ -85,12 +85,11 @@
     },
     {
       "id": "settlement-founded",
-      "comment": "step7 -> day>=6 + monument built -> settlement-founded (milestone, not ending). Game continues freely.",
+      "comment": "step7 -> stage==兴旺 (day>=96 + all T2 techs + monument + allied faction) -> settlement-founded. Sandbox continues.",
       "on": "tick",
       "if": [
         ["@quest.QuestLog.step", "==", 7],
-        ["@colony.Colony.day", ">=", 6],
-        ["@colony.Colony.monument_built", ">=", 1]
+        ["@colony.Colony.stage", "==", "兴旺"]
       ],
       "do": [
         { "emit": "settlement-founded", "data": {} },
@@ -132,7 +131,7 @@
       "if": [ ["@quest.QuestLog.step", "==", 4] ],
       "do": [
         { "set": "@quest_title_lbl.UiLabel.content", "to": "立足脚跟" },
-        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "等到第 3 天,凑齐 3 座结构" }
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "等到第 12 天(春末),研究 survival_t1 + 凑齐 5 座结构" }
       ]
     },
     {
@@ -141,7 +140,7 @@
       "if": [ ["@quest.QuestLog.step", "==", 5] ],
       "do": [
         { "set": "@quest_title_lbl.UiLabel.content", "to": "食物富足" },
-        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "攒 5 麦子(收几茬即可),等过第 4 天" }
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "攒 5 麦子,等过第 12 天(春末)" }
       ]
     },
     {
@@ -150,7 +149,7 @@
       "if": [ ["@quest.QuestLog.step", "==", 6] ],
       "do": [
         { "set": "@quest_title_lbl.UiLabel.content", "to": "多人聚居" },
-        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "等过第 5 天,把第 2、3 个伙伴请回家" }
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "等过第 24 天(夏末),把第 2、3 个伙伴请回家" }
       ]
     },
     {
@@ -159,7 +158,7 @@
       "if": [ ["@quest.QuestLog.step", "==", 7] ],
       "do": [
         { "set": "@quest_title_lbl.UiLabel.content", "to": "建造丰碑" },
-        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "等过第 6 天,攒 ore×4+plank×4+lamp×2+wheat×4 立丰碑" }
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "等过第 96 天(两年末),研究全部 T2 科技 + 立丰碑 + 任一派系结盟" }
       ]
     },
     {
