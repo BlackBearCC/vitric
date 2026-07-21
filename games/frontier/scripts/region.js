@@ -189,14 +189,13 @@ function checkUnlockCondition(id, ctx) {
     return has === 1;
   }
   if (id === "swamp") {
-    // Read companion_handles list (JSON text array of entity handles) and check if any has
-    // Persona.role === "explorer". companion_handles is a list-of-text field on Colony.
-    const handlesJson = ctx.getField("colony", "Colony.companion_handles");
-    if (!handlesJson) return false;
-    let handles = [];
-    try { handles = JSON.parse(handlesJson); } catch { return false; }
+    // companion_handles is a list-of-text field on Colony; ctx.getField returns it as a
+    // parsed JS array (NOT a JSON string — list fields are deserialized by __getFieldRaw).
+    // See wish.js:21 for the same pattern (direct array use, no JSON.parse).
+    const handles = ctx.getField("colony", "Colony.companion_handles");
     if (!Array.isArray(handles)) return false;
     for (const h of handles) {
+      if (typeof h !== "string" || !h) continue;
       const role = ctx.getField(h, "Persona.role");
       if (role === "explorer") return true;
     }
