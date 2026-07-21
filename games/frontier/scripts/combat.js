@@ -48,10 +48,13 @@ const GUARD_AFFINITY_MIN = 60;
 
 // Enemy type table: hp / damage / aggro_range / loot drops.
 // Raider only spawns if mountain region is thawed (forward-compat for Task 12).
-// Sandbeast is deferred to Task 13 (desert region only).
+// Sandbeast is desert-only, spawned by the desert-spawn system on a timer.
 const ENEMY_TYPES = {
   gnawer: { damage: 5,  aggro_range: 8,  hp: 20, drops: { hide: [1, 2] } },
   raider: { damage: 8,  aggro_range: 10, hp: 35, drops: { hide: [1, 1], crystal_core: [0, 1] } }, // crystal_core 50% chance
+  // Sandbeast: desert-only enemy, spawned by desert-spawn system. High HP, high damage,
+  // drops crystal_core. Only spawns when desert is active AND player is in desert.
+  sandbeast: { damage: 12, aggro_range: 12, hp: 60, drops: { hide: [2, 3], crystal_core: [1, 2] } },
 };
 
 // Roll loot for a killed enemy. Returns { hide: N, crystal_core: M } based on kind's drop table.
@@ -373,4 +376,56 @@ vitric.fn("retreat_all_enemies", (a, ctx) => {
     if (enemy && enemy.id) ctx.despawn(enemy.id);
   }
   ctx.emit("enemies-retreated", { count: snapshot.length });
+});
+
+// ---- desert-spawn: every 2 in-game hours (7200 ticks), if the desert region is active AND
+// the player is inside it, spawn a sandbeast near the player. Uses ctx.random_stream("desert_spawn")
+// for deterministic spawn position — replay-safe regardless of when the spawn happens.
+//
+// The spawn_timer field on Region (schema line 1041) tracks the cooldown. It's decremented
+// each tick; when it hits 0, the spawn check fires and the timer resets.
+//
+// The system queries ["Region"] (matches all region markers), filters for the desert marker
+// in the body. writes: ["Region"] covers the spawn_timer write on the desert marker entity.
+// Player position is read via ctx.getField (deferred-op channel — same pattern as
+// region-approach-check; doesn't require a writes declaration).
+vitric.system("desert-spawn", { query: ["Region"], writes: ["Region"] }, (entities, ctx) => {
+  for (const e of entities) {
+    if (e.Region.id !== "desert") continue;
+    if (e.Region.state !== "active") continue;
+
+    // Decrement spawn timer.
+    let timer = e.Region.spawn_timer - ctx.dt;
+    if (timer > 0) {
+      e.Region.spawn_timer = timer;
+      continue;
+    }
+
+    // Timer expired — reset and check if player is in desert.
+    e.Region.spawn_timer = 7200; // 2 minutes real time (7200 ticks at 60 tick/s)
+
+    const px = ctx.getField("player", "Position.x");
+    const py = ctx.getField("player", "Position.y");
+    if (typeof px !== "number" || typeof py !== "number") continue;
+
+    // Desert bounds: anchor (60,0), size 60×60 → x:60..119, y:0..59.
+    const inDesert = px >= 60 && px <= 119 && py >= 0 && py <= 59;
+    if (!inDesert) continue;
+
+    // Spawn sandbeast near player using desert_spawn substream (deterministic).
+    const stream = ctx.random_stream("desert_spawn");
+    const ox = stream.nextInt(-3, 3);
+    const oy = stream.nextInt(-3, 3);
+    const def = ENEMY_TYPES.sandbeast;
+    ctx.spawn({
+      Enemy: { kind: "sandbeast", damage: def.damage, aggro_range: def.aggro_range,
+               home_region: "desert", _attack_cd: 0 },
+      Position: { x: px + ox, y: py + oy },
+      Velocity: { x: 0, y: 0 },
+      Collider: { w: 1.0, h: 1.0 },
+      Sprite: { w: 1.0, h: 1.0, image: "enemy.png", color: "#d4a84a" },
+      Hp: { value: def.hp, max: def.hp },
+    });
+    ctx.emit("toast-show", { text: "沙兽出现!" });
+  }
 });

@@ -29,7 +29,10 @@ const REGION_CONTENT = {
       { kind: "ore", count: 6, color: "#caa45a", label: "矿脉", left: 5 },
     ],
     pois: [
+      // Ancient ruins: TechPoint reward (already in Task 12).
       { kind: "ancient-ruins", reward_table: '{"techpoint":[1,3]}', label: "古代遗迹" },
+      // Crystal cave: crystal_core reward + cave-injury risk (handler in poi.js).
+      { kind: "crystal-cave", reward_table: '{"crystal_core":[1,2]}', label: "水晶洞" },
     ],
   },
   swamp: {
@@ -38,7 +41,10 @@ const REGION_CONTENT = {
       { kind: "fiber", count: 5, color: "#9aac5a", label: "纤维丛", left: 5 },
     ],
     pois: [
+      // Dangerous flora: hide reward + combat trigger (handler spawns a weak enemy).
       { kind: "dangerous-flora", reward_table: '{"hide":[1,2]}', label: "危险植物" },
+      // Oasis: seed + fiber reward (fertile ground).
+      { kind: "oasis", reward_table: '{"seed":[2,4],"fiber":[1,3]}', label: "绿洲" },
     ],
   },
   desert: {
@@ -47,7 +53,9 @@ const REGION_CONTENT = {
       { kind: "crystal_core", count: 2, color: "#5acaff", label: "晶核", left: 3 },
     ],
     pois: [
-      { kind: "caravan", reward_table: '{}', label: "商队营地" },
+      // Caravan stop: no direct reward, but handler emits trade-available (faction hook).
+      { kind: "caravan-stop", reward_table: '{}', label: "商队驿站" },
+      // Tomb: high-tier reward + curse risk (handler applies mood drop).
       { kind: "tomb", reward_table: '{"crystal_core":[1,2],"techpoint":[2,4]}', label: "古墓" },
     ],
   },

@@ -31,6 +31,68 @@ vitric.system("poi_tick", { query: ["Poi"], writes: ["Poi"] }, (entities, ctx) =
   }
 });
 
+// ---- Per-type POI handlers: special effects beyond the standard reward_table roll ----
+// Each handler receives (a, ctx, poi, rewardText) and can emit additional events.
+// The standard reward roll (from reward_table) happens BEFORE the handler — handlers
+// only add extra effects (events, mood changes, combat triggers, etc.).
+const POI_HANDLERS = {
+  "ancient-ruins": (a, ctx, poi, rewardText) => {
+    // Bonus TechPoint for discovering ancient ruins (on top of the standard +2 per POI).
+    const tp = (a.techpoint | 0) + 3;
+    ctx.emit("tp-set", { value: tp });
+    ctx.emit("toast-show", { text: "古代遗迹: 额外+3科技点" });
+  },
+
+  "crystal-cave": (a, ctx, poi, rewardText) => {
+    // Crystal cave: 30% chance of cave-injury (companion mood drop).
+    // Moved from the legacy "cave-entrance" kind — crystal caves are the new cave POI.
+    if (ctx.random() < 0.3) {
+      ctx.emit("companion-mood-drop", { amount: 10, reason: "cave-injury" });
+      ctx.emit("toast-show", { text: "洞穴坍塌!全员心情-10" });
+    }
+  },
+
+  "dangerous-flora": (a, ctx, poi, rewardText) => {
+    // Dangerous flora: 50% chance of spawning a weak enemy (combat trigger).
+    // The enemy spawns at the POI's position — the player must deal with it.
+    if (ctx.random() < 0.5) {
+      const x = a.comp.Position.x;
+      const y = a.comp.Position.y;
+      ctx.spawn({
+        Enemy: { kind: "gnawer", damage: 5, aggro_range: 6, home_region: "swamp", _attack_cd: 0 },
+        Position: { x: x + 1, y: y },
+        Velocity: { x: 0, y: 0 },
+        Collider: { w: 0.8, h: 0.8 },
+        Sprite: { w: 0.8, h: 0.8, image: "enemy.png", color: "#7a9a3a" },
+        Hp: { value: 15, max: 15 },
+      });
+      ctx.emit("toast-show", { text: "危险植物释放了孢子!出现了敌对生物" });
+    }
+  },
+
+  "oasis": (a, ctx, poi, rewardText) => {
+    // Oasis: full party mood restoration (fertile ground, safe haven).
+    ctx.emit("companion-mood-boost", { amount: 5, reason: "oasis" });
+    ctx.emit("toast-show", { text: "绿洲清泉:全员心情+5" });
+  },
+
+  "caravan-stop": (a, ctx, poi, rewardText) => {
+    // Caravan stop: emit trade-available event (faction trade hook).
+    // The caravan faction's relation +1 hook (from Task 11's trader-companion-relation rule)
+    // also fires on trade-available — so discovering a caravan-stop improves caravan relation.
+    ctx.emit("trade-available", { pid: "caravan-stop", role: "trader" });
+    ctx.emit("toast-show", { text: "商队驿站:贸易关系+1" });
+  },
+
+  "tomb": (a, ctx, poi, rewardText) => {
+    // Tomb: 40% chance of curse (mood drop) — the high-tier reward comes with risk.
+    if (ctx.random() < 0.4) {
+      ctx.emit("companion-mood-drop", { amount: 15, reason: "tomb-curse" });
+      ctx.emit("toast-show", { text: "古墓诅咒!全员心情-15" });
+    }
+  },
+};
+
 // ---- Interact click on a POI: rule passes hit entity handle + components snapshot + current inventory ----
 // Same shape as economy.js `interact`: a.entity (handle), a.comp (components), a.<inventory fields>.
 // Only acts if the hit entity has a Poi component in state "fresh". Rolls rewards, emits inv-set, marks looted.
@@ -83,12 +145,17 @@ vitric.fn("interact_poi", (a, ctx) => {
   // Toast with reward summary.
   ctx.emit("toast-show", { text: `探索收获: ${rewardText.trim()}` });
 
-  // Cave-entrance risk: 30% chance of companion mood drop (cave-injury).
+  // Per-type handler: special effects beyond the standard reward roll.
+  // Handler runs AFTER rewards are applied (inventory + techpoint already emitted).
+  const handler = POI_HANDLERS[poi.kind];
+  if (handler) handler(a, ctx, poi, rewardText);
+
+  // Keep the legacy cave-entrance special-case for wild-area POIs (backward compat).
   if (poi.kind === "cave-entrance" && ctx.random() < POI_CAVE_INJURY_CHANCE) {
     ctx.emit("companion-mood-drop", { amount: 10, reason: "cave-injury" });
     ctx.emit("toast-show", { text: "洞穴坍塌!全员心情-10" });
   }
 
-  // Notify wish system (Task 4 will add a rule listening for this event).
+  // Notify wish system.
   ctx.emit("entered-poi", { kind: poi.kind });
 });

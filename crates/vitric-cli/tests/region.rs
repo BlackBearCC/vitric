@@ -655,3 +655,73 @@ fn camera_world_bounds_clamps_player_position() {
     assert_eq!(vx, 0.0,
         "player vx must be zeroed after clamping, got {}", vx);
 }
+
+// ---- Task 13: Sandbeast desert-spawn system ----
+//
+// The desert-spawn system (in combat.js) queries ["Region"], filters for the desert marker,
+// decrements Region.spawn_timer each tick, and when the timer hits 0 + the player is inside
+// desert bounds (60..119, 0..59), spawns a sandbeast near the player using the
+// "desert_spawn" substream. These tests verify both the spawn (player in desert) and the
+// no-op (player outside desert) branches.
+
+#[test]
+fn sandbeast_spawns_when_player_in_desert() {
+    // Activate desert region and set spawn_timer to 0 (trigger spawn this tick).
+    // Place player inside desert bounds and step — a sandbeast must spawn.
+    let (mut sim, mut rt) = Runtime::boot(&frontier_dir()).unwrap();
+
+    let desert_e = sim.world.entity("desert").unwrap();
+    sim.world.set_field(desert_e, "Region.state", json!("active")).unwrap();
+    sim.world.set_field(desert_e, "Region.spawn_timer", json!(0)).unwrap();
+
+    // Place player in desert (x=70, y=10 — inside desert bounds 60..119, 0..59).
+    let player_e = sim.world.entity("player").unwrap();
+    sim.world.set_field(player_e, "Position.x", json!(70.0)).unwrap();
+    sim.world.set_field(player_e, "Position.y", json!(10.0)).unwrap();
+
+    // Count enemies before step.
+    let enemies_before = sim.world.query(&["Enemy"]).len();
+
+    // Step — desert-spawn system runs, spawn_timer hits 0, player is in desert → spawn.
+    sim.step(&mut rt).unwrap();
+
+    let enemies_after = sim.world.query(&["Enemy"]).len();
+    assert!(enemies_after > enemies_before,
+        "sandbeast must spawn when player is in desert and spawn_timer expires: before={}, after={}",
+        enemies_before, enemies_after);
+
+    // Verify the spawned enemy is a sandbeast.
+    let sandbeast_count = sim.world.query(&["Enemy"])
+        .iter()
+        .filter(|&&id| {
+            sim.world.get_field(id, "Enemy.kind")
+                .map(|v| v.as_str() == Some("sandbeast"))
+                .unwrap_or(false)
+        })
+        .count();
+    assert!(sandbeast_count > 0, "at least one spawned enemy must be a sandbeast");
+}
+
+#[test]
+fn sandbeast_does_not_spawn_when_player_outside_desert() {
+    // Same setup as sandbeast_spawns_when_player_in_desert, but player is outside desert.
+    // The spawn_timer still expires, but the player-position check fails → no spawn.
+    let (mut sim, mut rt) = Runtime::boot(&frontier_dir()).unwrap();
+
+    let desert_e = sim.world.entity("desert").unwrap();
+    sim.world.set_field(desert_e, "Region.state", json!("active")).unwrap();
+    sim.world.set_field(desert_e, "Region.spawn_timer", json!(0)).unwrap();
+
+    // Place player OUTSIDE desert (x=7, y=7 — home area).
+    let player_e = sim.world.entity("player").unwrap();
+    sim.world.set_field(player_e, "Position.x", json!(7.0)).unwrap();
+    sim.world.set_field(player_e, "Position.y", json!(7.0)).unwrap();
+
+    let enemies_before = sim.world.query(&["Enemy"]).len();
+    sim.step(&mut rt).unwrap();
+    let enemies_after = sim.world.query(&["Enemy"]).len();
+
+    assert_eq!(enemies_before, enemies_after,
+        "no sandbeast should spawn when player is outside desert: before={}, after={}",
+        enemies_before, enemies_after);
+}
