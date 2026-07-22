@@ -2879,11 +2879,11 @@ pub fn describe_world_with_assets(
         let region_info = world
             .get_component(id, "Region")
             .ok()
-            .and_then(|r| {
-                Some(serde_json::json!({
+            .map(|r| {
+                serde_json::json!({
                     "id": r.get("id").and_then(|v| v.as_str()).unwrap_or(""),
                     "state": r.get("state").and_then(|v| v.as_str()).unwrap_or(""),
-                }))
+                })
             })
             .unwrap_or(serde_json::json!({}));
 
