@@ -2,3 +2,6 @@
 fonts/*.otf
 fonts/*.ttf
 fonts/*.ttc
+
+# cjk.otf is now a bundled OFL subset (see fonts/OFL.txt) — commit it
+!fonts/cjk.otf
