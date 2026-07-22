@@ -13,10 +13,13 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.87"
 license = "MIT"
+authors = ["BlackBearCC"]
 repository = "https://github.com/BlackBearCC/vitric"
+homepage = "https://github.com/BlackBearCC/vitric"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

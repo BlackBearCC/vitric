@@ -20,7 +20,7 @@
 ## 集成
 
 - [MCP server](mcp/index.js): 14 个工具，任何 MCP 客户端开箱即用
-- [team/](team/README.md): 多 agent 班子随引擎发货——角色工单（team/roles/）+ 协同黑板（vitric team）+ 地盘执法（vitric turf），MCP 经 vitric_role 领工单
+- [team/](team/README.md): 多 agent 班子随引擎发货——角色工单（team/skills/vitric-<role>/SKILL.md）+ 协同黑板（vitric team）+ 地盘执法（vitric turf），MCP 经 vitric_role 领工单
 - 仓库内置 Claude Code skill（.claude/skills/vitric/）
 
 ## 关键约定（写代码前必知）

@@ -1,0 +1,52 @@
+name: Feature request
+description: Propose a new engine capability or improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before proposing, check the [roadmap](https://github.com/BlackBearCC/vitric#roadmap)
+        in the README — your idea may already be planned, and an issue is the
+        right place to discuss prioritization.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that the engine doesn't support today? Who hits this — game authors, AI agents, engine contributors?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        Describe the behavior or API you'd like. Vitric's core contract is
+        bit-exact determinism — if your proposal touches simulation state,
+        say how it preserves determinism (JSON-serializable state, ordered
+        iteration, no wall-clock or undeclared randomness).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've used, or other designs you rejected and why.
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Engine simulation (sim, ecs, rules, script)
+        - Rendering
+        - Control plane (HTTP JSON-RPC)
+        - CLI
+        - Playtesting / gates
+        - Asset pipeline
+        - MCP server
+        - Documentation
+        - Other
+    validations:
+      required: true

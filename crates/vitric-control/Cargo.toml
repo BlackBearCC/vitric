@@ -2,8 +2,14 @@
 name = "vitric-control"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+description = "HTTP JSON-RPC control plane for the Vitric engine: state query/mutation, input injection, time control, assertions, and screenshots"
+# Internal implementation crate: not published to crates.io on its own.
+publish = false
 
 [dependencies]
 serde = { workspace = true }

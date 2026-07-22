@@ -6,9 +6,15 @@
 //! - `Math.random` / `Date.now` are disabled with a pointer to `ctx.random()` / `ctx.tick`;
 //!   the random source shares the same PCG32 stream as the Rust side (JS reimplements the same algorithm with BigInt),
 //!   so scripts don't break deterministic replay;
-//! - All data crossing the boundary is JSON: the entities scripts see speak the same language as scene files and the control plane.
+//! - All data crossing the boundary is JSON: the entities scripts see speak the same language as scene files and the control plane;
+//! - The QuickJS runtime runs under hard resource limits (heap memory, stack size, per-call
+//!   instruction budget — see [`ScriptLimits`]): a runaway script (`while(1){}`, memory bomb,
+//!   infinite recursion) surfaces as `ScriptError::Timeout`/`OutOfMemory`/`StackOverflow`
+//!   instead of hanging the sim's main loop and the control plane with it.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use rquickjs::{CatchResultExt, Context, Function, Runtime};
 use serde_json::{json, Map, Value};
@@ -24,6 +30,26 @@ thread_local! {
     /// Bare pointer to the World readable during the current call_js. Set before run_one_system/call_fn calls into JS, cleared after;
     /// null outside that window. QuickJS is single-threaded and synchronous; __getFieldRaw only reads it within the window.
     static WORLD_PTR: std::cell::Cell<*const World> = std::cell::Cell::new(std::ptr::null());
+}
+
+/// RAII guard for the `WORLD_PTR` read window: sets the thread-local pointer on creation and
+/// clears it on drop — **including during panic unwinding**, so a panic inside a JS call can
+/// never leave a dangling `World` pointer behind for the next call on this thread.
+struct WorldPtrGuard {
+    _private: (),
+}
+
+impl WorldPtrGuard {
+    fn new(world: &World) -> WorldPtrGuard {
+        WORLD_PTR.with(|p| p.set(world as *const World));
+        WorldPtrGuard { _private: () }
+    }
+}
+
+impl Drop for WorldPtrGuard {
+    fn drop(&mut self) {
+        WORLD_PTR.with(|p| p.set(std::ptr::null()));
+    }
 }
 
 /// Resolution for ctx.getField: handle (may carry an @ prefix) or entity name → that field's value; returns None if entity/field is missing.
@@ -59,6 +85,15 @@ pub struct ScriptOutput {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScriptError {
+    /// SC001: the script exhausted its instruction budget and was interrupted (e.g. `while(1){}`).
+    Timeout { location: String, budget: u64 },
+    /// SC002: the script exceeded the QuickJS heap memory limit.
+    OutOfMemory { location: String, limit: usize },
+    /// SC003: the script exceeded the QuickJS stack size limit (runaway recursion).
+    StackOverflow { location: String, limit: usize },
+    /// SC004: the script tampered with prelude internals (e.g. overrode `globalThis.__runSystem`)
+    /// and produced an op stream the prelude contract guarantees to be well-formed.
+    PreludeViolated { location: String, message: String },
     /// Script loading/evaluation failed (syntax error, bad registration args, ...).
     Load { file: String, message: String },
     /// Exception thrown while a system/function was running.
@@ -69,9 +104,73 @@ pub enum ScriptError {
     Op { location: String, message: String },
 }
 
+impl ScriptError {
+    /// Stable error code for programmatic handling and doc lookup — same convention as
+    /// vitric-data's VD codes: the code is part of the API, the message text is not.
+    pub fn code(&self) -> &'static str {
+        match self {
+            ScriptError::Timeout { .. } => "SC001",
+            ScriptError::OutOfMemory { .. } => "SC002",
+            ScriptError::StackOverflow { .. } => "SC003",
+            ScriptError::PreludeViolated { .. } => "SC004",
+            ScriptError::Load { .. } => "SC010",
+            ScriptError::Runtime { .. } => "SC011",
+            ScriptError::UndeclaredWrite { .. } => "SC012",
+            ScriptError::Op { .. } => "SC013",
+        }
+    }
+
+    /// How to fix it — third element of the project's error triad (path + code + fix hint).
+    pub fn hint(&self) -> String {
+        match self {
+            ScriptError::Timeout { budget, .. } => format!(
+                "脚本在 {budget} 条指令预算内没有结束（多半是死循环或失控递归）。把循环改成有界迭代；\
+                 确需更长预算时用 ScriptEngine::with_limits 调大 instruction_budget"
+            ),
+            ScriptError::OutOfMemory { limit, .. } => format!(
+                "脚本内存超过上限 {} 字节（多半是无限 push 数组或构造超大字符串）。\
+                 限制每 tick 的分配量；确需更多内存时用 ScriptEngine::with_limits 调大 memory_limit",
+                limit
+            ),
+            ScriptError::StackOverflow { limit, .. } => format!(
+                "脚本调用栈超过上限 {} 字节（无限递归）。给递归加终止条件；\
+                 确需更深栈时用 ScriptEngine::with_limits 调大 max_stack_size",
+                limit
+            ),
+            ScriptError::PreludeViolated { .. } => {
+                "脚本覆盖了 prelude 内部函数（globalThis.__runSystem/__callFn/__runCatchUp/__list）或伪造了 ops。\
+                 不要碰双下划线开头的全局量；生成/销毁实体和发事件请走 ctx.spawn/ctx.despawn/ctx.emit"
+                    .to_string()
+            }
+            ScriptError::Load { .. } => "修脚本语法或注册参数后重新加载".to_string(),
+            ScriptError::Runtime { .. } => {
+                "按异常消息修脚本；不确定时把脚本缩到最小复现再逐步加回".to_string()
+            }
+            ScriptError::UndeclaredWrite { component, .. } => format!(
+                "把 {component:?} 加进该系统的 writes，或者别改它——读写声明是引擎理解逻辑影响面的依据，不是摆设"
+            ),
+            ScriptError::Op { .. } => {
+                "ops 必须走 ctx.emit/ctx.spawn/ctx.despawn/ctx.setField 生成，字段齐全且类型正确".to_string()
+            }
+        }
+    }
+}
+
 impl fmt::Display for ScriptError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ScriptError::Timeout { location, budget } => {
+                write!(f, "脚本 {location} 超出指令预算（{budget} 条）被强制中断")
+            }
+            ScriptError::OutOfMemory { location, limit } => {
+                write!(f, "脚本 {location} 内存超限（上限 {limit} 字节）")
+            }
+            ScriptError::StackOverflow { location, limit } => {
+                write!(f, "脚本 {location} 调用栈超限（上限 {limit} 字节）")
+            }
+            ScriptError::PreludeViolated { location, message } => {
+                write!(f, "脚本 {location} 破坏了 prelude 约定: {message}")
+            }
             ScriptError::Load { file, message } => {
                 write!(f, "脚本 {file} 加载失败: {message}")
             }
@@ -80,24 +179,91 @@ impl fmt::Display for ScriptError {
             }
             ScriptError::UndeclaredWrite { system, entity, component } => write!(
                 f,
-                "系统 {system:?} 修改了实体 {entity} 的组件 {component:?}，\
-                 但 writes 里没有声明它。提示：把 {component:?} 加进该系统的 writes，\
-                 或者别改它——读写声明是引擎理解逻辑影响面的依据，不是摆设"
+                "系统 {system:?} 修改了实体 {entity} 的组件 {component:?}，但 writes 里没有声明它"
             ),
             ScriptError::Op { location, message } => {
                 write!(f, "脚本 {location} 的操作不合法: {message}")
             }
         }
+        .and_then(|()| write!(f, " [{}]（{}）", self.code(), self.hint()))
     }
 }
 
 impl std::error::Error for ScriptError {}
+
+/// Resource limits enforced on the embedded QuickJS runtime.
+///
+/// The engine's primary user is an AI agent; agent-written scripts can (and do) contain
+/// `while(1){}` loops, memory bombs and runaway recursion. Without limits any of those would
+/// hang the sim's main loop — and with it the control plane — forever. All three limits are
+/// configurable per engine; the defaults are sized for typical game systems.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScriptLimits {
+    /// Max bytes the QuickJS heap may allocate (`0` = unlimited). Exceeding it raises a JS
+    /// "out of memory" exception, surfaced as [`ScriptError::OutOfMemory`] (SC002).
+    pub memory_limit: usize,
+    /// Max JS stack size in bytes (QuickJS default is 256KiB; `0` disables the check —
+    /// rquickjs also maps values > 16 MiB to `0`). Exceeding it raises a JS
+    /// "stack overflow" exception, surfaced as [`ScriptError::StackOverflow`] (SC003).
+    pub max_stack_size: usize,
+    /// Instruction budget per engine entry call (`load`/`run_systems`/`call_fn`/
+    /// `run_catch_up_for_region`). Counted in interrupt-handler ticks: QuickJS invokes the
+    /// handler periodically (roughly every few thousand executed bytecodes), each invocation
+    /// costs one unit. When the budget hits zero the interpreter is interrupted with an
+    /// uncatchable exception, surfaced as [`ScriptError::Timeout`] (SC001).
+    pub instruction_budget: u64,
+}
+
+impl Default for ScriptLimits {
+    fn default() -> Self {
+        ScriptLimits {
+            memory_limit: 64 * 1024 * 1024,  // 64 MiB
+            max_stack_size: 1024 * 1024,     // 1 MiB
+            instruction_budget: 10_000_000,  // ~10M interrupt ticks
+        }
+    }
+}
+
+/// Shared state between the engine and the QuickJS interrupt handler: counts down the
+/// instruction budget and remembers whether an interrupt fired, so the exact interrupt cause
+/// can be reported (QuickJS itself only raises a generic "interrupted" error).
+#[derive(Debug, Default)]
+struct InstructionBudget {
+    remaining: AtomicU64,
+    interrupted: AtomicBool,
+}
+
+impl InstructionBudget {
+    /// Re-arm the budget before each engine entry call.
+    fn reset(&self, budget: u64) {
+        self.remaining.store(budget, Ordering::Relaxed);
+        self.interrupted.store(false, Ordering::Relaxed);
+    }
+
+    /// Called by QuickJS's interrupt handler; returning `true` aborts execution.
+    fn tick(&self) -> bool {
+        if self.interrupted.load(Ordering::Relaxed) {
+            return true;
+        }
+        if self.remaining.fetch_sub(1, Ordering::Relaxed) == 0 {
+            self.interrupted.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
+    fn was_interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::Relaxed)
+    }
+}
 
 /// Script engine. Holds one QuickJS context; hot reload = rebuild the context with new source.
 pub struct ScriptEngine {
     _runtime: Runtime,
     context: Context,
     schema: Schema,
+    limits: ScriptLimits,
+    budget: Arc<InstructionBudget>,
     sources: Vec<(String, String)>,
     pub systems: Vec<SystemDecl>,
     pub fns: Vec<String>,
@@ -105,10 +271,21 @@ pub struct ScriptEngine {
 
 impl ScriptEngine {
     pub fn new(schema: Schema) -> Result<ScriptEngine, ScriptError> {
+        ScriptEngine::with_limits(schema, ScriptLimits::default())
+    }
+
+    /// Create an engine with explicit resource limits (see [`ScriptLimits`]).
+    pub fn with_limits(schema: Schema, limits: ScriptLimits) -> Result<ScriptEngine, ScriptError> {
         let runtime = Runtime::new().map_err(|e| ScriptError::Load {
             file: "<runtime>".into(),
             message: e.to_string(),
         })?;
+        runtime.set_memory_limit(limits.memory_limit);
+        runtime.set_max_stack_size(limits.max_stack_size);
+        let budget = Arc::new(InstructionBudget::default());
+        budget.reset(limits.instruction_budget);
+        let handler_budget = Arc::clone(&budget);
+        runtime.set_interrupt_handler(Some(Box::new(move || handler_budget.tick())));
         let context = Context::full(&runtime).map_err(|e| ScriptError::Load {
             file: "<context>".into(),
             message: e.to_string(),
@@ -117,6 +294,8 @@ impl ScriptEngine {
             _runtime: runtime,
             context,
             schema,
+            limits,
+            budget,
             sources: Vec::new(),
             systems: Vec::new(),
             fns: Vec::new(),
@@ -164,8 +343,12 @@ impl ScriptEngine {
 
             // __randomStreamNext(name) → decimal u32 string. Reads the thread-local SIM_PTR set
             // by Sim::step (via vitric_sim::set_sim_ptr) — same pattern as __getFieldRaw reading
-            // WORLD_PTR. Panics if SIM_PTR is null (ctx.random_stream called outside a sim step);
-            // the panic propagates through QuickJS as a JS exception.
+            // WORLD_PTR. Panics if SIM_PTR is null (ctx.random_stream called outside a sim step).
+            // Verified against rquickjs-core 0.12.0 source: the FFI trampoline catches the Rust
+            // panic (no UB through C frames), raises a JS exception to unwind the JS stack, then
+            // `resume_unwind`s the original panic on the Rust side when the error surfaces
+            // (result.rs:728/740 `take_panic`). Sim::step's catch_unwind boundary turns it into
+            // SimError::Logic; the RAII guards keep no dangling pointers behind.
             let f_rand = Function::new(ctx.clone(), |name: String| -> String {
                 vitric_sim::with_sim_ptr(|sim| {
                     let v = sim.random_stream(&name).next_u32();
@@ -197,7 +380,7 @@ impl ScriptEngine {
 
     /// Hot reload: rebuild wholesale with new source (registry reset from scratch; world state untouched).
     pub fn reload(&mut self, sources: Vec<(String, String)>) -> Result<(), ScriptError> {
-        let mut fresh = ScriptEngine::new(self.schema.clone())?;
+        let mut fresh = ScriptEngine::with_limits(self.schema.clone(), self.limits.clone())?;
         for (file, src) in &sources {
             fresh.load(file, src)?;
         }
@@ -274,15 +457,16 @@ impl ScriptEngine {
                     "tick": tick,
                     "rng": rng_to_json(rng),
                 });
-                // Open the getField read-live-World window for this JS call, close it immediately after.
-                WORLD_PTR.with(|p| p.set(world as *const World));
-                let call = self.call_js(
-                    "__runCatchUp",
-                    (idx as i32, id.to_string(), dormant_ticks as i32, payload.to_string()),
-                    &location,
-                );
-                WORLD_PTR.with(|p| p.set(std::ptr::null()));
-                let result_str = call?;
+                // Open the getField read-live-World window for this JS call; the guard closes it
+                // on drop — even if call_js (or revive_f64 below) panics.
+                let result_str = {
+                    let _world_guard = WorldPtrGuard::new(world);
+                    self.call_js(
+                        "__runCatchUp",
+                        (idx as i32, id.to_string(), dormant_ticks as i32, payload.to_string()),
+                        &location,
+                    )?
+                };
                 let mut result: Value = serde_json::from_str(&result_str).map_err(|e| {
                     ScriptError::Op {
                         location: location.clone(),
@@ -330,11 +514,12 @@ impl ScriptEngine {
             "rng": rng_to_json(rng),
         });
 
-        // Open the getField read-live-World window for this JS call, close it immediately after.
-        WORLD_PTR.with(|p| p.set(world as *const World));
-        let call = self.call_js("__runSystem", (idx as i32, payload.to_string()), &location);
-        WORLD_PTR.with(|p| p.set(std::ptr::null()));
-        let result_str = call?;
+        // Open the getField read-live-World window for this JS call; the guard closes it on
+        // drop — even if call_js panics, no dangling World pointer survives the window.
+        let result_str = {
+            let _world_guard = WorldPtrGuard::new(world);
+            self.call_js("__runSystem", (idx as i32, payload.to_string()), &location)?
+        };
         let mut result: Value = serde_json::from_str(&result_str).map_err(|e| ScriptError::Op {
             location: location.clone(),
             message: format!("返回值不是合法 JSON: {e}"),
@@ -432,10 +617,10 @@ impl ScriptEngine {
             "tick": tick,
             "rng": rng_to_json(rng),
         });
-        WORLD_PTR.with(|p| p.set(world as *const World));
-        let call = self.call_js("__callFn", (function.to_string(), payload.to_string()), &location);
-        WORLD_PTR.with(|p| p.set(std::ptr::null()));
-        let result_str = call?;
+        let result_str = {
+            let _world_guard = WorldPtrGuard::new(world);
+            self.call_js("__callFn", (function.to_string(), payload.to_string()), &location)?
+        };
         let mut result: Value = serde_json::from_str(&result_str).map_err(|e| ScriptError::Op {
             location: location.clone(),
             message: format!("返回值不是合法 JSON: {e}"),
@@ -460,13 +645,23 @@ impl ScriptEngine {
             location: location.to_string(),
             message,
         };
+        // Fields the prelude guarantees to be present. A script CAN break that guarantee by
+        // overriding globalThis.__runSystem/__callFn/__runCatchUp and forging ops — so a missing
+        // field here is not a panic-worthy invariant but a prelude-contract violation (SC004).
+        let violated = |field: &str| ScriptError::PreludeViolated {
+            location: location.to_string(),
+            message: format!("op 缺少 prelude 保证的字段 {field:?}（prelude 内部函数可能被覆盖）"),
+        };
         let Some(ops) = ops.and_then(|v| v.as_array()) else {
             return Ok(());
         };
         for op in ops {
             match op.get("op").and_then(|v| v.as_str()) {
                 Some("emit") => {
-                    let name = op.get("name").and_then(|v| v.as_str()).expect("prelude 已校验");
+                    let name = op
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| violated("name"))?;
                     let data = op.get("data").cloned().unwrap_or_else(|| json!({}));
                     out.events.push(Event::new(name, data));
                 }
@@ -485,15 +680,24 @@ impl ScriptEngine {
                     }
                 }
                 Some("despawn") => {
-                    let handle = op.get("id").and_then(|v| v.as_str()).expect("prelude 已校验");
+                    let handle = op
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| violated("id"))?;
                     let id: EntityId = handle
                         .parse()
                         .map_err(|e: String| err(format!("despawn: {e}")))?;
                     world.despawn(id).map_err(|e| err(e.to_string()))?;
                 }
                 Some("setField") => {
-                    let r = op.get("ref").and_then(|v| v.as_str()).expect("prelude 已校验");
-                    let path = op.get("path").and_then(|v| v.as_str()).expect("prelude 已校验");
+                    let r = op
+                        .get("ref")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| violated("ref"))?;
+                    let path = op
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| violated("path"))?;
                     let value = op.get("value").cloned().unwrap_or(Value::Null);
                     // ref is handle text (e.g. "e3v0") or entity name — handle first, fall back to name lookup on parse failure.
                     // Names may carry an @ prefix (in rules "@name" is the convention); strip it uniformly here.
@@ -531,14 +735,43 @@ impl ScriptEngine {
         Ok(normalized)
     }
 
+    /// Classify a JS exception from `eval`/`call`: resource-limit hits get their own stable
+    /// codes (SC001–SC003); everything else keeps the load/runtime channel. QuickJS surfaces
+    /// limit violations as InternalError exceptions whose message is the only distinguishing
+    /// signal — except interrupts, which we track ourselves via the budget flag (the JS-side
+    /// "interrupted" message is indistinguishable from a user-thrown string of the same text).
+    fn classify_js_error(&self, location: &str, message: String, is_load: bool) -> ScriptError {
+        if self.budget.was_interrupted() {
+            return ScriptError::Timeout {
+                location: location.to_string(),
+                budget: self.limits.instruction_budget,
+            };
+        }
+        if message.contains("out of memory") {
+            return ScriptError::OutOfMemory {
+                location: location.to_string(),
+                limit: self.limits.memory_limit,
+            };
+        }
+        if message.contains("stack overflow") {
+            return ScriptError::StackOverflow {
+                location: location.to_string(),
+                limit: self.limits.max_stack_size,
+            };
+        }
+        if is_load {
+            ScriptError::Load { file: location.to_string(), message }
+        } else {
+            ScriptError::Runtime { location: location.to_string(), message }
+        }
+    }
+
     fn eval_file(&mut self, file: &str, source: &str) -> Result<(), ScriptError> {
+        self.budget.reset(self.limits.instruction_budget);
         self.context.with(|ctx| {
             ctx.eval::<(), _>(source.as_bytes().to_vec())
                 .catch(&ctx)
-                .map_err(|e| ScriptError::Load {
-                    file: file.to_string(),
-                    message: e.to_string(),
-                })
+                .map_err(|e| self.classify_js_error(file, e.to_string(), true))
         })
     }
 
@@ -546,33 +779,47 @@ impl ScriptEngine {
     where
         A: for<'js> rquickjs::function::IntoArgs<'js>,
     {
+        self.budget.reset(self.limits.instruction_budget);
         self.context.with(|ctx| {
             let f: Function = ctx.globals().get(entry).map_err(|e| ScriptError::Runtime {
                 location: location.to_string(),
                 message: format!("找不到入口 {entry}: {e}"),
             })?;
-            f.call::<_, String>(args).catch(&ctx).map_err(|e| ScriptError::Runtime {
-                location: location.to_string(),
-                message: e.to_string(),
-            })
+            f.call::<_, String>(args)
+                .catch(&ctx)
+                .map_err(|e| self.classify_js_error(location, e.to_string(), false))
         })
     }
 
     fn refresh_decls(&mut self) -> Result<(), ScriptError> {
         let listing = self.call_js("__list", (), "<注册表>")?;
-        let v: Value = serde_json::from_str(&listing).expect("prelude __list 输出合法 JSON");
-        self.systems = v["systems"]
-            .as_array()
-            .expect("systems 是数组")
-            .iter()
-            .map(|s| SystemDecl {
-                name: s["name"].as_str().expect("name").to_string(),
+        // A script shares the global object with the prelude and can override
+        // globalThis.__list — malformed registry output is a load error (SC010), not a
+        // panic-worthy invariant (P0-2: a script must never be able to panic the engine).
+        let load_err = |message: String| ScriptError::Load {
+            file: "<注册表>".into(),
+            message,
+        };
+        let v: Value = serde_json::from_str(&listing).map_err(|e| {
+            load_err(format!("prelude __list 输出不是合法 JSON（globalThis.__list 可能被脚本覆盖）: {e}"))
+        })?;
+        let systems = v["systems"].as_array().ok_or_else(|| {
+            load_err("prelude __list 输出缺少 systems 数组（globalThis.__list 可能被脚本覆盖）".into())
+        })?;
+        let mut decls = Vec::with_capacity(systems.len());
+        for s in systems {
+            let name = s["name"].as_str().ok_or_else(|| {
+                load_err("prelude __list 输出的 system 缺少 name 字段".into())
+            })?;
+            decls.push(SystemDecl {
+                name: name.to_string(),
                 query: to_string_vec(&s["query"]),
                 writes: to_string_vec(&s["writes"]),
                 // Prelude's __list reports `catch_up: true/false` per system; missing/false = no catch_up.
                 has_catch_up: s.get("catch_up").and_then(|v| v.as_bool()).unwrap_or(false),
-            })
-            .collect();
+            });
+        }
+        self.systems = decls;
         self.fns = to_string_vec(&v["fns"]);
         Ok(())
     }
@@ -1109,5 +1356,141 @@ mod tests {
             ScriptError::Load { file, .. } => assert_eq!(file, "oops.js"),
             other => panic!("错误类型不对: {other}"),
         }
+    }
+
+    // ---- P0-1: resource limits — an AI-written runaway script must surface as a
+    // ScriptError, never hang the main loop (and with it the control plane) forever. ----
+
+    #[test]
+    fn infinite_loop_is_interrupted_as_timeout_and_engine_survives() {
+        // Small budget keeps the test fast; the default (10M interrupt ticks) would spin for minutes.
+        let mut eng = ScriptEngine::with_limits(
+            schema(),
+            ScriptLimits { instruction_budget: 100, ..ScriptLimits::default() },
+        )
+        .unwrap();
+        eng.load(
+            "loop.js",
+            r#"vitric.system("spin", {query: ["Position"], writes: []}, () => { while (true) {} });"#,
+        )
+        .unwrap();
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let mut rng = Pcg32::new(1);
+        let err = eng.run_systems(&mut w, &mut rng, 0).unwrap_err();
+        match &err {
+            ScriptError::Timeout { budget, .. } => assert_eq!(*budget, 100),
+            other => panic!("错误类型不对: {other}"),
+        }
+        assert_eq!(err.code(), "SC001");
+        // The runtime is not poisoned by the interrupt: a healthy script still runs afterwards.
+        eng.reload(vec![(
+            "fine.js".into(),
+            r#"vitric.system("fine", {query: ["Position"], writes: ["Position"]}, (es) => {
+                for (const e of es) e.Position.x = 42;
+            });"#
+            .into(),
+        )])
+        .unwrap();
+        eng.run_systems(&mut w, &mut rng, 1).unwrap();
+        assert_eq!(w.get_field(e, "Position.x").unwrap().as_f64(), Some(42.0));
+    }
+
+    #[test]
+    fn memory_bomb_hits_memory_limit() {
+        // Default limits: 64 MiB heap fills in ~80 iterations of this loop — long before the
+        // 10M-tick instruction budget is anywhere near exhausted.
+        let mut eng = engine_with(
+            r#"
+            vitric.system("bomb", {query: ["Position"], writes: []}, () => {
+                const a = [];
+                while (true) { a.push(new Array(100000).fill(0)); }
+            });
+            "#,
+        );
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let mut rng = Pcg32::new(1);
+        let err = eng.run_systems(&mut w, &mut rng, 0).unwrap_err();
+        assert!(matches!(err, ScriptError::OutOfMemory { .. }), "应为 SC002 内存超限，实际 {err}");
+        assert_eq!(err.code(), "SC002");
+    }
+
+    #[test]
+    fn runaway_recursion_hits_stack_limit() {
+        let mut eng = engine_with(
+            r#"
+            vitric.system("rec", {query: ["Position"], writes: []}, () => {
+                function f() { return f() + 1; }
+                f();
+            });
+            "#,
+        );
+        let mut w = World::new();
+        let e = w.spawn();
+        w.set_component(e, "Position", json!({"x": 0.0, "y": 0.0})).unwrap();
+        let mut rng = Pcg32::new(1);
+        let err = eng.run_systems(&mut w, &mut rng, 0).unwrap_err();
+        assert!(matches!(err, ScriptError::StackOverflow { .. }), "应为 SC003 栈超限，实际 {err}");
+        assert_eq!(err.code(), "SC003");
+    }
+
+    // ---- P0-2: a script that tampers with prelude internals (they live on the same
+    // globalThis) or forges malformed ops must get an error, never panic the engine. ----
+
+    #[test]
+    fn forged_op_missing_fields_is_prelude_violation_not_panic() {
+        // Overriding __runSystem and forging an op without the prelude-guaranteed "name" field
+        // used to hit `expect("prelude 已校验")` and kill the whole engine process.
+        let mut eng = engine_with(
+            r#"
+            vitric.system("s", {query: ["Position"], writes: []}, () => {});
+            globalThis.__runSystem = () => JSON.stringify({
+                entities: [],
+                ops: [{op: "emit"}],
+                rng: {state: "1", inc: "3"},
+            });
+            "#,
+        );
+        let mut w = World::new();
+        let mut rng = Pcg32::new(1);
+        let err = eng.run_systems(&mut w, &mut rng, 0).unwrap_err();
+        assert!(matches!(err, ScriptError::PreludeViolated { .. }), "应为 SC004，实际 {err}");
+        assert_eq!(err.code(), "SC004");
+    }
+
+    #[test]
+    fn forged_unknown_op_is_op_error_not_panic() {
+        let mut eng = engine_with(
+            r#"
+            vitric.system("s", {query: ["Position"], writes: []}, () => {});
+            globalThis.__runSystem = () => JSON.stringify({
+                entities: [],
+                ops: [{op: "teleport", x: 1}],
+                rng: {state: "1", inc: "3"},
+            });
+            "#,
+        );
+        let mut w = World::new();
+        let mut rng = Pcg32::new(1);
+        let err = eng.run_systems(&mut w, &mut rng, 0).unwrap_err();
+        match &err {
+            ScriptError::Op { message, .. } => assert!(message.contains("teleport"), "{message}"),
+            other => panic!("错误类型不对: {other}"),
+        }
+        assert_eq!(err.code(), "SC013");
+    }
+
+    #[test]
+    fn tampered_list_entry_is_load_error_not_panic() {
+        // __list drives refresh_decls at load time; a script overriding it must not panic.
+        let mut eng = ScriptEngine::new(schema()).unwrap();
+        let err = eng
+            .load("evil.js", r#"globalThis.__list = () => "not json";"#)
+            .unwrap_err();
+        assert!(matches!(err, ScriptError::Load { .. }), "应为 SC010 加载错误，实际 {err}");
+        assert_eq!(err.code(), "SC010");
     }
 }

@@ -1,0 +1,91 @@
+name: Bug report
+description: Report a defect in the engine, CLI, or MCP server
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill in as much as
+        you can — a minimal reproduction is the fastest path to a fix.
+  - type: input
+    id: version
+    attributes:
+      label: Vitric version
+      description: Release tag or commit SHA you built from.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - Windows
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Which part of the project is misbehaving?
+      options:
+        - Engine simulation / determinism (sim, ecs, rules, script)
+        - Rendering (CPU rasterizer or GPU)
+        - Control plane (HTTP JSON-RPC)
+        - CLI (check / run / replay / gate / playtest / assets / bundle)
+        - MCP server
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: |
+        Exact commands and inputs. If possible, attach or link a minimal game
+        project (a `vitric.json` project like those under `examples/`) and the
+        recording file if the bug involves replay.
+      placeholder: |
+        1. vitric check examples/coin-run
+        2. vitric run examples/coin-run --port 6173
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the full error output. Engine errors carry a path, a stable code, and a fix hint — paste them verbatim.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Console output, playtest reports, or headless screenshots. Wrap logs in a fenced code block.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: determinism
+    attributes:
+      label: Determinism check
+      description: If the bug involves replay or gates, does the same seed and recording reproduce it every time?
+      options:
+        - label: Yes, the failure is deterministic (same seed + same inputs = same failure)
+          required: false
+        - label: No, it is intermittent
+          required: false
+        - label: Not applicable
+          required: false

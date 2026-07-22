@@ -2,8 +2,14 @@
 name = "vitric-playtest"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+description = "Deterministic agent-swarm playtesting for Vitric games: strategies, seed exploration, and structured reports"
+# Internal implementation crate: not published to crates.io on its own.
+publish = false
 
 [dependencies]
 serde = { workspace = true }

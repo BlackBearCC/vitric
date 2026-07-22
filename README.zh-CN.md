@@ -81,6 +81,8 @@ swarm 会报告：
 
 试玩门槛——零软锁、最低通关率、无不可达结局——可以声明成一道交付门（`vitric.json` 里的 `gates.playtest`），让"swarm 没能玩坏它"成为交付契约的一部分。报告能渲染成一页自包含的 HTML。详见 [docs/design-agent-playtest.md](docs/design-agent-playtest.md)。
 
+`vitric balance` 把"报告问题"闭合成"修掉问题"：指定一个数值旋钮（`<文件>#<json-pointer>`）和目标通关率区间，它就在项目的临时副本上反复跑试玩 swarm 做二分搜索，找到落进区间的旋钮值——原项目一个字节都不会动。
+
 ## 特性
 
 **确定性与验证**
@@ -94,14 +96,14 @@ swarm 会报告：
 
 **编写玩法**
 - **规则优先。** 约 80% 的玩法是声明式的 `当 X 则 Y` 规则（故意不做图灵完备；级联死循环直接报错）。
-- **脚本带安全带。** 其余写成 JS/TS 系统，但必须声明自己读写哪些组件——没声明就写会被拒，所以引擎永远知道每个系统的影响范围。TypeScript 经 esbuild 编译，支持热重载。
+- **脚本带安全带。** 其余写成 JS/TS 系统，但必须声明自己读写哪些组件——没声明就写会被拒，所以引擎永远知道每个系统的影响范围。TypeScript 经 esbuild 编译（外部二进制依赖：PATH 上的 `esbuild` 或 `ESBUILD_BIN` 环境变量；只有 `.ts` 脚本需要它——`examples/` 全是纯 `.js`，不装也能跑），支持热重载。
 - **动画单一归属。** 声明式片段 + `Anim` 组件；引擎独占 `Sprite.image` 的写权，所以"我的动画被别的系统打断了"这类 bug 不可能发生。
 
 **渲染**（CPU 光栅化是确定性真相源，wgpu 的 GPU 路径与它对齐）
 - 2D 动态光照（环境光 + 点/聚/方向光），零配置的法线浮雕（`hero.png` + `hero_n.png`），2D 投影，泛光后效。
 - 屏上文字走语义描述（不靠 OCR）；内置点阵字体，或挂一个 TTF 出带比例字距、抗锯齿的矢量字（含中日韩）。
 - 无头截图逐字节确定、可拿来断言——不要 GPU、不要窗口、不要显示会话。
-- 帧动画流水线（`vitric assets --frames`）：去重、裁边、打图集、统一色板、BC7 纹理压缩——支持 BC 的 GPU 上，图集纹理的运行时显存约降 4 倍（在 RTX 4090 上验证过）。
+- 帧动画流水线（`vitric assets --frames`）：去重、裁边、打图集、统一色板、BC7 纹理压缩——支持 BC 的 GPU 上，图集纹理的运行时显存约降 4 倍（用 `vitric gpu-probe` 在你自己的 GPU 上实测）。
 
 **AI 生成的美术**
 - `vitric assets` 把项目里的 PNG 统一到一套色板（确定性 median-cut），并程序化或图生图地生成法线贴图。
@@ -118,15 +120,15 @@ crates/
   vitric-rules     当-X-则-Y 规则引擎（触发器/条件/动作/级联保护）
   vitric-script    QuickJS 脚本（强制声明读写、确定性随机、热重载、TS 经 esbuild）
   vitric-sim       固定步长模拟（PCG32、录制/重放、存档/读档、运动 + 碰撞）
-  vitric-render    CPU 光栅化 + wgpu GPU 镜像（世界→PNG 无头、光照/投影/泛光、语义描述）
+  vitric-render    CPU 光栅化（世界→PNG 无头、光照/投影/泛光、语义描述）
   vitric-control   AI 控制面（HTTP JSON-RPC：查询/修改/注入输入/时间控制/断言/截图）
   vitric-playtest  agent 集群试玩（场景视图、策略含前瞻、种子探索、报告）
-  vitric-cli       vitric check / run / replay / gate / playtest / assets / bundle（+ 开窗、检查器、音频）
+  vitric-cli       vitric check / run / replay / playtest / balance / gate / bundle / run-embedded / assets / team / turf / gpu-probe（+ 开窗、检查器、音频、wgpu GPU 镜像）
 ```
 
 ## 示例
 
-`examples/` 下是能直接跑、且都有测试覆盖的样例游戏：`coin-run`（规则 + 脚本 + 动画 + 音频）、`jump`（纯规则零脚本的平台跳跃）、`cave-gen`（按配方生成关卡）、`spire`、`glow`（动态光照）、`ui-menu`/`ui-gallery`、`intro`（时间轴/序列系统）等。
+`examples/` 下是能直接跑的样例游戏，每个都在 CI 里过 `vitric check` 验证（`cargo test -p vitric-cli --test examples_check`）：`coin-run`（规则 + 脚本 + 动画 + 音频）、`jump`（纯规则零脚本的平台跳跃）、`cave-gen`（按配方生成关卡）、`spire`、`glow`（动态光照）、`ui-menu`/`ui-gallery`、`intro`（时间轴/序列系统）等。
 
 ## 文档
 

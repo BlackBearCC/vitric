@@ -81,6 +81,8 @@ Two properties of the engine make this work and set it apart:
 
 Playtest thresholds — no soft-locks, a minimum clear rate, no unreachable endings — can be declared as a delivery gate (`gates.playtest` in `vitric.json`), so "the swarm couldn't break it" becomes part of the contract. Reports render to a self-contained HTML page. See [docs/design-agent-playtest.md](docs/design-agent-playtest.md).
 
+`vitric balance` closes the loop from report to fix: point it at one numeric knob (`<file>#<json-pointer>`) and a target clear-rate band, and it binary-searches the value by re-running the playtest swarm on throwaway copies of the project — the original is never written.
+
 ## Features
 
 **Determinism & verification**
@@ -94,14 +96,14 @@ Playtest thresholds — no soft-locks, a minimum clear rate, no unreachable endi
 
 **Authoring**
 - **Rules first.** ~80% of gameplay is declarative `when X then Y` rules (deliberately not Turing-complete; cascade loops are a hard error).
-- **Scripts with a seatbelt.** The rest is JS/TS systems that must declare the components they read and write — undeclared writes are rejected, so the engine always knows the blast radius of every system. TypeScript compiles via esbuild; hot reload supported.
+- **Scripts with a seatbelt.** The rest is JS/TS systems that must declare the components they read and write — undeclared writes are rejected, so the engine always knows the blast radius of every system. TypeScript compiles via esbuild (an external binary: `esbuild` on PATH or `ESBUILD_BIN`; only needed for `.ts` scripts — the `examples/` are all plain `.js`); hot reload supported.
 - **One animation owner.** Declarative clips + an `Anim` component; the engine has exclusive write access to `Sprite.image`, so "my animation got interrupted by another system" cannot happen.
 
 **Rendering** (CPU rasterizer is the deterministic truth source; wgpu GPU path mirrors it)
 - 2D dynamic lighting (ambient + point/spot/directional) with zero-config normal-mapped relief (`hero.png` + `hero_n.png`), 2D shadow casting, and a bloom post-effect.
 - On-screen text described semantically (no OCR); built-in bitmap font, or a TTF for proportional anti-aliased vector text including CJK.
 - Headless screenshots are byte-for-byte deterministic and can be asserted on — no GPU, window, or display session required.
-- Frame-animation pipeline (`vitric assets --frames`): dedupe, trim, atlas, palette, and BC7 texture compression — runtime VRAM for the texture atlas drops ~4× on BC-capable GPUs (verified on an RTX 4090).
+- Frame-animation pipeline (`vitric assets --frames`): dedupe, trim, atlas, palette, and BC7 texture compression — runtime VRAM for the texture atlas drops ~4× on BC-capable GPUs (measure it on your own GPU with `vitric gpu-probe`).
 
 **AI-generated art**
 - `vitric assets` harmonizes a project's PNGs onto one shared palette (deterministic median-cut), and generates normal maps procedurally or via image-to-image.
@@ -118,15 +120,15 @@ crates/
   vitric-rules     when-X-then-Y rule engine (triggers/conditions/actions/cascade protection)
   vitric-script    QuickJS scripting (enforced read/write declarations, deterministic RNG, hot reload, TS via esbuild)
   vitric-sim       fixed-timestep simulation (PCG32, record/replay, snapshot/restore, motion + collision)
-  vitric-render    CPU rasterizer + wgpu GPU mirror (world→PNG headless, lighting/shadows/bloom, semantic describe)
+  vitric-render    CPU rasterizer (world→PNG headless, lighting/shadows/bloom, semantic describe)
   vitric-control   AI control plane (HTTP JSON-RPC: query/mutate/inject input/time control/asserts/screenshots)
   vitric-playtest  agent swarm playtesting (scene view, strategies incl. lookahead, seed exploration, report)
-  vitric-cli       vitric check / run / replay / gate / playtest / assets / bundle (+ window, inspector, audio)
+  vitric-cli       vitric check / run / replay / playtest / balance / gate / bundle / run-embedded / assets / team / turf / gpu-probe (+ window, inspector, audio, wgpu GPU mirror)
 ```
 
 ## Examples
 
-`examples/` holds runnable sample games, each fully covered by tests: `coin-run` (rules + scripts + animation + audio), `jump` (a platformer in pure rules, zero scripts), `cave-gen` (recipe-generated levels), `spire`, `glow` (dynamic lighting), `ui-menu`/`ui-gallery`, `intro` (the timeline/sequence system), and more.
+`examples/` holds runnable sample games, each validated in CI by `vitric check` (`cargo test -p vitric-cli --test examples_check`): `coin-run` (rules + scripts + animation + audio), `jump` (a platformer in pure rules, zero scripts), `cave-gen` (recipe-generated levels), `spire`, `glow` (dynamic lighting), `ui-menu`/`ui-gallery`, `intro` (the timeline/sequence system), and more.
 
 ## Docs
 

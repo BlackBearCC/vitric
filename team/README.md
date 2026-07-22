@@ -17,7 +17,8 @@
 
 ## 目录
 
-- `roles/<role>.md` — 六份角色工单（art / level / gameplay / audio / narrative / qa）。
+- `skills/vitric-<role>/SKILL.md` — 角色工单：art / level / gameplay / audio / narrative / qa
+  六个游戏开发角色（另有 director / engine-dev 两份）。
   把全文里的 `{PROJECT_DIR}` 替换成真实项目路径后，整篇就是该角色 subagent 的 prompt。
   MCP 客户端可调 `vitric_role` 工具直接取（带 project 参数则占位符已替换好）。
 - `templates/GDD-template.md` — 合同骨架，导演开工第一件事就是按它写 `{PROJECT_DIR}/GDD.md`。

@@ -2,8 +2,14 @@
 name = "vitric-sim"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+description = "Fixed-timestep deterministic simulation for the Vitric engine: seeded RNG, record/replay, and snapshot/restore"
+# Internal implementation crate: not published to crates.io on its own.
+publish = false
 
 [dependencies]
 serde = { workspace = true }

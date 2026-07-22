@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Agent guide (documentation)
+    url: https://github.com/BlackBearCC/vitric/blob/main/docs/agent-guide.en.md
+    about: CLI commands, control-plane methods, and the data language — check here before filing.
+  - name: Error catalog
+    url: https://github.com/BlackBearCC/vitric/blob/main/docs/errors.md
+    about: Every VD/VR error code with its fix — your error may already be explained.
+  - name: Security vulnerability
+    url: https://github.com/BlackBearCC/vitric/security/advisories/new
+    about: Report security issues privately. Do not file public issues for vulnerabilities.

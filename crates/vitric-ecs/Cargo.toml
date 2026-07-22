@@ -2,8 +2,14 @@
 name = "vitric-ecs"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+description = "Deterministic, introspectable ECS for the Vitric engine: JSON components, ordered iteration, snapshots, and state hashing"
+# Internal implementation crate: not published to crates.io on its own.
+publish = false
 
 [dependencies]
 serde = { workspace = true }

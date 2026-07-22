@@ -15,5 +15,7 @@ mod tween;
 
 pub use pcg::{Pcg32, Substream};
 pub use recording::{InputRecord, Recording, ReplyRecord};
-pub use sim::{clear_sim_ptr, set_sim_ptr, with_sim_ptr, GameLogic, Sim, SimError, StepReport, DT, TICKS_PER_SECOND};
+pub use sim::{
+    clear_sim_ptr, set_sim_ptr, with_sim_ptr, GameLogic, Sim, SimError, SimPtrGuard, StepReport, DT, TICKS_PER_SECOND,
+};
 pub use tween::{tween_value, Ease, EASE_NAMES};

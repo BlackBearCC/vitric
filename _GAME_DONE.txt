@@ -1,4 +1,0 @@
-frontier (星火) — 完整通关游戏
-
-关卡 gates: pass (check + playthrough → game-won at tick 1943)
-最终提交: 增量3+4 伙伴/任务/通关 + 键盘快捷键 + 通关录像

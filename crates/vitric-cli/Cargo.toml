@@ -2,8 +2,19 @@
 name = "vitric-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+description = "Deterministic, glass-box 2D game engine built for AI agents — CLI, runtime, and control plane"
+keywords = ["game-engine", "ai-agents", "deterministic", "2d", "gamedev"]
+categories = ["game-engines", "command-line-utilities", "graphics"]
+documentation = "https://docs.rs/vitric-cli"
+# Not published yet: the CLI depends on the workspace's internal crates, which
+# stay unpublished while the pre-1.0 API is unstable. Distribution happens via
+# GitHub Releases binaries (see .github/workflows/release.yml).
+publish = false
 
 [[bin]]
 name = "vitric"
@@ -22,7 +33,7 @@ vitric-playtest = { path = "../vitric-playtest" }
 vitric-control = { path = "../vitric-control" }
 winit = "0.30"
 softbuffer = "0.4"
-vitric-render = { version = "0.1.0", path = "../vitric-render" }
+vitric-render = { version = "0.2.0", path = "../vitric-render" }
 rodio = "0.22.2"
 wgpu = "29.0.3"
 pollster = "0.4.0"

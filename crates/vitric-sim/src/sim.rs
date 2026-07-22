@@ -45,6 +45,40 @@ pub fn clear_sim_ptr() {
     SIM_PTR.with(|p| p.set(std::ptr::null_mut()));
 }
 
+/// RAII guard for the `SIM_PTR` window: sets the thread-local pointer on creation and clears it
+/// on drop — **including during panic unwinding**. A panic escaping `logic.on_tick` /
+/// `logic.catch_up_region` used to skip `clear_sim_ptr` and leave a dangling pointer to `Sim`
+/// behind; the next `with_sim_ptr` on this thread would then dereference freed memory (UB).
+/// Prefer the guard over manual `set_sim_ptr`/`clear_sim_ptr` pairs.
+pub struct SimPtrGuard {
+    _private: (),
+}
+
+impl SimPtrGuard {
+    /// Set the thread-local `Sim` pointer; it is cleared automatically when the guard drops.
+    pub fn new(sim: &mut Sim) -> SimPtrGuard {
+        set_sim_ptr(sim);
+        SimPtrGuard { _private: () }
+    }
+}
+
+impl Drop for SimPtrGuard {
+    fn drop(&mut self) {
+        clear_sim_ptr();
+    }
+}
+
+/// Extract a readable message from a panic payload caught by `catch_unwind`.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "未知 panic 负载".to_string()
+    }
+}
+
 /// Run `f` with the current `Sim` borrowed mutably from the thread-local pointer. Panics if
 /// `SIM_PTR` is null (i.e. called outside a `set_sim_ptr`/`clear_sim_ptr` window) — this is
 /// the fail-fast contract that catches "random_stream called outside a sim step" bugs.
@@ -402,17 +436,24 @@ impl Sim {
                 .unwrap_or(0)
                 .max(0) as u32;
             // SIM_PTR window: catch_up_region runs scripts (each system's optional catch_up fn),
-            // which may call ctx.random_stream → __randomStreamNext → with_sim_ptr. Set before,
-            // clear after — same pattern as the on_tick window below.
-            set_sim_ptr(self);
-            let catch_up_result = logic.catch_up_region(
-                &mut self.world,
-                &mut self.rng,
-                &region_id,
-                dormant_ticks,
-                self.tick,
-            );
-            clear_sim_ptr();
+            // which may call ctx.random_stream → __randomStreamNext → with_sim_ptr. The guard
+            // clears the pointer on drop — even if the logic layer panics — and catch_unwind
+            // turns such a panic into a SimError::Logic instead of killing the engine process.
+            let catch_up_result = {
+                let _sim_ptr_guard = SimPtrGuard::new(self);
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    logic.catch_up_region(
+                        &mut self.world,
+                        &mut self.rng,
+                        &region_id,
+                        dormant_ticks,
+                        self.tick,
+                    )
+                }))
+                .unwrap_or_else(|payload| {
+                    Err(format!("逻辑层 panic（引擎已拦截）: {}", panic_payload_message(&*payload)))
+                })
+            };
             catch_up_result.map_err(|message| SimError::Logic { tick: self.tick, message })?;
             // Consume the budget: dormant_ticks resets to 0 after catch-up. The region is now
             // active, so accumulate_dormant_ticks won't touch it anymore.
@@ -421,13 +462,20 @@ impl Sim {
 
         // 5. Logic
         // SIM_PTR window: on_tick runs all script systems, which may call ctx.random_stream →
-        // __randomStreamNext → with_sim_ptr. Set before, clear after — the pointer is null
-        // outside this synchronous window (QuickJS is single-threaded; no concurrency, no
-        // aliasing with the &mut self.world / &mut self.rng borrows passed to logic).
-        set_sim_ptr(self);
-        let on_tick_result =
-            logic.on_tick(&mut self.world, events.clone(), &mut self.rng, self.tick);
-        clear_sim_ptr();
+        // __randomStreamNext → with_sim_ptr. The guard clears the pointer on drop — even if the
+        // logic layer panics — so no dangling pointer survives this window; catch_unwind turns a
+        // logic/script panic into a SimError::Logic, keeping the main loop (and recording
+        // finalization) alive. Note: the workspace does not set `panic = "abort"`, so unwinding
+        // is available; do not enable it without revisiting this boundary.
+        let on_tick_result = {
+            let _sim_ptr_guard = SimPtrGuard::new(self);
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                logic.on_tick(&mut self.world, events.clone(), &mut self.rng, self.tick)
+            }))
+            .unwrap_or_else(|payload| {
+                Err(format!("逻辑层 panic（引擎已拦截）: {}", panic_payload_message(&*payload)))
+            })
+        };
         on_tick_result.map_err(|message| SimError::Logic { tick: self.tick, message })?;
 
         // 5.5 Region dormant accounting: every step, dormant/frozen regions accumulate one tick
@@ -1166,6 +1214,43 @@ mod tests {
         sim.world.set_component(wall, "Collider", json!({"w": 2.0, "h": 4.0})).unwrap();
         sim.world.set_component(wall, "Solid", json!({})).unwrap();
         p
+    }
+
+    /// Logic that panics inside `on_tick`, standing in for a script-layer panic.
+    struct PanicLogic;
+
+    impl GameLogic for PanicLogic {
+        fn on_tick(&mut self, _: &mut World, _: Vec<Event>, _: &mut Pcg32, _: u64) -> Result<(), String> {
+            panic!("script layer exploded");
+        }
+    }
+
+    #[test]
+    fn sim_ptr_guard_clears_pointer_on_panic() {
+        let mut sim = Sim::new(1);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = SimPtrGuard::new(&mut sim);
+            SIM_PTR.with(|p| assert!(!p.get().is_null(), "窗口内指针应已设置"));
+            panic!("boom");
+        }));
+        assert!(caught.is_err(), "panic 应穿透窗口");
+        SIM_PTR.with(|p| assert!(p.get().is_null(), "guard drop 必须清掉 SIM_PTR，否则留下悬垂指针"));
+    }
+
+    #[test]
+    fn panicking_logic_becomes_logic_error_and_leaves_no_dangling_sim_ptr() {
+        let mut sim = Sim::new(1);
+        let err = sim.step(&mut PanicLogic).unwrap_err();
+        match &err {
+            SimError::Logic { message, .. } => {
+                assert!(message.contains("script layer exploded"), "panic 消息应透传，实际 {message}");
+            }
+            other => panic!("错误类型不对: {other}"),
+        }
+        SIM_PTR.with(|p| assert!(p.get().is_null(), "panic 后 SIM_PTR 必须为空（guard 已清理）"));
+        // The engine survives: the same Sim keeps stepping with healthy logic afterwards.
+        sim.step(&mut ()).unwrap();
+        assert_eq!(sim.tick, 1, "panic 的 tick 不应推进；后续 step 正常推进");
     }
 
     #[test]

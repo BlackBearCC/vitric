@@ -2,8 +2,14 @@
 name = "vitric-data"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+description = "Declarative data layer for the Vitric engine: schema validation, scene instantiation, and project loading"
+# Internal implementation crate: not published to crates.io on its own.
+publish = false
 
 [dependencies]
 serde = { workspace = true }

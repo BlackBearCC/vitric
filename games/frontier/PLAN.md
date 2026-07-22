@@ -219,7 +219,7 @@ Gate 录制策略：
 7. ~~**录制通关录像**~~ ✅ qa/clear.json
 8. ~~**跑 gate**~~ ✅ vitric gate games/frontier PASS
 9. ~~**收尾修复**~~ ✅ HUD 标签 / 数值 / smoke 补全
-10. ~~**创建 _GAME_DONE.txt**~~ ✅
+10. ~~**标记游戏完成**~~ ✅（当时以 `_GAME_DONE.txt` 为记，该文件现已删除，不再使用）
 
 每一步的产出：check 绿 → cargo build --release (如果引擎源码改了) → vitric run + 控制面自测 → git commit → git push
 

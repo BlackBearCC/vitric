@@ -2,8 +2,14 @@
 name = "vitric-script"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
+description = "Sandboxed QuickJS scripting for the Vitric engine, with enforced read/write declarations and a deterministic RNG"
+# Internal implementation crate: not published to crates.io on its own.
+publish = false
 
 [dependencies]
 serde = { workspace = true }
