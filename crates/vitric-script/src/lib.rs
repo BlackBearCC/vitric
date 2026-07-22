@@ -753,7 +753,11 @@ impl ScriptEngine {
                 limit: self.limits.memory_limit,
             };
         }
-        if message.contains("stack overflow") {
+        // QuickJS reports stack exhaustion as "Maximum call stack size exceeded";
+        // match both phrasings (case-insensitively) so the classification is robust
+        // against engine message wording changes.
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("stack overflow") || lower.contains("call stack size exceeded") {
             return ScriptError::StackOverflow {
                 location: location.to_string(),
                 limit: self.limits.max_stack_size,
