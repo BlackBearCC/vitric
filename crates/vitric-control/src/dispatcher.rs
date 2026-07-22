@@ -16,11 +16,15 @@ pub struct LoopCtl {
     /// Speed multiplier (1.0 = realtime, 0 = no upper limit — headless AI can fast-forward freely).
     pub speed: f64,
     pub quit: bool,
+    /// Turbo mode: ignore wall clock and run at full CPU speed while still draining RPC input.
+    /// Unlike `--ticks N` bounded run, turbo keeps the RPC server alive so external scripts can
+    /// inject input/click mid-run. Intended for headless recordings and AI fast-forward.
+    pub turbo: bool,
 }
 
 impl Default for LoopCtl {
     fn default() -> Self {
-        LoopCtl { paused: false, speed: 1.0, quit: false }
+        LoopCtl { paused: false, speed: 1.0, quit: false, turbo: false }
     }
 }
 
@@ -476,6 +480,17 @@ impl Dispatcher {
                 }
                 self.ctl.speed = speed;
                 Ok(json!({"speed": speed}))
+            }
+            "sim/turbo" => {
+                // Toggle turbo mode. When on, the main loop ignores wall-clock pacing and runs
+                // at full CPU speed while still draining RPC input between ticks. Turning turbo
+                // on implicitly resumes from pause (turbo and pause are mutually exclusive).
+                let on = params.get("on").and_then(|v| v.as_bool()).unwrap_or(true);
+                self.ctl.turbo = on;
+                if on {
+                    self.ctl.paused = false;
+                }
+                Ok(json!({"turbo": on, "tick": sim.tick}))
             }
             "sim/quit" => {
                 self.ctl.quit = true;

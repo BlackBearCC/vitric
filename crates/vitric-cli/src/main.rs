@@ -666,8 +666,9 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
             continue;
         }
 
-        if max_ticks.is_some() {
-            // Bounded run: full speed, no sleeping
+        if dispatcher.ctl.turbo || max_ticks.is_some() {
+            // Full-speed run: ignore wall clock, drain RPC input each iteration.
+            // Covers both `--ticks N` bounded runs and runtime `sim/turbo` toggle.
             step_once(&mut sim, &mut rt, &mut dispatcher, &mut audio_sink, &mut llm)?;
             continue;
         }
