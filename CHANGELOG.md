@@ -29,6 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `games/frontier` now bundles a subset CJK font (Noto Sans CJK SC, OFL —
+  see `fonts/OFL.txt`), fixing CI validation failures on the missing
+  `fonts/cjk.otf` declared in its manifest.
 - `examples_check` integration test: every project under `examples/` must pass
   `vitric check` in CI — the README's promise is now enforced by a test.
 - Community infrastructure: CONTRIBUTING, CODE_OF_CONDUCT, SECURITY policy,
