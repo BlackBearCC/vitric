@@ -27,7 +27,7 @@ thread_local! {
     /// Mirrors the `WORLD_PTR` pattern in vitric-script. Lives in vitric-sim (not vitric-script)
     /// to avoid a circular dependency: `Sim::step` sets it, vitric-script's native
     /// `__randomStreamNext` reads it via [`with_sim_ptr`].
-    static SIM_PTR: std::cell::Cell<*mut Sim> = std::cell::Cell::new(std::ptr::null_mut());
+    static SIM_PTR: std::cell::Cell<*mut Sim> = const { std::cell::Cell::new(std::ptr::null_mut()) };
 }
 
 /// Set the thread-local `Sim` pointer. Must be paired with [`clear_sim_ptr`] after the JS call

@@ -29,7 +29,7 @@ const PRELUDE: &str = include_str!("prelude.js");
 thread_local! {
     /// Bare pointer to the World readable during the current call_js. Set before run_one_system/call_fn calls into JS, cleared after;
     /// null outside that window. QuickJS is single-threaded and synchronous; __getFieldRaw only reads it within the window.
-    static WORLD_PTR: std::cell::Cell<*const World> = std::cell::Cell::new(std::ptr::null());
+    static WORLD_PTR: std::cell::Cell<*const World> = const { std::cell::Cell::new(std::ptr::null()) };
 }
 
 /// RAII guard for the `WORLD_PTR` read window: sets the thread-local pointer on creation and
