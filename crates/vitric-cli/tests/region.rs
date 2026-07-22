@@ -580,7 +580,7 @@ fn region_content_deterministic_across_thaw_timing() {
     let mut pos1: Vec<(f64, f64)> = Vec::new();
     for i in 0..6 {
         let name = format!("mountain_node_{}", i);
-        let e = sim1.world.entity(&name).expect(&format!("{} exists in sim1", name));
+        let e = sim1.world.entity(&name).unwrap_or_else(|| panic!("{} exists in sim1", name));
         let x = sim1.world.get_field(e, "Position.x").unwrap().as_f64().unwrap();
         let y = sim1.world.get_field(e, "Position.y").unwrap().as_f64().unwrap();
         pos1.push((x, y));
@@ -612,7 +612,7 @@ fn region_content_deterministic_across_thaw_timing() {
     let mut pos2: Vec<(f64, f64)> = Vec::new();
     for i in 0..6 {
         let name = format!("mountain_node_{}", i);
-        let e = sim2.world.entity(&name).expect(&format!("{} exists in sim2", name));
+        let e = sim2.world.entity(&name).unwrap_or_else(|| panic!("{} exists in sim2", name));
         let x = sim2.world.get_field(e, "Position.x").unwrap().as_f64().unwrap();
         let y = sim2.world.get_field(e, "Position.y").unwrap().as_f64().unwrap();
         pos2.push((x, y));
