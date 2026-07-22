@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -227,18 +228,42 @@ fn spawn_game(dir: &Path, extra: &[&str]) -> RunningGame {
 
 fn rpc(port: u16, method: &str, params: Value) -> Value {
     let body = json!({"method": method, "params": params}).to_string();
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    write!(
-        stream,
-        "POST /rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    )
-    .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).unwrap();
-    let body_start = response.find("\r\n\r\n").expect("HTTP 响应有空行") + 4;
-    serde_json::from_str(&response[body_start..]).expect("响应体是 JSON")
+    // Retry the whole request: the OS can complete the TCP handshake while the freshly
+    // spawned server is not yet accepting, which otherwise shows up as a refused or
+    // empty response on loaded CI machines.
+    let mut last_err = String::new();
+    for _ in 0..40 {
+        let attempt = (|| -> Result<String, String> {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.to_string())?;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .map_err(|e| e.to_string())?;
+            write!(
+                stream,
+                "POST /rpc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .map_err(|e| e.to_string())?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response).map_err(|e| e.to_string())?;
+            if !response.contains("\r\n\r\n") {
+                return Err(format!("incomplete HTTP response: {response:?}"));
+            }
+            Ok(response)
+        })();
+        match attempt {
+            Ok(response) => {
+                let body_start = response.find("\r\n\r\n").expect("HTTP 响应有空行") + 4;
+                return serde_json::from_str(&response[body_start..]).expect("响应体是 JSON");
+            }
+            Err(e) => {
+                last_err = e;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    panic!("RPC {method} retried 40 times, last error: {last_err}");
 }
 
 #[test]
