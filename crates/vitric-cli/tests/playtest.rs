@@ -1,7 +1,7 @@
 //! playtest foundation end-to-end (design draft stage 1): automatically play one session on the
-//! real jump project, asserting it can run to max_ticks producing Timeout + a non-empty recording
-//! + the recording passes vitric_sim's replay check, and that two runs of the same
-//! (project, strategy, seed, max_ticks) are byte-identical.
+//! real jump project, asserting it can run to max_ticks producing Timeout and a non-empty
+//! recording, that the recording passes vitric_sim's replay check, and that two runs of the
+//! same (project, strategy, seed, max_ticks) are byte-identical.
 
 use std::path::PathBuf;
 
