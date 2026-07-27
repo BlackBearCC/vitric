@@ -1,0 +1,25 @@
+{
+  "rules": [
+    {
+      "id": "quest-on-offer",
+      "on": { "event": "quest-offer" },
+      "do": [
+        { "call": "__quest_offer", "with": { "quest": "event.quest" } }
+      ]
+    },
+    {
+      "id": "quest-on-accept",
+      "on": { "event": "quest-accept" },
+      "do": [
+        { "call": "__quest_accept", "with": { "quest": "event.quest", "who": "event.who" } }
+      ]
+    },
+    {
+      "id": "quest-on-turn-in",
+      "on": { "event": "quest-turn-in" },
+      "do": [
+        { "call": "__quest_turn_in", "with": { "quest": "event.quest", "who": "event.who" } }
+      ]
+    }
+  ]
+}

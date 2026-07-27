@@ -1,0 +1,60 @@
+{
+  "rules": [
+    {
+      "id": "move-right-start",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "pressed" } },
+      "do": [{ "call": "move", "with": { "dir": 1 } }]
+    },
+    {
+      "id": "move-right-stop",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "released" } },
+      "do": [{ "call": "move", "with": { "dir": 0 } }]
+    },
+    {
+      "id": "move-left-start",
+      "on": { "event": "input", "filter": { "action": "left", "phase": "pressed" } },
+      "do": [{ "call": "move", "with": { "dir": -1 } }]
+    },
+    {
+      "id": "move-left-stop",
+      "on": { "event": "input", "filter": { "action": "left", "phase": "released" } },
+      "do": [{ "call": "move", "with": { "dir": 0 } }]
+    },
+    {
+      "id": "elder-offer",
+      "comment": "First contact with elder: offer the herb quest (inactive → offered).",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["@herb-quest.QuestState.state", "==", "inactive"]],
+      "do": [{ "emit": "quest-offer", "data": { "quest": "herb-quest" } }]
+    },
+    {
+      "id": "elder-accept",
+      "comment": "Still touching elder next tick: accept the quest (offered → active).",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["@herb-quest.QuestState.state", "==", "offered"]],
+      "do": [{ "emit": "quest-accept", "data": { "quest": "herb-quest", "who": "self" } }]
+    },
+    {
+      "id": "elder-turnin",
+      "comment": "Return to elder after completing objective: turn in (completed → turned-in, reward granted).",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["@herb-quest.QuestState.state", "==", "completed"]],
+      "do": [{ "emit": "quest-turn-in", "data": { "quest": "herb-quest", "who": "self" } }]
+    },
+    {
+      "id": "collect-herb",
+      "comment": "Walk over a herb pickup → emit pickup event (inventory module handles it) + despawn the herb.",
+      "on": { "event": "collision", "between": ["Player", "Pickup"] },
+      "do": [
+        { "emit": "pickup", "data": { "who": "self", "item": "other.Pickup.item", "count": "other.Pickup.count" } },
+        { "despawn": "other" }
+      ]
+    },
+    {
+      "id": "update-hud",
+      "comment": "Every tick: render quest state + inventory into the HUD text.",
+      "on": "tick",
+      "do": [{ "call": "render_hud", "with": { "who": "@player", "quest": "@herb-quest", "hud": "@hud" } }]
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "components": {
+    "QuestDef": {
+      "fields": {
+        "id": { "type": "text", "default": "" },
+        "title": { "type": "text", "default": "" },
+        "desc": { "type": "text", "default": "" },
+        "prereq": { "type": "list", "of": { "type": "text" }, "default": [] },
+        "reward_item": { "type": "text", "default": "" },
+        "reward_count": { "type": "int", "default": 0, "min": 0 }
+      }
+    },
+    "QuestObjective": {
+      "fields": {
+        "kind": { "type": "enum", "variants": ["collect", "talk"], "default": "collect" },
+        "arg": { "type": "text", "default": "" },
+        "target": { "type": "int", "default": 1, "min": 1 }
+      }
+    },
+    "QuestState": {
+      "fields": {
+        "state": { "type": "enum", "variants": ["inactive", "offered", "active", "completed", "turned-in", "failed"], "default": "inactive" },
+        "progress": { "type": "int", "default": 0, "min": 0 },
+        "assignee": { "type": "text", "default": "" }
+      }
+    },
+    "QuestLog": {
+      "fields": {
+        "active": { "type": "list", "of": { "type": "text" }, "default": [] },
+        "completed": { "type": "list", "of": { "type": "text" }, "default": [] }
+      }
+    },
+    "Talked": {
+      "fields": {
+        "count": { "type": "int", "default": 0, "min": 0 }
+      }
+    }
+  }
+}

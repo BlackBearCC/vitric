@@ -203,6 +203,124 @@ vitric check my-game
 
 ---
 
+## 配方 4：使用 quest 模块（任务系统 / 状态机 / 目标追踪 / 奖励）
+
+**目标**：NPC 给玩家派任务，玩家完成目标后回来交付，获得奖励。支持任务前置依赖（prereq）、collect / talk 两类目标、与 inventory 模块组合发奖。
+
+### 1. includes 两个模块
+
+```json
+{
+  "includes": ["../../modules/inventory", "../../modules/quest"]
+}
+```
+
+quest 模块贡献 5 个组件：
+- `QuestDef` — 静态：`id` / `title` / `desc` / `prereq`(前置任务 id 列表) / `reward_item` / `reward_count`
+- `QuestObjective` — 静态：`kind`(`collect`|`talk`) / `arg`(物品 id 或 NPC 名) / `target`
+- `QuestState` — 可变：`state`(`inactive`→`offered`→`active`→`completed`→`turned-in`) / `progress` / `assignee`
+- `QuestLog` — 挂在玩家身上：`active`(已接任务 id 列表) / `completed`(已交付任务 id 列表)
+- `Talked` — 挂在 NPC 身上：`count`（被对话次数，talk 目标读它）
+
+### 2. 场景里定义任务实体 + 给玩家挂 QuestLog
+
+任务是一个**逻辑实体**（不需要 Position/Collider），同时挂三个组件：
+
+```json
+{
+  "name": "herb-quest",
+  "components": {
+    "QuestDef": {
+      "id": "herb-quest",
+      "title": "采 3 株草药",
+      "desc": "去田野采 3 株草药，带回给长老。",
+      "prereq": [],
+      "reward_item": "coin",
+      "reward_count": 5
+    },
+    "QuestObjective": { "kind": "collect", "arg": "herb", "target": 3 },
+    "QuestState": { "state": "inactive", "progress": 0, "assignee": "" }
+  }
+}
+```
+
+```json
+{
+  "name": "player",
+  "components": {
+    "Player": {},
+    "Position": { "x": 0, "y": 0 },
+    "Inventory": { "items": [], "counts": [], "capacity": 8 },
+    "QuestLog": { "active": [], "completed": [] }
+  }
+}
+```
+
+### 3. 在自己的规则里驱动状态机
+
+quest 模块监听三个事件：`quest-offer` / `quest-accept` / `quest-turn-in`。你的游戏规则负责在合适的时机 emit 它们。典型模式是 NPC 碰撞驱动（碰撞每 tick 持续触发，状态机跨 tick 推进）：
+
+```json
+{
+  "rules": [
+    {
+      "id": "elder-offer",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["@herb-quest.QuestState.state", "==", "inactive"]],
+      "do": [{ "emit": "quest-offer", "data": { "quest": "herb-quest" } }]
+    },
+    {
+      "id": "elder-accept",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["@herb-quest.QuestState.state", "==", "offered"]],
+      "do": [{ "emit": "quest-accept", "data": { "quest": "herb-quest", "who": "self" } }]
+    },
+    {
+      "id": "elder-turnin",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["@herb-quest.QuestState.state", "==", "completed"]],
+      "do": [{ "emit": "quest-turn-in", "data": { "quest": "herb-quest", "who": "self" } }]
+    }
+  ]
+}
+```
+
+玩家碰到 NPC：tick 1 offer（inactive→offered），tick 2 accept（offered→active，因为状态写入是 deferred，下一 tick 可见），完成后再次碰撞 turn-in。
+
+### 4. 目标追踪是自动的
+
+quest 模块注册了 `quest-track` tick 系统，每 tick 扫描所有 `active` 任务：
+- **collect** 目标：读 `assignee` 的 `Inventory.items/counts`，把当前持有量写进 `progress`。**这会和 inventory 模块自动组合**——你只需用配方 1 的方式 emit `pickup` 事件，背包变了，任务进度自动跟上。
+- **talk** 目标：读 NPC（名为 `QuestObjective.arg`）的 `Talked.count`，>0 即完成。
+
+`progress >= target` 时系统自动把 state 切到 `completed` 并 emit `quest-completed`。你不用写任何追踪逻辑。
+
+### 5. 奖励也是自动的
+
+`quest-turn-in` 触发 `__quest_turn_in`，它会：
+- 把任务 id 从玩家的 `QuestLog.active` 移到 `QuestLog.completed`
+- 如果 `reward_item` 非空，emit `pickup` 事件——**inventory 模块接收并加进背包**。这就是模块组合的接缝：quest 发奖 = emit pickup。
+
+### 6. 监听模块发出的事件做反馈
+
+模块会 emit：`quest-offered` / `quest-locked`(前置未满足) / `quest-accepted` / `quest-completed` / `quest-turned-in`。
+
+```json
+{
+  "id": "update-hud",
+  "on": "tick",
+  "do": [{ "call": "render_hud", "with": { "who": "@player", "quest": "@herb-quest", "hud": "@hud" } }]
+}
+```
+
+### 7. 任务前置依赖
+
+`QuestDef.prereq` 列出必须先完成的任务 id。`__quest_offer` 会检查 `@player.QuestLog.completed` 是否包含全部 prereq；不满足则 emit `quest-locked`（任务保持 inactive），满足才切到 offered。用这个串起任务链：q2.prereq=["q1"]，玩家必须先交付 q1 才能接 q2。
+
+完整可运行示例见 `examples/quest-demo/`，集成测试见 `crates/vitric-cli/tests/quest.rs`。
+
+---
+
 ## 编写自己的模块
 
 模块就是一个含 `module.json` 的目录：

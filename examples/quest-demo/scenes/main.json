@@ -1,0 +1,82 @@
+{
+  "entities": [
+    {
+      "name": "player",
+      "components": {
+        "Player": {},
+        "Position": { "x": 0, "y": 0 },
+        "Velocity": { "x": 0, "y": 0 },
+        "Collider": { "w": 1, "h": 2 },
+        "Speed": { "value": 60 },
+        "Sprite": { "w": 1, "h": 2, "color": "#4da3ff" },
+        "Inventory": { "items": [], "counts": [], "capacity": 8 },
+        "QuestLog": { "active": [], "completed": [] }
+      }
+    },
+    {
+      "name": "camera",
+      "components": {
+        "Camera": { "x": 8, "y": 0, "scale": 8 }
+      }
+    },
+    {
+      "name": "elder",
+      "components": {
+        "Npc": {},
+        "Position": { "x": 3, "y": 0 },
+        "Collider": { "w": 3, "h": 2 },
+        "Sprite": { "w": 1, "h": 2, "color": "#a0522d" },
+        "Talked": { "count": 0 }
+      }
+    },
+    {
+      "name": "herb-1",
+      "components": {
+        "Position": { "x": 8, "y": 0 },
+        "Collider": { "w": 1, "h": 1 },
+        "Sprite": { "w": 1, "h": 1, "color": "#7cb342" },
+        "Pickup": { "item": "herb", "count": 1 }
+      }
+    },
+    {
+      "name": "herb-2",
+      "components": {
+        "Position": { "x": 10, "y": 0 },
+        "Collider": { "w": 1, "h": 1 },
+        "Sprite": { "w": 1, "h": 1, "color": "#7cb342" },
+        "Pickup": { "item": "herb", "count": 1 }
+      }
+    },
+    {
+      "name": "herb-3",
+      "components": {
+        "Position": { "x": 12, "y": 0 },
+        "Collider": { "w": 1, "h": 1 },
+        "Sprite": { "w": 1, "h": 1, "color": "#7cb342" },
+        "Pickup": { "item": "herb", "count": 1 }
+      }
+    },
+    {
+      "name": "herb-quest",
+      "components": {
+        "QuestDef": {
+          "id": "herb-quest",
+          "title": "Collect 3 Herbs",
+          "desc": "Gather herbs from the field and bring them to the elder.",
+          "prereq": [],
+          "reward_item": "coin",
+          "reward_count": 5
+        },
+        "QuestObjective": { "kind": "collect", "arg": "herb", "target": 3 },
+        "QuestState": { "state": "inactive", "progress": 0, "assignee": "" }
+      }
+    },
+    {
+      "name": "hud",
+      "components": {
+        "Position": { "x": 8, "y": 6 },
+        "Text": { "content": "Quest: none | Inventory: empty", "size": 1.0, "color": "#ffd75e" }
+      }
+    }
+  ]
+}
