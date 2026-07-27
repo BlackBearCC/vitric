@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "id": "shop-on-buy",
+      "comment": "Buy count of an item from a shop: deduct currency from buyer's inventory, add item to buyer's inventory, decrement stock. Atomic — directly reads/writes Inventory to avoid double-spend race.",
+      "on": { "event": "shop-buy" },
+      "do": [{ "call": "__shop_buy", "with": { "who": "event.who", "shop": "event.shop", "item": "event.item", "count": "event.count" } }]
+    },
+    {
+      "id": "shop-on-sell",
+      "comment": "Sell count of an item to a shop: remove item from seller's inventory, add currency to seller's inventory. Sell price is half of buy price (floor).",
+      "on": { "event": "shop-sell" },
+      "do": [{ "call": "__shop_sell", "with": { "who": "event.who", "shop": "event.shop", "item": "event.item", "count": "event.count" } }]
+    }
+  ]
+}

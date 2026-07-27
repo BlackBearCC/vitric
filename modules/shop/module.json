@@ -1,0 +1,6 @@
+{
+  "name": "shop",
+  "schema": "schema.json",
+  "rules": ["rules/shop.json"],
+  "scripts": ["scripts/shop.js"]
+}

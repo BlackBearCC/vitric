@@ -1,0 +1,52 @@
+{
+  "entities": [
+    {
+      "name": "player",
+      "components": {
+        "Player": {},
+        "Position": { "x": 0, "y": 0 },
+        "Sprite": { "w": 1, "h": 1, "color": "#4da3ff" },
+        "Health": { "hp": 100, "max": 100 },
+        "Attack": { "power": 50 },
+        "Inventory": { "items": ["coin"], "counts": [3], "capacity": 8 }
+      }
+    },
+    {
+      "name": "enemy",
+      "components": {
+        "Enemy": {},
+        "Position": { "x": 2, "y": 0 },
+        "Sprite": { "w": 1, "h": 1, "color": "#e53935" },
+        "Health": { "hp": 50, "max": 50 },
+        "Attack": { "power": 10 },
+        "LootTable": {
+          "items": ["coin"],
+          "count_mins": [3],
+          "count_maxs": [5],
+          "chances": [1.0]
+        }
+      }
+    },
+    {
+      "name": "merchant",
+      "components": {
+        "Npc": {},
+        "Position": { "x": 0, "y": 2 },
+        "Sprite": { "w": 1, "h": 1, "color": "#a3d44d" },
+        "Shop": {
+          "currency": "coin",
+          "items": ["potion", "key"],
+          "prices": [3, 10],
+          "stocks": [-1, 2]
+        }
+      }
+    },
+    {
+      "name": "hud",
+      "components": {
+        "Position": { "x": 1, "y": 4 },
+        "Text": { "content": "X: attack enemy | B: buy potion | S: sell coin", "size": 0.7, "color": "#ffd75e" }
+      }
+    }
+  ]
+}

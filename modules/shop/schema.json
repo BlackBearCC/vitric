@@ -1,0 +1,12 @@
+{
+  "components": {
+    "Shop": {
+      "fields": {
+        "currency": { "type": "text", "default": "coin" },
+        "items": { "type": "list", "of": { "type": "text" }, "default": [] },
+        "prices": { "type": "list", "of": { "type": "int" }, "default": [] },
+        "stocks": { "type": "list", "of": { "type": "int" }, "default": [] }
+      }
+    }
+  }
+}

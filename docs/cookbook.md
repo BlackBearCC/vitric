@@ -1037,6 +1037,144 @@ tick N+3: deferred 写入可见
 
 ---
 
+## 配方 11：使用 shop 模块（商店 / 买卖 / 货币 / 库存 / 经济闭环）
+
+**目标**：NPC 商店出售物品，玩家用货币（coin）购买；玩家也可以把不需要的物品卖给商店换钱。这是 RPG 经济闭环的核心——combat → loot → coins → shop → items → stronger。没有商店的 RPG 只是"刷怪"，有商店才是"刷怪攒钱买装备"的商业 RPG 玩法。
+
+### 1. includes
+
+```json
+{ "includes": ["../../modules/combat", "../../modules/inventory", "../../modules/loot", "../../modules/shop"] }
+```
+
+shop 模块依赖 Inventory 组件（直接读写，原子操作）。通常和 combat + loot + inventory 一起 includes，构成完整经济循环。shop 模块贡献 1 个组件：
+
+- `Shop`（挂在 NPC 商人上，静态）— 并行列表编码商店目录（和 Dialogue/LootTable 同模式）：
+  - `currency` — 货币物品 id（默认 `"coin"`）；游戏决定什么算钱
+  - `items` — 出售的物品 id 列表（如 `["potion", "sword"]`）
+  - `prices` — 每个物品的买价，以货币为单位（如 `[3, 50]`）
+  - `stocks` — 每个物品的库存；`-1` = 无限，`0` = 售罄，`N` = 限量（如 `[-1, 2]`）
+
+模块监听 2 个事件（你的规则负责 emit）：
+- `shop-buy { who, shop, item, count }` — 从 `shop` 购买 `count` 个 `item` 给 `who`
+- `shop-sell { who, shop, item, count }` — 把 `who` 的 `count` 个 `item` 卖给 `shop`
+
+模块 emit 的事件（你的规则可以监听做反馈）：
+- `item-bought { who, shop, item, count, total_price }` — 购买成功
+- `item-sold { who, shop, item, count, total_price }` — 出售成功
+- `shop-not-for-sale { who, shop, item }` — 物品不在商店目录
+- `shop-out-of-stock { who, shop, item, available }` — 库存不足
+- `shop-insufficient-funds { who, item, count, needed, have }` — 钱不够
+- `shop-inventory-full { who, item, count }` — 买家背包满
+- `shop-missing-item { who, item, count }` — 卖家没有该物品
+
+### 2. 场景里给 NPC 挂 Shop 组件
+
+```json
+{
+  "name": "merchant",
+  "components": {
+    "Npc": {},
+    "Shop": {
+      "currency": "coin",
+      "items": ["potion", "key", "sword"],
+      "prices": [3, 10, 50],
+      "stocks": [-1, 2, 1]
+    }
+  }
+}
+```
+
+这个商店的目录：
+- **potion**：3 coin，无限供应（-1）
+- **key**：10 coin，库存 2 把
+- **sword**：50 coin，库存 1 把
+
+### 3. 在规则里驱动买卖
+
+shop 模块不决定**何时**买卖——那是游戏逻辑。你的规则负责在合适的时机 emit `shop-buy` / `shop-sell`：
+
+```json
+{
+  "id": "buy-potion-on-b",
+  "comment": "Press B: buy 1 potion from the merchant.",
+  "on": { "event": "input", "filter": { "action": "b", "phase": "pressed" } },
+  "do": [{ "emit": "shop-buy", "data": { "who": "@player", "shop": "@merchant", "item": "potion", "count": 1 } }]
+},
+{
+  "id": "sell-key-on-s",
+  "comment": "Press S: sell 1 key to the merchant (sell price = floor(10/2) = 5 coins).",
+  "on": { "event": "input", "filter": { "action": "s", "phase": "pressed" } },
+  "do": [{ "emit": "shop-sell", "data": { "who": "@player", "shop": "@merchant", "item": "key", "count": 1 } }]
+}
+```
+
+### 4. 买卖结算是自动的
+
+shop 模块的 `__shop_buy` / `__shop_sell` 直接读写 Inventory 组件（原子操作，避免双花竞态）：
+
+- **买**：读 Inventory → 检查货币是否够 → 扣货币 → 加物品 → 写回 Inventory → 扣库存 → emit `item-bought`
+- **卖**：读 Inventory → 检查物品是否够 → 扣物品 → 加货币 → 写回 Inventory → emit `item-sold`
+
+卖价 = `floor(买价 / 2)`，最低 1。不在商店目录的物品不能卖（emit `shop-not-for-sale`）。
+
+> **为什么不 emit pickup/drop 事件？** 因为购买需要"扣货币 + 加物品"原子完成。如果用事件（emit drop + emit pickup），两个事件下一 tick 才结算，同 tick 内多次购买会双花（都看到原始货币量）。直接读写 Inventory 是同步的，不会双花。
+
+### 5. 监听模块发出的事件做反馈
+
+```json
+{
+  "id": "purchase-feedback",
+  "on": { "event": "item-bought" },
+  "do": [{ "call": "show_purchase_text", "with": { "item": "event.item", "count": "event.count", "price": "event.total_price", "hud": "@hud" } }]
+}
+```
+
+```js
+vitric.fn("show_purchase_text", (args, ctx) => {
+  ctx.setField(args.hud, "Text.content", "Bought " + args.count + "x " + args.item + " for " + args.price + " coins");
+});
+```
+
+### 6. 完整经济闭环
+
+shop 模块和 combat + loot + inventory 组合，构成 RPG 经济循环：
+
+```
+kill enemy → died → loot module → pickup(coin) → inventory += coin
+                                                          │
+                                                    [enough coins?]
+                                                          │
+press B → shop-buy → shop module → deduct coin + add item → inventory
+                                                          │
+press H → use item (game logic) → heal / equip / consume
+                                                          │
+                                                    stronger player
+                                                          │
+                                              kill tougher enemy → ...
+```
+
+这是商业 RPG 的核心循环：**刷怪 → 攒钱 → 买装备 → 变强 → 刷更强的怪**。loot 模块把战斗和经济连起来，shop 模块把经济和成长连起来。
+
+### 7. 与其他模块组合
+
+- **+ combat + loot**：`died` → loot 掉 coin → 玩家攒 coin → `shop-buy` 买 potion/装备。这是最常见的接法，四模块一起 includes。
+- **+ inventory**：shop 直接读写 Inventory 组件（原子操作），不 emit pickup/drop。硬依赖 Inventory。
+- **+ progression**：`item-bought` 可以触发"获得新装备 → 升级装备槽"；`item-sold` 可以驱动成就系统。
+- **+ game-flow**：`item-bought` 可以触发 UI 动画、音效；商店可以解锁新商品（修改 Shop.items 列表）。
+
+### 8. 库存机制
+
+- `stocks = -1`：无限供应（常见于消耗品如 potion）
+- `stocks = N`：限量供应，购买后自动扣减，售罄（`stocks = 0`）时 emit `shop-out-of-stock`
+- `stocks` 缺省：视为 -1（无限）
+
+限量库存适合关键道具（如"商店只有 1 把圣剑"），无限库存适合消耗品（如"药水无限买"）。
+
+完整可运行示例见 `examples/shop-demo/`，集成测试见 `crates/vitric-cli/tests/shop.rs`。
+
+---
+
 ## 编写自己的模块
 
 模块就是一个含 `module.json` 的目录：

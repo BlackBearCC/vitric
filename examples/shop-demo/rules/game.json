@@ -1,0 +1,33 @@
+{
+  "rules": [
+    {
+      "id": "player-attacks-enemy",
+      "comment": "Press X: player attacks the enemy (combat module applies damage).",
+      "on": { "event": "input", "filter": { "action": "x", "phase": "pressed" } },
+      "do": [{ "emit": "attack", "data": { "attacker": "@player", "target": "@enemy" } }]
+    },
+    {
+      "id": "player-buys-potion",
+      "comment": "Press B: buy 1 potion from the merchant for 3 coins.",
+      "on": { "event": "input", "filter": { "action": "b", "phase": "pressed" } },
+      "do": [{ "emit": "shop-buy", "data": { "who": "@player", "shop": "@merchant", "item": "potion", "count": 1 } }]
+    },
+    {
+      "id": "player-sells-key",
+      "comment": "Press S: sell 1 key to the merchant (sell price = floor(10/2) = 5 coins).",
+      "on": { "event": "input", "filter": { "action": "s", "phase": "pressed" } },
+      "do": [{ "emit": "shop-sell", "data": { "who": "@player", "shop": "@merchant", "item": "key", "count": 1 } }]
+    },
+    {
+      "id": "use-potion",
+      "comment": "Press H: use a potion to heal 30 HP (consumes 1 potion from inventory).",
+      "on": { "event": "input", "filter": { "action": "h", "phase": "pressed" } },
+      "do": [{ "call": "use_potion", "with": { "who": "@player" } }]
+    },
+    {
+      "id": "update-hud",
+      "on": "tick",
+      "do": [{ "call": "render_hud", "with": { "who": "@player", "enemy": "@enemy", "hud": "@hud" } }]
+    }
+  ]
+}
