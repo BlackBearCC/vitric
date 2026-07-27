@@ -1,0 +1,77 @@
+{
+  "rules": [
+    {
+      "id": "equip-sword",
+      "comment": "Press 1: equip sword to weapon slot (+10 ATK).",
+      "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } },
+      "do": [{ "emit": "equip", "data": { "who": "@player", "item": "sword", "slot": "weapon" } }]
+    },
+    {
+      "id": "equip-armor",
+      "comment": "Press 2: equip armor to armor slot (+20 max HP, full heal to new max).",
+      "on": { "event": "input", "filter": { "action": "2", "phase": "pressed" } },
+      "do": [{ "emit": "equip", "data": { "who": "@player", "item": "armor", "slot": "armor" } }]
+    },
+    {
+      "id": "equip-ring",
+      "comment": "Press 3: equip ring to accessory slot (+5 ATK).",
+      "on": { "event": "input", "filter": { "action": "3", "phase": "pressed" } },
+      "do": [{ "emit": "equip", "data": { "who": "@player", "item": "ring", "slot": "accessory" } }]
+    },
+    {
+      "id": "equip-gloves",
+      "comment": "Press 4: equip gloves to accessory slot — auto-unequips ring back to inventory (+3 ATK).",
+      "on": { "event": "input", "filter": { "action": "4", "phase": "pressed" } },
+      "do": [{ "emit": "equip", "data": { "who": "@player", "item": "gloves", "slot": "accessory" } }]
+    },
+    {
+      "id": "equip-spare-sword",
+      "comment": "Press 5: equip spare_sword to weapon slot — auto-unequips sword back to inventory (+8 ATK).",
+      "on": { "event": "input", "filter": { "action": "5", "phase": "pressed" } },
+      "do": [{ "emit": "equip", "data": { "who": "@player", "item": "spare_sword", "slot": "weapon" } }]
+    },
+    {
+      "id": "unequip-weapon",
+      "comment": "Press Q: unequip weapon slot (returns item to inventory, removes ATK bonus).",
+      "on": { "event": "input", "filter": { "action": "q", "phase": "pressed" } },
+      "do": [{ "emit": "unequip", "data": { "who": "@player", "slot": "weapon" } }]
+    },
+    {
+      "id": "unequip-armor",
+      "comment": "Press W: unequip armor slot (returns item to inventory, removes HP bonus).",
+      "on": { "event": "input", "filter": { "action": "w", "phase": "pressed" } },
+      "do": [{ "emit": "unequip", "data": { "who": "@player", "slot": "armor" } }]
+    },
+    {
+      "id": "unequip-accessory",
+      "comment": "Press E: unequip accessory slot (returns item to inventory, removes ATK bonus).",
+      "on": { "event": "input", "filter": { "action": "e", "phase": "pressed" } },
+      "do": [{ "emit": "unequip", "data": { "who": "@player", "slot": "accessory" } }]
+    },
+    {
+      "id": "player-attacks-dummy",
+      "comment": "Press X: player attacks the dummy — shows equipped weapon's attack power.",
+      "on": { "event": "input", "filter": { "action": "x", "phase": "pressed" } },
+      "do": [{ "emit": "attack", "data": { "attacker": "@player", "target": "@dummy" } }]
+    },
+    {
+      "id": "apply-equip-bonus",
+      "comment": "On equipped: apply stat bonus based on item id. Game decides the bonus, not the module.",
+      "on": { "event": "equipped" },
+      "if": [["event.who", "==", "@player"]],
+      "do": [{ "call": "apply_equip_bonus", "with": { "who": "@player", "item": "event.item" } }]
+    },
+    {
+      "id": "remove-equip-bonus",
+      "comment": "On unequipped: remove stat bonus based on item id.",
+      "on": { "event": "unequipped" },
+      "if": [["event.who", "==", "@player"]],
+      "do": [{ "call": "remove_equip_bonus", "with": { "who": "@player", "item": "event.item" } }]
+    },
+    {
+      "id": "update-hud",
+      "on": "tick",
+      "do": [{ "call": "render_hud", "with": { "who": "@player", "hud": "@hud" } }]
+    }
+  ]
+}

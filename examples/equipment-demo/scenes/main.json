@@ -1,0 +1,40 @@
+{
+  "entities": [
+    {
+      "name": "player",
+      "components": {
+        "Player": {},
+        "Position": { "x": 0, "y": 0 },
+        "Sprite": { "w": 1, "h": 1, "color": "#4da3ff" },
+        "Health": { "hp": 100, "max": 100 },
+        "Attack": { "power": 10 },
+        "Inventory": {
+          "items": ["sword", "armor", "ring", "gloves", "spare_sword"],
+          "counts": [1, 1, 1, 1, 1],
+          "capacity": 8
+        },
+        "Equipment": {
+          "slots": ["weapon", "armor", "accessory"],
+          "items": ["", "", ""]
+        }
+      }
+    },
+    {
+      "name": "dummy",
+      "components": {
+        "Enemy": {},
+        "Position": { "x": 2, "y": 0 },
+        "Sprite": { "w": 1, "h": 1, "color": "#e53935" },
+        "Health": { "hp": 999, "max": 999 },
+        "Attack": { "power": 0 }
+      }
+    },
+    {
+      "name": "hud",
+      "components": {
+        "Position": { "x": 1, "y": 4 },
+        "Text": { "content": "Equipment demo", "size": 0.7, "color": "#ffd75e" }
+      }
+    }
+  ]
+}

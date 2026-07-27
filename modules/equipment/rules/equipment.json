@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "id": "equipment-on-equip",
+      "comment": "Equip an item from inventory to a slot: remove from inventory, set slot. If slot is occupied, auto-unequip the old item back to inventory first.",
+      "on": { "event": "equip" },
+      "do": [{ "call": "__equip", "with": { "who": "event.who", "item": "event.item", "slot": "event.slot" } }]
+    },
+    {
+      "id": "equipment-on-unequip",
+      "comment": "Unequip an item from a slot: clear slot, add item back to inventory.",
+      "on": { "event": "unequip" },
+      "do": [{ "call": "__unequip", "with": { "who": "event.who", "slot": "event.slot" } }]
+    }
+  ]
+}

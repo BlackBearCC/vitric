@@ -1175,6 +1175,215 @@ press H → use item (game logic) → heal / equip / consume
 
 ---
 
+## 配方 12：使用 equipment 模块（装备槽 / 穿脱 / 自动换装 / 属性奖励事件）
+
+**目标**：玩家有装备槽（weapon/armor/accessory），从背包穿戴物品到槽位，脱下时物品回到背包。穿戴时游戏应用属性奖励（+ATK/+HP），脱下时移除奖励。这是 RPG 从"背包里有装备"变成"角色实际穿戴装备变强"的关键系统——和 shop 模块组合后，形成"刷怪 → 攒钱 → 买装备 → 穿戴变强 → 刷更强的怪"的完整商业 RPG 闭环。
+
+### 1. includes
+
+```json
+{ "includes": ["../../modules/combat", "../../modules/inventory", "../../modules/equipment"] }
+```
+
+equipment 模块依赖 Inventory 组件（直接读写，原子操作——和 shop 模块同一个设计原则）。通常和 combat + inventory 一起 includes，因为装备的属性奖励要应用到 Health/Attack 上。equipment 模块贡献 1 个组件：
+
+- `Equipment`（挂在可穿戴实体上）— 并行列表编码装备槽（和 Dialogue/LootTable/Shop 同模式）：
+  - `slots` — 槽位名列表，静态（如 `["weapon", "armor", "accessory"]`）
+  - `items` — 每个槽位当前装备的物品 id，`""` = 空（如 `["sword", "armor", ""]`）
+
+模块监听 2 个事件（你的规则负责 emit）：
+- `equip { who, item, slot }` — 从 `who` 的背包取出 `item` 穿戴到 `slot`
+- `unequip { who, slot }` — 脱下 `slot` 的物品，放回 `who` 的背包
+
+模块 emit 的事件（你的规则监听做属性奖励 / 反馈）：
+- `equipped { who, item, slot }` — 物品已穿戴（游戏应用属性奖励）
+- `unequipped { who, item, slot }` — 物品已脱下（游戏移除属性奖励）
+- `equip-item-not-found { who, item }` — 背包里没有该物品
+- `equip-slot-unknown { who, slot }` — 槽位名不在 `Equipment.slots` 里
+
+> **模块不决定属性奖励**——不同游戏的奖励表不同（+ATK？+HP？+暴击？技能解锁？）。模块只管"物品在背包和槽位之间移动 + emit 事件"，你的规则监听 `equipped`/`unequipped` 决定加什么属性。这和 progression 模块不在 `leveled-up` 时加属性、combat 模块不在 `died` 时 despawn 是同一个设计原则：模块管机制，游戏管策略。
+
+### 2. 场景里给实体挂 Equipment + Inventory
+
+```json
+{
+  "name": "player",
+  "components": {
+    "Health": { "hp": 100, "max": 100 },
+    "Attack": { "power": 10 },
+    "Inventory": {
+      "items": ["sword", "armor", "ring"],
+      "counts": [1, 1, 1],
+      "capacity": 8
+    },
+    "Equipment": {
+      "slots": ["weapon", "armor", "accessory"],
+      "items": ["", "", ""]
+    }
+  }
+}
+```
+
+`slots` 和 `items` 是并行列表——`items[i]` 是 `slots[i]` 当前装备的物品 id，`""` 表示空槽。初始全空（`["", "", ""]`），物品都在背包里。
+
+### 3. 在规则里驱动穿戴 / 脱下
+
+equipment 模块不决定**何时**穿戴——那是游戏逻辑（碰 NPC 打开装备 UI？按快捷键？升级解锁？）。你的规则负责在合适的时机 emit `equip` / `unequip`：
+
+```json
+{
+  "id": "equip-sword-on-1",
+  "comment": "Press 1: equip sword to weapon slot.",
+  "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } },
+  "do": [{ "emit": "equip", "data": { "who": "@player", "item": "sword", "slot": "weapon" } }]
+},
+{
+  "id": "unequip-weapon-on-q",
+  "comment": "Press Q: unequip weapon slot (returns item to inventory).",
+  "on": { "event": "input", "filter": { "action": "q", "phase": "pressed" } },
+  "do": [{ "emit": "unequip", "data": { "who": "@player", "slot": "weapon" } }]
+}
+```
+
+### 4. 穿脱结算是自动的
+
+equipment 模块的 `__equip` / `__unequip` 直接读写 Inventory + Equipment 组件（原子操作，避免状态不一致）：
+
+- **穿戴**：读 Inventory → 检查物品是否在背包 → 从背包移除 → 如果槽位已有物品，**自动脱下旧物品放回背包** → 把新物品写入槽位 → 写回 Inventory + Equipment → emit `equipped`
+- **脱下**：读 Equipment → 检查槽位是否有物品 → 把物品放回背包 → 清空槽位 → 写回 Inventory + Equipment → emit `unequipped`
+
+> **自动换装**是 equipment 模块的核心便利：往已占用的槽位穿戴新物品时，旧物品自动回到背包，不需要先手动脱下。模块会依次 emit `unequipped`（旧物品）和 `equipped`（新物品），你的规则监听这两个事件分别移除旧奖励、应用新奖励——属性不会错乱。
+
+### 5. 属性奖励：游戏决定加什么
+
+```json
+{
+  "id": "apply-equip-bonus",
+  "comment": "On equipped: apply stat bonus based on item id.",
+  "on": { "event": "equipped" },
+  "if": [["event.who", "==", "@player"]],
+  "do": [{ "call": "apply_equip_bonus", "with": { "who": "@player", "item": "event.item" } }]
+},
+{
+  "id": "remove-equip-bonus",
+  "comment": "On unequipped: remove stat bonus based on item id.",
+  "on": { "event": "unequipped" },
+  "if": [["event.who", "==", "@player"]],
+  "do": [{ "call": "remove_equip_bonus", "with": { "who": "@player", "item": "event.item" } }]
+}
+```
+
+```js
+// Per-item stat bonus table. The game owns this — the equipment module just
+// moves items between inventory and slots and emits events.
+function bonusFor(item) {
+  switch (item) {
+    case "sword":       return { atk: 10, maxHp: 0 };
+    case "spare_sword": return { atk: 8,  maxHp: 0 };
+    case "armor":       return { atk: 0,  maxHp: 20 };
+    case "ring":        return { atk: 5,  maxHp: 0 };
+    case "gloves":      return { atk: 3,  maxHp: 0 };
+    default:            return { atk: 0,  maxHp: 0 };
+  }
+}
+
+vitric.fn("apply_equip_bonus", (args, ctx) => {
+  const who = args.who;
+  const item = String(args.item);
+  const bonus = bonusFor(item);
+  if (bonus.atk !== 0) {
+    const power = Number(ctx.getField(who, "Attack.power")) || 0;
+    ctx.setField(who, "Attack.power", power + bonus.atk);
+  }
+  if (bonus.maxHp !== 0) {
+    const maxHp = Number(ctx.getField(who, "Health.max")) || 100;
+    const hp = Number(ctx.getField(who, "Health.hp")) || 0;
+    const newMax = maxHp + bonus.maxHp;
+    ctx.setField(who, "Health.max", newMax);
+    ctx.setField(who, "Health.hp", Math.min(newMax, hp + bonus.maxHp));
+  }
+});
+
+vitric.fn("remove_equip_bonus", (args, ctx) => {
+  const who = args.who;
+  const item = String(args.item);
+  const bonus = bonusFor(item);
+  if (bonus.atk !== 0) {
+    const power = Number(ctx.getField(who, "Attack.power")) || 0;
+    ctx.setField(who, "Attack.power", Math.max(0, power - bonus.atk));
+  }
+  if (bonus.maxHp !== 0) {
+    const maxHp = Number(ctx.getField(who, "Health.max")) || 100;
+    const hp = Number(ctx.getField(who, "Health.hp")) || 0;
+    const newMax = Math.max(1, maxHp - bonus.maxHp);
+    ctx.setField(who, "Health.max", newMax);
+    ctx.setField(who, "Health.hp", Math.min(hp, newMax));
+  }
+});
+```
+
+这个函数**同时读写 combat 模块的组件**（Health/Attack）——它就是 equipment 和 combat 的桥。模块本身不耦合（equipment 不知道 Health/Attack 的存在），桥接发生在**你的游戏脚本**里。这和配方 9（progression）的 `apply_level_up_bonus` 是同一个模式：模块通过事件通信，游戏脚本桥接属性。
+
+### 6. 自动换装时序
+
+往已占用的槽位穿戴新物品时，`__equip` 在同一 tick 内依次：
+
+```
+tick N:   input → emit equip (carryover)
+tick N+1: equipment-on-equip → __equip:
+            1. remove new item from inventory
+            2. read old item from slot (if any)
+            3. add old item back to inventory (auto-unequip)
+            4. emit unequipped { old item } (carryover)
+            5. set slot = new item
+            6. emit equipped { new item } (carryover)
+tick N+2: remove-equip-bonus rule (for old item) → remove_equip_bonus → ATK/HP 写入 (deferred)
+          apply-equip-bonus rule (for new item) → apply_equip_bonus → ATK/HP 写入 (deferred)
+tick N+3: deferred 写入可见
+```
+
+测试驱动时，穿戴后 step 3-4 tick 让 `equipped` → `apply_equip_bonus` → 属性写入全部走完。自动换装时 `unequipped` 和 `equipped` 同一 tick emit，属性先减后加——最终结果正确。
+
+### 7. 与其他模块组合
+
+- **+ combat**：`equipped` → `apply_equip_bonus` 改 Health/Attack。穿戴武器后 `attack` 事件造成的伤害更高（combat 模块读 `Attack.power`）。这是最常见的接法。
+- **+ inventory**：equipment 直接读写 Inventory 组件（原子操作）。硬依赖 Inventory。
+- **+ shop**：`item-bought` → emit `equip`（买到装备自动穿戴）；或玩家从背包手动穿戴。shop 提供物品来源，equipment 提供穿戴机制。
+- **+ progression**：`leveled-up` 可以解锁新装备槽（往 `Equipment.slots` 追加）；`Level.points` 可以驱动"分配点数 → 装备需求"。
+- **+ loot**：`loot-dropped` → `pickup` → inventory → 玩家从背包穿戴掉落物。完整的"刷怪 → 掉装备 → 穿戴变强"循环。
+
+### 8. 完整 RPG 闭环中的位置
+
+equipment 模块把 shop 模块的经济循环延伸为**成长循环**：
+
+```
+kill enemy → died → loot module → pickup(coin/item) → inventory
+                                                          │
+                                                    [enough coins?]
+                                                          │
+press B → shop-buy → shop module → deduct coin + add item → inventory
+                                                          │
+press 1 → equip → equipment module → remove from inventory + set slot
+                                                          │
+                                                    equipped event
+                                                          │
+                                          apply_equip_bonus → +ATK / +HP
+                                                          │
+                                                    stronger player
+                                                          │
+                                              kill tougher enemy → ...
+```
+
+没有 equipment 的 RPG：背包里有一把剑但角色用拳头打怪（属性不变）。有 equipment 的 RPG：穿戴剑后攻击力 +10，穿装甲后血量 +20——角色**实际变强**，不只是背包变满。这是"收集游戏"和"装备驱动 RPG"的差别。
+
+### 9. 脱下空槽位是 no-op
+
+如果槽位已经是空的（`items[i] == ""`），`__unequip` 直接 return，不 emit `unequipped`，不报错。这意味着你可以让玩家按 Q 脱武器槽而不担心槽位已经空了——模块自动处理。
+
+完整可运行示例见 `examples/equipment-demo/`，集成测试见 `crates/vitric-cli/tests/equipment.rs`（12 例：check 通过 / 初始状态 / 穿剑 / 穿甲 / 穿戒指 / 脱武器 / 脱空槽 no-op / 自动换装 accessory / 自动换装 weapon / 全套叠加 / 穿戴后攻击力提升 / 脱装甲 HP 钳制）。
+
+---
+
 ## 编写自己的模块
 
 模块就是一个含 `module.json` 的目录：

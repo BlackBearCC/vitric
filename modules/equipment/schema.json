@@ -1,0 +1,10 @@
+{
+  "components": {
+    "Equipment": {
+      "fields": {
+        "slots": { "type": "list", "of": { "type": "text" }, "default": [] },
+        "items": { "type": "list", "of": { "type": "text" }, "default": [] }
+      }
+    }
+  }
+}

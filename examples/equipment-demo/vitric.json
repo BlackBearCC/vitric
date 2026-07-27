@@ -1,0 +1,14 @@
+{
+  "name": "equipment-demo",
+  "schema": "schema.json",
+  "entry": "scenes/main.json",
+  "scenes": ["scenes/main.json"],
+  "rules": ["rules/game.json"],
+  "scripts": ["scripts/demo.js"],
+  "includes": [
+    "../../modules/combat",
+    "../../modules/inventory",
+    "../../modules/equipment"
+  ],
+  "seed": 1
+}
