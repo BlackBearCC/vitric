@@ -1,12 +1,13 @@
 //! End-to-end test for rpg-mini — the complete-game proof.
 //!
-//! Composes all five gameplay modules (inventory + quest + dialogue + game-flow
-//! + combat) into a single closed loop: title → talk to elder → accept quest →
-//! collect 3 herbs → turn in quest → win → restart. Also covers the combat lose
-//! path (wolf attacks player to death) and the combat kill path (X kills wolf).
+//! Composes all six gameplay modules (inventory + quest + dialogue + game-flow
+//! + combat + progression) into a single closed loop: title → talk to elder →
+//!   accept quest → collect 3 herbs → turn in quest → win → restart. Also covers
+//!   the combat lose path (wolf attacks player to death), the combat kill path
+//!   (X kills wolf), and the progression path (kill wolf → XP → level up → bonus).
 //!
 //! This is the structural proof that the engine supports commercial-game closed
-//! loops, not just demos: the five modules compose without glue code, driven
+//! loops, not just demos: the six modules compose without glue code, driven
 //! purely by rules + module-emitted events.
 
 use std::path::PathBuf;
@@ -73,6 +74,26 @@ fn player_pos(sim: &vitric_sim::Sim) -> (f64, f64) {
 fn player_hp(sim: &vitric_sim::Sim) -> i64 {
     let p = sim.world.entity("player").unwrap();
     sim.world.get_field(p, "Health.hp").unwrap().as_i64().unwrap()
+}
+
+fn player_max_hp(sim: &vitric_sim::Sim) -> i64 {
+    let p = sim.world.entity("player").unwrap();
+    sim.world.get_field(p, "Health.max").unwrap().as_i64().unwrap()
+}
+
+fn player_attack(sim: &vitric_sim::Sim) -> i64 {
+    let p = sim.world.entity("player").unwrap();
+    sim.world.get_field(p, "Attack.power").unwrap().as_i64().unwrap()
+}
+
+fn player_level(sim: &vitric_sim::Sim) -> i64 {
+    let p = sim.world.entity("player").unwrap();
+    sim.world.get_field(p, "Level.value").unwrap().as_i64().unwrap()
+}
+
+fn player_xp(sim: &vitric_sim::Sim) -> i64 {
+    let p = sim.world.entity("player").unwrap();
+    sim.world.get_field(p, "XP.current").unwrap().as_i64().unwrap()
 }
 
 fn wolf_hp(sim: &vitric_sim::Sim) -> i64 {
@@ -250,14 +271,9 @@ fn rpg_mini_combat_death() {
 #[test]
 fn rpg_mini_combat_kill_wolf() {
     // Player can kill the wolf with X (2 hits: 40+40 > 60 HP). After death the
-    // wolf is stashed off-screen (entity kept for restart). The quest loop is
-    // unaffected — proves combat composes with the other four modules.
-    //
-    // Wolf respawn-on-restart is verified by reset_game (scripts/demo.js), which
-    // runs on every restart path tested in rpg_mini_combat_death and
-    // rpg_mini_full_win_loop; we don't duplicate the restart here because R only
-    // fires from won/lost, and forcing a win/lose after the kill would duplicate
-    // those tests.
+    // wolf is stashed off-screen (entity kept for restart) and the player gains
+    // XP → levels up → +20 max HP / +10 attack. Proves combat + progression
+    // compose with the other four modules.
     let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
 
     // title → playing.
@@ -266,28 +282,37 @@ fn rpg_mini_combat_kill_wolf() {
     sim.step(&mut rt).unwrap();
     assert_eq!(phase(&sim), "playing");
     assert_eq!(wolf_hp(&sim), 60, "wolf should start at full HP");
+    assert_eq!(player_level(&sim), 1, "player starts at level 1");
 
     // Player presses X to attack the wolf (no collision needed — X targets @wolf).
     // 1st hit: 60 → 20.
     press_x(&mut sim, &mut rt);
     assert_eq!(wolf_hp(&sim), 20, "wolf HP should be 20 after 1st player attack");
 
-    // 2nd hit: 20 → 0 → died → stash_wolf.
+    // 2nd hit: 20 → 0 → died → stash_wolf + gain-xp(100) → level-up → bonus.
+    // Full cascade: died(N) → stash+gain-xp(N+1) → level-up+leveled-up(N+2)
+    // → apply_level_up_bonus(N+3) → deferred writes visible(N+4).
     press_x(&mut sim, &mut rt);
-    sim.step(&mut rt).unwrap(); // died carryover → wolf-dies-on-combat → stash_wolf
-    sim.step(&mut rt).unwrap(); // stash_wolf deferred write flushes
+    for _ in 0..5 {
+        sim.step(&mut rt).unwrap(); // clear the died → gain-xp → level-up → bonus cascade
+    }
     assert_eq!(wolf_hp(&sim), 0, "wolf HP should be 0 after 2nd attack");
 
     // Wolf stashed off-screen (entity kept alive for restart, not despawned).
     let (wx, wy) = wolf_pos(&sim);
     assert!(wx < 0.0 && wy < 0.0, "wolf should be stashed off-screen after death, got ({wx}, {wy})");
 
-    // Player is unharmed (wolf never attacked back — no collision).
-    assert_eq!(player_hp(&sim), 100, "player should be at full HP after ranged combat");
+    // Progression: kill gave 100 XP, threshold was 100 → level up (100-100=0 remaining).
+    assert_eq!(player_level(&sim), 2, "player should level up to 2 after killing the wolf");
+    assert_eq!(player_xp(&sim), 0, "0 XP remaining after exact-threshold level-up");
 
-    // Player can now walk through the wolf's former spot (1,2) without dying —
-    // the stashed wolf is at (-100,-100), so no collision fires. This proves
-    // combat opened the path: the wolf is gone from the gameplay space.
+    // Level-up bonus: +20 max HP (full heal), +10 attack.
+    assert_eq!(player_max_hp(&sim), 120, "max HP should increase by 20 on level-up");
+    assert_eq!(player_hp(&sim), 120, "HP should be full (120) after level-up heal");
+    assert_eq!(player_attack(&sim), 50, "attack should increase by 10 on level-up");
+
+    // Player can walk through the wolf's former spot (1,2) without dying —
+    // the stashed wolf is at (-100,-100), so no collision fires.
     sim.inject_input("right", "pressed");
     sim.step(&mut rt).unwrap(); // (0,0)→(1,0)
     sim.inject_input("right", "released");
@@ -297,5 +322,5 @@ fn rpg_mini_combat_kill_wolf() {
     sim.step(&mut rt).unwrap(); // (1,2)→(1,3) — keep moving, no collision
     sim.inject_input("up", "released");
     assert_eq!(phase(&sim), "playing", "walking through the dead wolf's spot should not lose");
-    assert_eq!(player_hp(&sim), 100, "player should be unharmed walking through the dead wolf's spot");
+    assert_eq!(player_hp(&sim), 120, "player should be unharmed walking through the dead wolf's spot");
 }

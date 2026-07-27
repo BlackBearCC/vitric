@@ -19,7 +19,9 @@
         "QuestLog": { "active": [], "completed": [] },
         "DialogueRunner": { "active_npc": "", "current": -1 },
         "Health": { "hp": 100, "max": 100 },
-        "Attack": { "power": 40 }
+        "Attack": { "power": 40 },
+        "XP": { "current": 0, "threshold": 100 },
+        "Level": { "value": 1, "points": 0 }
       }
     },
     {

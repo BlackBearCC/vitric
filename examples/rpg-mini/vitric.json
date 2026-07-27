@@ -10,7 +10,8 @@
     "../../modules/quest",
     "../../modules/dialogue",
     "../../modules/game-flow",
-    "../../modules/combat"
+    "../../modules/combat",
+    "../../modules/progression"
   ],
   "seed": 7
 }

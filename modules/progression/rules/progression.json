@@ -1,0 +1,10 @@
+{
+  "rules": [
+    {
+      "id": "progression-on-gain-xp",
+      "comment": "Add XP to an entity; auto-level-up if threshold reached. Multiple level-ups from one gain are handled in a loop.",
+      "on": { "event": "gain-xp" },
+      "do": [{ "call": "__progression_gain_xp", "with": { "who": "event.who", "amount": "event.amount" } }]
+    }
+  ]
+}

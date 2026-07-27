@@ -1,0 +1,31 @@
+{
+  "rules": [
+    {
+      "id": "player-attack",
+      "comment": "Press X: player attacks the enemy.",
+      "on": { "event": "input", "filter": { "action": "x", "phase": "pressed" } },
+      "do": [{ "emit": "attack", "data": { "attacker": "@player", "target": "@enemy" } }]
+    },
+    {
+      "id": "enemy-dies",
+      "comment": "Enemy died → grant XP to the killer (carried through combat module's died event).",
+      "on": { "event": "died" },
+      "if": [["event.who", "==", "@enemy"]],
+      "do": [{ "emit": "gain-xp", "data": { "who": "event.killer", "amount": 120 } }]
+    },
+    {
+      "id": "level-up-bonus",
+      "comment": "On level-up: +20 max HP (and full heal), +10 attack power. Game decides the bonus, not the module.",
+      "on": { "event": "leveled-up" },
+      "if": [["event.who", "==", "@player"]],
+      "do": [
+        { "call": "apply_level_up_bonus", "with": { "who": "@player" } }
+      ]
+    },
+    {
+      "id": "update-hud",
+      "on": "tick",
+      "do": [{ "call": "render_hud", "with": { "who": "@player", "enemy": "@enemy", "hud": "@hud" } }]
+    }
+  ]
+}

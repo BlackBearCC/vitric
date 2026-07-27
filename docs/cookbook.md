@@ -611,11 +611,11 @@ vitric.fn("reset_game", (_args, ctx) => {
 
 ---
 
-## 配方 8：五模块组合出完整 RPG 闭环（inventory + quest + dialogue + game-flow + combat）
+## 配方 8：六模块组合出完整 RPG 闭环（inventory + quest + dialogue + game-flow + combat + progression）
 
-**目标**：把五个模块拼成一个完整的 RPG 小品——标题→对话接任务→收集草药→（躲避或击杀狼）→交付任务→胜利→重开。这是"商业游戏闭环"的最小可运行证明：五个模块无需胶水代码，纯靠规则 + 模块事件组合。
+**目标**：把六个模块拼成一个完整的 RPG 小品——标题→对话接任务→收集草药→（躲避或击杀狼，击杀获得经验升级）→交付任务→胜利→重开。这是"商业游戏闭环"的最小可运行证明：六个模块无需胶水代码，纯靠规则 + 模块事件组合。
 
-### 1. includes 五个模块
+### 1. includes 六个模块
 
 ```json
 {
@@ -624,14 +624,15 @@ vitric.fn("reset_game", (_args, ctx) => {
     "../../modules/quest",
     "../../modules/dialogue",
     "../../modules/game-flow",
-    "../../modules/combat"
+    "../../modules/combat",
+    "../../modules/progression"
   ]
 }
 ```
 
 ### 2. 组合接缝
 
-五个模块的接缝是**事件**，不是函数调用：
+六个模块的接缝是**事件**，不是函数调用：
 
 ```
                     ┌─── game-flow ────┐
@@ -671,6 +672,12 @@ vitric.fn("reset_game", (_args, ctx) => {
                     │    wolf died  → stash_wolf (off-screen)
                     │
   quest-turned-in ──→ emit game-win ──→ game-flow module ──→ phase=won
+
+  died(wolf) ──→ gain-xp ──→ progression module ──→ leveled-up ──→ apply bonus
+                    │                                                      │
+                    │                                              +20 max HP, +10 ATK
+                    │                                                      │
+                    └──────────── stronger player ─────────────────────────┘
 ```
 
 ### 3. 关键规则模式
@@ -733,9 +740,9 @@ emit `pickup` → inventory 模块加进背包 → quest 模块的 `quest-track`
 
 quest 模块 emit `quest-turned-in`（含奖励 `pickup` 事件，inventory 模块接收）→ 你的规则 emit `game-win` → game-flow 模块切 `phase=won`。
 
-### 4. 战斗接缝：attack / died 事件
+### 4. 战斗 + 升级接缝：attack / died / gain-xp / leveled-up 事件
 
-combat 模块和其他模块一样通过事件组合。狼碰撞玩家 → emit `attack` → 模块结算伤害 → HP 归零 emit `died` → 你的规则决定后续：
+combat 模块和其他模块一样通过事件组合。狼碰撞玩家 → emit `attack` → 模块结算伤害 → HP 归零 emit `died`（携带 `killer`）→ 你的规则 emit `gain-xp` → progression 模块加 XP、升级 → emit `leveled-up` → 你的规则应用升级奖励：
 
 ```json
 {
@@ -758,21 +765,147 @@ combat 模块和其他模块一样通过事件组合。狼碰撞玩家 → emit 
   "id": "wolf-dies-on-combat",
   "on": { "event": "died" },
   "if": [["event.who", "==", "@wolf"]],
-  "do": [{ "call": "stash_wolf", "with": { "wolf": "@wolf" } }]
+  "do": [
+    { "call": "stash_wolf", "with": { "wolf": "@wolf" } },
+    { "emit": "gain-xp", "data": { "who": "event.killer", "amount": 100 } }
+  ]
+},
+{
+  "id": "level-up-bonus",
+  "on": { "event": "leveled-up" },
+  "if": [["event.who", "==", "@player"]],
+  "do": [{ "call": "apply_level_up_bonus", "with": { "who": "@player" } }]
 }
 ```
 
-`died` → `game-lose` 与 `quest-turned-in` → `game-win` 是两条独立的胜负路径，都汇入 game-flow 模块的 phase 状态机。玩家可以选择躲避狼直奔任务，也可以击杀狼清路——combat 是可选的玩法层，不阻塞主任务链。
+`died` → `game-lose` 与 `quest-turned-in` → `game-win` 是两条独立的胜负路径，都汇入 game-flow 模块的 phase 状态机。`died` → `gain-xp` → `leveled-up` → `apply_level_up_bonus` 是成长路径——击杀狼让玩家变强（+HP/+ATK），但不是通关必须。玩家可以选择躲避狼直奔任务，也可以击杀狼清路升级——combat + progression 是可选的玩法深度层，不阻塞主任务链。
 
 ### 5. 重启
 
-`reset_game` 脚本重置游戏内容（玩家位置/HP、收集物位置、背包、quest 状态、dialogue 状态、狼 HP/位置），然后 emit `game-restart` → game-flow 模块重置 `GameState`（phase=title, time=0, score=0）。
+`reset_game` 脚本重置游戏内容（玩家位置/HP/max HP/攻击力/XP/Level、收集物位置、背包、quest 状态、dialogue 状态、狼 HP/位置），然后 emit `game-restart` → game-flow 模块重置 `GameState`（phase=title, time=0, score=0）。
 
 ### 6. deferred 写入时序
 
-五模块组合时，事件链跨 tick 传播：collision（tick N）→ quest-offer carryover（tick N+1 处理）→ quest-accept carryover（tick N+2）→ ...；战斗链同样：collision（tick N）→ attack（N+1）→ damage（N+2）→ HP 写入 + died（N+3）→ game-lose（N+4）→ phase=lost（N+5）。测试驱动时，每个状态转移后要 step 1-2 tick 让 deferred 写入 flush；战斗结算要 step 3-4 tick。详见集成测试 `tests/rpg_mini.rs` 的注释。
+六模块组合时，事件链跨 tick 传播：collision（tick N）→ quest-offer carryover（tick N+1 处理）→ quest-accept carryover（tick N+2）→ ...；战斗链同样：collision（tick N）→ attack（N+1）→ damage（N+2）→ HP 写入 + died（N+3）→ game-lose（N+4）→ phase=lost（N+5）；升级链：died（N）→ gain-xp（N+1）→ leveled-up + XP/Level 写入（N+2）→ apply_level_up_bonus + HP/ATK 写入（N+3）→ 写入可见（N+4）。测试驱动时，每个状态转移后要 step 1-2 tick 让 deferred 写入 flush；战斗结算 step 3-4 tick；升级链 step 4-5 tick。详见集成测试 `tests/rpg_mini.rs` 的注释。
 
-完整可运行示例见 `examples/rpg-mini/`，集成测试见 `crates/vitric-cli/tests/rpg_mini.rs`（4 例：check 通过 / 完整胜利循环 / 战斗失败路径 / 击杀狼路径）。
+完整可运行示例见 `examples/rpg-mini/`，集成测试见 `crates/vitric-cli/tests/rpg_mini.rs`（4 例：check 通过 / 完整胜利循环 / 战斗失败路径 / 击杀狼+升级路径）。
+
+---
+
+## 配方 9：使用 progression 模块（XP / 等级 / 自动升级 / 阈值增长）
+
+**目标**：实体有经验和等级，击杀敌人获得 XP，XP 达到阈值自动升级，升级时游戏决定奖励（+HP/+攻击力等）。这是 RPG 从"收集 → 通关"变成"战斗 → 成长 → 更强战斗"的关键系统——没有成长的 RPG 是 demo，有成长的才是商业游戏。
+
+### 1. includes
+
+```json
+{ "includes": ["../../modules/progression"] }
+```
+
+progression 模块贡献 2 个组件：
+- `XP` — `current`（当前经验）/ `threshold`（升下一级所需经验，每次升级后 ×1.5 增长）
+- `Level` — `value`（当前等级，从 1 开始）/ `points`（未分配的属性点）
+
+模块监听 1 个事件（你的规则负责 emit）：
+- `gain-xp { who, amount }` — 给 `who` 加 `amount` 经验；达到阈值自动升级（支持一次跨多级）
+
+模块 emit 的事件（你的规则监听做反馈）：
+- `xp-gained { who, amount, total }` — 经验已加（total = 加完后的当前经验）
+- `leveled-up { who, level, points }` — 等级提升（points = 累计未分配属性点）
+
+> **模块不决定升级奖励**——不同游戏有不同的属性系统（HP？攻击力？技能树？）。模块只管 XP/Level 状态机，你的规则监听 `leveled-up` 决定加什么。这和 combat 模块不在 `died` 时 despawn 是同一个设计原则：模块管机制，游戏管策略。
+
+### 2. 给实体挂 `XP` + `Level`
+
+```json
+{
+  "name": "player",
+  "components": {
+    "Health": { "hp": 100, "max": 100 },
+    "Attack": { "power": 40 },
+    "XP": { "current": 0, "threshold": 100 },
+    "Level": { "value": 1, "points": 0 }
+  }
+}
+```
+
+`threshold` 的起始值由你定（这里 100）。之后的增长是 `floor(threshold × 1.5)`：100 → 150 → 225 → 337 → ... 越往后升级越慢，经典 RPG 曲线。
+
+### 3. 与 combat 模块组合：击杀 → XP → 升级
+
+combat 模块的 `died` 事件携带 `killer`——这就是与 progression 的接缝：
+
+```json
+{
+  "id": "enemy-dies-grants-xp",
+  "on": { "event": "died" },
+  "if": [["event.who", "==", "@enemy"]],
+  "do": [{ "emit": "gain-xp", "data": { "who": "event.killer", "amount": 120 } }]
+}
+```
+
+击杀敌人 → `died { who: enemy, killer: player }` → 你的规则 emit `gain-xp` → 模块加 XP → 达到阈值 emit `leveled-up` → 你的规则应用奖励。纯事件流，无函数调用，无需胶水代码。
+
+### 4. 升级奖励：游戏决定加什么
+
+```json
+{
+  "id": "level-up-bonus",
+  "on": { "event": "leveled-up" },
+  "if": [["event.who", "==", "@player"]],
+  "do": [{ "call": "apply_level_up_bonus", "with": { "who": "@player" } }]
+}
+```
+
+```js
+vitric.fn("apply_level_up_bonus", (args, ctx) => {
+  const who = args.who;
+  // +20 max HP, full heal to new max.
+  const maxHp = Number(ctx.getField(who, "Health.max")) || 100;
+  const newMax = maxHp + 20;
+  ctx.setField(who, "Health.max", newMax);
+  ctx.setField(who, "Health.hp", newMax);
+  // +10 attack power.
+  const power = Number(ctx.getField(who, "Attack.power")) || 0;
+  ctx.setField(who, "Attack.power", power + 10);
+});
+```
+
+这个函数**同时读写 combat 模块的组件**（Health/Attack）——它就是 progression 和 combat 的桥。模块本身不耦合（progression 不知道 Health/Attack 的存在），桥接发生在**你的游戏脚本**里。这就是 Vitric 的模块组合哲学：模块之间通过事件通信，通过游戏脚本桥接。
+
+### 5. 阈值增长曲线
+
+```
+等级  阈值   累计XP
+  1    100    0
+  2    150    100
+  3    225    250
+  4    337    475
+  5    505    812
+```
+
+每次升级 `threshold = floor(threshold × 1.5)`。如果你想用不同的曲线（线性、指数、对数），修改 `scripts/progression.js` 里的增长公式——模块是可fork的，不是黑盒。
+
+### 6. 升级链时序
+
+```
+tick N:   died (from combat module, carries killer)
+tick N+1: enemy-dies rule → emit gain-xp (carryover)
+tick N+2: progression-on-gain-xp → __progression_gain_xp → XP/Level 写入, emit leveled-up (carryover)
+tick N+3: level-up-bonus rule → apply_level_up_bonus → Health/Attack 写入 (deferred)
+tick N+4: 所有 deferred 写入可见
+```
+
+测试驱动时，击杀后 step 4-5 tick 让整个链走完。
+
+### 7. 与其他模块组合
+
+- **+ combat**：`died { killer }` → `gain-xp` → `leveled-up` → `apply_level_up_bonus`（改 Health/Attack）。这是最常见的接法。
+- **+ game-flow**：`leveled-up` 可以触发 UI 动画、音效、甚至解锁新区域。
+- **+ quest**：`quest-turned-in` 也可以 emit `gain-xp`（交任务也有经验）。两条 XP 来源（战斗 + 任务）自然组合。
+- **+ inventory**：`Level.points` 可以驱动"分配点数换物品"或"升级解锁新装备槽"。
+
+完整可运行示例见 `examples/progression-demo/`，集成测试见 `crates/vitric-cli/tests/progression.rs`；六模块组合（含 progression）见 `examples/rpg-mini/`，集成测试见 `crates/vitric-cli/tests/rpg_mini.rs`。
 
 ---
 

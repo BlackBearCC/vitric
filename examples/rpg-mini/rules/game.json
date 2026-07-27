@@ -62,10 +62,20 @@
     },
     {
       "id": "wolf-dies-on-combat",
-      "comment": "Wolf HP reached 0 → stash off-screen (keep entity for restart).",
+      "comment": "Wolf HP reached 0 → stash off-screen (keep entity for restart) + grant XP to killer.",
       "on": { "event": "died" },
       "if": [["event.who", "==", "@wolf"]],
-      "do": [{ "call": "stash_wolf", "with": { "wolf": "@wolf" } }]
+      "do": [
+        { "call": "stash_wolf", "with": { "wolf": "@wolf" } },
+        { "emit": "gain-xp", "data": { "who": "event.killer", "amount": 100 } }
+      ]
+    },
+    {
+      "id": "level-up-bonus",
+      "comment": "On level-up: +20 max HP (full heal), +10 attack. Game decides the bonus, not the module.",
+      "on": { "event": "leveled-up" },
+      "if": [["event.who", "==", "@player"]],
+      "do": [{ "call": "apply_level_up_bonus", "with": { "who": "@player" } }]
     },
 
     {
