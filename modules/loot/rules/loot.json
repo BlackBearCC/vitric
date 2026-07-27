@@ -1,0 +1,10 @@
+{
+  "rules": [
+    {
+      "id": "loot-on-died",
+      "comment": "On death, roll the dead entity's LootTable. Each successful entry emits a pickup event to the killer (inventory module auto-receives) and a loot-dropped event for game feedback (HUD/sound/floating text).",
+      "on": { "event": "died" },
+      "do": [{ "call": "__loot_roll", "with": { "who": "event.who", "killer": "event.killer" } }]
+    }
+  ]
+}

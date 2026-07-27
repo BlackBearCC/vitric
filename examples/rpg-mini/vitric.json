@@ -11,7 +11,8 @@
     "../../modules/dialogue",
     "../../modules/game-flow",
     "../../modules/combat",
-    "../../modules/progression"
+    "../../modules/progression",
+    "../../modules/loot"
   ],
   "seed": 7
 }

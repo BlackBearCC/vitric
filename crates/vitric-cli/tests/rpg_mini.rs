@@ -1,13 +1,13 @@
 //! End-to-end test for rpg-mini — the complete-game proof.
 //!
-//! Composes all six gameplay modules (inventory + quest + dialogue + game-flow
-//! + combat + progression) into a single closed loop: title → talk to elder →
+//! Composes all seven gameplay modules (inventory + quest + dialogue + game-flow
+//! + combat + progression + loot) into a single closed loop: title → talk to elder →
 //!   accept quest → collect 3 herbs → turn in quest → win → restart. Also covers
 //!   the combat lose path (wolf attacks player to death), the combat kill path
-//!   (X kills wolf), and the progression path (kill wolf → XP → level up → bonus).
+//!   (X kills wolf → loot drops → XP → level up → bonus).
 //!
 //! This is the structural proof that the engine supports commercial-game closed
-//! loops, not just demos: the six modules compose without glue code, driven
+//! loops, not just demos: the seven modules compose without glue code, driven
 //! purely by rules + module-emitted events.
 
 use std::path::PathBuf;
@@ -106,6 +106,21 @@ fn wolf_pos(sim: &vitric_sim::Sim) -> (f64, f64) {
     let x = sim.world.get_field(w, "Position.x").unwrap().as_f64().unwrap();
     let y = sim.world.get_field(w, "Position.y").unwrap().as_f64().unwrap();
     (x, y)
+}
+
+fn coin_count(sim: &vitric_sim::Sim) -> i64 {
+    let p = sim.world.entity("player").unwrap();
+    let items = sim.world.get_field(p, "Inventory.items").unwrap().clone();
+    let counts = sim.world.get_field(p, "Inventory.counts").unwrap().clone();
+    let arr = items.as_array().unwrap();
+    let cnt = counts.as_array().unwrap();
+    let mut total = 0;
+    for (i, it) in arr.iter().enumerate() {
+        if it == &json!("coin") {
+            total += cnt[i].as_i64().unwrap_or(0);
+        }
+    }
+    total
 }
 
 /// Press X once and step enough ticks for the attack cascade to land:
@@ -310,6 +325,10 @@ fn rpg_mini_combat_kill_wolf() {
     assert_eq!(player_max_hp(&sim), 120, "max HP should increase by 20 on level-up");
     assert_eq!(player_hp(&sim), 120, "HP should be full (120) after level-up heal");
     assert_eq!(player_attack(&sim), 50, "attack should increase by 10 on level-up");
+
+    // Loot: wolf's LootTable drops 2 coins (chance 1.0, count 2-2) → auto-pickup
+    // to player's inventory via the combat → died → loot → pickup → inventory cascade.
+    assert_eq!(coin_count(&sim), 2, "wolf death should drop 2 coins into player's inventory");
 
     // Player can walk through the wolf's former spot (1,2) without dying —
     // the stashed wolf is at (-100,-100), so no collision fires.

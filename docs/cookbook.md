@@ -611,11 +611,11 @@ vitric.fn("reset_game", (_args, ctx) => {
 
 ---
 
-## 配方 8：六模块组合出完整 RPG 闭环（inventory + quest + dialogue + game-flow + combat + progression）
+## 配方 8：七模块组合出完整 RPG 闭环（inventory + quest + dialogue + game-flow + combat + progression + loot）
 
-**目标**：把六个模块拼成一个完整的 RPG 小品——标题→对话接任务→收集草药→（躲避或击杀狼，击杀获得经验升级）→交付任务→胜利→重开。这是"商业游戏闭环"的最小可运行证明：六个模块无需胶水代码，纯靠规则 + 模块事件组合。
+**目标**：把七个模块拼成一个完整的 RPG 小品——标题→对话接任务→收集草药→（躲避或击杀狼，击杀掉落金币+获得经验升级）→交付任务→胜利→重开。这是"商业游戏闭环"的最小可运行证明：七个模块无需胶水代码，纯靠规则 + 模块事件组合。
 
-### 1. includes 六个模块
+### 1. includes 七个模块
 
 ```json
 {
@@ -625,14 +625,15 @@ vitric.fn("reset_game", (_args, ctx) => {
     "../../modules/dialogue",
     "../../modules/game-flow",
     "../../modules/combat",
-    "../../modules/progression"
+    "../../modules/progression",
+    "../../modules/loot"
   ]
 }
 ```
 
 ### 2. 组合接缝
 
-六个模块的接缝是**事件**，不是函数调用：
+七个模块的接缝是**事件**，不是函数调用：
 
 ```
                     ┌─── game-flow ────┐
@@ -673,11 +674,13 @@ vitric.fn("reset_game", (_args, ctx) => {
                     │
   quest-turned-in ──→ emit game-win ──→ game-flow module ──→ phase=won
 
-  died(wolf) ──→ gain-xp ──→ progression module ──→ leveled-up ──→ apply bonus
-                    │                                                      │
-                    │                                              +20 max HP, +10 ATK
-                    │                                                      │
-                    └──────────── stronger player ─────────────────────────┘
+  died(wolf) ──→ loot module ──→ pickup(coin) ──→ inventory module ──→ Inventory += coin
+                    │
+                    └──→ gain-xp ──→ progression module ──→ leveled-up ──→ apply bonus
+                                                                      │
+                                                              +20 max HP, +10 ATK
+                                                                      │
+                                                                      └── stronger player
 ```
 
 ### 3. 关键规则模式
@@ -740,9 +743,9 @@ emit `pickup` → inventory 模块加进背包 → quest 模块的 `quest-track`
 
 quest 模块 emit `quest-turned-in`（含奖励 `pickup` 事件，inventory 模块接收）→ 你的规则 emit `game-win` → game-flow 模块切 `phase=won`。
 
-### 4. 战斗 + 升级接缝：attack / died / gain-xp / leveled-up 事件
+### 4. 战斗 + 掉落 + 升级接缝：attack / died / loot / gain-xp / leveled-up 事件
 
-combat 模块和其他模块一样通过事件组合。狼碰撞玩家 → emit `attack` → 模块结算伤害 → HP 归零 emit `died`（携带 `killer`）→ 你的规则 emit `gain-xp` → progression 模块加 XP、升级 → emit `leveled-up` → 你的规则应用升级奖励：
+combat 模块和其他模块一样通过事件组合。狼碰撞玩家 → emit `attack` → 模块结算伤害 → HP 归零 emit `died`（携带 `killer`）→ **loot 模块自动滚 wolf 的 LootTable，emit `pickup` 给 killer** → inventory 模块接收 → 同时你的规则 emit `gain-xp` → progression 模块加 XP、升级 → emit `leveled-up` → 你的规则应用升级奖励：
 
 ```json
 {
@@ -763,6 +766,7 @@ combat 模块和其他模块一样通过事件组合。狼碰撞玩家 → emit 
 },
 {
   "id": "wolf-dies-on-combat",
+  "comment": "wolf 死亡：stash + grant XP。loot 模块的 loot-on-died 规则同时触发，自动滚 LootTable 掉落金币——无需在这里写掉落逻辑。",
   "on": { "event": "died" },
   "if": [["event.who", "==", "@wolf"]],
   "do": [
@@ -778,7 +782,9 @@ combat 模块和其他模块一样通过事件组合。狼碰撞玩家 → emit 
 }
 ```
 
-`died` → `game-lose` 与 `quest-turned-in` → `game-win` 是两条独立的胜负路径，都汇入 game-flow 模块的 phase 状态机。`died` → `gain-xp` → `leveled-up` → `apply_level_up_bonus` 是成长路径——击杀狼让玩家变强（+HP/+ATK），但不是通关必须。玩家可以选择躲避狼直奔任务，也可以击杀狼清路升级——combat + progression 是可选的玩法深度层，不阻塞主任务链。
+wolf 需要挂 `LootTable` 组件（见配方 10）。`died` 触发后，loot 模块的 `loot-on-died` 规则和你的 `wolf-dies-on-combat` 规则**同一 tick 内并行触发**——loot 模块 emit `pickup`（inventory 自动接收），你的规则 emit `gain-xp`（progression 自动接收）。两条链独立。
+
+`died` → `game-lose` 与 `quest-turned-in` → `game-win` 是两条独立的胜负路径，都汇入 game-flow 模块的 phase 状态机。`died` → `loot` + `gain-xp` → `leveled-up` → `apply_level_up_bonus` 是成长路径——击杀狼让玩家变强（+HP/+ATK）并获得金币，但不是通关必须。玩家可以选择躲避狼直奔任务，也可以击杀狼清路升级攒钱——combat + loot + progression 是可选的玩法深度层，不阻塞主任务链。
 
 ### 5. 重启
 
@@ -786,9 +792,9 @@ combat 模块和其他模块一样通过事件组合。狼碰撞玩家 → emit 
 
 ### 6. deferred 写入时序
 
-六模块组合时，事件链跨 tick 传播：collision（tick N）→ quest-offer carryover（tick N+1 处理）→ quest-accept carryover（tick N+2）→ ...；战斗链同样：collision（tick N）→ attack（N+1）→ damage（N+2）→ HP 写入 + died（N+3）→ game-lose（N+4）→ phase=lost（N+5）；升级链：died（N）→ gain-xp（N+1）→ leveled-up + XP/Level 写入（N+2）→ apply_level_up_bonus + HP/ATK 写入（N+3）→ 写入可见（N+4）。测试驱动时，每个状态转移后要 step 1-2 tick 让 deferred 写入 flush；战斗结算 step 3-4 tick；升级链 step 4-5 tick。详见集成测试 `tests/rpg_mini.rs` 的注释。
+七模块组合时，事件链跨 tick 传播：collision（tick N）→ quest-offer carryover（tick N+1 处理）→ quest-accept carryover（tick N+2）→ ...；战斗链同样：collision（tick N）→ attack（N+1）→ damage（N+2）→ HP 写入 + died（N+3）→ game-lose（N+4）→ phase=lost（N+5）；掉落链：died（N）→ loot roll + pickup（N+1）→ inventory 写入（N+2）→ 写入可见（N+3）；升级链：died（N）→ gain-xp（N+1）→ leveled-up + XP/Level 写入（N+2）→ apply_level_up_bonus + HP/ATK 写入（N+3）→ 写入可见（N+4）。掉落链和升级链**并行**，都在 died 后的同一 tick 启动。测试驱动时，每个状态转移后要 step 1-2 tick 让 deferred 写入 flush；战斗结算 step 3-4 tick；升级+掉落链 step 4-5 tick。详见集成测试 `tests/rpg_mini.rs` 的注释。
 
-完整可运行示例见 `examples/rpg-mini/`，集成测试见 `crates/vitric-cli/tests/rpg_mini.rs`（4 例：check 通过 / 完整胜利循环 / 战斗失败路径 / 击杀狼+升级路径）。
+完整可运行示例见 `examples/rpg-mini/`，集成测试见 `crates/vitric-cli/tests/rpg_mini.rs`（4 例：check 通过 / 完整胜利循环 / 战斗失败路径 / 击杀狼+掉落+升级路径）。
 
 ---
 
@@ -905,7 +911,129 @@ tick N+4: 所有 deferred 写入可见
 - **+ quest**：`quest-turned-in` 也可以 emit `gain-xp`（交任务也有经验）。两条 XP 来源（战斗 + 任务）自然组合。
 - **+ inventory**：`Level.points` 可以驱动"分配点数换物品"或"升级解锁新装备槽"。
 
-完整可运行示例见 `examples/progression-demo/`，集成测试见 `crates/vitric-cli/tests/progression.rs`；六模块组合（含 progression）见 `examples/rpg-mini/`，集成测试见 `crates/vitric-cli/tests/rpg_mini.rs`。
+完整可运行示例见 `examples/progression-demo/`，集成测试见 `crates/vitric-cli/tests/progression.rs`；七模块组合（含 progression）见 `examples/rpg-mini/`，集成测试见 `crates/vitric-cli/tests/rpg_mini.rs`。
+
+---
+
+## 配方 10：使用 loot 模块（死亡掉落 / 战利品表 / 确定性 RNG / 自动拾取）
+
+**目标**：敌人死亡时按战利品表掉落物品，自动拾取到击杀者的背包。这是 RPG 经济循环的核心环节——combat → loot → inventory 形成闭环，玩家击杀怪物获得物品，物品可以是货币（coin）、消耗品（herb）或装备。没有掉落的战斗只是"清障"，有掉落才是"刷装备/攒钱"的商业 RPG 玩法。
+
+### 1. includes
+
+```json
+{ "includes": ["../../modules/combat", "../../modules/inventory", "../../modules/loot"] }
+```
+
+loot 模块依赖 combat 的 `died` 事件，并 emit `pickup` 给 inventory 模块接收。所以这三个模块通常一起 includes。loot 模块贡献 1 个组件：
+
+- `LootTable`（挂在可掉落的实体上，静态）— 并行列表编码掉落条目（和 dialogue 模块的 node_* 同模式）：
+  - `items` — 物品 id 列表（如 `["coin", "herb", "gem"]`）
+  - `count_mins` — 每条最小数量（含，如 `[2, 1, 1]`）
+  - `count_maxs` — 每条最大数量（含，如 `[5, 2, 1]`）；缺省或 < min 时 = min（固定数量）
+  - `chances` — 每条掉落概率 0.0-1.0（如 `[1.0, 0.75, 0.25]`）；缺省时 = 1.0（必定掉落）
+
+模块监听 1 个事件（combat 模块 emit 的）：
+- `died { who, killer }` — 滚 `who` 的 LootTable，每条成功 emit `pickup` 给 killer
+
+模块 emit 2 个事件：
+- `pickup { who, item, count }` — 自动拾取到 killer 的背包（inventory 模块接收并加进 Inventory）
+- `loot-dropped { who, killer, item, count }` — 每条掉落条目（游戏可监听做飘字/音效/HUD 更新）
+
+### 2. 场景里给敌人挂 LootTable
+
+```json
+{
+  "name": "wolf",
+  "components": {
+    "Enemy": {},
+    "Health": { "hp": 60, "max": 60 },
+    "Attack": { "power": 20 },
+    "LootTable": {
+      "items": ["coin", "fang"],
+      "count_mins": [2, 1],
+      "count_maxs": [5, 1],
+      "chances": [1.0, 0.3]
+    }
+  }
+}
+```
+
+这条 LootTable 的含义：
+- **coin**：100% 掉落 2-5 个（随机数量）
+- **fang**：30% 掉落 1 个（固定数量，因为 min=max=1）
+
+### 3. 不用写掉落规则——loot 模块自动触发
+
+loot 模块的 `loot-on-died` 规则监听 `died` 事件，自动滚 LootTable。你的游戏规则只需要处理 `died` 的其他后果（stash/respawn/game-lose 等），掉落完全自动：
+
+```json
+{
+  "id": "wolf-dies",
+  "comment": "wolf 死亡：stash + grant XP。loot 模块的 loot-on-died 规则自动并行触发，无需在这里写掉落逻辑。",
+  "on": { "event": "died" },
+  "if": [["event.who", "==", "@wolf"]],
+  "do": [
+    { "call": "stash_wolf", "with": { "wolf": "@wolf" } },
+    { "emit": "gain-xp", "data": { "who": "event.killer", "amount": 100 } }
+  ]
+}
+```
+
+`died` 触发后，loot 模块的 `loot-on-died` 规则和你的 `wolf-dies` 规则**同一 tick 内并行触发**。loot 模块 emit `pickup` → inventory 模块接收 → 物品进背包。你的规则 emit `gain-xp` → progression 模块接收 → 升级。两条链独立，不互相阻塞。
+
+### 4. 监听 loot-dropped 做反馈
+
+```json
+{
+  "id": "loot-feedback",
+  "on": { "event": "loot-dropped" },
+  "do": [{ "call": "show_loot_text", "with": { "item": "event.item", "count": "event.count", "hud": "@hud" } }]
+}
+```
+
+```js
+vitric.fn("show_loot_text", (args, ctx) => {
+  const text = "+" + args.count + " " + args.item;
+  ctx.setField(args.hud, "Text.content", text);
+});
+```
+
+`pickup` 事件被 inventory 模块消费（加进背包），`loot-dropped` 是给你做反馈的——飘字、音效、HUD 闪烁。
+
+### 5. 确定性 RNG
+
+loot 模块用 `ctx.random_stream("loot")`——一个**命名子流**，种子由 `(world_seed, "loot")` 决定，独立于主 RNG 流。这意味着：
+
+- **掉落结果可复现**：同 seed + 同输入 = 同掉落。回放/录像/测试都确定。
+- **不干扰其他系统**：loot 滚动不消耗主 RNG 流，不会让其他系统的随机数发生偏移。
+- **多次击杀有序**：同 tick 内多个敌人死亡时，按事件 FIFO 顺序从子流取数，确定且可复现。
+
+测试时可以断言"两次运行产生完全相同的 Inventory.items/counts"（见 `tests/loot.rs` 的 `loot_roll_is_deterministic_across_runs`）。
+
+### 6. 掉落链时序
+
+```
+tick N:   died (from combat module, carries killer)
+tick N+1: loot-on-died rule → __loot_roll → emit pickup + loot-dropped (carryover)
+tick N+2: inv-pickup rule → __inv_pickup → Inventory 写入 (deferred)
+tick N+3: deferred 写入可见
+```
+
+掉落链和升级链（见配方 9 第 6 节）**并行**，都在 `died` 后的同一 tick 启动。测试驱动时，击杀后 step 4-5 tick 让两条链都走完。
+
+### 7. 与其他模块组合
+
+- **+ combat**：`died { who, killer }` → loot roll → `pickup` → inventory。这是最常见的接法，三者通常一起 includes。
+- **+ inventory**：loot emit `pickup`，inventory 自动接收并加进背包。无胶水代码。
+- **+ progression**：`died` 同时触发 loot（掉物品）和 gain-xp（涨经验），两条链并行。玩家击杀 → 获得物品 + 升级，完整的"刷怪成长"循环。
+- **+ game-flow**：`loot-dropped` 可以触发 UI 动画、音效；`pickup` 可以累加 score。
+
+### 8. 无 killer 时的行为
+
+如果 `died` 事件没有 `killer`（环境死亡、摔死等），loot 模块**跳过滚动**——没有自动拾取的目标。游戏如果想做"地面掉落"（spawn 一个 Pickup 实体让玩家走过去捡），可以监听 `died` 自己处理，不依赖 loot 模块的自动拾取。
+
+完整可运行示例见 `examples/loot-demo/`，集成测试见 `crates/vitric-cli/tests/loot.rs`；七模块组合（含 loot）见 `examples/rpg-mini/`，集成测试见 `crates/vitric-cli/tests/rpg_mini.rs`。
 
 ---
 

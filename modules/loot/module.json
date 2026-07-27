@@ -1,0 +1,6 @@
+{
+  "name": "loot",
+  "schema": "schema.json",
+  "rules": ["rules/loot.json"],
+  "scripts": ["scripts/loot.js"]
+}

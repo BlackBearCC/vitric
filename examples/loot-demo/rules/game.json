@@ -1,0 +1,15 @@
+{
+  "rules": [
+    {
+      "id": "player-attacks-enemy",
+      "comment": "Press X: player attacks the enemy (combat module applies damage).",
+      "on": { "event": "input", "filter": { "action": "x", "phase": "pressed" } },
+      "do": [{ "emit": "attack", "data": { "attacker": "@player", "target": "@enemy" } }]
+    },
+    {
+      "id": "update-hud",
+      "on": "tick",
+      "do": [{ "call": "render_hud", "with": { "who": "@player", "enemy": "@enemy", "hud": "@hud" } }]
+    }
+  ]
+}

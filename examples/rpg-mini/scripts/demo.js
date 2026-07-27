@@ -129,8 +129,13 @@ vitric.fn("render_hud", (args, ctx) => {
     text = "TITLE — Press SPACE to start";
   } else if (phase === "playing") {
     const inv = ctx.getField(who, "Inventory.items") || [];
+    const invCounts = ctx.getField(who, "Inventory.counts") || [];
     const herbCount = inv.filter(function (it) { return it === "herb"; }).length;
-    text = lvlText + "  Quest: " + qState + " " + qProgress + "/3  Herbs: " + herbCount + phpText + "  Time: " + time;
+    let coinCount = 0;
+    for (let i = 0; i < inv.length; i++) {
+      if (inv[i] === "coin") coinCount += (invCounts[i] || 0);
+    }
+    text = lvlText + "  Quest: " + qState + " " + qProgress + "/3  Herbs: " + herbCount + "  Coins: " + coinCount + phpText + "  Time: " + time;
   } else if (phase === "won") {
     text = "YOU WIN! Cleared in " + time + " ticks. Press R to restart.";
   } else if (phase === "lost") {

@@ -1,0 +1,12 @@
+{
+  "components": {
+    "LootTable": {
+      "fields": {
+        "items": { "type": "list", "of": { "type": "text" }, "default": [] },
+        "count_mins": { "type": "list", "of": { "type": "int" }, "default": [] },
+        "count_maxs": { "type": "list", "of": { "type": "int" }, "default": [] },
+        "chances": { "type": "list", "of": { "type": "number" }, "default": [] }
+      }
+    }
+  }
+}

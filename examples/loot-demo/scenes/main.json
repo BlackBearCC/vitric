@@ -1,0 +1,38 @@
+{
+  "entities": [
+    {
+      "name": "player",
+      "components": {
+        "Player": {},
+        "Position": { "x": 0, "y": 0 },
+        "Sprite": { "w": 1, "h": 1, "color": "#4da3ff" },
+        "Health": { "hp": 100, "max": 100 },
+        "Attack": { "power": 50 },
+        "Inventory": { "items": [], "counts": [], "capacity": 8 }
+      }
+    },
+    {
+      "name": "enemy",
+      "components": {
+        "Enemy": {},
+        "Position": { "x": 2, "y": 0 },
+        "Sprite": { "w": 1, "h": 1, "color": "#e53935" },
+        "Health": { "hp": 50, "max": 50 },
+        "Attack": { "power": 10 },
+        "LootTable": {
+          "items": ["coin", "herb", "gem"],
+          "count_mins": [2, 1, 1],
+          "count_maxs": [5, 2, 1],
+          "chances": [1.0, 0.75, 0.25]
+        }
+      }
+    },
+    {
+      "name": "hud",
+      "components": {
+        "Position": { "x": 1, "y": 4 },
+        "Text": { "content": "Press X to kill enemy — loot auto-pickups", "size": 0.7, "color": "#ffd75e" }
+      }
+    }
+  ]
+}

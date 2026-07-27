@@ -97,7 +97,13 @@
         "Collider": { "w": 1, "h": 1 },
         "Sprite": { "w": 1, "h": 1, "color": "#9a4a3a" },
         "Health": { "hp": 60, "max": 60 },
-        "Attack": { "power": 20 }
+        "Attack": { "power": 20 },
+        "LootTable": {
+          "items": ["coin"],
+          "count_mins": [2],
+          "count_maxs": [2],
+          "chances": [1.0]
+        }
       }
     },
     {
