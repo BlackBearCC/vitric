@@ -1816,6 +1816,147 @@ press 9 → drink mana_potion → Mana.current += 50 → 100/100
 
 ---
 
+## 配方 15：使用 crafting 模块（配方 / 材料消耗 / 产出 / 数据驱动配方实体）
+
+**目标**：让玩家用材料合成物品——3 铁矿 + 1 木头 = 1 把剑，2 铁矿 + 2 木头 = 1 面盾。配方是**数据驱动的实体**（不是硬编码在脚本里），玩家知道哪些配方就能合成哪些。合成时自动验证材料是否足够，足够则消耗材料并产出物品，不够则拒绝。这是 RPG 经济系统的"生产"层——和 inventory + equipment + combat 组合后，形成"刷怪 → 收集材料 → 合成装备 → 穿戴变强 → 刷更强的怪"的完整生产消费循环，而不是只能从商店买东西。
+
+### 1. includes
+
+```json
+{ "includes": ["../../modules/inventory", "../../modules/combat", "../../modules/equipment", "../../modules/crafting"] }
+```
+
+crafting 模块**硬依赖** inventory——合成时直接读写 Inventory 组件（原子操作，和 equipment 模块同一个设计原则）。通常和 inventory + equipment + combat 一起 includes，因为合成的装备要穿戴后通过 equipment → combat 桥接才能实际变强。模块贡献 3 个组件：
+
+- `Crafting`（挂在合成者实体上）— 已知配方列表：
+  - `known` — 配方实体名列表（如 `["sword_recipe", "shield_recipe"]`）
+
+- `RecipeDef`（挂在配方实体上）— 静态产出定义：
+  - `output` — 产出的物品 id（如 `"sword"`）
+  - `output_count` — 产出数量（如 `1`）
+
+- `RecipeInputs`（挂在配方实体上）— 并行列表编码所需材料（和 Dialogue/LootTable 同模式）：
+  - `items` — 材料物品 id 列表（如 `["iron", "wood"]`）
+  - `counts` — 每种材料需要多少（如 `[3, 1]`）
+
+模块监听 1 个事件（你的规则负责 emit）：
+- `craft { who, recipe }` — 请求合成（who 用 recipe 配方合成）
+
+模块 emit 的事件（你的规则监听做反馈）：
+- `crafted { who, recipe, output, output_count }` — 合成成功
+- `craft-rejected { who, recipe, reason }` — 合成失败，reason ∈ `{"unknown", "missing_materials"}`
+
+> **配方是实体，不是硬编码**——每个配方是一个带 `RecipeDef` + `RecipeInputs` 组件的实体。这意味着配方是**数据**，可以在场景文件里定义、可以动态添加（NPC 教你新配方 → 往 `Crafting.known` 追加）、可以序列化进存档。这和 quest 模块的 quest 实体（带 `QuestDef` + `QuestObjective` + `QuestState`）是同一个数据驱动模式。
+
+### 2. 场景里定义配方实体 + 给玩家挂 Crafting + Inventory
+
+```json
+{
+  "name": "player",
+  "components": {
+    "Health": { "hp": 100, "max": 100 },
+    "Attack": { "power": 10 },
+    "Inventory": {
+      "items": ["iron", "wood", "herb"],
+      "counts": [5, 3, 2],
+      "capacity": 16
+    },
+    "Equipment": { "slots": ["weapon"], "items": [""] },
+    "Crafting": { "known": ["sword_recipe", "shield_recipe"] }
+  }
+},
+{
+  "name": "sword_recipe",
+  "components": {
+    "RecipeDef": { "output": "sword", "output_count": 1 },
+    "RecipeInputs": { "items": ["iron", "wood"], "counts": [3, 1] }
+  }
+},
+{
+  "name": "shield_recipe",
+  "components": {
+    "RecipeDef": { "output": "shield", "output_count": 1 },
+    "RecipeInputs": { "items": ["iron", "wood"], "counts": [2, 2] }
+  }
+}
+```
+
+配方实体没有 Position/Sprite——它们不在游戏世界里"存在"，只是数据容器。玩家通过 `Crafting.known` 引用配方实体名。初始材料在 Inventory 里（5 iron + 3 wood + 2 herb）。
+
+### 3. 在规则里驱动合成
+
+crafting 模块不决定**何时**合成——那是游戏逻辑（在工坊 UI 里按合成？快捷键？NPC 对话后触发？）。你的规则负责在合适的时机 emit `craft`：
+
+```json
+{
+  "id": "craft-sword-on-1",
+  "comment": "Press 1: craft a sword (requires 3 iron + 1 wood).",
+  "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } },
+  "do": [{ "emit": "craft", "data": { "who": "@player", "recipe": "sword_recipe" } }]
+}
+```
+
+### 4. 合成验证 + 消耗 + 产出是自动的
+
+crafting 模块的 `__crafting_craft` 在收到 `craft` 事件时：
+
+1. **检查已学**：`recipe` 是否在 `Crafting.known` 里。不在 → emit `craft-rejected { reason: "unknown" }`，return
+2. **读取配方定义**：从配方实体读 `RecipeDef.output`/`output_count` 和 `RecipeInputs.items`/`counts`
+3. **验证材料**：读玩家的 Inventory，检查每种材料的持有量 ≥ 需求量。不够 → emit `craft-rejected { reason: "missing_materials" }`，return
+4. **消耗材料**：从 Inventory 扣除每种材料的数量
+5. **产出物品**：把 `output` 加到 Inventory（已有则堆叠，没有则追加）
+6. **写回 Inventory**：原子写回 items + counts
+7. **emit 成功**：`crafted { who, recipe, output, output_count }`
+
+> **原子操作**：步骤 4-6 在同一个函数调用内完成，中间不会被其他系统打断。这避免了"扣了材料但没给产出"的不一致状态。和 equipment 模块的 `__equip`（检查 + 移除 + 添加 + 写回在同一函数内）是同一个设计原则。
+
+### 5. 与其他模块组合
+
+- **+ inventory**：硬依赖。crafting 直接读写 Inventory 组件。材料从 Inventory 扣除，产出加到 Inventory。
+- **+ equipment**：合成的装备可以穿戴。`crafted` → 游戏规则 emit `equip` → equipment 模块处理。crafting 提供"获得装备的途径"，equipment 提供"穿戴装备的机制"。
+- **+ combat**：合成的武器穿戴后提升攻击力。`crafted` → `equip` → `equipped` → `apply_equip_bonus` → Attack.power += N。crafting 是"变强"的来源之一。
+- **+ loot**：杀怪掉材料（`loot-dropped` → `pickup` → Inventory 有了 iron/wood）。crafting 用这些材料合成装备。完整的"刷怪 → 收集 → 合成"循环。
+- **+ shop**：商店卖材料（玩家可以买 iron 而不是刷怪掉）。shop 提供"快速获取材料的途径"，crafting 提供"材料变装备的途径"。
+- **+ progression**：升级解锁新配方（`leveled-up` → 往 `Crafting.known` 追加新配方实体名）。progression 提供"成长"，crafting 提供"成长后能做什么"。
+- **+ quest**：任务奖励新配方（`quest-turned-in` → 往 `Crafting.known` 追加）。quest 提供叙事动力，crafting 提供实际收益。
+
+### 6. 数据驱动配方的好处
+
+配方是实体意味着：
+
+- **动态添加**：NPC 教你新配方 → `ctx.setField(who, "Crafting.known", [...known, "legendary_sword_recipe"])`。不需要改脚本逻辑，只需追加配方实体名。
+- **序列化进存档**：配方实体是场景的一部分，`Crafting.known` 是组件数据——存档系统自动处理。
+- **运行时检查**：游戏可以读 `RecipeInputs.items`/`counts` 在 UI 里显示"合成这把剑需要 3 铁矿 + 1 木头"，不需要硬编码 UI。
+- **配方可以是任务奖励**：quest 模块的 `quest-turned-in` 事件可以触发"学习新配方"，和 crafting 模块无缝衔接。
+
+### 7. 完整 RPG 闭环中的位置
+
+crafting 模块把 shop 模块的"只能买"经济延伸为**生产消费循环**：
+
+```
+kill enemy → died → loot module → pickup(iron/wood) → inventory
+                                                          │
+press 1 → craft → crafting module → consume 3 iron + 1 wood → add sword
+                                                          │
+                                              [sword in inventory]
+                                                          │
+press 3 → equip → equipment module → sword to weapon slot
+                                                          │
+                                              equipped event
+                                                          │
+                                          apply_equip_bonus → +15 ATK
+                                                          │
+                                              attack damage 10 → 25
+                                                          │
+                                              kill tougher enemy → ...
+```
+
+没有 crafting 的 RPG：玩家只能从商店买装备（钱从刷怪来），经济是单线的"刷怪 → 攒钱 → 买装备"。有 crafting 的 RPG：玩家可以收集材料自己造装备——这多了"去哪里刷材料"的策略选择（铁矿去矿山？木头去森林？），也多了"先造什么"的优先级决策（先造武器提升输出？先造盾提升生存？）。这是"有深度的 RPG 经济"和"简单商店游戏"的差别。
+
+完整可运行示例见 `examples/crafting-demo/`，集成测试见 `crates/vitric-cli/tests/crafting.rs`（10 例：check 通过 / 初始材料 / 合成剑消耗材料 / 合成盾消耗不同量 / 材料不足阻止 / 未知配方拒绝 / 完整合成-穿戴-攻击循环 / 连续合成验证 / 合成盾验证 / 无关材料不被消耗）。
+
+---
+
 ## 编写自己的模块
 
 模块就是一个含 `module.json` 的目录：

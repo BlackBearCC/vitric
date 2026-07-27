@@ -1,0 +1,10 @@
+{
+  "rules": [
+    {
+      "id": "crafting-on-craft",
+      "comment": "Craft request: validate (known recipe / has materials) then consume materials and produce output.",
+      "on": { "event": "craft" },
+      "do": [{ "call": "__crafting_craft", "with": { "who": "event.who", "recipe": "event.recipe" } }]
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "rules": [
+    {
+      "id": "craft-sword-on-1",
+      "comment": "Press 1: craft a sword (requires 3 iron + 1 wood).",
+      "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } },
+      "do": [{ "emit": "craft", "data": { "who": "@player", "recipe": "sword_recipe" } }]
+    },
+    {
+      "id": "craft-shield-on-2",
+      "comment": "Press 2: craft a shield (requires 2 iron + 2 wood).",
+      "on": { "event": "input", "filter": { "action": "2", "phase": "pressed" } },
+      "do": [{ "emit": "craft", "data": { "who": "@player", "recipe": "shield_recipe" } }]
+    },
+    {
+      "id": "equip-sword-on-3",
+      "comment": "Press 3: equip the sword (if in inventory).",
+      "on": { "event": "input", "filter": { "action": "3", "phase": "pressed" } },
+      "do": [{ "emit": "equip", "data": { "who": "@player", "item": "sword", "slot": "weapon" } }]
+    },
+    {
+      "id": "unequip-weapon-on-4",
+      "comment": "Press 4: unequip weapon slot (returns item to inventory).",
+      "on": { "event": "input", "filter": { "action": "4", "phase": "pressed" } },
+      "do": [{ "emit": "unequip", "data": { "who": "@player", "slot": "weapon" } }]
+    },
+    {
+      "id": "player-attacks-dummy",
+      "comment": "Press X: attack the dummy — shows how crafted gear increases damage.",
+      "on": { "event": "input", "filter": { "action": "x", "phase": "pressed" } },
+      "do": [{ "emit": "attack", "data": { "attacker": "@player", "target": "@dummy" } }]
+    },
+
+    {
+      "id": "apply-equip-bonus",
+      "comment": "On equipped: apply stat bonus based on item id.",
+      "on": { "event": "equipped" },
+      "if": [["event.who", "==", "@player"]],
+      "do": [{ "call": "apply_equip_bonus", "with": { "who": "@player", "item": "event.item" } }]
+    },
+    {
+      "id": "remove-equip-bonus",
+      "comment": "On unequipped: remove stat bonus based on item id.",
+      "on": { "event": "unequipped" },
+      "if": [["event.who", "==", "@player"]],
+      "do": [{ "call": "remove_equip_bonus", "with": { "who": "@player", "item": "event.item" } }]
+    },
+
+    {
+      "id": "update-hud",
+      "on": "tick",
+      "do": [{ "call": "render_hud", "with": { "who": "@player", "enemy": "@dummy", "hud": "@hud" } }]
+    }
+  ]
+}

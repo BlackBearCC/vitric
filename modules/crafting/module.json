@@ -1,0 +1,6 @@
+{
+  "name": "crafting",
+  "schema": "schema.json",
+  "rules": ["rules/crafting.json"],
+  "scripts": ["scripts/crafting.js"]
+}

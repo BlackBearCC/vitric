@@ -1,0 +1,21 @@
+{
+  "components": {
+    "Crafting": {
+      "fields": {
+        "known": { "type": "list", "of": { "type": "text" }, "default": [] }
+      }
+    },
+    "RecipeDef": {
+      "fields": {
+        "output": { "type": "text", "default": "" },
+        "output_count": { "type": "int", "default": 1, "min": 1 }
+      }
+    },
+    "RecipeInputs": {
+      "fields": {
+        "items": { "type": "list", "of": { "type": "text" }, "default": [] },
+        "counts": { "type": "list", "of": { "type": "int", "default": 1, "min": 1 }, "default": [] }
+      }
+    }
+  }
+}

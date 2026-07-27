@@ -1,0 +1,15 @@
+{
+  "name": "crafting-demo",
+  "schema": "schema.json",
+  "entry": "scenes/main.json",
+  "scenes": ["scenes/main.json"],
+  "rules": ["rules/game.json"],
+  "scripts": ["scripts/demo.js"],
+  "includes": [
+    "../../modules/inventory",
+    "../../modules/combat",
+    "../../modules/equipment",
+    "../../modules/crafting"
+  ],
+  "seed": 1
+}
