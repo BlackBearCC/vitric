@@ -44,7 +44,8 @@
         "ore": "@player.Inventory.ore",   "wood": "@player.Inventory.wood",
         "fiber": "@player.Inventory.fiber", "seed": "@player.Inventory.seed",
         "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
-        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp"
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
       } }]
     },
 
@@ -102,11 +103,11 @@
 
     {
       "id": "drifter-cadence-normal",
-      "comment": "每隔一个游戏日 spawn 一个新旅人(最多 8 个,且场上没人时才 spawn)。stage != 兴旺 时 cadence=2 天。",
+      "comment": "Every 2 game-days spawn a new drifter (cap 12 — full DRIFTER_POOL, so traders at idx 10/11 can spawn; was 8 which blocked traders). stage != 兴旺 → cadence=2 days.",
       "on": { "event": "day-start" },
       "if": [
         ["event.day", ">=", "@colony.Colony.next_drifter_day"],
-        ["@colony.Colony.drifters_spawned", "<", 8],
+        ["@colony.Colony.drifters_spawned", "<", 12],
         ["@colony.Colony.target_drifter", "==", ""],
         ["@colony.Colony.stage", "!=", "兴旺"]
       ],
@@ -121,11 +122,11 @@
     },
     {
       "id": "drifter-cadence-fast",
-      "comment": "兴旺阶段:cadence=1 天(更频繁的旅人到访)。",
+      "comment": "兴旺 stage: cadence=1 day (more frequent drifter visits). Cap 12 (matches DRIFTER_POOL length).",
       "on": { "event": "day-start" },
       "if": [
         ["event.day", ">=", "@colony.Colony.next_drifter_day"],
-        ["@colony.Colony.drifters_spawned", "<", 8],
+        ["@colony.Colony.drifters_spawned", "<", 12],
         ["@colony.Colony.target_drifter", "==", ""],
         ["@colony.Colony.stage", "==", "兴旺"]
       ],

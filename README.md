@@ -6,13 +6,15 @@
 
 English | [中文](README.zh-CN.md)
 
-**A deterministic, glass-box 2D game engine built for AI agents.**
+**The AI game engine for shipping commercial games — not demos.**
+
+> 核心宗旨：让 AI 有能力独立完成商业闭环游戏，而非止步于 demo。
 
 ![glow demo](docs/media/glow.gif)
 
 *↑ AI-generated pixel art, dynamic 2D lighting, particles, camera follow — every frame captured headlessly by an AI driving the game through the control plane.*
 
-Existing engines were designed for a human in front of an editor; to an AI they are black boxes. Vitric is built around an **agent API**: every piece of engine state is visible, operable, and verifiable, so an AI can autonomously **run the game → observe pixels and state → assert → modify → repeat** without a human in the loop. Because the simulation is bit-exact deterministic, the engine can also *prove* things about a game — that a recording clears it, that a swarm of agents can't soft-lock it.
+Most "AI game" tools stop at prompt-to-prototype. Vitric is built around an **agent API** so an AI can autonomously carry a game the whole way to shippable: **run the game → observe pixels and state → assert → modify → repeat**, no human in the loop. Existing engines were designed for a human in front of an editor; to an AI they are black boxes — state invisible, bugs unreproducible, "done" is a claim, not a fact. Vitric inverts that: every piece of engine state is visible, operable, and verifiable, and because the simulation is bit-exact deterministic, the engine can *prove* things about a game — that a recording clears it, that a swarm of agents can't soft-lock it. Two complete games in `games/` have already passed the delivery gate.
 
 ## Contents
 
