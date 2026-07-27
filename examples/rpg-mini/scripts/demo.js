@@ -1,10 +1,12 @@
-// rpg-mini script — composes inventory + quest + dialogue + game-flow into a
-// complete game loop: title → talk to elder → collect herbs → turn in → win.
+// rpg-mini script — composes inventory + quest + dialogue + game-flow + combat
+// into a complete game loop: title → talk to elder → collect herbs → fight or
+// avoid the wolf → turn in quest → win. Player has HP and can attack the wolf;
+// the wolf attacks back on contact; either dying triggers game-end.
 //
 // `move` applies input direction to Velocity (rule DSL can't negate paths).
-// `reset_game` restores player/herbs/quest for a fresh run, then emits
+// `reset_game` restores player/herbs/wolf/quest for a fresh run, then emits
 // game-restart (game-flow module catches it → phase back to title, time/score reset).
-// `render_hud` shows phase-appropriate text including quest progress.
+// `render_hud` shows phase-appropriate text including quest progress and player HP.
 
 // Herb home positions (for restart).
 const HERB_HOMES = {
@@ -12,6 +14,11 @@ const HERB_HOMES = {
   "herb-2": [3, 3],
   "herb-3": [0, 3],
 };
+
+// Wolf home position and stats (for restart after a fight).
+const WOLF_HOME = [1, 2];
+const WOLF_MAX_HP = 60;
+const PLAYER_MAX_HP = 100;
 
 vitric.fn("move", (args, ctx) => {
   const axis = args.axis || "x";
@@ -28,12 +35,22 @@ vitric.fn("stash_herb", (args, ctx) => {
   ctx.setField(herb, "Position.y", -100);
 });
 
+// Move a dead wolf off-screen (keep entity alive for restart). Mirrors stash_herb:
+// despawning would break @wolf references in rules and reset_game.
+vitric.fn("stash_wolf", (args, ctx) => {
+  const wolf = args.wolf;
+  if (!wolf) return;
+  ctx.setField(wolf, "Position.x", -100);
+  ctx.setField(wolf, "Position.y", -100);
+});
+
 vitric.fn("reset_game", (_args, ctx) => {
-  // Reset player position and velocity.
+  // Reset player position, velocity, and HP.
   ctx.setField("@player", "Position.x", 0);
   ctx.setField("@player", "Position.y", 0);
   ctx.setField("@player", "Velocity.x", 0);
   ctx.setField("@player", "Velocity.y", 0);
+  ctx.setField("@player", "Health.hp", PLAYER_MAX_HP);
 
   // Clear inventory.
   ctx.setField("@player", "Inventory.items", []);
@@ -61,6 +78,11 @@ vitric.fn("reset_game", (_args, ctx) => {
     ctx.setField(name, "Position.y", HERB_HOMES[name][1]);
   }
 
+  // Revive the wolf: restore HP and move it back home (it was stashed off-screen if killed).
+  ctx.setField("@wolf", "Health.hp", WOLF_MAX_HP);
+  ctx.setField("@wolf", "Position.x", WOLF_HOME[0]);
+  ctx.setField("@wolf", "Position.y", WOLF_HOME[1]);
+
   // Emit game-restart — game-flow module resets phase/time/score.
   ctx.emit("game-restart", {});
 });
@@ -76,6 +98,8 @@ vitric.fn("render_hud", (args, ctx) => {
   const time = ctx.getField(game, "GameState.time") || 0;
   const qState = ctx.getField(quest, "QuestState.state") || "inactive";
   const qProgress = ctx.getField(quest, "QuestState.progress") || 0;
+  const php = ctx.getField(who, "Health.hp");
+  const phpText = (php !== undefined && php !== null) ? ("  HP: " + php) : "";
 
   let text;
   if (phase === "title") {
@@ -83,7 +107,7 @@ vitric.fn("render_hud", (args, ctx) => {
   } else if (phase === "playing") {
     const inv = ctx.getField(who, "Inventory.items") || [];
     const herbCount = inv.filter(function (it) { return it === "herb"; }).length;
-    text = "Quest: " + qState + " " + qProgress + "/3  Herbs: " + herbCount + "  Time: " + time;
+    text = "Quest: " + qState + " " + qProgress + "/3  Herbs: " + herbCount + phpText + "  Time: " + time;
   } else if (phase === "won") {
     text = "YOU WIN! Cleared in " + time + " ticks. Press R to restart.";
   } else if (phase === "lost") {

@@ -1,0 +1,31 @@
+{
+  "entities": [
+    {
+      "name": "player",
+      "components": {
+        "Player": {},
+        "Position": { "x": 0, "y": 0 },
+        "Sprite": { "w": 1, "h": 1, "color": "#4da3ff" },
+        "Health": { "hp": 100, "max": 100 },
+        "Attack": { "power": 40 }
+      }
+    },
+    {
+      "name": "enemy",
+      "components": {
+        "Enemy": {},
+        "Position": { "x": 2, "y": 0 },
+        "Sprite": { "w": 1, "h": 1, "color": "#e53935" },
+        "Health": { "hp": 100, "max": 100 },
+        "Attack": { "power": 20 }
+      }
+    },
+    {
+      "name": "hud",
+      "components": {
+        "Position": { "x": 1, "y": 4 },
+        "Text": { "content": "Press X to attack, H to heal", "size": 0.7, "color": "#ffd75e" }
+      }
+    }
+  ]
+}

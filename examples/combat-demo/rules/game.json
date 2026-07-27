@@ -1,0 +1,28 @@
+{
+  "rules": [
+    {
+      "id": "player-attack",
+      "comment": "Press X: player attacks the enemy.",
+      "on": { "event": "input", "filter": { "action": "x", "phase": "pressed" } },
+      "do": [{ "emit": "attack", "data": { "attacker": "@player", "target": "@enemy" } }]
+    },
+    {
+      "id": "player-heal",
+      "comment": "Press H: player heals 30 hp.",
+      "on": { "event": "input", "filter": { "action": "h", "phase": "pressed" } },
+      "do": [{ "emit": "heal", "data": { "who": "@player", "amount": 30 } }]
+    },
+    {
+      "id": "enemy-dies",
+      "comment": "When the enemy dies, move it off-screen (keep entity alive for HUD reads).",
+      "on": { "event": "died" },
+      "if": [["event.who", "==", "@enemy"]],
+      "do": [{ "call": "stash_enemy", "with": { "enemy": "@enemy" } }]
+    },
+    {
+      "id": "update-hud",
+      "on": "tick",
+      "do": [{ "call": "render_hud", "with": { "who": "@player", "enemy": "@enemy", "hud": "@hud" } }]
+    }
+  ]
+}

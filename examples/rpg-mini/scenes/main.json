@@ -17,7 +17,9 @@
         "Sprite": { "w": 1, "h": 1, "color": "#4da3ff" },
         "Inventory": { "items": [], "counts": [], "capacity": 8 },
         "QuestLog": { "active": [], "completed": [] },
-        "DialogueRunner": { "active_npc": "", "current": -1 }
+        "DialogueRunner": { "active_npc": "", "current": -1 },
+        "Health": { "hp": 100, "max": 100 },
+        "Attack": { "power": 40 }
       }
     },
     {
@@ -91,7 +93,9 @@
         "Enemy": {},
         "Position": { "x": 1, "y": 2 },
         "Collider": { "w": 1, "h": 1 },
-        "Sprite": { "w": 1, "h": 1, "color": "#9a4a3a" }
+        "Sprite": { "w": 1, "h": 1, "color": "#9a4a3a" },
+        "Health": { "hp": 60, "max": 60 },
+        "Attack": { "power": 20 }
       }
     },
     {

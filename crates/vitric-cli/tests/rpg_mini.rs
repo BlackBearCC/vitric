@@ -1,11 +1,12 @@
 //! End-to-end test for rpg-mini — the complete-game proof.
 //!
-//! Composes all four gameplay modules (inventory + quest + dialogue + game-flow)
-//! into a single closed loop: title → talk to elder → accept quest → collect 3
-//! herbs → turn in quest → win → restart. Also verifies the lose path (wolf).
+//! Composes all five gameplay modules (inventory + quest + dialogue + game-flow
+//! + combat) into a single closed loop: title → talk to elder → accept quest →
+//! collect 3 herbs → turn in quest → win → restart. Also covers the combat lose
+//! path (wolf attacks player to death) and the combat kill path (X kills wolf).
 //!
 //! This is the structural proof that the engine supports commercial-game closed
-//! loops, not just demos: the four modules compose without glue code, driven
+//! loops, not just demos: the five modules compose without glue code, driven
 //! purely by rules + module-emitted events.
 
 use std::path::PathBuf;
@@ -67,6 +68,32 @@ fn player_pos(sim: &vitric_sim::Sim) -> (f64, f64) {
     let x = sim.world.get_field(p, "Position.x").unwrap().as_f64().unwrap();
     let y = sim.world.get_field(p, "Position.y").unwrap().as_f64().unwrap();
     (x, y)
+}
+
+fn player_hp(sim: &vitric_sim::Sim) -> i64 {
+    let p = sim.world.entity("player").unwrap();
+    sim.world.get_field(p, "Health.hp").unwrap().as_i64().unwrap()
+}
+
+fn wolf_hp(sim: &vitric_sim::Sim) -> i64 {
+    let w = sim.world.entity("wolf").unwrap();
+    sim.world.get_field(w, "Health.hp").unwrap().as_i64().unwrap()
+}
+
+fn wolf_pos(sim: &vitric_sim::Sim) -> (f64, f64) {
+    let w = sim.world.entity("wolf").unwrap();
+    let x = sim.world.get_field(w, "Position.x").unwrap().as_f64().unwrap();
+    let y = sim.world.get_field(w, "Position.y").unwrap().as_f64().unwrap();
+    (x, y)
+}
+
+/// Press X once and step enough ticks for the attack cascade to land:
+/// input → emit attack → __combat_attack → emit damage → __combat_damage → HP write.
+fn press_x(sim: &mut vitric_sim::Sim, rt: &mut Runtime) {
+    sim.inject_input("x", "pressed");
+    for _ in 0..4 {
+        sim.step(rt).unwrap();
+    }
 }
 
 #[test]
@@ -174,7 +201,9 @@ fn rpg_mini_full_win_loop() {
 }
 
 #[test]
-fn rpg_mini_lose_path() {
+fn rpg_mini_combat_death() {
+    // Replaces the old instant-lose wolf-hit: the wolf now attacks the player on
+    // contact (combat module), and the player only loses when HP reaches 0.
     let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
 
     // title → playing.
@@ -182,6 +211,7 @@ fn rpg_mini_lose_path() {
     sim.step(&mut rt).unwrap();
     sim.step(&mut rt).unwrap();
     assert_eq!(phase(&sim), "playing");
+    assert_eq!(player_hp(&sim), 100, "player should start at full HP");
 
     // Walk into the wolf at (1,2): right to (1,0), up to (1,2).
     sim.inject_input("right", "pressed");
@@ -189,15 +219,83 @@ fn rpg_mini_lose_path() {
     sim.inject_input("right", "released");
     sim.inject_input("up", "pressed");
     sim.step(&mut rt).unwrap(); // (1,0)→(1,1)
-    sim.step(&mut rt).unwrap(); // (1,1)→(1,2), collision wolf → game-lose emitted
+    sim.step(&mut rt).unwrap(); // (1,1)→(1,2), collision → emit attack (carryover)
     sim.inject_input("up", "released");
-    sim.step(&mut rt).unwrap(); // game-lose processed → phase=lost
-    sim.step(&mut rt).unwrap(); // buffer for deferred phase write
-    assert_eq!(phase(&sim), "lost", "touching the wolf should lose the game");
 
-    // Restart → title.
+    // Stand on the wolf: collision fires every tick → wolf keeps attacking.
+    // HP cascade per attack: collision (tick N) → attack → damage → HP -= 20 (lands ~tick N+2).
+    // Player HP 100, wolf Attack.power 20 → 5 hits to die → died → game-lose → phase=lost.
+    // Step plenty of ticks to let the cascade drain HP to 0 and propagate to phase.
+    let mut died = false;
+    for _ in 0..25 {
+        sim.step(&mut rt).unwrap();
+        if !died && player_hp(&sim) == 0 {
+            died = true;
+        }
+        if phase(&sim) == "lost" {
+            break;
+        }
+    }
+    assert!(died, "player HP should reach 0 from wolf attacks");
+    assert_eq!(phase(&sim), "lost", "player death (HP=0) should trigger game-lose");
+
+    // Restart → title, player HP restored.
     sim.inject_input("r", "pressed");
     sim.step(&mut rt).unwrap();
     sim.step(&mut rt).unwrap();
     assert_eq!(phase(&sim), "title");
+    assert_eq!(player_hp(&sim), 100, "player HP should reset on restart");
+}
+
+#[test]
+fn rpg_mini_combat_kill_wolf() {
+    // Player can kill the wolf with X (2 hits: 40+40 > 60 HP). After death the
+    // wolf is stashed off-screen (entity kept for restart). The quest loop is
+    // unaffected — proves combat composes with the other four modules.
+    //
+    // Wolf respawn-on-restart is verified by reset_game (scripts/demo.js), which
+    // runs on every restart path tested in rpg_mini_combat_death and
+    // rpg_mini_full_win_loop; we don't duplicate the restart here because R only
+    // fires from won/lost, and forcing a win/lose after the kill would duplicate
+    // those tests.
+    let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
+
+    // title → playing.
+    sim.inject_input("space", "pressed");
+    sim.step(&mut rt).unwrap();
+    sim.step(&mut rt).unwrap();
+    assert_eq!(phase(&sim), "playing");
+    assert_eq!(wolf_hp(&sim), 60, "wolf should start at full HP");
+
+    // Player presses X to attack the wolf (no collision needed — X targets @wolf).
+    // 1st hit: 60 → 20.
+    press_x(&mut sim, &mut rt);
+    assert_eq!(wolf_hp(&sim), 20, "wolf HP should be 20 after 1st player attack");
+
+    // 2nd hit: 20 → 0 → died → stash_wolf.
+    press_x(&mut sim, &mut rt);
+    sim.step(&mut rt).unwrap(); // died carryover → wolf-dies-on-combat → stash_wolf
+    sim.step(&mut rt).unwrap(); // stash_wolf deferred write flushes
+    assert_eq!(wolf_hp(&sim), 0, "wolf HP should be 0 after 2nd attack");
+
+    // Wolf stashed off-screen (entity kept alive for restart, not despawned).
+    let (wx, wy) = wolf_pos(&sim);
+    assert!(wx < 0.0 && wy < 0.0, "wolf should be stashed off-screen after death, got ({wx}, {wy})");
+
+    // Player is unharmed (wolf never attacked back — no collision).
+    assert_eq!(player_hp(&sim), 100, "player should be at full HP after ranged combat");
+
+    // Player can now walk through the wolf's former spot (1,2) without dying —
+    // the stashed wolf is at (-100,-100), so no collision fires. This proves
+    // combat opened the path: the wolf is gone from the gameplay space.
+    sim.inject_input("right", "pressed");
+    sim.step(&mut rt).unwrap(); // (0,0)→(1,0)
+    sim.inject_input("right", "released");
+    sim.inject_input("up", "pressed");
+    sim.step(&mut rt).unwrap(); // (1,0)→(1,1)
+    sim.step(&mut rt).unwrap(); // (1,1)→(1,2) — wolf's former spot, now empty
+    sim.step(&mut rt).unwrap(); // (1,2)→(1,3) — keep moving, no collision
+    sim.inject_input("up", "released");
+    assert_eq!(phase(&sim), "playing", "walking through the dead wolf's spot should not lose");
+    assert_eq!(player_hp(&sim), 100, "player should be unharmed walking through the dead wolf's spot");
 }

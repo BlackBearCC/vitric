@@ -40,11 +40,32 @@
       ]
     },
     {
-      "id": "wolf-hit",
-      "comment": "Touch the wolf (only while playing) → lose.",
+      "id": "wolf-attacks-player",
+      "comment": "Wolf attacks player on contact (combat module handles HP/damage). self=Player, other=Enemy.",
       "on": { "event": "collision", "between": ["Player", "Enemy"] },
       "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "emit": "attack", "data": { "attacker": "other", "target": "self" } }]
+    },
+    {
+      "id": "player-attacks-wolf",
+      "comment": "Press X to attack the wolf (combat module reads Attack.power and applies damage).",
+      "on": { "event": "input", "filter": { "action": "x", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "emit": "attack", "data": { "attacker": "@player", "target": "@wolf" } }]
+    },
+    {
+      "id": "player-dies-on-combat",
+      "comment": "Player HP reached 0 → game-lose (combat module emits died).",
+      "on": { "event": "died" },
+      "if": [["event.who", "==", "@player"]],
       "do": [{ "emit": "game-lose" }]
+    },
+    {
+      "id": "wolf-dies-on-combat",
+      "comment": "Wolf HP reached 0 → stash off-screen (keep entity for restart).",
+      "on": { "event": "died" },
+      "if": [["event.who", "==", "@wolf"]],
+      "do": [{ "call": "stash_wolf", "with": { "wolf": "@wolf" } }]
     },
 
     {

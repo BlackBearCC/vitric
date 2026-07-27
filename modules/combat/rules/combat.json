@@ -1,0 +1,22 @@
+{
+  "rules": [
+    {
+      "id": "combat-on-attack",
+      "comment": "An attacker attacks a target: read attacker's Attack.power and deal damage to target.",
+      "on": { "event": "attack" },
+      "do": [{ "call": "__combat_attack", "with": { "attacker": "event.attacker", "target": "event.target" } }]
+    },
+    {
+      "id": "combat-on-damage",
+      "comment": "Apply damage to an entity: reduce hp by amount (clamped to [0, max]).",
+      "on": { "event": "damage" },
+      "do": [{ "call": "__combat_damage", "with": { "who": "event.who", "amount": "event.amount", "killer": "event.killer" } }]
+    },
+    {
+      "id": "combat-on-heal",
+      "comment": "Heal an entity: restore hp by amount (clamped to [0, max]).",
+      "on": { "event": "heal" },
+      "do": [{ "call": "__combat_heal", "with": { "who": "event.who", "amount": "event.amount" } }]
+    }
+  ]
+}

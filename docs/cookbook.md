@@ -417,6 +417,130 @@ vitric.fn("render_dialogue_hud", (args, ctx) => {
 
 ---
 
+## 配方 6：使用 combat 模块（HP / 攻击 / 伤害 / 死亡 / 治疗）
+
+**目标**：实体有血量，可以互相攻击；血量归零时死亡并发出事件；可以治疗。比配方 2（纯规则版）更进一步：combat 模块把 HP 钳制、死亡事件、伤害链都封装好，你只管 emit `attack` / `damage` / `heal`。
+
+### 1. includes
+
+```json
+{ "includes": ["../../modules/combat"] }
+```
+
+combat 模块贡献 2 个组件：
+- `Health` — `hp`（当前血量）/ `max`（最大血量）
+- `Attack` — `power`（每次攻击造成的伤害）
+
+模块监听 3 个事件（你的规则负责 emit）：
+- `attack { attacker, target }` — 攻击者打目标，模块读 `attacker.Attack.power` 并 emit `damage`
+- `damage { who, amount, killer? }` — 对 `who` 造成 `amount` 伤害（正值扣血，钳到 [0, max]）
+- `heal { who, amount }` — 治疗 `who` `amount` 点（钳到 [0, max]）
+
+模块 emit 的事件（你的规则可以监听做反馈）：
+- `damaged { who, amount, hp_after }` — 伤害已结算
+- `healed { who, amount, hp_after }` — 治疗已结算
+- `died { who, killer }` — HP 归零（**模块不 despawn**，由你的规则决定后续）
+
+### 2. 场景里给实体挂 `Health` + `Attack`
+
+```json
+{
+  "name": "player",
+  "components": {
+    "Health": { "hp": 100, "max": 100 },
+    "Attack": { "power": 40 }
+  }
+},
+{
+  "name": "wolf",
+  "components": {
+    "Enemy": {},
+    "Health": { "hp": 60, "max": 60 },
+    "Attack": { "power": 20 }
+  }
+}
+```
+
+### 3. 在规则里驱动战斗
+
+模块本身不决定**何时**攻击——那是游戏逻辑。你的规则负责在合适的时机 emit `attack`：
+
+```json
+{
+  "id": "wolf-attacks-player",
+  "comment": "Wolf attacks player on contact. self=Player, other=Enemy.",
+  "on": { "event": "collision", "between": ["Player", "Enemy"] },
+  "do": [{ "emit": "attack", "data": { "attacker": "other", "target": "self" } }]
+},
+{
+  "id": "player-attacks-wolf",
+  "comment": "Press X: player attacks the wolf.",
+  "on": { "event": "input", "filter": { "action": "x", "phase": "pressed" } },
+  "do": [{ "emit": "attack", "data": { "attacker": "@player", "target": "@wolf" } }]
+}
+```
+
+### 4. 死亡处理由你决定
+
+模块 emit `died` 但**不 despawn**——因为不同游戏对死亡的处理不同（销毁 / 复活 / 隐藏 / 触发 game-lose）。你的规则监听 `died` 决定：
+
+```json
+{
+  "id": "player-dies",
+  "comment": "Player died → game-lose.",
+  "on": { "event": "died" },
+  "if": [["event.who", "==", "@player"]],
+  "do": [{ "emit": "game-lose" }]
+},
+{
+  "id": "wolf-dies",
+  "comment": "Wolf died → stash off-screen (keep entity for HUD/restart).",
+  "on": { "event": "died" },
+  "if": [["event.who", "==", "@wolf"]],
+  "do": [{ "call": "stash_wolf", "with": { "wolf": "@wolf" } }]
+}
+```
+
+```js
+// stash_wolf: move off-screen instead of despawning — keeps @wolf references
+// valid for HUD reads and reset_game on restart.
+vitric.fn("stash_wolf", (args, ctx) => {
+  ctx.setField(args.wolf, "Position.x", -100);
+  ctx.setField(args.wolf, "Position.y", -100);
+});
+```
+
+> **为什么不 despawn？** despawn 后 `@wolf` 实体不再存在，规则里的 `event.who == @wolf` 比较、HUD 读 `@wolf.Health.hp`、`reset_game` 复活狼——全都会报错。stash（移到屏幕外）保留了实体，所有引用仍然有效。配方 1 的 herb 拾取也用同样的模式。
+
+### 5. 伤害链时序
+
+一次攻击跨 3 个 tick 结算（事件级联）：
+
+```
+tick N:   collision/input → emit attack (carryover)
+tick N+1: combat-on-attack → __combat_attack → emit damage (carryover)
+tick N+2: combat-on-damage → __combat_damage → setField HP, emit damaged (+ died if HP<=0)
+tick N+3: died → 你的 player-dies/wolf-dies 规则触发
+tick N+4: game-lose → phase=lost
+```
+
+测试驱动时，每次 emit `attack` 后 step 3-4 tick 让伤害落地；HP 归零后再 step 2-3 tick 让 `died` → `game-lose` → `phase=lost` 传播完。
+
+### 6. 与配方 2（纯规则版）的关系
+
+配方 2 用纯规则实现了 HP/伤害/死亡——适合学习引擎机制。combat 模块是配方 2 的产品化版本：HP 钳制、`died` 事件、`killer` 透传、`heal` 治疗都封装好了。两者选其一即可，**不要同时用**（会重复扣血）。
+
+### 7. 与其他模块组合
+
+combat 模块的事件接口让它与其他模块无缝组合：
+- **+ game-flow**：`died`（who=player）→ emit `game-lose`；`quest-turned-in` → emit `game-win`。战斗胜负直接驱动游戏状态机。
+- **+ quest**：杀死敌人可以触发 `collect` 目标（敌人掉落物品 → emit `pickup` → inventory → quest-track）。
+- **+ dialogue**：NPC 死亡可以跳过对话，或对话选择决定是否开战。
+
+完整可运行示例见 `examples/combat-demo/`，集成测试见 `crates/vitric-cli/tests/combat_module.rs`；五模块组合（含 combat）见 `examples/rpg-mini/`，集成测试见 `crates/vitric-cli/tests/rpg_mini.rs`。
+
+---
+
 ## 配方 7：使用 game-flow 模块（游戏状态机 / 闭环）
 
 **目标**：给游戏一个统一的"开始-玩-胜/负-重开"结构骨架。这是"完整游戏"与"沙盒 demo"的结构性差别——game-flow 模块让每款 Vitric 游戏都有相同的开始/结束形状。
@@ -487,11 +611,11 @@ vitric.fn("reset_game", (_args, ctx) => {
 
 ---
 
-## 配方 8：四模块组合出完整 RPG 闭环（inventory + quest + dialogue + game-flow）
+## 配方 8：五模块组合出完整 RPG 闭环（inventory + quest + dialogue + game-flow + combat）
 
-**目标**：把四个模块拼成一个完整的 RPG 小品——标题→对话接任务→收集草药→交付任务→胜利→重开。这是"商业游戏闭环"的最小可运行证明：四个模块无需胶水代码，纯靠规则 + 模块事件组合。
+**目标**：把五个模块拼成一个完整的 RPG 小品——标题→对话接任务→收集草药→（躲避或击杀狼）→交付任务→胜利→重开。这是"商业游戏闭环"的最小可运行证明：五个模块无需胶水代码，纯靠规则 + 模块事件组合。
 
-### 1. includes 四个模块
+### 1. includes 五个模块
 
 ```json
 {
@@ -499,14 +623,15 @@ vitric.fn("reset_game", (_args, ctx) => {
     "../../modules/inventory",
     "../../modules/quest",
     "../../modules/dialogue",
-    "../../modules/game-flow"
+    "../../modules/game-flow",
+    "../../modules/combat"
   ]
 }
 ```
 
 ### 2. 组合接缝
 
-四个模块的接缝是**事件**，不是函数调用：
+五个模块的接缝是**事件**，不是函数调用：
 
 ```
                     ┌─── game-flow ────┐
@@ -533,6 +658,17 @@ vitric.fn("reset_game", (_args, ctx) => {
                     │                              ▼
                     │                        quest-track reads Talked
                     │                        → talk objective done
+                    │
+  collision ──→ attack event ──→ combat module ──→ damage ──→ HP
+  input X    ──→ attack event ──→ combat module ──→ damage ──→ HP
+                    │                                      │
+                    │                                      ▼
+                    │                        HP <= 0 → died event
+                    │                              │
+                    │              ┌───────────────┘
+                    │              ▼
+                    │    player died → game-lose → phase=lost
+                    │    wolf died  → stash_wolf (off-screen)
                     │
   quest-turned-in ──→ emit game-win ──→ game-flow module ──→ phase=won
 ```
@@ -597,15 +733,46 @@ emit `pickup` → inventory 模块加进背包 → quest 模块的 `quest-track`
 
 quest 模块 emit `quest-turned-in`（含奖励 `pickup` 事件，inventory 模块接收）→ 你的规则 emit `game-win` → game-flow 模块切 `phase=won`。
 
-### 4. 重启
+### 4. 战斗接缝：attack / died 事件
 
-`reset_game` 脚本重置游戏内容（玩家位置、收集物位置、背包、quest 状态、dialogue 状态），然后 emit `game-restart` → game-flow 模块重置 `GameState`（phase=title, time=0, score=0）。
+combat 模块和其他模块一样通过事件组合。狼碰撞玩家 → emit `attack` → 模块结算伤害 → HP 归零 emit `died` → 你的规则决定后续：
 
-### 5. deferred 写入时序
+```json
+{
+  "id": "wolf-attacks-player",
+  "on": { "event": "collision", "between": ["Player", "Enemy"] },
+  "do": [{ "emit": "attack", "data": { "attacker": "other", "target": "self" } }]
+},
+{
+  "id": "player-attacks-wolf",
+  "on": { "event": "input", "filter": { "action": "x", "phase": "pressed" } },
+  "do": [{ "emit": "attack", "data": { "attacker": "@player", "target": "@wolf" } }]
+},
+{
+  "id": "player-dies-on-combat",
+  "on": { "event": "died" },
+  "if": [["event.who", "==", "@player"]],
+  "do": [{ "emit": "game-lose" }]
+},
+{
+  "id": "wolf-dies-on-combat",
+  "on": { "event": "died" },
+  "if": [["event.who", "==", "@wolf"]],
+  "do": [{ "call": "stash_wolf", "with": { "wolf": "@wolf" } }]
+}
+```
 
-四模块组合时，事件链跨 tick 传播：collision（tick N）→ quest-offer carryover（tick N+1 处理）→ quest-accept carryover（tick N+2）→ ... 测试驱动时，每个状态转移后要 step 1-2 tick 让 deferred 写入 flush。详见集成测试 `tests/rpg_mini.rs` 的注释。
+`died` → `game-lose` 与 `quest-turned-in` → `game-win` 是两条独立的胜负路径，都汇入 game-flow 模块的 phase 状态机。玩家可以选择躲避狼直奔任务，也可以击杀狼清路——combat 是可选的玩法层，不阻塞主任务链。
 
-完整可运行示例见 `examples/rpg-mini/`，集成测试见 `crates/vitric-cli/tests/rpg_mini.rs`（3 例：check 通过 / 完整胜利循环 / 失败路径）。
+### 5. 重启
+
+`reset_game` 脚本重置游戏内容（玩家位置/HP、收集物位置、背包、quest 状态、dialogue 状态、狼 HP/位置），然后 emit `game-restart` → game-flow 模块重置 `GameState`（phase=title, time=0, score=0）。
+
+### 6. deferred 写入时序
+
+五模块组合时，事件链跨 tick 传播：collision（tick N）→ quest-offer carryover（tick N+1 处理）→ quest-accept carryover（tick N+2）→ ...；战斗链同样：collision（tick N）→ attack（N+1）→ damage（N+2）→ HP 写入 + died（N+3）→ game-lose（N+4）→ phase=lost（N+5）。测试驱动时，每个状态转移后要 step 1-2 tick 让 deferred 写入 flush；战斗结算要 step 3-4 tick。详见集成测试 `tests/rpg_mini.rs` 的注释。
+
+完整可运行示例见 `examples/rpg-mini/`，集成测试见 `crates/vitric-cli/tests/rpg_mini.rs`（4 例：check 通过 / 完整胜利循环 / 战斗失败路径 / 击杀狼路径）。
 
 ---
 
