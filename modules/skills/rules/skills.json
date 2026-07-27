@@ -1,0 +1,10 @@
+{
+  "rules": [
+    {
+      "id": "skills-on-cast",
+      "comment": "Cast request: validate (known / cooldown / mana) then deduct mana, set cooldown, emit ability-cast.",
+      "on": { "event": "cast" },
+      "do": [{ "call": "__skills_cast", "with": { "who": "event.who", "ability": "event.ability", "target": "event.target" } }]
+    }
+  ]
+}

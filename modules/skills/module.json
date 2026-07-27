@@ -1,0 +1,6 @@
+{
+  "name": "skills",
+  "schema": "schema.json",
+  "rules": ["rules/skills.json"],
+  "scripts": ["scripts/skills.js"]
+}

@@ -1,0 +1,56 @@
+{
+  "rules": [
+    {
+      "id": "cast-fireball-on-1",
+      "comment": "Press 1: cast fireball on the dummy (cost 20 mana, cooldown 10t, 50 damage).",
+      "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } },
+      "do": [{ "emit": "cast", "data": { "who": "@player", "ability": "fireball", "target": "@dummy" } }]
+    },
+    {
+      "id": "cast-heal-on-2",
+      "comment": "Press 2: cast heal on self (cost 15 mana, cooldown 15t, 30 HP).",
+      "on": { "event": "input", "filter": { "action": "2", "phase": "pressed" } },
+      "do": [{ "emit": "cast", "data": { "who": "@player", "ability": "heal", "target": "@player" } }]
+    },
+    {
+      "id": "cast-shield-on-3",
+      "comment": "Press 3: cast shield on self (cost 10 mana, cooldown 20t, applies shield status 10t).",
+      "on": { "event": "input", "filter": { "action": "3", "phase": "pressed" } },
+      "do": [{ "emit": "cast", "data": { "who": "@player", "ability": "shield", "target": "@player" } }]
+    },
+    {
+      "id": "player-attacks-dummy",
+      "comment": "Press X: basic attack (no mana, no cooldown) — baseline for comparison with abilities.",
+      "on": { "event": "input", "filter": { "action": "x", "phase": "pressed" } },
+      "do": [{ "emit": "attack", "data": { "attacker": "@player", "target": "@dummy" } }]
+    },
+
+    {
+      "id": "fireball-deals-damage",
+      "comment": "Fireball cast: deal 50 damage to target. Bridges skills → combat.",
+      "on": { "event": "ability-cast" },
+      "if": [["event.ability", "==", "fireball"]],
+      "do": [{ "emit": "damage", "data": { "who": "event.target", "amount": 50, "killer": "" } }]
+    },
+    {
+      "id": "heal-restores-hp",
+      "comment": "Heal cast: restore 30 HP to target. Bridges skills → combat.",
+      "on": { "event": "ability-cast" },
+      "if": [["event.ability", "==", "heal"]],
+      "do": [{ "emit": "heal", "data": { "who": "event.target", "amount": 30 } }]
+    },
+    {
+      "id": "shield-applies-status",
+      "comment": "Shield cast: apply shield status (10 ticks). Bridges skills → status-effects.",
+      "on": { "event": "ability-cast" },
+      "if": [["event.ability", "==", "shield"]],
+      "do": [{ "emit": "apply-status", "data": { "who": "event.target", "effect": "shield", "duration": 10, "magnitude": 0 } }]
+    },
+
+    {
+      "id": "update-hud",
+      "on": "tick",
+      "do": [{ "call": "render_hud", "with": { "who": "@player", "enemy": "@dummy", "hud": "@hud" } }]
+    }
+  ]
+}

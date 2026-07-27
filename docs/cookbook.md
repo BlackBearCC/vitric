@@ -1614,6 +1614,208 @@ press 1 → drink poison_potion → apply-status poison(self, 5t, 5)
 
 ---
 
+## 配方 14：使用 skills 模块（主动技能 / 法力 / 冷却 / 施法验证 / 三种效果桥接）
+
+**目标**：让实体施放主动技能——火球术（50 伤害，20 法力，10 tick 冷却）、治疗术（30 回血，15 法力，15 tick 冷却）、护盾术（施加护盾状态，10 法力，20 tick 冷却）。技能有法力消耗和冷却时间，施法前自动验证（是否已学 / 冷却是否就绪 / 法力是否足够），验证通过才扣法力、进冷却、emit 事件。这是 RPG 战斗系统的"主动操作"层——和 combat + status-effects 组合后，能做出"火球术输出 → 治疗术续航 → 护盾术防御"这种有策略选择的战斗，而不是单纯平 A。
+
+### 1. includes
+
+```json
+{ "includes": ["../../modules/combat", "../../modules/status-effects", "../../modules/skills"] }
+```
+
+skills 模块**软依赖** combat 和 status-effects——模块本身只管施法验证（法力 / 冷却 / 已学）和 emit `ability-cast` 事件，效果的实际作用（伤害 / 治疗 / 状态）需要 combat 的 `damage`/`heal` 事件和 status-effects 的 `apply-status` 事件。所以实战中三个模块一起 includes。模块贡献 2 个组件：
+
+- `Abilities`（挂在可施法实体上）— 并行列表编码已知技能（和 Dialogue/LootTable/Equipment/StatusEffects 同模式）：
+  - `known` — 技能 id 列表（如 `["fireball", "heal", "shield"]`）
+  - `cooldowns` — 每个技能剩余冷却 tick 数（0 = 就绪，运行时变化）
+  - `costs` — 每个技能的法力消耗（静态，如 `[20, 15, 10]`）
+  - `cooldown_maxs` — 每个技能的冷却总时长（静态，如 `[10, 15, 20]`）
+
+- `Mana`（挂在可施法实体上）— 法力池：
+  - `current` — 当前法力（如 `80`）
+  - `max` — 最大法力（如 `100`）
+
+模块监听 1 个事件（你的规则负责 emit）：
+- `cast { who, ability, target }` — 请求施法（who 施放 ability 到 target）
+
+模块 emit 的事件（你的规则监听定义效果）：
+- `ability-cast { who, ability, target }` — 施法成功（游戏定义效果：emit damage/heal/apply-status 等）
+- `cast-rejected { who, ability, reason }` — 施法失败，reason ∈ `{"unknown", "cooldown", "mana"}`
+
+> **模块不决定技能效果**——"fireball"打多少伤害？"heal"回多少血？模块不知道，也不关心。模块只管"验证 + 扣费 + 进冷却 + emit 事件"，技能的具体效果由**你的规则**监听 `ability-cast` 决定。这和 status-effects 不知道"poison"扣多少血、equipment 不知道"sword"加多少 ATK 是同一个设计原则：模块管机制，游戏管策略。
+
+### 2. 场景里给实体挂 Abilities + Mana + Health
+
+```json
+{
+  "name": "player",
+  "components": {
+    "Health": { "hp": 100, "max": 100 },
+    "Attack": { "power": 15 },
+    "Mana": { "current": 100, "max": 100 },
+    "Abilities": {
+      "known": ["fireball", "heal", "shield"],
+      "cooldowns": [0, 0, 0],
+      "costs": [20, 15, 10],
+      "cooldown_maxs": [10, 15, 20]
+    },
+    "StatusEffects": { "effects": [], "durations": [], "magnitudes": [] }
+  }
+}
+```
+
+四个并行列表（`known` / `cooldowns` / `costs` / `cooldown_maxs`）描述同一组技能。`known` + `costs` + `cooldown_maxs` 是静态的（场景设定时确定），`cooldowns` 是动态的（运行时由模块管理）。初始全 0（全部就绪）。
+
+### 3. 在规则里驱动施法
+
+skills 模块不决定**何时**施法——那是游戏逻辑（按键？AI 决策？物品使用？）。你的规则负责在合适的时机 emit `cast`：
+
+```json
+{
+  "id": "cast-fireball-on-1",
+  "comment": "Press 1: cast fireball on the dummy.",
+  "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } },
+  "do": [{ "emit": "cast", "data": { "who": "@player", "ability": "fireball", "target": "@dummy" } }]
+},
+{
+  "id": "cast-heal-on-2",
+  "comment": "Press 2: cast heal on self.",
+  "on": { "event": "input", "filter": { "action": "2", "phase": "pressed" } },
+  "do": [{ "emit": "cast", "data": { "who": "@player", "ability": "heal", "target": "@player" } }]
+}
+```
+
+### 4. 施法验证是自动的
+
+skills 模块的 `__skills_cast` 在收到 `cast` 事件时，按顺序验证：
+
+1. **是否已学**：检查 `ability` 是否在 `Abilities.known` 里。不在 → emit `cast-rejected { reason: "unknown" }`，return
+2. **冷却就绪**：检查 `cooldowns[idx]` 是否为 0。> 0 → emit `cast-rejected { reason: "cooldown" }`，return
+3. **法力足够**：检查 `Mana.current >= costs[idx]`。不够 → emit `cast-rejected { reason: "mana" }`，return
+4. **扣法力**：`Mana.current -= cost`
+5. **进冷却**：`cooldowns[idx] = cooldown_maxs[idx]`
+6. **emit 成功**：`ability-cast { who, ability, target }`
+
+模块内置一个 **tick 系统**（`skills-cooldown-tick`），每 tick 自动遍历所有带 `Abilities` 的实体，把所有 > 0 的 cooldown 减 1。冷却到期后自动归零，技能重新就绪。
+
+> **验证顺序很重要**：先检查"已学"（最快失败），再检查"冷却"（无副作用），最后检查"法力"（需要读取 Mana 组件）。这样最常见的失败原因最先被拦截，避免不必要的组件读取。
+
+### 5. 技能效果：游戏决定做什么
+
+这是 skills 模块的核心。有**三种效果桥接模式**，对应三类技能：
+
+#### 模式 A：伤害技能（fireball）
+
+监听 `ability-cast`，emit `damage` 事件。桥接 skills → combat：
+
+```json
+{
+  "id": "fireball-deals-damage",
+  "comment": "Fireball cast: deal 50 damage to target. Bridges skills → combat.",
+  "on": { "event": "ability-cast" },
+  "if": [["event.ability", "==", "fireball"]],
+  "do": [{ "emit": "damage", "data": { "who": "event.target", "amount": 50, "killer": "" } }]
+}
+```
+
+#### 模式 B：治疗技能（heal）
+
+监听 `ability-cast`，emit `heal` 事件。桥接 skills → combat：
+
+```json
+{
+  "id": "heal-restores-hp",
+  "comment": "Heal cast: restore 30 HP to target.",
+  "on": { "event": "ability-cast" },
+  "if": [["event.ability", "==", "heal"]],
+  "do": [{ "emit": "heal", "data": { "who": "event.target", "amount": 30 } }]
+}
+```
+
+#### 模式 C：状态技能（shield）
+
+监听 `ability-cast`，emit `apply-status` 事件。桥接 skills → status-effects：
+
+```json
+{
+  "id": "shield-applies-status",
+  "comment": "Shield cast: apply shield status (10 ticks). Bridges skills → status-effects.",
+  "on": { "event": "ability-cast" },
+  "if": [["event.ability", "==", "shield"]],
+  "do": [{ "emit": "apply-status", "data": { "who": "event.target", "effect": "shield", "duration": 10, "magnitude": 0 } }]
+}
+```
+
+三种模式可以组合：一个技能可以同时造成伤害 AND 施加状态（如"毒刃术"：emit `damage` + emit `apply-status` poison）。只需在 `ability-cast` 规则里 emit 多个事件。
+
+> **技能效果在规则里定义，不在脚本里**——这是和 equipment 的 `apply_equip_bonus` 脚本不同的地方。技能效果通常是"emit 一个事件"（damage/heal/apply-status），规则引擎能直接处理，不需要脚本。只有当效果需要复杂计算（如"根据目标已损失血量增加伤害"）时才走脚本。这和 combat 模块的规则直接 emit `damage` 是同一个模式：简单效果走规则，复杂逻辑走脚本。
+
+### 6. 施法时序
+
+从按键到效果生效，需要几个 tick 的 cascade：
+
+```
+tick N:   input → emit cast (carryover)
+tick N+1: skills-on-cast rule → __skills_cast:
+            1. validate (known / cooldown / mana)
+            2. deduct mana, set cooldown
+            3. emit ability-cast (carryover)
+tick N+2: ability-cast rule (for fireball) → emit damage (carryover)
+          skills-cooldown-tick system: decrement all cooldowns by 1
+tick N+3: combat-on-damage rule → __combat_damage → HP 写入 (deferred)
+tick N+4: HP 写入可见
+```
+
+测试驱动时，施法后 step 5 tick 让 `cast` → `ability-cast` → `damage` → `HP 写入` 全链路走完。冷却每 tick 减 1，所以 `cooldown_maxs[i]` 决定了多久能再次施法。
+
+### 7. 法力管理
+
+法力是 skills 模块的资源经济。设计要点：
+
+- **初始满法力**：场景设定 `Mana.current = Mana.max`，玩家开局可以施法
+- **法力不自动回复**：模块不内置法力回复（不同游戏的回复机制不同——升级回复？药水回复？每 tick 回复？）。游戏自己实现：可以写一个 tick 规则 `on tick → Mana.current = min(max, current + 1)`
+- **法力消耗是静态的**：`costs` 列表在场景设定时确定，运行时不变。如果想要"升级降低消耗"，可以写脚本动态修改 `Abilities.costs`
+- **法力为 0 时**：所有有消耗的技能都无法施放（emit `cast-rejected { reason: "mana" }`），但 0 消耗的技能仍可施放
+
+### 8. 与其他模块组合
+
+- **+ combat**：最常见的组合。模式 A 通过 `damage` 事件造成伤害，模式 B 通过 `heal` 事件恢复血量。技能因此有了"输出"和"续航"两个维度。
+- **+ status-effects**：模式 C 通过 `apply-status` 施加状态。技能可以施加中毒 / 急速 / 护盾等效果，和 status-effects 模块的状态机无缝衔接。这是三个模块组合的核心：skills 决定"何时施加"，status-effects 决定"如何持续"，combat 决定"扣多少血"。
+- **+ equipment**：装备可以修改技能——"法杖"降低 fireball 的法力消耗（修改 `Abilities.costs`），"加速护手"缩短 cooldown（修改 `Abilities.cooldown_maxs`）。equipment 提供"穿戴什么"，skills 提供"能施放什么"。
+- **+ progression**：升级时学习新技能（往 `Abilities.known` 追加），或降低现有技能的法力消耗。progression 提供"成长"，skills 提供"成长后能做什么"。
+- **+ loot**：稀有掉落物"技能书"使用后永久学习技能（emit `cast` 一个特殊"learn"技能？或直接修改 `Abilities.known`）。
+
+### 9. 完整 RPG 闭环中的位置
+
+skills 模块把 combat 模块的"平 A 互砍"延伸为**有策略选择的战斗**：
+
+```
+kill enemy → died → loot module → pickup(mana_potion) → inventory
+                                                            │
+press 1 → cast fireball (20 mana, 50 damage) → dummy HP -50
+                                                            │
+                                              [cooldown 10t, mana 80/100]
+                                                            │
+press 3 → cast shield (10 mana) → apply-status shield(self, 10t)
+                                                            │
+                                              [shield active, mana 70/100]
+                                                            │
+press 2 → cast heal (15 mana, 30 HP) → player HP +30
+                                                            │
+                                              [mana 55/100, all abilities on cooldown]
+                                                            │
+press 9 → drink mana_potion → Mana.current += 50 → 100/100
+                                                            │
+                                              [ready to cast again]
+```
+
+没有 skills 的 RPG：战斗是"你打我一下、我打你一下"的平 A 互砍——攻击力 15，砍 14 次才能杀死 200 HP 的敌人。有 skills 的 RPG：火球术一次 50 伤害（4 次杀死），治疗术保命，护盾术扛致命一击——战斗有了**资源管理**（法力）和**策略选择**（什么时候输出、什么时候保命），这是"动作 RPG"和"点击游戏"的差别。
+
+完整可运行示例见 `examples/skills-demo/`，集成测试见 `crates/vitric-cli/tests/skills.rs`（11 例：check 通过 / 初始就绪 / 火球伤害+法力消耗 / 治疗回血+法力消耗 / 护盾施加状态 / 冷却阻止重施 / 冷却到期恢复 / 法力不足阻止 / 未知技能拒绝 / 平 A 不耗法力 / 多技能共存）。
+
+---
+
 ## 编写自己的模块
 
 模块就是一个含 `module.json` 的目录：

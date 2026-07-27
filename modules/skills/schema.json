@@ -1,0 +1,18 @@
+{
+  "components": {
+    "Abilities": {
+      "fields": {
+        "known": { "type": "list", "of": { "type": "text" }, "default": [] },
+        "cooldowns": { "type": "list", "of": { "type": "int", "default": 0, "min": 0 }, "default": [] },
+        "costs": { "type": "list", "of": { "type": "int", "default": 0, "min": 0 }, "default": [] },
+        "cooldown_maxs": { "type": "list", "of": { "type": "int", "default": 0, "min": 0 }, "default": [] }
+      }
+    },
+    "Mana": {
+      "fields": {
+        "current": { "type": "int", "default": 0, "min": 0 },
+        "max": { "type": "int", "default": 0, "min": 0 }
+      }
+    }
+  }
+}
