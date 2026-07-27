@@ -417,6 +417,198 @@ vitric.fn("render_dialogue_hud", (args, ctx) => {
 
 ---
 
+## 配方 7：使用 game-flow 模块（游戏状态机 / 闭环）
+
+**目标**：给游戏一个统一的"开始-玩-胜/负-重开"结构骨架。这是"完整游戏"与"沙盒 demo"的结构性差别——game-flow 模块让每款 Vitric 游戏都有相同的开始/结束形状。
+
+### 1. includes
+
+```json
+{ "includes": ["../../modules/game-flow"] }
+```
+
+game-flow 模块贡献 1 个组件：
+- `GameState`（挂在 `@game` 实体上）— `phase`(`title`|`playing`|`won`|`lost`|`paused`) / `time`(ticks, playing 时自动 +1) / `score`(int, 你的游戏通过 `__game_add_score` 累加)
+
+模块监听 4 个事件：`game-start` / `game-win` / `game-lose` / `game-restart`，自动转移 phase 并 emit `game-started` / `game-won` / `game-lost` / `game-restarted`。
+
+### 2. 场景里放一个 `@game` 实体
+
+```json
+{
+  "name": "game",
+  "components": {
+    "GameState": { "phase": "title", "time": 0, "score": 0 }
+  }
+}
+```
+
+### 3. 在规则里驱动状态机
+
+```json
+{
+  "id": "start-on-space",
+  "on": { "event": "input", "filter": { "action": "space", "phase": "pressed" } },
+  "if": [["@game.GameState.phase", "==", "title"]],
+  "do": [{ "emit": "game-start" }]
+},
+{
+  "id": "restart-on-r",
+  "on": { "event": "input", "filter": { "action": "r", "phase": "pressed" } },
+  "if": [["@game.GameState.phase", "==", "won"]],
+  "do": [{ "call": "reset_game" }]
+}
+```
+
+你的游戏规则负责：emit `game-start`（开始）/ `game-win`（胜利条件达成）/ `game-lose`（失败条件）。`game-restart` 由你的 `reset_game` 脚本 emit（重置场景后），模块把 phase 切回 `title`。
+
+### 4. time 自动累加
+
+模块注册了 `game-tick-time` tick 系统：`phase==playing` 时每 tick `time += 1`。你不用写计时逻辑。title/won/lost 屏 time 不动。
+
+### 5. 重启的完整模式
+
+重启需要重置**你的游戏状态**（玩家位置、收集物、分数等）**再** emit `game-restart`。典型 `reset_game` 脚本：
+
+```js
+vitric.fn("reset_game", (_args, ctx) => {
+  ctx.setField("@player", "Position.x", 0);
+  ctx.setField("@player", "Position.y", 0);
+  ctx.setField("@player", "Velocity.x", 0);
+  ctx.setField("@player", "Velocity.y", 0);
+  // ... 重置收集物位置、清空背包等 ...
+  ctx.emit("game-restart", {});  // 模块 catch → phase=title, time=0, score=0
+});
+```
+
+> **注意**：`game-restart` 事件是模块重置 `GameState` 的触发器。你的 `reset_game` 脚本负责游戏内容重置，模块负责 `GameState` 重置——分工清晰。
+
+完整可运行示例见 `examples/game-flow-demo/`，集成测试见 `crates/vitric-cli/tests/game_flow.rs`。
+
+---
+
+## 配方 8：四模块组合出完整 RPG 闭环（inventory + quest + dialogue + game-flow）
+
+**目标**：把四个模块拼成一个完整的 RPG 小品——标题→对话接任务→收集草药→交付任务→胜利→重开。这是"商业游戏闭环"的最小可运行证明：四个模块无需胶水代码，纯靠规则 + 模块事件组合。
+
+### 1. includes 四个模块
+
+```json
+{
+  "includes": [
+    "../../modules/inventory",
+    "../../modules/quest",
+    "../../modules/dialogue",
+    "../../modules/game-flow"
+  ]
+}
+```
+
+### 2. 组合接缝
+
+四个模块的接缝是**事件**，不是函数调用：
+
+```
+                    ┌─── game-flow ────┐
+                    │ title→playing    │
+                    │   →won/lost      │
+                    │   →restart       │
+                    └──────────────────┘
+                           ▲ ▼
+  collision ──→ quest-offer/accept/turn-in ──→ quest module
+                    │                              │
+                    │                              ▼
+                    │                        quest-track (tick)
+                    │                              │
+                    │              ┌───────────────┘
+                    │              ▼
+  collision ──→ pickup event ──→ inventory module ──→ Inventory.items
+                    │                                      │
+                    │                                      ▼
+                    │                        quest-track reads Inventory
+                    │                        → progress → completed
+                    │
+  collision ──→ talk event ──→ dialogue module ──→ Talked.count++
+                    │                              │
+                    │                              ▼
+                    │                        quest-track reads Talked
+                    │                        → talk objective done
+                    │
+  quest-turned-in ──→ emit game-win ──→ game-flow module ──→ phase=won
+```
+
+### 3. 关键规则模式
+
+**NPC 碰撞驱动 quest 状态机 + dialogue 同时启动**：
+
+```json
+{
+  "id": "elder-offer-quest",
+  "on": { "event": "collision", "between": ["Player", "Npc"] },
+  "if": [["@herb-quest.QuestState.state", "==", "inactive"]],
+  "do": [{ "emit": "quest-offer", "data": { "quest": "herb-quest" } }]
+},
+{
+  "id": "elder-accept-quest",
+  "on": { "event": "collision", "between": ["Player", "Npc"] },
+  "if": [["@herb-quest.QuestState.state", "==", "offered"]],
+  "do": [{ "emit": "quest-accept", "data": { "quest": "herb-quest", "who": "self" } }]
+},
+{
+  "id": "elder-turn-in-quest",
+  "on": { "event": "collision", "between": ["Player", "Npc"] },
+  "if": [["@herb-quest.QuestState.state", "==", "completed"]],
+  "do": [{ "emit": "quest-turn-in", "data": { "quest": "herb-quest", "who": "self" } }]
+},
+{
+  "id": "elder-start-dialogue",
+  "on": { "event": "collision", "between": ["Player", "Npc"] },
+  "if": [["self.DialogueRunner.current", "<", 0]],
+  "do": [{ "emit": "talk", "data": { "npc": "other", "who": "self" } }]
+}
+```
+
+碰 NPC → quest 状态机跨 tick 推进（inactive→offered→active→completed→turned-in），同时 dialogue 启动。两条链独立，不互相阻塞。
+
+**拾取物 → inventory → quest 自动追踪**：
+
+```json
+{
+  "id": "herb-pickup",
+  "on": { "event": "collision", "between": ["Player", "Pickup"] },
+  "do": [
+    { "emit": "pickup", "data": { "who": "self", "item": "other.Pickup.item", "count": "other.Pickup.count" } },
+    { "call": "stash_herb", "with": { "herb": "other" } }
+  ]
+}
+```
+
+emit `pickup` → inventory 模块加进背包 → quest 模块的 `quest-track` tick 系统每 tick 读 `Inventory.items` 自动更新 `progress` → `progress >= target` 时自动切 `completed`。你不用写追踪逻辑。
+
+**quest 交付 → 胜利**：
+
+```json
+{
+  "id": "win-on-quest-turned-in",
+  "on": { "event": "quest-turned-in" },
+  "do": [{ "emit": "game-win" }]
+}
+```
+
+quest 模块 emit `quest-turned-in`（含奖励 `pickup` 事件，inventory 模块接收）→ 你的规则 emit `game-win` → game-flow 模块切 `phase=won`。
+
+### 4. 重启
+
+`reset_game` 脚本重置游戏内容（玩家位置、收集物位置、背包、quest 状态、dialogue 状态），然后 emit `game-restart` → game-flow 模块重置 `GameState`（phase=title, time=0, score=0）。
+
+### 5. deferred 写入时序
+
+四模块组合时，事件链跨 tick 传播：collision（tick N）→ quest-offer carryover（tick N+1 处理）→ quest-accept carryover（tick N+2）→ ... 测试驱动时，每个状态转移后要 step 1-2 tick 让 deferred 写入 flush。详见集成测试 `tests/rpg_mini.rs` 的注释。
+
+完整可运行示例见 `examples/rpg-mini/`，集成测试见 `crates/vitric-cli/tests/rpg_mini.rs`（3 例：check 通过 / 完整胜利循环 / 失败路径）。
+
+---
+
 ## 编写自己的模块
 
 模块就是一个含 `module.json` 的目录：

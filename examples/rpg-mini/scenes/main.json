@@ -1,0 +1,105 @@
+{
+  "entities": [
+    {
+      "name": "game",
+      "components": {
+        "GameState": { "phase": "title", "time": 0, "score": 0 }
+      }
+    },
+    {
+      "name": "player",
+      "components": {
+        "Player": {},
+        "Position": { "x": 0, "y": 0 },
+        "Velocity": { "x": 0, "y": 0 },
+        "Collider": { "w": 1, "h": 1 },
+        "Speed": { "value": 60 },
+        "Sprite": { "w": 1, "h": 1, "color": "#4da3ff" },
+        "Inventory": { "items": [], "counts": [], "capacity": 8 },
+        "QuestLog": { "active": [], "completed": [] },
+        "DialogueRunner": { "active_npc": "", "current": -1 }
+      }
+    },
+    {
+      "name": "camera",
+      "components": { "Camera": { "x": 1, "y": 1, "scale": 5 } }
+    },
+    {
+      "name": "elder",
+      "components": {
+        "Npc": {},
+        "Position": { "x": 1, "y": 0 },
+        "Collider": { "w": 1, "h": 1 },
+        "Sprite": { "w": 1, "h": 1, "color": "#a3d44d" },
+        "Talked": { "count": 0 },
+        "Dialogue": {
+          "node_text": [
+            "The village needs 3 herbs. Will you help?",
+            "Thank you! Bring me 3 herbs from the field."
+          ],
+          "node_choices": ["I will help.;Not now.", "Goodbye."],
+          "node_next": ["1;-1", "-1"],
+          "entry": 0
+        }
+      }
+    },
+    {
+      "name": "herb-quest",
+      "components": {
+        "QuestDef": {
+          "id": "herb-quest",
+          "title": "Gather 3 Herbs",
+          "desc": "Collect 3 herbs from the field and return to the elder.",
+          "prereq": [],
+          "reward_item": "coin",
+          "reward_count": 5
+        },
+        "QuestObjective": { "kind": "collect", "arg": "herb", "target": 3 },
+        "QuestState": { "state": "inactive", "progress": 0, "assignee": "" }
+      }
+    },
+    {
+      "name": "herb-1",
+      "components": {
+        "Pickup": { "item": "herb", "count": 1 },
+        "Position": { "x": 3, "y": 0 },
+        "Collider": { "w": 1, "h": 1 },
+        "Sprite": { "w": 1, "h": 1, "color": "#5fd44d" }
+      }
+    },
+    {
+      "name": "herb-2",
+      "components": {
+        "Pickup": { "item": "herb", "count": 1 },
+        "Position": { "x": 3, "y": 3 },
+        "Collider": { "w": 1, "h": 1 },
+        "Sprite": { "w": 1, "h": 1, "color": "#5fd44d" }
+      }
+    },
+    {
+      "name": "herb-3",
+      "components": {
+        "Pickup": { "item": "herb", "count": 1 },
+        "Position": { "x": 0, "y": 3 },
+        "Collider": { "w": 1, "h": 1 },
+        "Sprite": { "w": 1, "h": 1, "color": "#5fd44d" }
+      }
+    },
+    {
+      "name": "wolf",
+      "components": {
+        "Enemy": {},
+        "Position": { "x": 1, "y": 2 },
+        "Collider": { "w": 1, "h": 1 },
+        "Sprite": { "w": 1, "h": 1, "color": "#9a4a3a" }
+      }
+    },
+    {
+      "name": "hud",
+      "components": {
+        "Position": { "x": 1, "y": 5 },
+        "Text": { "content": "TITLE — Press SPACE to start", "size": 0.7, "color": "#ffd75e" }
+      }
+    }
+  ]
+}

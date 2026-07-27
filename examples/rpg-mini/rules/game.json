@@ -1,0 +1,100 @@
+{
+  "rules": [
+    { "id": "move-right-start", "on": { "event": "input", "filter": { "action": "right", "phase": "pressed" } }, "do": [{ "call": "move", "with": { "axis": "x", "dir": 1 } }] },
+    { "id": "move-right-stop", "on": { "event": "input", "filter": { "action": "right", "phase": "released" } }, "do": [{ "call": "move", "with": { "axis": "x", "dir": 0 } }] },
+    { "id": "move-left-start", "on": { "event": "input", "filter": { "action": "left", "phase": "pressed" } }, "do": [{ "call": "move", "with": { "axis": "x", "dir": -1 } }] },
+    { "id": "move-left-stop", "on": { "event": "input", "filter": { "action": "left", "phase": "released" } }, "do": [{ "call": "move", "with": { "axis": "x", "dir": 0 } }] },
+    { "id": "move-up-start", "on": { "event": "input", "filter": { "action": "up", "phase": "pressed" } }, "do": [{ "call": "move", "with": { "axis": "y", "dir": 1 } }] },
+    { "id": "move-up-stop", "on": { "event": "input", "filter": { "action": "up", "phase": "released" } }, "do": [{ "call": "move", "with": { "axis": "y", "dir": 0 } }] },
+    { "id": "move-down-start", "on": { "event": "input", "filter": { "action": "down", "phase": "pressed" } }, "do": [{ "call": "move", "with": { "axis": "y", "dir": -1 } }] },
+    { "id": "move-down-stop", "on": { "event": "input", "filter": { "action": "down", "phase": "released" } }, "do": [{ "call": "move", "with": { "axis": "y", "dir": 0 } }] },
+
+    {
+      "id": "start-on-space",
+      "comment": "Title screen: press SPACE to begin a playthrough.",
+      "on": { "event": "input", "filter": { "action": "space", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "title"]],
+      "do": [{ "emit": "game-start" }]
+    },
+    {
+      "id": "restart-on-r-won",
+      "on": { "event": "input", "filter": { "action": "r", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "won"]],
+      "do": [{ "call": "reset_game" }]
+    },
+    {
+      "id": "restart-on-r-lost",
+      "on": { "event": "input", "filter": { "action": "r", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "lost"]],
+      "do": [{ "call": "reset_game" }]
+    },
+
+    {
+      "id": "herb-pickup",
+      "comment": "Collect a herb (only while playing): inventory module handles the pickup; herb is moved off-screen (kept for restart).",
+      "on": { "event": "collision", "between": ["Player", "Pickup"] },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [
+        { "emit": "pickup", "data": { "who": "self", "item": "other.Pickup.item", "count": "other.Pickup.count" } },
+        { "call": "stash_herb", "with": { "herb": "other" } }
+      ]
+    },
+    {
+      "id": "wolf-hit",
+      "comment": "Touch the wolf (only while playing) → lose.",
+      "on": { "event": "collision", "between": ["Player", "Enemy"] },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "emit": "game-lose" }]
+    },
+
+    {
+      "id": "elder-offer-quest",
+      "comment": "First contact with elder: offer the herb quest.",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["@herb-quest.QuestState.state", "==", "inactive"]],
+      "do": [{ "emit": "quest-offer", "data": { "quest": "herb-quest" } }]
+    },
+    {
+      "id": "elder-accept-quest",
+      "comment": "Second contact: accept the quest (inactive→offered→active across ticks).",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["@herb-quest.QuestState.state", "==", "offered"]],
+      "do": [{ "emit": "quest-accept", "data": { "quest": "herb-quest", "who": "self" } }]
+    },
+    {
+      "id": "elder-turn-in-quest",
+      "comment": "After collecting 3 herbs (quest auto-completed): turn in for reward → win.",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["@herb-quest.QuestState.state", "==", "completed"]],
+      "do": [{ "emit": "quest-turn-in", "data": { "quest": "herb-quest", "who": "self" } }]
+    },
+
+    {
+      "id": "elder-start-dialogue",
+      "comment": "Start dialogue with elder on contact (if not already talking).",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["self.DialogueRunner.current", "<", 0]],
+      "do": [{ "emit": "talk", "data": { "npc": "other", "who": "self" } }]
+    },
+    {
+      "id": "dialogue-choose-1",
+      "comment": "Press 1 to pick the first dialogue option.",
+      "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } },
+      "if": [["@player.DialogueRunner.current", ">=", 0]],
+      "do": [{ "emit": "dialogue-choose", "data": { "who": "@player", "choice_index": 0 } }]
+    },
+
+    {
+      "id": "win-on-quest-turned-in",
+      "comment": "Quest turned in → emit game-win. The game-flow module transitions phase to won.",
+      "on": { "event": "quest-turned-in" },
+      "do": [{ "emit": "game-win" }]
+    },
+
+    {
+      "id": "update-hud",
+      "on": "tick",
+      "do": [{ "call": "render_hud", "with": { "game": "@game", "quest": "@herb-quest", "who": "@player", "hud": "@hud" } }]
+    }
+  ]
+}

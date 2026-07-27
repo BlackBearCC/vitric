@@ -1,0 +1,15 @@
+{
+  "name": "rpg-mini",
+  "schema": "schema.json",
+  "entry": "scenes/main.json",
+  "scenes": ["scenes/main.json"],
+  "rules": ["rules/game.json"],
+  "scripts": ["scripts/demo.js"],
+  "includes": [
+    "../../modules/inventory",
+    "../../modules/quest",
+    "../../modules/dialogue",
+    "../../modules/game-flow"
+  ],
+  "seed": 7
+}
