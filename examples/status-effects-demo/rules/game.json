@@ -1,0 +1,69 @@
+{
+  "rules": [
+    {
+      "id": "apply-poison-to-dummy",
+      "comment": "Press 1: apply poison to the dummy (10 ticks, 10 damage/tick).",
+      "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } },
+      "do": [{ "emit": "apply-status", "data": { "who": "@dummy", "effect": "poison", "duration": 10, "magnitude": 10 } }]
+    },
+    {
+      "id": "apply-regen-to-player",
+      "comment": "Press 2: apply regen to the player (10 ticks, 15 heal/tick).",
+      "on": { "event": "input", "filter": { "action": "2", "phase": "pressed" } },
+      "do": [{ "emit": "apply-status", "data": { "who": "@player", "effect": "regen", "duration": 10, "magnitude": 15 } }]
+    },
+    {
+      "id": "apply-haste-to-player",
+      "comment": "Press 3: apply haste to the player (10 ticks, +10 ATK while active).",
+      "on": { "event": "input", "filter": { "action": "3", "phase": "pressed" } },
+      "do": [{ "emit": "apply-status", "data": { "who": "@player", "effect": "haste", "duration": 10, "magnitude": 10 } }]
+    },
+    {
+      "id": "clear-poison-from-dummy",
+      "comment": "Press 4: clear poison from the dummy (antidote).",
+      "on": { "event": "input", "filter": { "action": "4", "phase": "pressed" } },
+      "do": [{ "emit": "clear-status", "data": { "who": "@dummy", "effect": "poison" } }]
+    },
+    {
+      "id": "player-attacks-dummy",
+      "comment": "Press X: player attacks the dummy — shows haste-boosted attack power.",
+      "on": { "event": "input", "filter": { "action": "x", "phase": "pressed" } },
+      "do": [{ "emit": "attack", "data": { "attacker": "@player", "target": "@dummy" } }]
+    },
+
+    {
+      "id": "poison-tick-deals-damage",
+      "comment": "Poison tick: deal magnitude damage to the afflicted entity. Bridges status-effects → combat.",
+      "on": { "event": "status-ticked" },
+      "if": [["event.effect", "==", "poison"]],
+      "do": [{ "emit": "damage", "data": { "who": "event.who", "amount": "event.magnitude", "killer": "" } }]
+    },
+    {
+      "id": "regen-tick-heals",
+      "comment": "Regen tick: heal magnitude HP to the afflicted entity. Bridges status-effects → combat.",
+      "on": { "event": "status-ticked" },
+      "if": [["event.effect", "==", "regen"]],
+      "do": [{ "emit": "heal", "data": { "who": "event.who", "amount": "event.magnitude" } }]
+    },
+    {
+      "id": "haste-applied-boosts-atk",
+      "comment": "Haste applied: +magnitude ATK. Bridges status-effects → combat (stat modifier pattern).",
+      "on": { "event": "status-applied" },
+      "if": [["event.effect", "==", "haste"]],
+      "do": [{ "call": "apply_haste_bonus", "with": { "who": "event.who", "magnitude": "event.magnitude" } }]
+    },
+    {
+      "id": "haste-expired-removes-atk",
+      "comment": "Haste expired: -magnitude ATK (read from the effect's magnitude before it expired).",
+      "on": { "event": "status-expired" },
+      "if": [["event.effect", "==", "haste"]],
+      "do": [{ "call": "remove_haste_bonus", "with": { "who": "event.who" } }]
+    },
+
+    {
+      "id": "update-hud",
+      "on": "tick",
+      "do": [{ "call": "render_hud", "with": { "who": "@player", "enemy": "@dummy", "hud": "@hud" } }]
+    }
+  ]
+}

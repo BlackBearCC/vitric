@@ -1,0 +1,11 @@
+{
+  "components": {
+    "StatusEffects": {
+      "fields": {
+        "effects": { "type": "list", "of": { "type": "text" }, "default": [] },
+        "durations": { "type": "list", "of": { "type": "int", "default": 0, "min": 0 }, "default": [] },
+        "magnitudes": { "type": "list", "of": { "type": "int", "default": 0 }, "default": [] }
+      }
+    }
+  }
+}

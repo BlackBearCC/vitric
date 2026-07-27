@@ -1,0 +1,16 @@
+{
+  "rules": [
+    {
+      "id": "status-on-apply",
+      "comment": "Apply a status effect to an entity: add or refresh (take max duration/magnitude).",
+      "on": { "event": "apply-status" },
+      "do": [{ "call": "__status_apply", "with": { "who": "event.who", "effect": "event.effect", "duration": "event.duration", "magnitude": "event.magnitude" } }]
+    },
+    {
+      "id": "status-on-clear",
+      "comment": "Clear a status effect from an entity (e.g. antidote cures poison).",
+      "on": { "event": "clear-status" },
+      "do": [{ "call": "__status_clear", "with": { "who": "event.who", "effect": "event.effect" } }]
+    }
+  ]
+}

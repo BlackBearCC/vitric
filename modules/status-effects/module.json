@@ -1,0 +1,6 @@
+{
+  "name": "status-effects",
+  "schema": "schema.json",
+  "rules": ["rules/status-effects.json"],
+  "scripts": ["scripts/status-effects.js"]
+}

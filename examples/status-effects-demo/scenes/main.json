@@ -1,0 +1,33 @@
+{
+  "entities": [
+    {
+      "name": "player",
+      "components": {
+        "Player": {},
+        "Position": { "x": 0, "y": 0 },
+        "Sprite": { "w": 1, "h": 1, "color": "#4da3ff" },
+        "Health": { "hp": 100, "max": 100 },
+        "Attack": { "power": 20 },
+        "StatusEffects": { "effects": [], "durations": [], "magnitudes": [] }
+      }
+    },
+    {
+      "name": "dummy",
+      "components": {
+        "Enemy": {},
+        "Position": { "x": 2, "y": 0 },
+        "Sprite": { "w": 1, "h": 1, "color": "#e53935" },
+        "Health": { "hp": 200, "max": 200 },
+        "Attack": { "power": 0 },
+        "StatusEffects": { "effects": [], "durations": [], "magnitudes": [] }
+      }
+    },
+    {
+      "name": "hud",
+      "components": {
+        "Position": { "x": 1, "y": 4 },
+        "Text": { "content": "Status effects demo", "size": 0.7, "color": "#ffd75e" }
+      }
+    }
+  ]
+}

@@ -1384,6 +1384,236 @@ press 1 → equip → equipment module → remove from inventory + set slot
 
 ---
 
+## 配方 13：使用 status-effects 模块（定时效果 / DoT / HoT / 属性修饰 / 清除）
+
+**目标**：给实体挂定时效果——中毒（每 tick 扣血）、回血（每 tick 加血）、急速（持续时间内 +ATK）、护盾（持续时间内 +max HP）等。效果有生命周期：施加 → 每 tick 计时 → 到期自动移除；也可被清除（解毒药）。这是 RPG 战斗系统的"状态机"层——和 combat 模块组合后，能做出"中毒 → 解毒 → 急速 → 暴击"这种有战术深度的战斗，而不是单纯的"你打我一下、我打你一下"。
+
+### 1. includes
+
+```json
+{ "includes": ["../../modules/combat", "../../modules/status-effects"] }
+```
+
+status-effects 模块**软依赖** combat——模块本身不读写 Health/Attack，但效果的实际作用（中毒扣血、急速加攻）需要 combat 的 `damage`/`heal` 事件和 Health/Attack 组件。所以实战中通常一起 includes。模块贡献 1 个组件：
+
+- `StatusEffects`（挂在可被施加效果的实体上）— 并行列表编码当前活跃效果（和 Dialogue/LootTable/Equipment 同模式）：
+  - `effects` — 效果名列表（如 `["poison", "haste"]`）
+  - `durations` — 每个效果剩余 tick 数（如 `[5, 3]`）
+  - `magnitudes` — 每个效果的强度（如 `[10, 5]`，含义由游戏定义：poison 是每 tick 伤害、haste 是 +ATK 数值）
+
+模块监听 2 个事件（你的规则负责 emit）：
+- `apply-status { who, effect, duration, magnitude }` — 施加效果
+- `clear-status { who, effect }` — 清除效果（如解毒药）
+
+模块 emit 的事件（你的规则监听定义效果语义）：
+- `status-applied { who, effect, duration, magnitude }` — 效果已施加（新增或刷新）
+- `status-ticked { who, effect, magnitude, ticks_remaining }` — 效果 tick 了一次（每 tick 都触发，游戏决定做什么）
+- `status-expired { who, effect }` — 效果到期自动消失
+- `status-cleared { who, effect }` — 效果被 `clear-status` 移除
+
+> **模块不决定效果语义**——"poison"扣多少血？"haste"加多少 ATK？模块不知道，也不关心。模块只管"计时 + tick + 到期"的生命周期，效果的具体作用由**你的规则**监听 `status-ticked`/`status-applied`/`status-expired` 决定。这和 equipment 模块不知道"sword"加多少 ATK、combat 模块不在 `died` 时 despawn 是同一个设计原则：模块管机制，游戏管策略。
+
+### 2. 场景里给实体挂 StatusEffects + Health
+
+```json
+{
+  "name": "player",
+  "components": {
+    "Health": { "hp": 100, "max": 100 },
+    "Attack": { "power": 20 },
+    "StatusEffects": { "effects": [], "durations": [], "magnitudes": [] }
+  }
+},
+{
+  "name": "dummy",
+  "components": {
+    "Health": { "hp": 200, "max": 200 },
+    "Attack": { "power": 0 },
+    "StatusEffects": { "effects": [], "durations": [], "magnitudes": [] }
+  }
+}
+```
+
+三个列表初始都为空。施加第一个效果时，三个列表同时 push 一项；到期或清除时，三项同时 splice。并行列表的好处是：规则引擎不支持 map 结构，但支持 list —— 用三个 list 平行存储就实现了"效果字典"。
+
+### 3. 在规则里驱动施加 / 清除
+
+status-effects 模块不决定**何时**施加效果——那是游戏逻辑（敌人攻击附带中毒？喝药水？装备诅咒？）。你的规则负责在合适的时机 emit `apply-status` / `clear-status`：
+
+```json
+{
+  "id": "apply-poison-on-1",
+  "comment": "Press 1: apply poison to the dummy (10 ticks, 10 damage/tick).",
+  "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } },
+  "do": [{ "emit": "apply-status", "data": { "who": "@dummy", "effect": "poison", "duration": 10, "magnitude": 10 } }]
+},
+{
+  "id": "apply-haste-on-3",
+  "comment": "Press 3: apply haste to the player (10 ticks, +10 ATK while active).",
+  "on": { "event": "input", "filter": { "action": "3", "phase": "pressed" } },
+  "do": [{ "emit": "apply-status", "data": { "who": "@player", "effect": "haste", "duration": 10, "magnitude": 10 } }]
+},
+{
+  "id": "clear-poison-on-4",
+  "comment": "Press 4: clear poison from the dummy (antidote).",
+  "on": { "event": "input", "filter": { "action": "4", "phase": "pressed" } },
+  "do": [{ "emit": "clear-status", "data": { "who": "@dummy", "effect": "poison" } }]
+}
+```
+
+### 4. 生命周期是自动的
+
+status-effects 模块内置一个 **tick 系统**（`status-tick`），每 tick 自动遍历所有带 `StatusEffects` 的实体：
+
+1. **每个活跃效果**：emit `status-ticked { who, effect, magnitude, ticks_remaining }`（游戏监听这个事件决定效果作用）
+2. **duration 减 1**
+3. **如果 duration ≤ 0**：emit `status-expired { who, effect }`，从列表移除
+4. **如果 duration > 0**：保留效果，写回新的 duration
+
+模块的 `__status_apply` 在施加时：
+- **新效果**：三个列表同时 push
+- **已存在**：刷新——取 `max(旧 duration, 新 duration)` 和 `max(旧 magnitude, 新 magnitude)`（RPG 标准的"刷新不叠加"规则，避免重复施加无限累加）
+
+模块的 `__status_clear` 在清除时：从三个列表 splice 掉对应项，emit `status-cleared`。**清除不存在的效果是 no-op**——不报错、不 emit 事件，所以你可以放心让玩家喝解毒药而不担心已经没中毒了。
+
+### 5. 效果语义：游戏决定做什么
+
+这是 status-effects 模块的核心。有**两种组合模式**，对应两类效果：
+
+#### 模式 A：tick 驱动（DoT / HoT）
+
+监听 `status-ticked`，每 tick 触发一次效果作用。适合"持续伤害 / 持续治疗"类效果：
+
+```json
+{
+  "id": "poison-tick-deals-damage",
+  "comment": "Poison tick: deal magnitude damage to the afflicted entity. Bridges status-effects → combat.",
+  "on": { "event": "status-ticked" },
+  "if": [["event.effect", "==", "poison"]],
+  "do": [{ "emit": "damage", "data": { "who": "event.who", "amount": "event.magnitude", "killer": "" } }]
+},
+{
+  "id": "regen-tick-heals",
+  "comment": "Regen tick: heal magnitude HP to the afflicted entity.",
+  "on": { "event": "status-ticked" },
+  "if": [["event.effect", "==", "regen"]],
+  "do": [{ "emit": "heal", "data": { "who": "event.who", "amount": "event.magnitude" } }]
+}
+```
+
+每 tick：模块 emit `status-ticked { effect: "poison", magnitude: 10 }` → 规则过滤 effect == "poison" → emit `damage { amount: 10 }` → combat 模块扣血。这就是中毒扣血的完整链路。
+
+#### 模式 B：状态驱动（属性修饰）
+
+监听 `status-applied` / `status-expired`，在效果开始 / 结束时一次性修改属性。适合"急速 +ATK"、"护盾 +max HP"、"虚弱 -ATK"类效果：
+
+```json
+{
+  "id": "haste-applied-boosts-atk",
+  "comment": "Haste applied: +magnitude ATK. Bridges status-effects → combat (stat modifier pattern).",
+  "on": { "event": "status-applied" },
+  "if": [["event.effect", "==", "haste"]],
+  "do": [{ "call": "apply_haste_bonus", "with": { "who": "event.who", "magnitude": "event.magnitude" } }]
+},
+{
+  "id": "haste-expired-removes-atk",
+  "comment": "Haste expired: -magnitude ATK (read from the effect's magnitude before it expired).",
+  "on": { "event": "status-expired" },
+  "if": [["event.effect", "==", "haste"]],
+  "do": [{ "call": "remove_haste_bonus", "with": { "who": "event.who" } }]
+}
+```
+
+```js
+// Haste magnitude is fixed in this demo (+10 ATK). In a real game with variable
+// haste strength, track the bonus per entity (e.g. a HasteBonus component or a
+// script-side map) so remove knows how much to subtract.
+const HASTE_BONUS = 10;
+
+vitric.fn("apply_haste_bonus", (args, ctx) => {
+  const who = args.who;
+  const magnitude = Number(args.magnitude) || HASTE_BONUS;
+  const power = Number(ctx.getField(who, "Attack.power")) || 0;
+  ctx.setField(who, "Attack.power", power + magnitude);
+});
+
+vitric.fn("remove_haste_bonus", (args, ctx) => {
+  const who = args.who;
+  const power = Number(ctx.getField(who, "Attack.power")) || 0;
+  ctx.setField(who, "Attack.power", Math.max(0, power - HASTE_BONUS));
+});
+```
+
+施加急速：`apply-status` → `status-applied` → `apply_haste_bonus` → `Attack.power += 10`。到期：`status-expired` → `remove_haste_bonus` → `Attack.power -= 10`。属性变化是**对称的**——加多少减多少，到期后属性回到原值。
+
+> **模式 A vs 模式 B 的区别**：模式 A 每 tick 都触发效果作用（中毒每 tick 扣 10 血，10 tick 扣 100 血）；模式 B 只在开始和结束触发一次（急速开始 +10 ATK，期间 ATK 一直是 30，结束 -10 ATK 回到 20）。选择哪种取决于效果语义：累计型用 A，瞬时型用 B。
+
+### 6. tick 系统时序
+
+施加一个效果到效果开始作用，需要几个 tick 的 cascade：
+
+```
+tick N:   input → emit apply-status (carryover)
+tick N+1: status-on-apply rule → __status_apply:
+            1. read effects/durations/magnitudes
+            2. push (or refresh) new effect
+            3. write back lists
+            4. emit status-applied (carryover)
+tick N+2: status-tick system runs (every tick):
+            for the new effect: emit status-ticked (carryover)
+            (duration: 10 → 9)
+          status-applied rule (for haste) → apply_haste_bonus → ATK 写入 (deferred)
+tick N+3: status-ticked rule (for poison) → emit damage (carryover)
+          ATK 写入可见
+tick N+4: combat-on-damage rule → __combat_damage → HP 写入 (deferred)
+tick N+5: HP 写入可见
+```
+
+测试驱动时，施加后 step 5 tick 让 `apply-status` → `status-applied` → `status-tick` → `status-ticked` → `damage` → `HP 写入` 全链路走完。每 tick 都会触发 `status-ticked`，所以效果越久、cascade 越多。
+
+### 7. 刷新规则：取 max，不叠加
+
+重复施加同名效果时，`__status_apply` 取 `max(旧 duration, 新 duration)` 和 `max(旧 magnitude, 新 magnitude)`——这是 RPG 标准的"刷新不叠加"规则：
+
+- **不叠加**：中毒 10 tick + 再中毒 10 tick ≠ 中毒 20 tick。否则玩家可以无限叠加伤害。
+- **刷新**：如果旧效果还剩 3 tick，重新施加 10 tick，duration 变成 `max(3, 10) = 10`——延长了效果，但没有叠加。
+
+如果你的游戏**想要叠加**（如叠加伤害），可以在 `status-applied` 规则里手动累加 magnitude 到一个独立字段，绕过模块的刷新逻辑。模块默认行为是最安全的"不叠加"。
+
+### 8. 与其他模块组合
+
+- **+ combat**：最常见的组合。模式 A 通过 `damage`/`heal` 事件桥接（poison → damage → 扣血）；模式 B 直接读写 Health/Attack（haste → +ATK）。战斗因此有了战术层：单纯攻击变成"先中毒削弱 → 再急速爆发 → 解毒保命"。
+- **+ equipment**：装备可以触发被动效果——穿戴"毒剑"时攻击附带中毒（`attack` 事件 → 检查武器 → `apply-status`）。equipment 提供"穿戴什么"，status-effects 提供"穿戴后有什么持续效果"。
+- **+ loot**：稀有掉落物使用时施加效果（喝"力量药水"→ `apply-status haste`）。loot 提供"获得什么"，status-effects 提供"使用后做什么"。
+- **+ progression**：升级时刷新被动效果（`leveled-up` → `apply-status` 重置 duration）。或技能树解锁"永久急速"——duration 设极大值（如 999999）模拟永久效果。
+- **+ quest**：任务触发剧情效果（"被诅咒"任务 → `apply-status curse`）。quest 提供叙事，status-effects 提供机制。
+
+### 9. 完整 RPG 闭环中的位置
+
+status-effects 模块把 combat 模块的"瞬时伤害"延伸为**持续战斗状态**：
+
+```
+kill enemy → died → loot module → pickup(poison_potion) → inventory
+                                                            │
+press 1 → drink poison_potion → apply-status poison(self, 5t, 5)
+                                                            │
+                                              [every tick: status-ticked]
+                                                            │
+                                              poison-tick rule → damage
+                                                            │
+                                                       HP 缓慢下降
+                                                            │
+                                              press 4 → clear-status poison
+                                                            │
+                                                       antidote 救命
+```
+
+没有 status-effects 的 RPG：战斗是"瞬间结算"——攻击一次扣一次血，没有持续效果。有 status-effects 的 RPG：中毒让敌人慢慢死、急速让自己短期爆发、护盾扛过致命一击——战斗有了**时间维度**和**状态管理**，这是"回合制/即时 RPG"和"简单街机"的差别。
+
+完整可运行示例见 `examples/status-effects-demo/`，集成测试见 `crates/vitric-cli/tests/status_effects.rs`（10 例：check 通过 / 初始无效果 / 中毒持续扣血 / 回血不溢出 / 急速到期恢复 / 解毒提前清除 / 重复施加刷新时长 / 多效果共存 / 急速提升攻击伤害 / 清除不存在 no-op）。
+
+---
+
 ## 编写自己的模块
 
 模块就是一个含 `module.json` 的目录：
