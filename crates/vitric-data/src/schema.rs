@@ -390,6 +390,55 @@ impl Schema {
     pub fn component(&self, name: &str) -> Option<&ComponentSchema> {
         self.components.get(name)
     }
+
+    /// Merge another schema (typically from an included module) into this one.
+    ///
+    /// Semantics:
+    /// - A component present only in `other` is added.
+    /// - A component present in both is merged field-by-field.
+    ///   A field present in both must have the **same type** (FieldType equality) — otherwise VD092.
+    ///   Same-type duplicate fields are idempotent (kept as-is in `self`).
+    /// - A component declared twice with identical fields is also idempotent (no error).
+    ///
+    /// `other` is consumed. `module_path` is used in error messages to point at the conflicting module file.
+    pub fn merge(&mut self, other: Schema, module_path: &str, report: &mut ValidationReport) {
+        for (cname, cdef) in other.components {
+            match self.components.remove(&cname) {
+                None => {
+                    self.components.insert(cname, cdef);
+                }
+                Some(mut existing) => {
+                    for (fname, fdef) in cdef.fields {
+                        match existing.fields.remove(&fname) {
+                            None => {
+                                existing.fields.insert(fname, fdef);
+                            }
+                            Some(existing_fdef) => {
+                                if existing_fdef.ty != fdef.ty {
+                                    report.push(
+                                        "VD092",
+                                        format!("{module_path}#/components/{cname}/fields/{fname}"),
+                                        format!(
+                                            "字段类型冲突：模块定义为 {}，项目已有 {}。同一字段在两处类型必须一致",
+                                            fdef.ty.name(),
+                                            existing_fdef.ty.name()
+                                        ),
+                                        format!(
+                                            "统一为同一类型（{} 或 {}），或重命名其中一处",
+                                            fdef.ty.name(),
+                                            existing_fdef.ty.name()
+                                        ),
+                                    );
+                                }
+                                existing.fields.insert(fname, existing_fdef);
+                            }
+                        }
+                    }
+                    self.components.insert(cname, existing);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

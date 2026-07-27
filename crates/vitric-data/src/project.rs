@@ -59,6 +59,40 @@ pub struct ProjectManifest {
     /// World random seed; same seed + same input = same result.
     #[serde(default = "default_seed")]
     pub seed: u64,
+    /// Reusable modules to include (paths relative to the project root, each pointing at a directory with a `module.json`).
+    /// Each module contributes: a schema fragment (merged field-by-field with conflict detection),
+    /// rule files (appended to `rules`), and script files (appended to `scripts`).
+    /// Nested includes are supported (a module may itself include other modules); cycles are detected and reported (VD093).
+    #[serde(default)]
+    pub includes: Vec<String>,
+}
+
+/// Module manifest `module.json` — the slim descriptor a reusable module ships alongside its schema/rules/scripts.
+///
+/// All paths inside are relative to the module directory. `name` is informational (for error messages and future tooling);
+/// `schema` / `rules` / `scripts` / `includes` are all optional — a module contributes only what it declares.
+///
+/// ```json
+/// {
+///   "name": "inventory",
+///   "schema": "schema.json",
+///   "rules": ["rules/inventory.json"],
+///   "scripts": ["scripts/inventory.js"]
+/// }
+/// ```
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ModuleManifest {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub schema: Option<String>,
+    #[serde(default)]
+    pub rules: Vec<String>,
+    #[serde(default)]
+    pub scripts: Vec<String>,
+    /// Nested includes (paths relative to this module's directory). Cycles are detected (VD093).
+    #[serde(default)]
+    pub includes: Vec<String>,
 }
 
 /// Delivery gate declaration (the manifest's `gates` field).
@@ -270,7 +304,7 @@ impl Project {
                 return Err(report);
             }
         };
-        let manifest: ProjectManifest = match serde_json::from_value(manifest_doc) {
+        let mut manifest: ProjectManifest = match serde_json::from_value(manifest_doc) {
             Ok(m) => m,
             Err(e) => {
                 report.push(
@@ -292,7 +326,7 @@ impl Project {
         }
 
         // schema
-        let schema = match read_json(&root.join(&manifest.schema)) {
+        let mut schema = match read_json(&root.join(&manifest.schema)) {
             Ok(doc) => match Schema::parse(&doc, &manifest.schema) {
                 Ok(s) => s,
                 Err(r) => {
@@ -305,6 +339,24 @@ impl Project {
                 Schema::default()
             }
         };
+
+        // Includes: merge module schema fragments into `schema`, append module rules/scripts to the manifest.
+        // Must happen BEFORE scenes load (scenes are validated against the merged schema).
+        // Tracks visited module directories (by canonicalized path) to detect cycles (VD093).
+        // `take` the includes list to avoid borrowing manifest while mutating it.
+        let includes = std::mem::take(&mut manifest.includes);
+        if !includes.is_empty() {
+            let mut visited: Vec<PathBuf> = Vec::new();
+            process_includes(
+                &includes,
+                "",
+                &root,
+                &mut schema,
+                &mut manifest,
+                &mut report,
+                &mut visited,
+            );
+        }
 
         // Scenes
         let mut scenes = BTreeMap::new();
@@ -459,6 +511,122 @@ fn read_json(path: &Path) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("JSON 解析失败（第 {} 行第 {} 列）: {e}", e.line(), e.column()))
 }
 
+/// Join a relative-include path with the current module directory (both relative to the project root).
+/// Empty `cur_dir_rel` means the project root is the current directory.
+fn join_rel(cur_dir_rel: &str, rel: &str) -> String {
+    if cur_dir_rel.is_empty() {
+        rel.to_string()
+    } else {
+        format!("{cur_dir_rel}/{rel}")
+    }
+}
+
+/// Process `includes`: for each module, merge its schema fragment, append its rules/scripts, and recurse into nested includes.
+///
+/// - `includes`: the list of include paths (relative to `cur_dir_rel`).
+/// - `cur_dir_rel`: the directory of the manifest currently being processed, relative to the project root
+///   ("" for the project root itself; "../../modules/inventory" for a module two levels up).
+/// - `root`: the project root directory.
+/// - `schema`: the merged schema so far (mutated in place).
+/// - `manifest`: the project manifest (its `rules`/`scripts` lists are extended with module-relative paths).
+/// - `visited`: canonicalized module directory paths, for cycle detection (VD093).
+fn process_includes(
+    includes: &[String],
+    cur_dir_rel: &str,
+    root: &Path,
+    schema: &mut Schema,
+    manifest: &mut ProjectManifest,
+    report: &mut ValidationReport,
+    visited: &mut Vec<PathBuf>,
+) {
+    for inc in includes {
+        let module_dir_rel = join_rel(cur_dir_rel, inc);
+        let module_dir_abs = root.join(&module_dir_rel);
+
+        // Cycle detection: canonicalize the module directory and check against visited.
+        // canonicalize fails for nonexistent paths — that's reported below as VD090.
+        if let Ok(canon) = module_dir_abs.canonicalize() {
+            if visited.contains(&canon) {
+                report.push(
+                    "VD093",
+                    format!("vitric.json#/includes (via {module_dir_rel})"),
+                    format!("检测到 include 循环：模块 {module_dir_rel:?} 已被引用过"),
+                    "移除循环引用（A includes B includes A 是非法的）",
+                );
+                continue;
+            }
+            visited.push(canon);
+        }
+
+        // Load module.json
+        let module_manifest_path = format!("{module_dir_rel}/module.json");
+        let module_doc = match read_json(&root.join(&module_manifest_path)) {
+            Ok(v) => v,
+            Err(e) => {
+                report.push(
+                    "VD090",
+                    &module_manifest_path,
+                    e,
+                    "includes 指向的目录必须包含 module.json 清单",
+                );
+                continue;
+            }
+        };
+        let module_manifest: ModuleManifest = match serde_json::from_value(module_doc) {
+            Ok(m) => m,
+            Err(e) => {
+                report.push(
+                    "VD091",
+                    &module_manifest_path,
+                    format!("模块清单解析失败: {e}"),
+                    "必填: 可选字段 name(文本)、schema(路径)、rules/scripts(路径数组)、includes(路径数组)",
+                );
+                continue;
+            }
+        };
+
+        // Merge module schema fragment
+        if let Some(schema_rel) = &module_manifest.schema {
+            let schema_path_rel = join_rel(&module_dir_rel, schema_rel);
+            match read_json(&root.join(&schema_path_rel)) {
+                Ok(doc) => match Schema::parse(&doc, &schema_path_rel) {
+                    Ok(module_schema) => schema.merge(module_schema, &schema_path_rel, report),
+                    Err(r) => report.merge(r),
+                },
+                Err(e) => {
+                    report.push(
+                        "VD040",
+                        &schema_path_rel,
+                        e,
+                        "module.json 的 schema 字段指向的文件必须存在",
+                    );
+                }
+            }
+        }
+
+        // Append module rules/scripts (paths become project-root-relative via module_dir_rel)
+        for r in &module_manifest.rules {
+            manifest.rules.push(join_rel(&module_dir_rel, r));
+        }
+        for s in &module_manifest.scripts {
+            manifest.scripts.push(join_rel(&module_dir_rel, s));
+        }
+
+        // Recurse into nested includes
+        if !module_manifest.includes.is_empty() {
+            process_includes(
+                &module_manifest.includes,
+                &module_dir_rel,
+                root,
+                schema,
+                manifest,
+                report,
+                visited,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,6 +711,215 @@ mod tests {
         assert!(codes.contains(&"VD042"), "入口不在列表: {err}");
         assert!(codes.contains(&"VD005"), "未知组件: {err}");
         assert!(codes.contains(&"VD040"), "规则文件缺失: {err}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- includes mechanism ----
+
+    fn write_module(dir: &Path, mod_rel: &str, schema_json: &str, rules: &[&str], scripts: &[&str]) {
+        let mod_dir = dir.join(mod_rel);
+        let rules_str = format!(
+            "[{}]",
+            rules.iter().map(|r| format!("\"{}\"", r)).collect::<Vec<_>>().join(",")
+        );
+        let scripts_str = format!(
+            "[{}]",
+            scripts.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(",")
+        );
+        let module_json = format!(
+            r#"{{"name":"{}","schema":"schema.json","rules":{},"scripts":{}}}"#,
+            mod_rel.replace('/', "-"),
+            if rules.is_empty() { "[]".to_string() } else { rules_str },
+            if scripts.is_empty() { "[]".to_string() } else { scripts_str },
+        );
+        write(&mod_dir.join("module.json"), &module_json);
+        write(&mod_dir.join("schema.json"), schema_json);
+    }
+
+    #[test]
+    fn includes_merges_schema_and_appends_rules_scripts() {
+        let dir = temp_project("inc-merge");
+        write(
+            &dir.join("vitric.json"),
+            r#"{"name":"demo","schema":"schema.json","entry":"scenes/main.json",
+                "scenes":["scenes/main.json"],"includes":["mods/inventory"]}"#,
+        );
+        // Project schema: Position + the Inventory component (proves field-level merge works —
+        // the project declares `capacity` as int, the module also declares it as int → no conflict).
+        write(
+            &dir.join("schema.json"),
+            r#"{"components":{
+                "Position":{"fields":{"x":{"type":"number"},"y":{"type":"number"}}},
+                "Inventory":{"fields":{"capacity":{"type":"int","default":16,"min":1}}}
+            }}"#,
+        );
+        write(
+            &dir.join("scenes/main.json"),
+            r#"{"entities":[{"name":"player","components":{
+                "Position":{"x":0,"y":0},
+                "Inventory":{"items":[],"counts":[],"capacity":8}
+            }}]}"#,
+        );
+        // Module: contributes Inventory.items/counts (new fields, merged in) + a rule file + a script file
+        write_module(
+            &dir,
+            "mods/inventory",
+            r#"{"components":{"Inventory":{"fields":{
+                "items":{"type":"list","of":{"type":"text"},"default":[]},
+                "counts":{"type":"list","of":{"type":"int"},"default":[]}
+            }}}}"#,
+            &["rules/inventory.json"],
+            &["scripts/inventory.js"],
+        );
+        write(&dir.join("mods/inventory/rules/inventory.json"), r#"{"rules":[]}"#);
+        write(&dir.join("mods/inventory/scripts/inventory.js"), "// inventory module system\n");
+
+        let p = Project::load(&dir).unwrap();
+        // Schema merged: Inventory has all three fields
+        let inv = p.schema.component("Inventory").unwrap();
+        assert!(inv.fields.contains_key("capacity"), "项目原字段保留");
+        assert!(inv.fields.contains_key("items"), "模块新增字段合并进来");
+        assert!(inv.fields.contains_key("counts"), "模块新增字段合并进来");
+        // Rules/scripts appended with module-relative paths
+        assert!(
+            p.manifest.rules.iter().any(|r| r == "mods/inventory/rules/inventory.json"),
+            "rules 列表含模块规则: {:?}",
+            p.manifest.rules
+        );
+        assert!(
+            p.manifest.scripts.iter().any(|s| s == "mods/inventory/scripts/inventory.js"),
+            "scripts 列表含模块脚本: {:?}",
+            p.manifest.scripts
+        );
+        // The merged schema actually validates the scene (Inventory.items/counts are now legal)
+        assert!(p.scenes.contains_key("scenes/main.json"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn includes_field_type_conflict_reports_vd092() {
+        let dir = temp_project("inc-conflict");
+        write(
+            &dir.join("vitric.json"),
+            r#"{"name":"demo","schema":"schema.json","entry":"scenes/main.json",
+                "scenes":["scenes/main.json"],"includes":["mods/bad"]}"#,
+        );
+        // Project says Inventory.capacity is int; module says it's text → VD092
+        write(
+            &dir.join("schema.json"),
+            r#"{"components":{"Inventory":{"fields":{"capacity":{"type":"int","default":16}}}}}"#,
+        );
+        write(&dir.join("scenes/main.json"), r#"{"entities":[]}"#);
+        write_module(
+            &dir,
+            "mods/bad",
+            r#"{"components":{"Inventory":{"fields":{"capacity":{"type":"text","default":""}}}}}"#,
+            &[],
+            &[],
+        );
+        let err = Project::load(&dir).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("VD092"), "要有字段冲突错误码: {text}");
+        assert!(text.contains("capacity"), "要点名冲突字段: {text}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn includes_missing_module_json_reports_vd090() {
+        let dir = temp_project("inc-missing");
+        write(
+            &dir.join("vitric.json"),
+            r#"{"name":"demo","schema":"schema.json","entry":"scenes/main.json",
+                "scenes":["scenes/main.json"],"includes":["mods/ghost"]}"#,
+        );
+        write(
+            &dir.join("schema.json"),
+            r#"{"components":{"P":{"fields":{"x":{"type":"number"}}}}}"#,
+        );
+        write(&dir.join("scenes/main.json"), r#"{"entities":[]}"#);
+        // mods/ghost directory exists but has no module.json
+        fs::create_dir_all(dir.join("mods/ghost")).unwrap();
+        let err = Project::load(&dir).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("VD090"), "要有模块缺失错误码: {text}");
+        assert!(text.contains("mods/ghost/module.json"), "要点名缺失文件: {text}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn includes_cycle_reports_vd093() {
+        let dir = temp_project("inc-cycle");
+        write(
+            &dir.join("vitric.json"),
+            r#"{"name":"demo","schema":"schema.json","entry":"scenes/main.json",
+                "scenes":["scenes/main.json"],"includes":["mods/a"]}"#,
+        );
+        write(&dir.join("schema.json"), r#"{"components":{"P":{"fields":{"x":{"type":"number"}}}}}"#);
+        write(&dir.join("scenes/main.json"), r#"{"entities":[]}"#);
+        // A includes B, B includes A → cycle
+        write(&dir.join("mods/a/module.json"), r#"{"name":"a","includes":["../b"]}"#);
+        write(&dir.join("mods/a/schema.json"), r#"{"components":{}}"#);
+        write(&dir.join("mods/b/module.json"), r#"{"name":"b","includes":["../a"]}"#);
+        write(&dir.join("mods/b/schema.json"), r#"{"components":{}}"#);
+        let err = Project::load(&dir).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("VD093"), "要有循环引用错误码: {text}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn nested_includes_merge_transitively() {
+        let dir = temp_project("inc-nested");
+        write(
+            &dir.join("vitric.json"),
+            r#"{"name":"demo","schema":"schema.json","entry":"scenes/main.json",
+                "scenes":["scenes/main.json"],"includes":["mods/a"]}"#,
+        );
+        write(&dir.join("schema.json"), r#"{"components":{}}"#);
+        write(&dir.join("scenes/main.json"), r#"{"entities":[]}"#);
+        // A contributes component A_comp, includes B; B contributes B_comp
+        write(
+            &dir.join("mods/a/module.json"),
+            r#"{"name":"a","schema":"schema.json","includes":["../b"]}"#,
+        );
+        write(
+            &dir.join("mods/a/schema.json"),
+            r#"{"components":{"A_comp":{"fields":{"a":{"type":"int","default":0}}}}}"#,
+        );
+        write(&dir.join("mods/b/module.json"), r#"{"name":"b","schema":"schema.json"}"#);
+        write(
+            &dir.join("mods/b/schema.json"),
+            r#"{"components":{"B_comp":{"fields":{"b":{"type":"text","default":""}}}}}"#,
+        );
+        let p = Project::load(&dir).unwrap();
+        assert!(p.schema.component("A_comp").is_some(), "A 的组件合并进来");
+        assert!(p.schema.component("B_comp").is_some(), "B 的组件通过嵌套 include 也合并进来");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn idempotent_include_same_field_same_type_no_error() {
+        // A field declared identically in both project and module is not a conflict (idempotent merge).
+        let dir = temp_project("inc-idem");
+        write(
+            &dir.join("vitric.json"),
+            r#"{"name":"demo","schema":"schema.json","entry":"scenes/main.json",
+                "scenes":["scenes/main.json"],"includes":["mods/dup"]}"#,
+        );
+        write(
+            &dir.join("schema.json"),
+            r#"{"components":{"Inventory":{"fields":{"capacity":{"type":"int","default":16,"min":1}}}}}"#,
+        );
+        write(&dir.join("scenes/main.json"), r#"{"entities":[]}"#);
+        write_module(
+            &dir,
+            "mods/dup",
+            r#"{"components":{"Inventory":{"fields":{"capacity":{"type":"int","default":16,"min":1}}}}}"#,
+            &[],
+            &[],
+        );
+        let p = Project::load(&dir).unwrap();
+        assert!(p.schema.component("Inventory").unwrap().fields.contains_key("capacity"));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

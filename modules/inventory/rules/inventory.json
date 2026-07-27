@@ -1,0 +1,34 @@
+{
+  "rules": [
+    {
+      "id": "inv-pickup",
+      "on": { "event": "pickup" },
+      "do": [
+        {
+          "call": "__inv_pickup",
+          "with": { "who": "event.who", "item": "event.item", "count": "event.count" }
+        }
+      ]
+    },
+    {
+      "id": "inv-drop",
+      "on": { "event": "drop" },
+      "do": [
+        {
+          "call": "__inv_drop",
+          "with": { "who": "event.who", "item": "event.item", "count": "event.count" }
+        }
+      ]
+    },
+    {
+      "id": "inv-transfer",
+      "on": { "event": "transfer" },
+      "do": [
+        {
+          "call": "__inv_transfer",
+          "with": { "from": "event.from", "to": "event.to", "item": "event.item", "count": "event.count" }
+        }
+      ]
+    }
+  ]
+}

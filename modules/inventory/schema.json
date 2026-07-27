@@ -1,0 +1,11 @@
+{
+  "components": {
+    "Inventory": {
+      "fields": {
+        "items": { "type": "list", "of": { "type": "text" }, "default": [] },
+        "counts": { "type": "list", "of": { "type": "int" }, "default": [] },
+        "capacity": { "type": "int", "default": 16, "min": 1 }
+      }
+    }
+  }
+}

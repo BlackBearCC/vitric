@@ -1,0 +1,32 @@
+{
+  "rules": [
+    {
+      "id": "move-right-start",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "pressed" } },
+      "do": [{ "set": "@player.Velocity.x", "to": "@player.Speed.value" }]
+    },
+    {
+      "id": "move-right-stop",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "released" } },
+      "do": [{ "set": "@player.Velocity.x", "to": 0 }]
+    },
+    {
+      "id": "collect-pickup",
+      "on": { "event": "collision", "between": ["Player", "Pickup"] },
+      "do": [
+        { "emit": "pickup", "data": { "who": "self", "item": "other.Pickup.item", "count": "other.Pickup.count" } },
+        { "despawn": "other" }
+      ]
+    },
+    {
+      "id": "update-hud-on-pickup",
+      "on": { "event": "item-picked-up" },
+      "do": [{ "call": "render_inventory", "with": { "who": "event.who", "hud": "@hud" } }]
+    },
+    {
+      "id": "update-hud-on-drop",
+      "on": { "event": "item-dropped" },
+      "do": [{ "call": "render_inventory", "with": { "who": "event.who", "hud": "@hud" } }]
+    }
+  ]
+}

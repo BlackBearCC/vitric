@@ -22,5 +22,6 @@ Thumbs.db
 # Local build outputs
 /dist/
 *.log
+*.tmp
 
 echo-linux

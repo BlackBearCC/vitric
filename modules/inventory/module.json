@@ -1,0 +1,6 @@
+{
+  "name": "inventory",
+  "schema": "schema.json",
+  "rules": ["rules/inventory.json"],
+  "scripts": ["scripts/inventory.js"]
+}

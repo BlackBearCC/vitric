@@ -34,6 +34,10 @@
 | VD071 | UI 容器类型不认识/缺 kind | 可选: VBox/HBox/Grid |
 | VD072 | Grid 列数 < 1 | columns 必须 ≥ 1（VBox/HBox 不用 columns） |
 | VD073 | UI 容器对齐名不合法 | main/cross 可选: start/center/end |
+| VD090 | includes 指向的目录缺 module.json | 每个被 include 的目录必须含 module.json 清单 |
+| VD091 | module.json 解析失败 | 可选字段: name(文本)、schema(路径)、rules/scripts(路径数组)、includes(路径数组) |
+| VD092 | includes 字段类型冲突 | 同一字段在项目和模块（或两个模块）中类型必须一致；统一类型或重命名 |
+| VD093 | includes 循环引用 | A includes B includes A 非法；移除循环 |
 
 ## VR —— 规则层
 

@@ -20,11 +20,15 @@ pub struct LoopCtl {
     /// Unlike `--ticks N` bounded run, turbo keeps the RPC server alive so external scripts can
     /// inject input/click mid-run. Intended for headless recordings and AI fast-forward.
     pub turbo: bool,
+    /// CPU usage cap for turbo / full-speed mode (0-100, default 50).
+    /// 0 = uncapped (full CPU), 50 = ~50% CPU, 100 = effectively uncapped.
+    /// Prevents long-running recordings / fast-forward from monopolizing the machine.
+    pub cpu_cap: u32,
 }
 
 impl Default for LoopCtl {
     fn default() -> Self {
-        LoopCtl { paused: false, speed: 1.0, quit: false, turbo: false }
+        LoopCtl { paused: false, speed: 1.0, quit: false, turbo: false, cpu_cap: 50 }
     }
 }
 
@@ -491,6 +495,14 @@ impl Dispatcher {
                     self.ctl.paused = false;
                 }
                 Ok(json!({"turbo": on, "tick": sim.tick}))
+            }
+            "sim/cpu-cap" => {
+                // Set or query the CPU usage cap for turbo / full-speed mode.
+                // cap: 0-100 (0=uncapped, 50=~50% CPU). Default 50.
+                if let Some(cap) = params.get("cap").and_then(|v| v.as_u64()) {
+                    self.ctl.cpu_cap = cap.min(100) as u32;
+                }
+                Ok(json!({"cpu_cap": self.ctl.cpu_cap}))
             }
             "sim/quit" => {
                 self.ctl.quit = true;

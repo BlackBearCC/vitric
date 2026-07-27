@@ -33,6 +33,7 @@
 //!   --record <file>  write recording to file on exit
 //!   --load <slot>    immediately restore from <project>/saves/<slot>.json on startup to continue playing (mutually exclusive with --record)
 //!   --renderer <gpu|cpu> window presentation path (default cpu=softbuffer; gpu=wgpu, opens its own window)
+//!   --cpu-cap <N>    CPU usage cap 0-100 for turbo/full-speed mode (default 50, 0=uncapped)
 //!
 //! bundle options:
 //!   --out <file>     output path (default <project-name>-<platform>[.exe])
@@ -527,6 +528,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let mut load_slot: Option<String> = None;
     let mut windowed = false;
     let mut renderer = window::Renderer::Cpu;
+    let mut cpu_cap: Option<u32> = None;
     let mut i = 1;
     while i < args.len() {
         let need = |key: &str| format!("{key} 缺少参数值");
@@ -565,7 +567,11 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
                 load_slot = Some(args.get(i + 1).ok_or(need("--load"))?.clone());
                 i += 2;
             }
-            other => return Err(format!("未知选项 {other:?}。可用: --window --renderer --port --speed --ticks --record --load")),
+            "--cpu-cap" => {
+                cpu_cap = Some(args.get(i + 1).ok_or(need("--cpu-cap"))?.parse().map_err(|e| format!("--cpu-cap: {e}"))?);
+                i += 2;
+            }
+            other => return Err(format!("未知选项 {other:?}。可用: --window --renderer --port --speed --ticks --record --load --cpu-cap")),
         }
     }
     // GPU is a window presentation path, no headless form — choosing gpu means opening a window
@@ -584,6 +590,9 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     }
     dispatcher.set_budgets(project.manifest.budgets.clone());
     dispatcher.ctl.speed = speed;
+    if let Some(cap) = cpu_cap {
+        dispatcher.ctl.cpu_cap = cap.min(100);
+    }
 
     // Player saves: slots are fixed under <project>/saves/, convention events (save-game/load-game),
     // save/* RPC and --load all share this one SaveStore — same code path, same validation
@@ -645,6 +654,8 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     // Main loop: fixed step + speed multiplier + frame-boundary handling of control commands
     let mut last = Instant::now();
     let mut acc: f64 = 0.0;
+    // Accumulated wall-clock work time in turbo/full-speed mode, for CPU cap throttling.
+    let mut turbo_work: Duration = Duration::ZERO;
     loop {
         for req in server.drain() {
             let resp = dispatcher.handle(&req.request, &mut sim, &mut rt);
@@ -669,7 +680,25 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         if dispatcher.ctl.turbo || max_ticks.is_some() {
             // Full-speed run: ignore wall clock, drain RPC input each iteration.
             // Covers both `--ticks N` bounded runs and runtime `sim/turbo` toggle.
+            // CPU cap (default 50%): accumulate work time, then sleep proportionally to
+            // keep overall CPU usage near the target. Prevents long recordings from
+            // monopolizing the machine. 0 or 100 = uncapped.
+            let step_start = Instant::now();
             step_once(&mut sim, &mut rt, &mut dispatcher, &mut audio_sink, &mut llm)?;
+            let cap = dispatcher.ctl.cpu_cap;
+            if cap > 0 && cap < 100 {
+                turbo_work += step_start.elapsed();
+                // Batch: only sleep when accumulated work crosses a threshold, to avoid
+                // platform sleep-granularity dominating tiny per-tick durations.
+                if turbo_work >= Duration::from_millis(2) {
+                    let ratio = 100.0 / cap as f64 - 1.0;
+                    let sleep_us = (turbo_work.as_micros() as f64 * ratio) as u64;
+                    if sleep_us >= 1000 {
+                        std::thread::sleep(Duration::from_micros(sleep_us));
+                    }
+                    turbo_work = Duration::ZERO;
+                }
+            }
             continue;
         }
 
