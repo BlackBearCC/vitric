@@ -1,0 +1,35 @@
+{
+  "rules": [
+    {
+      "id": "game-on-start",
+      "comment": "title → playing (begin a playthrough)",
+      "on": { "event": "game-start" },
+      "do": [{ "call": "__game_start" }]
+    },
+    {
+      "id": "game-on-win",
+      "comment": "playing → won (win condition met)",
+      "on": { "event": "game-win" },
+      "do": [{ "call": "__game_win" }]
+    },
+    {
+      "id": "game-on-lose",
+      "comment": "playing → lost (lose condition met)",
+      "on": { "event": "game-lose" },
+      "do": [{ "call": "__game_lose" }]
+    },
+    {
+      "id": "game-on-restart",
+      "comment": "won/lost → title (back to title screen for a new run)",
+      "on": { "event": "game-restart" },
+      "do": [{ "call": "__game_restart" }]
+    },
+    {
+      "id": "game-tick-time",
+      "comment": "While playing, increment the playthrough timer each tick.",
+      "on": "tick",
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "call": "__game_tick" }]
+    }
+  ]
+}

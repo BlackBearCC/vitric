@@ -1,0 +1,18 @@
+{
+  "components": {
+    "Dialogue": {
+      "fields": {
+        "node_text": { "type": "list", "of": { "type": "text" }, "default": [] },
+        "node_choices": { "type": "list", "of": { "type": "text" }, "default": [] },
+        "node_next": { "type": "list", "of": { "type": "text" }, "default": [] },
+        "entry": { "type": "int", "default": 0, "min": 0 }
+      }
+    },
+    "DialogueRunner": {
+      "fields": {
+        "active_npc": { "type": "text", "default": "" },
+        "current": { "type": "int", "default": -1 }
+      }
+    }
+  }
+}

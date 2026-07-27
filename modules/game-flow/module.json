@@ -1,0 +1,6 @@
+{
+  "name": "game-flow",
+  "schema": "schema.json",
+  "rules": ["rules/game-flow.json"],
+  "scripts": ["scripts/game-flow.js"]
+}

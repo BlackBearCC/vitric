@@ -1,0 +1,6 @@
+{
+  "name": "dialogue",
+  "schema": "schema.json",
+  "rules": ["rules/dialogue.json"],
+  "scripts": ["scripts/dialogue.js"]
+}

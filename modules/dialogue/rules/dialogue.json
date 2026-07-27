@@ -1,0 +1,18 @@
+{
+  "rules": [
+    {
+      "id": "dialogue-on-talk",
+      "on": { "event": "talk" },
+      "do": [
+        { "call": "__dialogue_start", "with": { "npc": "event.npc", "who": "event.who" } }
+      ]
+    },
+    {
+      "id": "dialogue-on-choose",
+      "on": { "event": "dialogue-choose" },
+      "do": [
+        { "call": "__dialogue_choose", "with": { "who": "event.who", "choice_index": "event.choice_index" } }
+      ]
+    }
+  ]
+}

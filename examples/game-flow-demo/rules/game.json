@@ -1,0 +1,55 @@
+{
+  "rules": [
+    { "id": "move-right-start", "on": { "event": "input", "filter": { "action": "right", "phase": "pressed" } }, "do": [{ "call": "move", "with": { "axis": "x", "dir": 1 } }] },
+    { "id": "move-right-stop", "on": { "event": "input", "filter": { "action": "right", "phase": "released" } }, "do": [{ "call": "move", "with": { "axis": "x", "dir": 0 } }] },
+    { "id": "move-left-start", "on": { "event": "input", "filter": { "action": "left", "phase": "pressed" } }, "do": [{ "call": "move", "with": { "axis": "x", "dir": -1 } }] },
+    { "id": "move-left-stop", "on": { "event": "input", "filter": { "action": "left", "phase": "released" } }, "do": [{ "call": "move", "with": { "axis": "x", "dir": 0 } }] },
+    { "id": "move-up-start", "on": { "event": "input", "filter": { "action": "up", "phase": "pressed" } }, "do": [{ "call": "move", "with": { "axis": "y", "dir": 1 } }] },
+    { "id": "move-up-stop", "on": { "event": "input", "filter": { "action": "up", "phase": "released" } }, "do": [{ "call": "move", "with": { "axis": "y", "dir": 0 } }] },
+    { "id": "move-down-start", "on": { "event": "input", "filter": { "action": "down", "phase": "pressed" } }, "do": [{ "call": "move", "with": { "axis": "y", "dir": -1 } }] },
+    { "id": "move-down-stop", "on": { "event": "input", "filter": { "action": "down", "phase": "released" } }, "do": [{ "call": "move", "with": { "axis": "y", "dir": 0 } }] },
+
+    {
+      "id": "start-on-space",
+      "comment": "Title screen: press SPACE to begin a playthrough.",
+      "on": { "event": "input", "filter": { "action": "space", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "title"]],
+      "do": [{ "emit": "game-start" }]
+    },
+    {
+      "id": "restart-on-r-won",
+      "comment": "Won screen: press R to reset and return to title.",
+      "on": { "event": "input", "filter": { "action": "r", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "won"]],
+      "do": [{ "call": "reset_game" }]
+    },
+    {
+      "id": "restart-on-r-lost",
+      "comment": "Lost screen: press R to reset and return to title.",
+      "on": { "event": "input", "filter": { "action": "r", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "lost"]],
+      "do": [{ "call": "reset_game" }]
+    },
+
+    {
+      "id": "coin-pickup",
+      "comment": "Collect a coin (only while playing): move it off-screen, +1 score, decrement counter, win if none left.",
+      "on": { "event": "collision", "between": ["Player", "Coin"] },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "call": "collect_coin", "with": { "coin": "other" } }]
+    },
+    {
+      "id": "enemy-hit",
+      "comment": "Touch the enemy (only while playing) → lose.",
+      "on": { "event": "collision", "between": ["Player", "Enemy"] },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "emit": "game-lose" }]
+    },
+
+    {
+      "id": "update-hud",
+      "on": "tick",
+      "do": [{ "call": "render_hud", "with": { "game": "@game", "hud": "@hud" } }]
+    }
+  ]
+}

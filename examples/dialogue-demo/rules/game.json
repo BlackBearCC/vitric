@@ -1,0 +1,34 @@
+{
+  "rules": [
+    {
+      "id": "move-right-start",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "pressed" } },
+      "do": [{ "call": "move", "with": { "dir": 1 } }]
+    },
+    {
+      "id": "move-right-stop",
+      "on": { "event": "input", "filter": { "action": "right", "phase": "released" } },
+      "do": [{ "call": "move", "with": { "dir": 0 } }]
+    },
+    {
+      "id": "talk-on-collision",
+      "comment": "Walk into the elder → start a dialogue (only if not already in one).",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["self.DialogueRunner.current", "<", 0]],
+      "do": [{ "emit": "talk", "data": { "npc": "other", "who": "self" } }]
+    },
+    {
+      "id": "dialogue-choose-1",
+      "comment": "Press 1 → pick the first choice (only while in a dialogue).",
+      "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } },
+      "if": [["@player.DialogueRunner.current", ">=", 0]],
+      "do": [{ "emit": "dialogue-choose", "data": { "who": "@player", "choice_index": 0 } }]
+    },
+    {
+      "id": "update-hud",
+      "comment": "Every tick: render the current dialogue node (or a prompt) into the HUD.",
+      "on": "tick",
+      "do": [{ "call": "render_dialogue_hud", "with": { "who": "@player", "npc": "@elder", "hud": "@hud" } }]
+    }
+  ]
+}

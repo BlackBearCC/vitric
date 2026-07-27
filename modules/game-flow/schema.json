@@ -1,0 +1,11 @@
+{
+  "components": {
+    "GameState": {
+      "fields": {
+        "phase": { "type": "enum", "variants": ["title", "playing", "won", "lost", "paused"], "default": "title" },
+        "time": { "type": "int", "default": 0, "min": 0 },
+        "score": { "type": "int", "default": 0, "min": 0 }
+      }
+    }
+  }
+}

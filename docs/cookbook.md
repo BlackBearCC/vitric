@@ -321,6 +321,102 @@ quest 模块注册了 `quest-track` tick 系统，每 tick 扫描所有 `active`
 
 ---
 
+## 配方 5：使用 dialogue 模块（分支对话树 / 选项推进 / 与 quest 组合）
+
+**目标**：NPC 有可分支的对话树，玩家选选项推进，对话结束时自动增量 `Talked.count`——quest 模块的 `talk` 目标读它判定完成。这是 RPG 三件套（inventory + quest + dialogue）的最后一块。
+
+### 1. includes
+
+```json
+{ "includes": ["../../modules/inventory", "../../modules/quest", "../../modules/dialogue"] }
+```
+
+dialogue 模块贡献 2 个组件：
+- `Dialogue`（挂在 NPC 上，静态）— 并行列表编码对话树：
+  - `node_text` — 每个节点的 NPC 台词
+  - `node_choices` — 每个节点的玩家选项，`;`-分隔（如 `"Yes;No"`）
+  - `node_next` — 每个选项跳转的节点索引，`;`-分隔（如 `"1;2"`），`-1` = 结束对话
+  - `entry` — 起始节点索引
+- `DialogueRunner`（挂在玩家上，运行时）— `active_npc`（当前对话的 NPC）/ `current`（当前节点索引，`-1` = 不在对话中）
+
+### 2. 在 NPC 上写对话树
+
+```json
+{
+  "name": "elder",
+  "components": {
+    "Npc": {},
+    "Talked": { "count": 0 },
+    "Dialogue": {
+      "node_text": [
+        "Hello! The village needs herbs.",
+        "Bring me 3 herbs, will you?",
+        "Thank you! Come back when you have them."
+      ],
+      "node_choices": ["I can help.;Not now.", "I'll do it.;Maybe later.", "Goodbye."],
+      "node_next": ["1;-1", "2;-1", "-1"],
+      "entry": 0
+    }
+  }
+}
+```
+
+玩家也挂 `DialogueRunner: {active_npc:"", current:-1}`。
+
+### 3. 在规则里驱动
+
+dialogue 模块监听两个事件：`talk`（开始对话）/ `dialogue-choose`（选选项）。你的游戏规则负责 emit 它们：
+
+```json
+{
+  "id": "talk-on-collision",
+  "on": { "event": "collision", "between": ["Player", "Npc"] },
+  "if": [["self.DialogueRunner.current", "<", 0]],
+  "do": [{ "emit": "talk", "data": { "npc": "other", "who": "self" } }]
+},
+{
+  "id": "dialogue-choose-1",
+  "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } },
+  "if": [["@player.DialogueRunner.current", ">=", 0]],
+  "do": [{ "emit": "dialogue-choose", "data": { "who": "@player", "choice_index": 0 } }]
+}
+```
+
+碰 NPC → `talk`（仅当不在对话中）。按 1 → `dialogue-choose`（仅当在对话中）。
+
+### 4. 推进与结束是自动的
+
+模块的 `__dialogue_choose` 读 `node_next[current][choice_index]`：是 `-1` 或缺失 → 结束对话（`current=-1`，emit `dialogue-ended`）；否则 `current=next`，emit `dialogue-advanced`。你不用写任何推进逻辑。
+
+### 5. 与 quest 的组合接缝：Talked.count
+
+`__dialogue_end` 结束对话时会读 NPC 的 `Talked.count`——**如果有就 +1**（软依赖：NPC 没 Talked 组件则跳过，不报错）。而 quest 模块的 `talk` 目标读 `Talked.count > 0` 判定完成。所以三模块自动组合：
+
+```
+玩家碰NPC → talk事件 → dialogue开始 → 选选项推进 → dialogue结束
+  → Talked.count++ → quest的quest-track系统读Talked → talk目标完成
+```
+
+要启用这条链，NPC 同时挂 `Dialogue` + `Talked` + `Npc`，quest 的 `QuestObjective` 设 `{"kind":"talk","arg":"elder","target":1}`。
+
+### 6. HUD 渲染当前节点
+
+```js
+vitric.fn("render_dialogue_hud", (args, ctx) => {
+  const current = ctx.getField(args.who, "DialogueRunner.current");
+  if (current < 0) { /* 显示提示 */ return; }
+  const texts = ctx.getField(args.npc, "Dialogue.node_text") || [];
+  const choices = (ctx.getField(args.npc, "Dialogue.node_choices") || [])[current] || "";
+  ctx.setField(args.hud, "Text.content", "Elder: " + texts[current] + "  [" + choices + "]");
+});
+```
+
+> **注意 deferred 写入时序**：同一 tick 内，`__dialogue_choose` 的 `setField(current=-1)` 对同 tick 的 HUD 渲染不可见（deferred）。HUD 要到下一 tick 才反映结束状态。测试断言 HUD 时多 step 一 tick。
+
+完整可运行示例见 `examples/dialogue-demo/`，集成测试见 `crates/vitric-cli/tests/dialogue.rs`。
+
+---
+
 ## 编写自己的模块
 
 模块就是一个含 `module.json` 的目录：
