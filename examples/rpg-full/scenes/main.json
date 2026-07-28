@@ -1,0 +1,119 @@
+{
+  "entities": [
+    {
+      "name": "game",
+      "components": {
+        "GameState": { "phase": "title", "time": 0, "score": 0 }
+      }
+    },
+    {
+      "name": "player",
+      "components": {
+        "Player": {},
+        "Position": { "x": 0, "y": 0 },
+        "Velocity": { "x": 0, "y": 0 },
+        "Collider": { "w": 1, "h": 1 },
+        "Speed": { "value": 60 },
+        "Sprite": { "w": 1, "h": 1, "color": "#4da3ff" },
+        "Health": { "hp": 100, "max": 100 },
+        "Attack": { "power": 10 },
+        "Mana": { "current": 100, "max": 100 },
+        "Inventory": {
+          "items": ["iron", "wood", "coin"],
+          "counts": [3, 1, 5],
+          "capacity": 16
+        },
+        "Equipment": { "slots": ["weapon"], "items": [""] },
+        "Abilities": {
+          "known": ["fireball", "heal"],
+          "cooldowns": [0, 0],
+          "costs": [20, 15],
+          "cooldown_maxs": [10, 15]
+        },
+        "StatusEffects": { "effects": [], "durations": [], "magnitudes": [] },
+        "Crafting": { "known": ["sword_recipe"] },
+        "XP": { "current": 0, "threshold": 100 },
+        "Level": { "value": 1, "points": 0 },
+        "QuestLog": { "active": [], "completed": [] },
+        "DialogueRunner": { "active_npc": "", "current": -1 }
+      }
+    },
+    {
+      "name": "camera",
+      "components": { "Camera": { "x": 1, "y": 1, "scale": 5 } }
+    },
+    {
+      "name": "elder",
+      "components": {
+        "Npc": {},
+        "Position": { "x": 1, "y": 0 },
+        "Collider": { "w": 1, "h": 1 },
+        "Sprite": { "w": 1, "h": 1, "color": "#a3d44d" },
+        "Talked": { "count": 0 },
+        "Dialogue": {
+          "node_text": [
+            "A wolf terrorizes our village! Kill it and bring me its pelt.",
+            "Good luck, hero! The wolf lurks in the southern woods.",
+            "Have you killed the wolf? Bring me its pelt!"
+          ],
+          "node_choices": ["I'll do it.;I'm not ready.", "Goodbye.", "I'm working on it.;Goodbye."],
+          "node_next": ["1;-1", "-1", "-1;-1"],
+          "entry": 0
+        }
+      }
+    },
+    {
+      "name": "wolf-quest",
+      "components": {
+        "QuestDef": {
+          "id": "wolf-quest",
+          "title": "Kill the Wolf",
+          "desc": "Defeat the wolf terrorizing the village and bring its pelt to the elder.",
+          "prereq": [],
+          "reward_item": "coin",
+          "reward_count": 10
+        },
+        "QuestObjective": { "kind": "collect", "arg": "wolf_pelt", "target": 1 },
+        "QuestState": { "state": "inactive", "progress": 0, "assignee": "" }
+      }
+    },
+    {
+      "name": "wolf",
+      "components": {
+        "Enemy": {},
+        "Position": { "x": 1, "y": 2 },
+        "Collider": { "w": 1, "h": 1 },
+        "Sprite": { "w": 1, "h": 1, "color": "#9a4a3a" },
+        "Health": { "hp": 80, "max": 80 },
+        "Attack": { "power": 15 },
+        "LootTable": {
+          "items": ["coin", "wolf_pelt"],
+          "count_mins": [3, 1],
+          "count_maxs": [5, 1],
+          "chances": [1.0, 1.0]
+        },
+        "StatusEffects": { "effects": [], "durations": [], "magnitudes": [] }
+      }
+    },
+    {
+      "name": "sword_recipe",
+      "components": {
+        "RecipeDef": { "output": "sword", "output_count": 1 },
+        "RecipeInputs": { "items": ["iron", "wood"], "counts": [3, 1] }
+      }
+    },
+    {
+      "name": "shop",
+      "components": {
+        "Shop": { "currency": "coin", "items": ["potion"], "prices": [5], "stocks": [10] }
+      }
+    },
+    {
+      "name": "hud",
+      "components": {
+        "Position": { "x": 1, "y": 5 },
+        "Text": { "content": "RPG FULL — Press SPACE to start", "size": 0.7, "color": "#ffd75e" }
+      }
+    }
+  ]
+}

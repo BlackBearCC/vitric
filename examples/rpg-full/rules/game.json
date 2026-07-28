@@ -1,0 +1,212 @@
+{
+  "rules": [
+    { "id": "move-right-start", "on": { "event": "input", "filter": { "action": "right", "phase": "pressed" } }, "do": [{ "call": "move", "with": { "axis": "x", "dir": 1 } }] },
+    { "id": "move-right-stop", "on": { "event": "input", "filter": { "action": "right", "phase": "released" } }, "do": [{ "call": "move", "with": { "axis": "x", "dir": 0 } }] },
+    { "id": "move-left-start", "on": { "event": "input", "filter": { "action": "left", "phase": "pressed" } }, "do": [{ "call": "move", "with": { "axis": "x", "dir": -1 } }] },
+    { "id": "move-left-stop", "on": { "event": "input", "filter": { "action": "left", "phase": "released" } }, "do": [{ "call": "move", "with": { "axis": "x", "dir": 0 } }] },
+    { "id": "move-up-start", "on": { "event": "input", "filter": { "action": "up", "phase": "pressed" } }, "do": [{ "call": "move", "with": { "axis": "y", "dir": 1 } }] },
+    { "id": "move-up-stop", "on": { "event": "input", "filter": { "action": "up", "phase": "released" } }, "do": [{ "call": "move", "with": { "axis": "y", "dir": 0 } }] },
+    { "id": "move-down-start", "on": { "event": "input", "filter": { "action": "down", "phase": "pressed" } }, "do": [{ "call": "move", "with": { "axis": "y", "dir": -1 } }] },
+    { "id": "move-down-stop", "on": { "event": "input", "filter": { "action": "down", "phase": "released" } }, "do": [{ "call": "move", "with": { "axis": "y", "dir": 0 } }] },
+
+    {
+      "id": "start-on-space",
+      "comment": "Title screen: press SPACE to begin.",
+      "on": { "event": "input", "filter": { "action": "space", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "title"]],
+      "do": [{ "emit": "game-start" }]
+    },
+    {
+      "id": "restart-on-r-won",
+      "on": { "event": "input", "filter": { "action": "r", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "won"]],
+      "do": [{ "call": "reset_game" }]
+    },
+    {
+      "id": "restart-on-r-lost",
+      "on": { "event": "input", "filter": { "action": "r", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "lost"]],
+      "do": [{ "call": "reset_game" }]
+    },
+
+    {
+      "id": "elder-offer-quest",
+      "comment": "Contact with elder: offer the wolf quest.",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["@wolf-quest.QuestState.state", "==", "inactive"]],
+      "do": [{ "emit": "quest-offer", "data": { "quest": "wolf-quest" } }]
+    },
+    {
+      "id": "elder-accept-quest",
+      "comment": "Second contact: accept the quest.",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["@wolf-quest.QuestState.state", "==", "offered"]],
+      "do": [{ "emit": "quest-accept", "data": { "quest": "wolf-quest", "who": "self" } }]
+    },
+    {
+      "id": "elder-turn-in-quest",
+      "comment": "After killing wolf (quest auto-completed via loot→pickup→inventory→quest-track): turn in for reward.",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["@wolf-quest.QuestState.state", "==", "completed"]],
+      "do": [{ "emit": "quest-turn-in", "data": { "quest": "wolf-quest", "who": "self" } }]
+    },
+    {
+      "id": "elder-start-dialogue",
+      "comment": "Start dialogue with elder on first contact only (quest=inactive). Prevents dialogue restart loop while standing on the elder.",
+      "on": { "event": "collision", "between": ["Player", "Npc"] },
+      "if": [["self.DialogueRunner.current", "<", 0], ["@wolf-quest.QuestState.state", "==", "inactive"]],
+      "do": [{ "emit": "talk", "data": { "npc": "other", "who": "self" } }]
+    },
+    {
+      "id": "dialogue-choose-1",
+      "comment": "Press 1 to pick the first dialogue option.",
+      "on": { "event": "input", "filter": { "action": "1", "phase": "pressed" } },
+      "if": [["@player.DialogueRunner.current", ">=", 0], ["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "emit": "dialogue-choose", "data": { "who": "@player", "choice_index": 0 } }]
+    },
+
+    {
+      "id": "wolf-attacks-player",
+      "comment": "Wolf attacks player on contact + applies poison (status-effects module).",
+      "on": { "event": "collision", "between": ["Player", "Enemy"] },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [
+        { "emit": "attack", "data": { "attacker": "other", "target": "self" } },
+        { "emit": "apply-status", "data": { "who": "self", "effect": "poison", "duration": 5, "magnitude": 5 } }
+      ]
+    },
+    {
+      "id": "player-attacks-wolf",
+      "comment": "Press X to attack the wolf (combat module reads Attack.power).",
+      "on": { "event": "input", "filter": { "action": "x", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "playing"], ["@player.DialogueRunner.current", "<", 0]],
+      "do": [{ "emit": "attack", "data": { "attacker": "@player", "target": "@wolf" } }]
+    },
+
+    {
+      "id": "cast-fireball-on-f",
+      "comment": "Press F to cast fireball on the wolf (skills module validates mana/cooldown).",
+      "on": { "event": "input", "filter": { "action": "f", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "playing"], ["@player.DialogueRunner.current", "<", 0]],
+      "do": [{ "emit": "cast", "data": { "who": "@player", "ability": "fireball", "target": "@wolf" } }]
+    },
+    {
+      "id": "cast-heal-on-g",
+      "comment": "Press G to cast heal on self (skills module validates mana/cooldown).",
+      "on": { "event": "input", "filter": { "action": "g", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "playing"], ["@player.DialogueRunner.current", "<", 0]],
+      "do": [{ "emit": "cast", "data": { "who": "@player", "ability": "heal", "target": "@player" } }]
+    },
+    {
+      "id": "fireball-deals-damage",
+      "comment": "Fireball cast: deal 50 damage to target. Bridges skills → combat.",
+      "on": { "event": "ability-cast" },
+      "if": [["event.ability", "==", "fireball"]],
+      "do": [{ "emit": "damage", "data": { "who": "event.target", "amount": 50, "killer": "event.who" } }]
+    },
+    {
+      "id": "heal-spell-restores-hp",
+      "comment": "Heal cast: restore 30 HP. Bridges skills → combat.",
+      "on": { "event": "ability-cast" },
+      "if": [["event.ability", "==", "heal"]],
+      "do": [{ "emit": "heal", "data": { "who": "event.target", "amount": 30 } }]
+    },
+
+    {
+      "id": "poison-tick-damages-player",
+      "comment": "Poison tick: deal 5 damage. Bridges status-effects → combat. Only during active play — prevents queued poison from damaging a dead/restarting player.",
+      "on": { "event": "status-ticked" },
+      "if": [["event.effect", "==", "poison"], ["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "emit": "damage", "data": { "who": "event.who", "amount": "event.magnitude", "killer": "" } }]
+    },
+
+    {
+      "id": "craft-sword-on-c",
+      "comment": "Press C to craft a sword (crafting module validates materials).",
+      "on": { "event": "input", "filter": { "action": "c", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "emit": "craft", "data": { "who": "@player", "recipe": "sword_recipe" } }]
+    },
+    {
+      "id": "equip-sword-on-e",
+      "comment": "Press E to equip the sword (equipment module handles inventory→slot).",
+      "on": { "event": "input", "filter": { "action": "e", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "emit": "equip", "data": { "who": "@player", "item": "sword", "slot": "weapon" } }]
+    },
+    {
+      "id": "unequip-weapon-on-q",
+      "comment": "Press Q to unequip weapon slot.",
+      "on": { "event": "input", "filter": { "action": "q", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "emit": "unequip", "data": { "who": "@player", "slot": "weapon" } }]
+    },
+    {
+      "id": "apply-equip-bonus",
+      "comment": "On equipped: apply stat bonus (+15 ATK for sword).",
+      "on": { "event": "equipped" },
+      "if": [["event.who", "==", "@player"]],
+      "do": [{ "call": "apply_equip_bonus", "with": { "who": "@player", "item": "event.item" } }]
+    },
+    {
+      "id": "remove-equip-bonus",
+      "comment": "On unequipped: remove stat bonus.",
+      "on": { "event": "unequipped" },
+      "if": [["event.who", "==", "@player"]],
+      "do": [{ "call": "remove_equip_bonus", "with": { "who": "@player", "item": "event.item" } }]
+    },
+
+    {
+      "id": "buy-potion-on-b",
+      "comment": "Press B to buy a potion from the shop (shop module handles transaction).",
+      "on": { "event": "input", "filter": { "action": "b", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "emit": "shop-buy", "data": { "who": "@player", "shop": "@shop", "item": "potion", "count": 1 } }]
+    },
+    {
+      "id": "use-potion-on-h",
+      "comment": "Press H to use a potion (heals 30 HP, consumes 1 potion from inventory).",
+      "on": { "event": "input", "filter": { "action": "h", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "call": "use_potion", "with": { "who": "@player" } }]
+    },
+
+    {
+      "id": "player-dies-on-combat",
+      "comment": "Player HP reached 0 → game-lose.",
+      "on": { "event": "died" },
+      "if": [["event.who", "==", "@player"]],
+      "do": [{ "emit": "game-lose" }]
+    },
+    {
+      "id": "wolf-dies-on-combat",
+      "comment": "Wolf HP reached 0 → stash off-screen + grant XP. Loot module auto-drops coins + wolf_pelt.",
+      "on": { "event": "died" },
+      "if": [["event.who", "==", "@wolf"]],
+      "do": [
+        { "call": "stash_wolf", "with": { "wolf": "@wolf" } },
+        { "emit": "gain-xp", "data": { "who": "event.killer", "amount": 100 } }
+      ]
+    },
+    {
+      "id": "level-up-bonus",
+      "comment": "On level-up: +20 max HP (full heal), +10 attack.",
+      "on": { "event": "leveled-up" },
+      "if": [["event.who", "==", "@player"]],
+      "do": [{ "call": "apply_level_up_bonus", "with": { "who": "@player" } }]
+    },
+
+    {
+      "id": "win-on-quest-turned-in",
+      "comment": "Quest turned in → emit game-win.",
+      "on": { "event": "quest-turned-in" },
+      "do": [{ "emit": "game-win" }]
+    },
+
+    {
+      "id": "update-hud",
+      "on": "tick",
+      "do": [{ "call": "render_hud", "with": { "game": "@game", "quest": "@wolf-quest", "who": "@player", "wolf": "@wolf", "hud": "@hud" } }]
+    }
+  ]
+}

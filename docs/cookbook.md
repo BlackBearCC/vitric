@@ -1957,6 +1957,251 @@ press 3 → equip → equipment module → sword to weapon slot
 
 ---
 
+## 配方 16：十二模块旗舰组合（完整商业 RPG 闭环）
+
+**目标**：把全部十二个玩法模块拼成一个完整的 RPG——标题→对话接任务→合成剑→穿戴剑→火球术攻击狼→狼中毒攻击玩家→玩家买药水回血→击杀狼→掉落狼皮→任务自动完成→交付任务→胜利→重开。这是引擎"能产出完整商业游戏"的结构性证明：十二个模块零胶水代码组合，纯靠规则 + 模块事件驱动。
+
+配方 8 证明了七模块闭环；本配方在此基础上加入 shop（经济）、equipment（装备槽）、status-effects（状态效果）、skills（主动技能）、crafting（合成）五个模块，把"收集→交付"的单线闭环扩展为"收集→合成→穿戴→施法→战斗→掉落→升级→商店"的**网状闭环**。
+
+### 1. includes 十二个模块
+
+```json
+{
+  "includes": [
+    "../../modules/inventory",
+    "../../modules/quest",
+    "../../modules/dialogue",
+    "../../modules/game-flow",
+    "../../modules/combat",
+    "../../modules/progression",
+    "../../modules/loot",
+    "../../modules/shop",
+    "../../modules/equipment",
+    "../../modules/status-effects",
+    "../../modules/skills",
+    "../../modules/crafting"
+  ]
+}
+```
+
+### 2. 玩家实体挂全部十二个模块的组件
+
+```json
+{
+  "name": "player",
+  "components": {
+    "Player": {},
+    "Position": { "x": 0, "y": 0 },
+    "Velocity": { "x": 0, "y": 0 },
+    "Collider": { "w": 1, "h": 1 },
+    "Speed": { "value": 60 },
+    "Sprite": { "w": 1, "h": 1, "color": "#4da3ff" },
+    "Health": { "hp": 100, "max": 100 },
+    "Attack": { "power": 10 },
+    "Mana": { "current": 100, "max": 100 },
+    "Inventory": {
+      "items": ["iron", "wood", "coin"],
+      "counts": [3, 1, 5],
+      "capacity": 16
+    },
+    "Equipment": { "slots": ["weapon"], "items": [""] },
+    "Abilities": {
+      "known": ["fireball", "heal"],
+      "cooldowns": [0, 0],
+      "costs": [20, 15],
+      "cooldown_maxs": [10, 15]
+    },
+    "StatusEffects": { "effects": [], "durations": [], "magnitudes": [] },
+    "Crafting": { "known": ["sword_recipe"] },
+    "XP": { "current": 0, "threshold": 100 },
+    "Level": { "value": 1, "points": 0 },
+    "QuestLog": { "active": [], "completed": [] },
+    "DialogueRunner": { "active_npc": "", "current": -1 }
+  }
+}
+```
+
+### 3. 组合接缝总览
+
+十二个模块之间的接缝全是**事件桥接**——一个模块发事件，另一个模块的规则监听后发新事件，游戏规则在中间定义"语义"：
+
+```
+                    ┌─────────────────────────────────────────────┐
+                    │                                             │
+  press C ──→ craft event ──→ crafting module ──→ item-crafted event
+                                  consumes iron+wood      │
+                                                          ↓
+  press E ──→ equip event ──→ equipment module ──→ equipped event
+                                  moves sword to slot     │
+                                                          ↓
+  game rule: apply_equip_bonus → +15 Attack.power ◄───────┘
+
+  press F ──→ cast event ──→ skills module ──→ ability-cast event
+                                validates mana/cd   │
+                                                    ↓
+  game rule: fireball-deals-damage → damage event ──→ combat module ──→ HP -= 50
+
+  collision ──→ attack + apply-status events ──→ combat module (damage)
+                                                   status-effects module (poison)
+                                                         │
+                                                         ↓
+  status-ticked event ──→ game rule: poison-tick-damages-player ──→ damage event
+
+  HP=0 ──→ died event ──→ game rule: stash_wolf + gain-xp
+                             │                    │
+                             ↓                    ↓
+  loot module ──→ pickup event ──→ inventory  progression module ──→ leveled-up event
+                                   (+wolf_pelt)        │
+                                                       ↓
+  quest module ──→ quest auto-completes     game rule: apply_level_up_bonus
+  (collect wolf_pelt)                                  → +20 max HP, +10 ATK
+
+  collision elder ──→ quest-turn-in event ──→ quest module ──→ quest-turned-in
+                                                                   │
+                                                                   ↓
+                                                   game rule: win-on-quest-turned-in
+                                                           → game-win → phase=won
+```
+
+### 4. 关键规则模式
+
+**施法 → 伤害桥接**（skills → combat）：
+```json
+{
+  "id": "fireball-deals-damage",
+  "on": { "event": "ability-cast" },
+  "if": [["event.ability", "==", "fireball"]],
+  "do": [{ "emit": "damage", "data": { "who": "event.target", "amount": 50, "killer": "event.who" } }]
+}
+```
+skills 模块只管"验证法力/冷却/设置冷却→发 ability-cast"，火球术的 50 点伤害由游戏规则定义。这让同一个 skills 模块可以服务于完全不同的技能集。
+
+**状态效果 → 伤害桥接**（status-effects → combat）：
+```json
+{
+  "id": "poison-tick-damages-player",
+  "on": { "event": "status-ticked" },
+  "if": [["event.effect", "==", "poison"], ["@game.GameState.phase", "==", "playing"]],
+  "do": [{ "emit": "damage", "data": { "who": "event.who", "amount": "event.magnitude" } }]
+}
+```
+`phase == "playing"` 守卫防止队列中残留的 poison 事件在游戏结束后继续伤害玩家——这是确定性引擎里"事件已入队但状态已变"的经典时序问题。
+
+**装备奖励桥接**（equipment → combat）：
+```json
+{
+  "id": "apply-equip-bonus",
+  "on": { "event": "equipped" },
+  "do": [{ "call": "apply_equip_bonus", "with": { "who": "@player", "item": "event.item" } }]
+}
+```
+equipment 模块只管"把物品移到槽位→发 equipped 事件"，+15 ATK 的奖励由游戏脚本定义（`bonusFor("sword") → 15`）。
+
+**对话防重启守卫**：
+```json
+{
+  "id": "elder-start-dialogue",
+  "on": { "event": "collision", "between": ["Player", "Npc"] },
+  "if": [["self.DialogueRunner.current", "<", 0], ["@wolf-quest.QuestState.state", "==", "inactive"]],
+  "do": [{ "emit": "talk", "data": { "npc": "other", "who": "self" } }]
+}
+```
+碰撞事件每 tick 触发，如果只检查 `current < 0`，对话结束的下一 tick 会立刻重启。加 `quest == inactive` 守卫确保对话只在首次接触时启动——这是确定性引擎里"持续碰撞"的经典陷阱。
+
+### 5. 完整游戏循环
+
+```
+title ──SPACE──→ playing
+  │
+  ├── right → collision elder → quest-offer + quest-accept + talk
+  │     ├── 1 → dialogue advance
+  │     └── 1 → dialogue end
+  │
+  ├── left → walk away from elder
+  │
+  ├── C → craft sword (consume 3 iron + 1 wood → add sword)
+  ├── E → equip sword (sword → weapon slot, +15 ATK → 25 ATK)
+  │
+  ├── F → cast fireball (20 mana, 50 damage → wolf 80→30)
+  ├── wait 10 ticks (cooldown)
+  ├── F → cast fireball (20 mana, 50 damage → wolf 30→0)
+  │     ├── wolf died → stash_wolf + gain-xp(100)
+  │     ├── loot module → pickup(coin 3-5, wolf_pelt 1)
+  │     ├── quest module → auto-complete (have wolf_pelt)
+  │     └── progression module → level-up (100 XP ≥ 100 threshold)
+  │           └── apply_level_up_bonus → +20 max HP, +10 ATK
+  │
+  ├── right → collision elder → quest-turn-in
+  │     └── quest-turned-in → game-win → phase=won
+  │
+  └── R → reset_game → phase=title (全状态重置)
+```
+
+### 6. 重置全覆盖
+
+`reset_game` 脚本必须重置**所有十二个模块**的状态——漏掉任何一个都会导致重开后状态泄漏：
+
+```javascript
+vitric.fn("reset_game", (_args, ctx) => {
+  // combat: Health, Attack
+  ctx.setField("@player", "Health.hp", 100);
+  ctx.setField("@player", "Health.max", 100);
+  ctx.setField("@player", "Attack.power", 10);
+  // skills: Mana, Abilities cooldowns
+  ctx.setField("@player", "Mana.current", 100);
+  ctx.setField("@player", "Abilities.cooldowns", [0, 0]);
+  // status-effects: clear all effects
+  ctx.setField("@player", "StatusEffects.effects", []);
+  ctx.setField("@player", "StatusEffects.durations", []);
+  ctx.setField("@player", "StatusEffects.magnitudes", []);
+  // equipment: clear slots
+  ctx.setField("@player", "Equipment.slots", ["weapon"]);
+  ctx.setField("@player", "Equipment.items", [""]);
+  // inventory: restore starting items
+  ctx.setField("@player", "Inventory.items", ["iron", "wood", "coin"]);
+  ctx.setField("@player", "Inventory.counts", [3, 1, 5]);
+  // progression: XP, Level
+  ctx.setField("@player", "XP.current", 0);
+  ctx.setField("@player", "Level.value", 1);
+  // quest: clear log + reset quest state
+  ctx.setField("@player", "QuestLog.active", []);
+  ctx.setField("@wolf-quest", "QuestState.state", "inactive");
+  // dialogue: clear runner
+  ctx.setField("@player", "DialogueRunner.current", -1);
+  // wolf: revive + clear status
+  ctx.setField("@wolf", "Health.hp", 80);
+  ctx.setField("@wolf", "Position.x", 1);
+  ctx.setField("@wolf", "Position.y", 2);
+  ctx.setField("@wolf", "StatusEffects.effects", []);
+  // emit game-restart → game-flow module resets phase/time/score
+  ctx.emit("game-restart", {});
+});
+```
+
+### 7. 为什么这是"完整游戏"而非 demo
+
+| 维度 | demo | rpg-full |
+|------|------|----------|
+| 模块数 | 1-3 | 12 |
+| 系统互联 | 线性 | 网状（每个模块至少和 2 个其他模块有事件接缝） |
+| 经济循环 | 无 | kill→loot→coin→shop→potion→heal→survive |
+| 生产循环 | 无 | gather iron/wood→craft sword→equip→stronger |
+| 成长循环 | 无 | kill→XP→level-up→+HP+ATK→kill tougher |
+| 状态效果 | 无 | wolf poisons player → DoT → must heal or die |
+| 主动技能 | 无 | fireball (damage) + heal (restore) with mana+cooldown |
+| 重置完整性 | 部分 | 全 12 模块状态重置 |
+| 测试覆盖 | smoke | 9 integration tests (initial state / craft+equip / fireball+heal / shop+ potion / poison / kill+loot+quest / full win loop / death+restart / check) |
+
+### 8. 与配方 8（七模块）的对比
+
+配方 8 的 rpg-mini 是"最小闭环"：接任务→收集草药→交付→赢。战斗是可选支线（可以绕开狼）。
+
+配方 16 的 rpg-full 是"完整闭环"：必须合成武器、用技能击杀狼、收集战利品才能完成任务。五个额外模块把"可选的战斗"变成了"必须经历的生产-战斗-成长循环"——这正是商业 RPG 和 demo 的本质区别。
+
+完整可运行示例见 `examples/rpg-full/`，集成测试见 `crates/vitric-cli/tests/rpg_full.rs`（9 例：check 通过 / 初始状态 / 合成+穿戴剑 / 火球+治疗术 / 商店买药水 / 狼中毒玩家 / 火球杀狼+掉落+任务完成+升级 / 完整胜利循环 / 玩家死亡+重启）。
+
+---
+
 ## 编写自己的模块
 
 模块就是一个含 `module.json` 的目录：

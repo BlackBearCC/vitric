@@ -1,0 +1,23 @@
+{
+  "name": "rpg-full",
+  "schema": "schema.json",
+  "entry": "scenes/main.json",
+  "scenes": ["scenes/main.json"],
+  "rules": ["rules/game.json"],
+  "scripts": ["scripts/demo.js"],
+  "includes": [
+    "../../modules/inventory",
+    "../../modules/quest",
+    "../../modules/dialogue",
+    "../../modules/game-flow",
+    "../../modules/combat",
+    "../../modules/progression",
+    "../../modules/loot",
+    "../../modules/shop",
+    "../../modules/equipment",
+    "../../modules/status-effects",
+    "../../modules/skills",
+    "../../modules/crafting"
+  ],
+  "seed": 7
+}
