@@ -130,11 +130,16 @@ crates/
 
 ## Examples
 
-`examples/` holds runnable sample games, each validated in CI by `vitric check` (`cargo test -p vitric-cli --test examples_check`): `coin-run` (rules + scripts + animation + audio), `jump` (a platformer in pure rules, zero scripts), `cave-gen` (recipe-generated levels), `spire`, `glow` (dynamic lighting), `ui-menu`/`ui-gallery`, `intro` (the timeline/sequence system), and more.
+`examples/` holds runnable sample games, each validated in CI by `vitric check` (`cargo test -p vitric-cli --test examples_check`): `coin-run` (rules + scripts + animation + audio), `jump` (a platformer in pure rules, zero scripts), `cave-gen` (recipe-generated levels), `spire`, `glow` (dynamic lighting), `ui-menu`/`ui-gallery`, `intro` (the timeline/sequence system), `rpg-mini` (7-module RPG closed loop), `rpg-full` (12-module flagship RPG with save/load), and more.
+
+`modules/` is a library of 12 reusable gameplay modules — drop them into any project via `includes` and compose them with zero glue code: `inventory`, `quest`, `dialogue`, `game-flow`, `combat`, `progression`, `loot`, `shop`, `equipment`, `status-effects`, `skills`, `crafting`. The `rpg-full` example composes all 12 into a complete RPG with persistence.
+
+`games/` holds two complete, delivery-gated games: `echo` (a card-battle RPG with 6 scenes, 13 sound effects, multiple enemy types) and `frontier` (a colony survival game with 20 rule files, 15 systems, multi-faction AI). Both have passed `vitric gate` — bit-exact replay of a winning recording.
 
 ## Docs
 
 - [Agent API reference](docs/agent-guide.en.md) ([中文](docs/agent-guide.md)) · [Error catalog](docs/errors.md) · [Art pipeline](docs/art-pipeline.md)
+- **[Cookbook](docs/cookbook.md)** — 21 recipes covering all engine capabilities: 12 gameplay modules, save/load, procedural generation, frame animation, audio, and UI. Each recipe has copy-paste patterns, component schemas, and integration test references.
 - Design records: [agent playtesting](docs/design-agent-playtest.md), [UI](docs/design-ui.md), [frame animation](docs/design-frame-animation.md), [tween/sequence](docs/design-tween-sequence.md)
 - [llms.txt](llms.txt) for agents reading the repo.
 
@@ -150,14 +155,14 @@ The engine also carries a multi-agent team harness: role work tickets (`team/`),
 
 ## Status
 
-Pre-1.0 and under active development; the API may change. The core is real and tested (650+ tests in CI, including an end-to-end run where an agent beats a game over HTTP and the recording replays hash-identically). Determinism, replay, gates, headless rendering, lighting/shadows/bloom, rules + TypeScript, save/load, scene flow, GPU presentation, audio, asset harmonization, frame animation, the playtest swarm, and the MCP server are all in place. Binaries ship for Linux and Windows.
+Pre-1.0 and under active development; the API may change. The core is real and tested (650+ tests in CI, including an end-to-end run where an agent beats a game over HTTP and the recording replays hash-identically). Determinism, replay, gates, headless rendering, lighting/shadows/bloom, rules + TypeScript, save/load, scene flow, GPU presentation, audio, asset harmonization, frame animation, the playtest swarm, the MCP server, and a 12-module gameplay library with 21 cookbook recipes are all in place. Binaries ship for Linux and Windows.
 
 ## Roadmap
 
 **Near-term**
 - [ ] **Web playground (WASM)** — compile the engine to WebAssembly so anyone can play `coin-run` in a browser without installing Rust. *Why: the project has zero stars because no one can try it in 30 seconds; a one-click demo is the single highest-leverage fix.*
 - [ ] **Benchmark suite** — deterministic sim throughput vs. other Rust 2D engines (Bevy 2D, Macroquad, Fyrox). *Why: "deterministic" is the core selling point but currently unquantified; a number on a chart is what makes the claim credible to engine shoppers.*
-- [ ] **Cookbook** — recipes for common gameplay patterns (inventory, dialogue trees, save points) written in rules + scripts. *Why: the rules + scripts split is novel and unfamiliar; concrete copy-paste recipes are how new users cross the learning curve.*
+- [x] **Cookbook** — 21 recipes covering 12 gameplay modules, save/load, procgen, animation, audio, and UI. *Done: `docs/cookbook.md`.*
 - [ ] **Hot-reload for rules & scenes** — reload rule and scene data without restarting the sim (scripts already support it). *Why: the inner loop of game development is edit → run → edit; cold-restart kills iteration speed, which kills adoption among game devs.*
 
 **Long-term engine capabilities**

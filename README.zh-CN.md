@@ -130,11 +130,16 @@ crates/
 
 ## 示例
 
-`examples/` 下是能直接跑的样例游戏，每个都在 CI 里过 `vitric check` 验证（`cargo test -p vitric-cli --test examples_check`）：`coin-run`（规则 + 脚本 + 动画 + 音频）、`jump`（纯规则零脚本的平台跳跃）、`cave-gen`（按配方生成关卡）、`spire`、`glow`（动态光照）、`ui-menu`/`ui-gallery`、`intro`（时间轴/序列系统）等。
+`examples/` 下是能直接跑的样例游戏，每个都在 CI 里过 `vitric check` 验证（`cargo test -p vitric-cli --test examples_check`）：`coin-run`（规则 + 脚本 + 动画 + 音频）、`jump`（纯规则零脚本的平台跳跃）、`cave-gen`（按配方生成关卡）、`spire`、`glow`（动态光照）、`ui-menu`/`ui-gallery`、`intro`（时间轴/序列系统）、`rpg-mini`（7 模块 RPG 闭环）、`rpg-full`（12 模块旗舰 RPG，含存档/读档）等。
+
+`modules/` 是 12 个可复用玩法模块库——通过 `includes` 一行引入，零胶水代码组合：`inventory`、`quest`、`dialogue`、`game-flow`、`combat`、`progression`、`loot`、`shop`、`equipment`、`status-effects`、`skills`、`crafting`。`rpg-full` 示例把全部 12 个模块组合成一个带持久化的完整 RPG。
+
+`games/` 下是两款已过交付门的完整游戏：`echo`（卡牌战斗 RPG，6 个场景、13 种音效、多种敌人）和 `frontier`（殖民地生存游戏，20 个规则文件、15 个系统、多阵营 AI）。两款都通过了 `vitric gate`——逐位重放通关录像。
 
 ## 文档
 
 - [agent API 参考](docs/agent-guide.md)（[English](docs/agent-guide.en.md)） · [错误码表](docs/errors.md) · [美术流水线](docs/art-pipeline.md)
+- **[Cookbook 配方书](docs/cookbook.md)**——21 个配方覆盖引擎全部能力：12 个玩法模块、存档/读档、程序化生成、帧动画、音频、UI。每个配方都有可复制粘贴的模式、组件 schema 和集成测试引用。
 - 设计稿：[agent 试玩](docs/design-agent-playtest.md)、[UI](docs/design-ui.md)、[帧动画](docs/design-frame-animation.md)、[补间/序列](docs/design-tween-sequence.md)
 - 给读仓库的 agent 看的 [llms.txt](llms.txt)。
 
@@ -150,14 +155,14 @@ crates/
 
 ## 状态
 
-1.0 之前，正在积极开发，API 可能变。核心是真实可用且有测试的（CI 里 650+ 个测试，含一个端到端用例：agent 通过 HTTP 通关游戏、录像逐位重放一致）。确定性、重放、交付门、无头渲染、光照/投影/泛光、规则 + TypeScript、存档/读档、场景流转、GPU 呈现、音频、素材统一、帧动画、试玩 swarm、MCP server 都已就位。二进制提供 Linux 和 Windows 版。
+1.0 之前，正在积极开发，API 可能变。核心是真实可用且有测试的（CI 里 650+ 个测试，含一个端到端用例：agent 通过 HTTP 通关游戏、录像逐位重放一致）。确定性、重放、交付门、无头渲染、光照/投影/泛光、规则 + TypeScript、存档/读档、场景流转、GPU 呈现、音频、素材统一、帧动画、试玩 swarm、MCP server、12 模块玩法库 + 21 个 cookbook 配方都已就位。二进制提供 Linux 和 Windows 版。
 
 ## 路线图
 
 **近期**
 - [ ] **Web 试玩场（WASM）**——把引擎编译成 WebAssembly，浏览器里直接玩 `coin-run`，不用装 Rust。*为什么：项目零 star 的根因是没人能 30 秒内试到；一键 demo 是杠杆最高的修法。*
 - [ ] **基准测试套件**——确定性模拟吞吐 vs. 其他 Rust 2D 引擎（Bevy 2D / Macroquad / Fyrox）。*为什么："确定性"是核心卖点但现在是空口无凭；一张图上的数字才能让选引擎的人信服。*
-- [ ] **Cookbook 配方书**——常见玩法模式（背包、对话树、存档点）的规则 + 脚本配方。*为什么：规则 + 脚本的分工是新模式、不熟悉；能复制粘贴的配方是新手跨过学习曲线的方式。*
+- [x] **Cookbook 配方书**——21 个配方覆盖 12 个玩法模块、存档/读档、程序化生成、帧动画、音频、UI。*已完成：`docs/cookbook.md`。*
 - [ ] **规则与场景热重载**——改规则和场景数据不用重启模拟（脚本已支持）。*为什么：游戏开发的内循环是 改→跑→改；冷重启拖慢迭代，迭代慢就留不住游戏开发者。*
 
 **长期引擎能力**
