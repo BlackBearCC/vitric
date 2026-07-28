@@ -8,14 +8,48 @@
 
 - [Agent Guide (English)](docs/agent-guide.en.md): CLI commands, every control-plane method, data language syntax, engine conventions — one page
 - [Agent 操作指南（中文）](docs/agent-guide.md): 同上中文版
+- [Cookbook 配方书](docs/cookbook.md): 21 个配方覆盖引擎全部能力——12 个玩法模块（背包/任务/对话/游戏流/战斗/成长/掉落/商店/装备/状态效果/技能/合成）+ 存档/读档 + 程序化生成 + 帧动画 + 音频 + UI。每个配方有可复制粘贴的规则/脚本模式、组件 schema 和集成测试引用。
 - [错误码目录](docs/errors.md): 全部 VD/VR 错误码与修法
 - [README](README.md): 定位、快速上手、架构
 - [设计稿](docs/AI原生游戏引擎-设计稿.md): 完整设计决策与理由
 
-## 示例
+## 玩法模块库（modules/）
 
-- [examples/coin-run](examples/coin-run/vitric.json): 吃金币——规则/脚本/动画/贴图全覆盖
-- [examples/cave-gen](examples/cave-gen/vitric.json): 配方生成关卡——改 seed 整关重生成
+12 个可复用玩法模块，通过 vitric.json 的 `includes` 一行引入，零胶水代码组合：
+
+- `modules/inventory` — 背包：堆叠/溢出/转移（cookbook 配方 1）
+- `modules/quest` — 任务：状态机/目标追踪/奖励（配方 4）
+- `modules/dialogue` — 对话：分支对话树/选项推进（配方 5）
+- `modules/game-flow` — 游戏流：标题/进行/胜利/失败/重启（配方 7）
+- `modules/combat` — 战斗：HP/攻击/伤害/死亡/治疗（配方 6）
+- `modules/progression` — 成长：XP/等级/自动升级（配方 9）
+- `modules/loot` — 掉落：战利品表/确定性 RNG/自动拾取（配方 10）
+- `modules/shop` — 商店：买卖/货币/库存/经济闭环（配方 11）
+- `modules/equipment` — 装备：槽位/穿脱/属性奖励事件（配方 12）
+- `modules/status-effects` — 状态效果：DoT/HoT/属性修饰/清除（配方 13）
+- `modules/skills` — 技能：法力/冷却/施法验证/效果桥接（配方 14）
+- `modules/crafting` — 合成：配方/材料消耗/产出/数据驱动（配方 15）
+
+配方 16 展示如何把全部 12 个模块组合成完整 RPG（rpg-full 示例）。
+
+## 示例（examples/）
+
+- [examples/rpg-full](examples/rpg-full/vitric.json): 12 模块旗舰 RPG——标题→对话接任务→合成剑→穿戴→火球术→狼中毒→买药水→击杀→掉落→升级→交付→胜利→重启，含存档/读档（11 个集成测试）
+- [examples/rpg-mini](examples/rpg-mini/vitric.json): 7 模块 RPG 闭环——标题→接任务→收集草药→战斗→交付→胜利（4 个集成测试）
+- [examples/coin-run](examples/coin-run/vitric.json): 吃金币——规则/脚本/动画/贴图/音频全覆盖
+- [examples/cave-gen](examples/cave-gen/vitric.json): 配方生成关卡——改 seed 整关重生成（程序化生成）
+- [examples/frame-anim](examples/frame-anim/vitric.json): 帧动画 + 图集
+- [examples/ui-menu](examples/ui-menu/vitric.json): UI 菜单系统——按钮/主题/场景切换/键盘鼠标导航
+- [examples/glow](examples/glow/vitric.json): 动态光照/法线贴图/泛光
+- [examples/ember](examples/ember/vitric.json): 平台跳跃——BGM + 5 种音效 + 动画 + 光照
+- [examples/spire](examples/spire/vitric.json): 卡牌战斗——GDD + 录像 + 交付门
+- [examples/jump](examples/jump/vitric.json): 纯规则零脚本平台跳跃
+- [examples/intro](examples/intro/vitric.json): 时间轴/序列系统（过场动画）
+
+## 完整游戏（games/）
+
+- [games/echo](games/echo/vitric.json): 卡牌战斗 RPG——6 个场景（菜单/地图/战斗1/战斗2/Boss/胜利）、13 种音效、多种敌人、动画、GDD，已过 `vitric gate`
+- [games/frontier](games/frontier/vitric.json): 殖民地生存——20 个规则文件、15 个系统脚本、多阵营 AI、同伴系统、研究树、任务系统，已过 `vitric gate`
 
 ## 集成
 
@@ -30,3 +64,7 @@
 - 引擎独占 Sprite.image 写权（有 Anim 组件时），换动画改 Anim.clip
 - 内建事件: start / input / collision / anim-finished
 - 内建组件约定: Position+Velocity=移动, Position+Collider=碰撞, Position+Sprite=渲染, Camera=取景
+- 约定事件（引擎自动处理，不需要模块）: save-game { slot } / load-game { slot } / play-sound { sound, volume } / play-music { sound, volume } / scene-change { scene }
+- UI 组件: UiRoot / Ui (anchor+parent布局) / Panel / UiLabel / Button (action+state) / Container (VBox/HBox)
+- 程序化生成: ctx.random() 取种子化随机数, ctx.spawn({ Component: {...} }) 运行时创建实体
+- includes 机制: vitric.json 的 includes 数组引入模块目录，合并 schema/rules/scripts
