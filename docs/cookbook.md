@@ -2344,6 +2344,478 @@ CLI 命令 `vitric saves` 列出所有存档槽，`vitric run --load slot1` 从�
 
 ---
 
+## 配方 18：程序化生成（ctx.random / ctx.spawn / 确定性种子 / Recipe 组件）
+
+**目标**：用代码生成关卡、敌人、物品——不是手摆每一个实体，而是用参数化的生成器批量产出。这是"内容兼备的"关键：一个生成器可以产出无限种关卡，而手摆只能产出一种。
+
+Vitric 的程序化生成建立在确定性 RNG 之上：`ctx.random()` 从引擎的种子化随机流取值，同一粒种子永远生成同一张地图。这意味着生成结果可回放、可测试、可分享（只分享一个种子号即可）。
+
+### 1. 核心三件套
+
+| API | 作用 |
+|-----|------|
+| `ctx.random()` | 返回 `[0, 1)` 的随机浮点数，从引擎种子化 PCG32 流取值。同一种子 → 同一序列。 |
+| `ctx.spawn({ Component: {...}, ... })` | 运行时创建实体，参数是组件字典。和场景文件里的实体格式完全一致。 |
+| `ctx.emit("event", data)` | 生成完成后发事件通知游戏规则。 |
+
+### 2. Recipe 组件：参数化生成
+
+把生成参数放在一个 `Recipe` 组件里，让场景文件控制生成器行为：
+
+```json
+{
+  "name": "generator",
+  "components": {
+    "Recipe": { "gems": 10, "hazards": 14, "width": 44, "height": 26 }
+  }
+}
+```
+
+```javascript
+vitric.fn("generate", (args, ctx) => {
+  const halfW = args.width / 2;
+  const halfH = args.height / 2;
+
+  // 安全区：不在出生点附近放危险物
+  function place() {
+    let x = (ctx.random() * 2 - 1) * (halfW - 1);
+    let y = (ctx.random() * 2 - 1) * (halfH - 1);
+    if (Math.abs(x) < 4 && Math.abs(y) < 4) {
+      x += x >= 0 ? 5 : -5;
+      y += y >= 0 ? 5 : -5;
+    }
+    return { x, y };
+  }
+
+  for (let i = 0; i < args.gems; i++) {
+    const p = place();
+    ctx.spawn({
+      Gem: {},
+      Position: { x: p.x, y: p.y },
+      Collider: { w: 1, h: 1 },
+      Sprite: { w: 0.8, h: 0.8, color: "#39e6c3" },
+    });
+  }
+  for (let i = 0; i < args.hazards; i++) {
+    const p = place();
+    ctx.spawn({
+      Hazard: {},
+      Position: { x: p.x, y: p.y },
+      Collider: { w: 1.2, h: 1.2 },
+      Sprite: { w: 1.2, h: 1.2, color: "#ff5470" },
+    });
+  }
+  ctx.emit("level-generated", { gems: args.gems, hazards: args.hazards });
+});
+```
+
+### 3. 触发生成
+
+规则在游戏开始时调用生成器：
+
+```json
+{
+  "id": "generate-level",
+  "on": { "event": "game-start" },
+  "do": [{ "call": "generate", "with": { "gems": "@generator.Recipe.gems", "hazards": "@generator.Recipe.hazards", "width": "@generator.Recipe.width", "height": "@generator.Recipe.height" } }]
+}
+```
+
+### 4. 确定性保证
+
+- `ctx.random()` 和规则里的 `rng` 使用同一个 PCG32 流。
+- 改 `vitric.json` 的 `seed` 值 → 完全不同的地图。
+- 不改 seed → 每次运行生成完全相同的地图。
+- 生成结果可以通过 `Sim::state_hash()` 验证——同一 seed 的哈希值必定相同。
+
+### 5. 应用场景
+
+| 场景 | Recipe 参数 | 生成内容 |
+|------|------------|----------|
+| 地牢生成 | rooms, corridors, traps | 房间、走廊、陷阱 |
+| 敌人波次 | count, types, spawn_rate | 不同类型敌人的刷怪波 |
+| 战利品 | table, count, rarity | 随机物品掉落 |
+| NPC 对话 | branches, mood | 随机分支对话 |
+| 地图地形 | biomes, size, seed | 不同生态的地形布局 |
+
+完整可运行示例见 `examples/cave-gen/`，集成测试见 `crates/vitric-cli/tests/cave_gen.rs`。
+
+---
+
+## 配方 19：帧动画（animations.json / Anim 组件 / 动画状态切换）
+
+**目标**：让精灵动起来——走路、待机、攻击、旋转。没有动画的游戏是 demo，有动画才是商业游戏。
+
+Vitric 的动画系统是数据驱动的：在 `animations.json` 里定义动画片段（clip），在 `Anim` 组件里追踪当前播放状态，引擎自动推进帧。
+
+### 1. animations.json 格式
+
+项目根目录放 `animations.json`，定义所有动画片段：
+
+```json
+{
+  "clips": {
+    "idle": {
+      "frames": ["player.png"],
+      "fps": 1,
+      "loop": true
+    },
+    "walk": {
+      "frames": ["player-walk-0.png", "player-walk-1.png"],
+      "fps": 6,
+      "loop": true
+    },
+    "coin-spin": {
+      "frames": ["coin-0.png", "coin-1.png", "coin-2.png", "coin-3.png"],
+      "fps": 8,
+      "loop": true
+    }
+  }
+}
+```
+
+- `frames` — 帧图片文件名列表（相对于 `assets/` 目录）
+- `fps` — 帧率（每秒帧数）
+- `loop` — 是否循环播放
+
+### 2. Anim 组件
+
+```json
+{
+  "Anim": { "clip": "idle", "prev": "", "t": 0, "done": false }
+}
+```
+
+| 字段 | 作用 |
+|------|------|
+| `clip` | 当前播放的动画片段名 |
+| `prev` | 上一个片段名（用于检测切换） |
+| `t` | 当前帧时间累计（引擎自动更新） |
+| `done` | 非循环动画是否播放完毕 |
+
+引擎的动画系统每 tick 自动更新 `t` 和 `Sprite.image`（设置为当前帧图片）。
+
+### 3. 在 vitric.json 中引用
+
+```json
+{
+  "name": "my-game",
+  "schema": "schema.json",
+  "entry": "scenes/main.json",
+  "rules": ["rules/game.json"],
+  "animations": "animations.json",
+  "scripts": ["scripts/systems.js"]
+}
+```
+
+### 4. 动画状态切换
+
+在脚本里根据游戏状态切换动画：
+
+```javascript
+vitric.fn("update_anim", (args, ctx) => {
+  const who = args.who;
+  const vx = ctx.getField(who, "Velocity.x") || 0;
+  const current = ctx.getField(who, "Anim.clip") || "idle";
+
+  let next;
+  if (Math.abs(vx) > 0.1) {
+    next = "walk";
+  } else {
+    next = "idle";
+  }
+  if (next !== current) {
+    ctx.setField(who, "Anim.clip", next);
+  }
+});
+```
+
+在规则里每 tick 调用：
+
+```json
+{
+  "id": "update-player-anim",
+  "on": "tick",
+  "do": [{ "call": "update_anim", "with": { "who": "@player" } }]
+}
+```
+
+### 5. 精灵图集（Atlas）
+
+对于大量帧的动画，使用图集（atlas）减少加载开销：
+
+```
+assets/
+  slide-atlas.png      # 合并后的图集图片
+  slide-atlas.json     # 图集元数据（每帧在图集中的位置和尺寸）
+  slide/
+    frame000.png       # 原始帧（开发用，运行时用图集）
+```
+
+引擎自动检测图集并使用，开发者无需修改代码——`animations.json` 仍然引用原始帧名。
+
+完整可运行示例见 `examples/frame-anim/`（基础图集动画）和 `examples/coin-run/`（游戏集成动画），集成测试见 `crates/vitric-cli/tests/animation.rs` 和 `crates/vitric-cli/tests/frames.rs`。
+
+---
+
+## 配方 20：音频系统（play-sound / play-music 约定事件 / 音量控制）
+
+**目标**：让游戏有声音——背景音乐、跳跃音效、受伤音效、收集音效。静默的游戏是 demo，有声音才是商业游戏。
+
+Vitric 的音频系统使用两个约定事件，由引擎自动处理，不需要写模块：
+
+### 1. 两个约定事件
+
+| 事件 | 用途 | 参数 |
+|------|------|------|
+| `play-sound` | 播放音效（一次性） | `sound`（文件名）, `volume`（0-1，默认 1） |
+| `play-music` | 播放背景音乐（循环） | `sound`（文件名）, `volume`（0-1，默认 1） |
+
+音频文件放在项目的 `sounds/` 目录下：
+
+```
+my-game/
+  sounds/
+    bgm.wav
+    jump.wav
+    hurt.wav
+    coin.wav
+    win.wav
+```
+
+### 2. 在规则中触发音效
+
+```json
+{
+  "id": "play-bgm-on-start",
+  "on": { "event": "game-start" },
+  "do": [{ "emit": "play-music", "data": { "sound": "bgm.wav", "volume": 0.3 } }]
+},
+{
+  "id": "play-jump-sound",
+  "on": { "event": "input", "filter": { "action": "space", "phase": "pressed" } },
+  "do": [{ "emit": "play-sound", "data": { "sound": "jump.wav" } }]
+},
+{
+  "id": "play-hurt-sound",
+  "on": { "event": "collision", "between": ["Player", "Hazard"] },
+  "do": [
+    { "emit": "play-sound", "data": { "sound": "hurt.wav" } },
+    { "emit": "damage", "data": { "who": "@player", "amount": 10 } }
+  ]
+},
+{
+  "id": "play-win-sound",
+  "on": { "event": "game-win" },
+  "do": [{ "emit": "play-sound", "data": { "sound": "win.wav" } }]
+}
+```
+
+### 3. 音量控制
+
+- `volume: 1.0` — 最大音量
+- `volume: 0.3` — 背景音乐常用（30% 音量，不盖过音效）
+- `volume: 0.0` — 静音
+
+可以在规则中根据游戏状态动态调整音量：
+
+```json
+{
+  "id": "lower-music-on-dialogue",
+  "on": { "event": "talk" },
+  "do": [{ "emit": "play-music", "data": { "sound": "bgm.wav", "volume": 0.1 } }]
+}
+```
+
+### 4. 确定性边界
+
+音频是**输出副作用**——和 `play-sound` 一样在模拟之外执行。文件是否播放成功不影响世界状态，所以确定性回放不受影响。录制回放时，音频会照常播放（因为输入序列相同 → 事件序列相同 → 音效触发相同）。
+
+### 5. 与游戏流程的配合
+
+| 游戏事件 | 音频事件 | 文件 |
+|----------|---------|------|
+| game-start | play-music | bgm.wav (volume 0.3) |
+| input: jump | play-sound | jump.wav |
+| collision: Player+Hazard | play-sound | hurt.wav |
+| collision: Player+Gem | play-sound | coin.wav |
+| game-win | play-sound | win.wav |
+| game-lose | play-sound | lose.wav |
+
+完整可运行示例见 `examples/ember/`（BGM + 5 种音效）和 `examples/glow/`（BGM + 音效集成），集成测试见 `crates/vitric-cli/tests/` 相关测试。
+
+---
+
+## 配方 21：UI 系统（Ui 组件 / Button / 布局容器 / 主题 / 场景切换）
+
+**目标**：让游戏有菜单——标题画面、暂停菜单、选项界面。没有 UI 的游戏是 demo，有 UI 才是商业游戏。
+
+Vitric 的 UI 系统是组件驱动的：用 `Ui`（布局）、`Panel`（面板）、`UiLabel`（文字）、`Button`（按钮）、`Container`（布局容器）组件组合出界面，支持键盘/鼠标导航和主题切换。
+
+### 1. UI 组件总览
+
+| 组件 | 作用 | 关键字段 |
+|------|------|---------|
+| `UiRoot` | UI 根节点 | 无（标记实体为 UI 根） |
+| `Ui` | 布局参数 | anchor, ox, oy, w, h, parent |
+| `Panel` | 面板背景 | color |
+| `UiLabel` | 文字标签 | content, size, color, align |
+| `Button` | 可点击按钮 | action, theme, state |
+| `Text` | 世界空间文字（HUD） | content |
+
+### 2. 锚点系统
+
+`Ui.anchor` 决定元素相对于父元素的位置：
+
+| 锚点 | 含义 |
+|------|------|
+| `center` | 居中 |
+| `top-center` | 顶部居中 |
+| `top-left` | 左上角 |
+| `bottom-center` | 底部居中 |
+| `stretch` | 拉伸填充父元素（配合 ox/oy 留边距） |
+
+```json
+{
+  "name": "title",
+  "components": {
+    "Ui": { "anchor": "top-center", "ox": 0, "oy": 28, "w": 560, "h": 56, "parent": "panel" },
+    "UiLabel": { "content": "My Game", "size": 40, "color": "#f0f0f0", "align": "center" }
+  }
+}
+```
+
+### 3. 布局容器
+
+`Container` 组件自动排列子元素：
+
+```json
+{
+  "name": "menu-vbox",
+  "components": {
+    "Ui": { "anchor": "stretch", "ox": 60, "oy": 130, "parent": "menu-panel" },
+    "Container": { "kind": "VBox", "gap": 24, "pad": 0, "main": "start", "cross": "center" }
+  }
+}
+```
+
+| 字段 | 作用 |
+|------|------|
+| `kind` | `VBox`（垂直排列）或 `HBox`（水平排列） |
+| `gap` | 子元素间距 |
+| `main` | 主轴对齐：`start` / `center` / `end` |
+| `cross` | 交叉轴对齐：`start` / `center` / `end` |
+
+### 4. 按钮与状态
+
+```json
+{
+  "name": "btn-start",
+  "components": {
+    "Ui": { "anchor": "top-left", "w": 460, "h": 72, "parent": "menu-vbox" },
+    "Panel": { "color": "#3a4a6b" },
+    "Button": { "action": "start", "theme": "dark", "state": "focused" }
+  }
+}
+```
+
+| `state` | 含义 | 视觉 |
+|---------|------|------|
+| `normal` | 默认状态 | 主题 normal 色 |
+| `focused` | 键盘焦点 | 主题 focus 色 |
+| `pressed` | 按下中 | 主题 pressed 色 |
+| `disabled` | 禁用 | 主题 disabled 色（灰色） |
+
+`Button.action` 是按钮点击时发出的 `ui-activate` 事件的 action 值。
+
+### 5. 主题系统
+
+主题文件是 JSON，定义颜色和尺寸：
+
+```json
+{
+  "colors": {
+    "bg": "#1b1d26",
+    "text": "#f0f0f0",
+    "focus": "#5a7bb5",
+    "disabled": "#555555"
+  },
+  "font_size": 30,
+  "padding": 12,
+  "button": {
+    "normal":   { "bg": "#3a4a6b", "text": "#e8ecf4" },
+    "focused":  { "bg": "#5a7bb5", "text": "#ffffff" },
+    "pressed":  { "bg": "#9fc0f0", "text": "#10131a" },
+    "disabled": { "bg": "#2a2d36", "text": "#6b6f7a" }
+  }
+}
+```
+
+在 `vitric.json` 中引用：
+
+```json
+{
+  "themes": ["themes/dark.json"],
+  "font": "fonts/DejaVuSans.ttf"
+}
+```
+
+### 6. 场景切换（菜单 → 游戏）
+
+`vitric.json` 声明多个场景，`entry` 是初始场景：
+
+```json
+{
+  "entry": "scenes/menu.json",
+  "scenes": ["scenes/menu.json", "scenes/game.json"]
+}
+```
+
+规则监听按钮激活事件，切换场景：
+
+```json
+{
+  "id": "start-game-on-click",
+  "on": { "event": "ui-activate", "filter": { "action": "start" } },
+  "do": [
+    { "emit": "scene-change", "data": { "scene": "scenes/game.json" } },
+    { "emit": "game-started" }
+  ]
+}
+```
+
+### 7. 导航控制
+
+- **键盘**：方向键移动焦点，Enter/Space 确认
+- **鼠标**：点击直接激活按钮
+- **RPC**：`input/ui-click-by-name` 按实体名激活按钮（用于自动化测试）
+
+```json
+{
+  "id": "navigate-focus",
+  "on": { "event": "input", "filter": { "action": "down", "phase": "pressed" } },
+  "do": [{ "call": "ui_focus_next", "with": { "dir": "down" } }]
+}
+```
+
+### 8. UI 与游戏流程的完整闭环
+
+```
+menu scene (title + buttons)
+  ↓ Enter on "Start" button
+  ↓ scene-change → game scene
+game scene (gameplay + HUD)
+  ↓ press Esc
+  ↓ scene-change → pause scene
+pause scene (resume/quit buttons)
+  ↓ Enter on "Resume"
+  ↓ scene-change → game scene
+```
+
+完整可运行示例见 `examples/ui-menu/`（菜单 + 场景切换 + 主题）和 `examples/ui-gallery/`（UI 组件展示），集成测试见 `crates/vitric-cli/tests/ui.rs` 和 `crates/vitric-cli/tests/ui_interact.rs`。
+
+---
+
 ## 编写自己的模块
 
 模块就是一个含 `module.json` 的目录：
