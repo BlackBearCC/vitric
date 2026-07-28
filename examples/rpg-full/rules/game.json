@@ -204,6 +204,21 @@
     },
 
     {
+      "id": "save-on-s",
+      "comment": "Press S to save game to slot1 (convention event handled by Dispatcher).",
+      "on": { "event": "input", "filter": { "action": "s", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "emit": "save-game", "data": { "slot": "slot1" } }]
+    },
+    {
+      "id": "load-on-l",
+      "comment": "Press L to load game from slot1 (convention event handled by Dispatcher).",
+      "on": { "event": "input", "filter": { "action": "l", "phase": "pressed" } },
+      "if": [["@game.GameState.phase", "==", "playing"]],
+      "do": [{ "emit": "load-game", "data": { "slot": "slot1" } }]
+    },
+
+    {
       "id": "update-hud",
       "on": "tick",
       "do": [{ "call": "render_hud", "with": { "game": "@game", "quest": "@wolf-quest", "who": "@player", "wolf": "@wolf", "hud": "@hud" } }]

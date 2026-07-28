@@ -221,6 +221,6 @@ vitric.fn("render_hud", (args, ctx) => {
   const text = "Lv" + lvl + " HP:" + hp + "/" + maxHp + " MP:" + mana + " ATK:" + atk +
     " Quest:" + qState + " Wolf:" + wolfHp + "hp" +
     " Inv:[" + invText + "] Eq:[" + eqText + "] Status:[" + statusText + "]" +
-    " | F:fireball G:heal C:craft E:equip Q:unequip B:buy H:potion X:attack";
+    " | F:fireball G:heal C:craft E:equip Q:unequip B:buy H:potion X:attack S:save L:load";
   ctx.setField(hud, "Text.content", text);
 });

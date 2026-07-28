@@ -8,16 +8,18 @@
 //! equip sword → cast fireball at wolf → wolf dies → loot drops wolf_pelt →
 //! quest auto-completes → turn in to elder → win → restart. Along the way:
 //! wolf poisons the player (status-effects), player casts heal (skills),
-//! buys and uses potions (shop), levels up (progression).
-//!
-//! This is the structural proof that the engine supports commercial-game
-//! closed loops with mature, interconnected systems — not just demos.
+//! buys and uses potions (shop), levels up (progression). Save/load (press
+//! S/L) proves persistence — a complete game, not a demo.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
 use vitric_cli::runtime::Runtime;
+use vitric_control::{Dispatcher, SaveStore};
+use vitric_data::Project;
+use vitric_sim::GameLogic;
 
 fn demo_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/rpg-full")
@@ -406,4 +408,167 @@ fn rpg_full_player_death_loses() {
     press(&mut sim, &mut rt, "r");
     assert_eq!(phase(&sim), "title");
     assert_eq!(player_hp(&sim), 100, "HP restored on restart");
+}
+
+// ---- save/load test ----
+
+fn copy_dir(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &to);
+        } else {
+            fs::copy(entry.path(), &to).unwrap();
+        }
+    }
+}
+
+/// Boot rpg-full with a Dispatcher (handles save-game/load-game convention events).
+/// Uses a temp copy so save files don't pollute the example directory.
+struct GameWithSaves {
+    sim: vitric_sim::Sim,
+    rt: Runtime,
+    d: Dispatcher,
+}
+
+impl GameWithSaves {
+    fn new(dir: &Path) -> GameWithSaves {
+        let project = Project::load(dir).unwrap();
+        let (sim, rt) = Runtime::boot(dir).unwrap();
+        let mut d = Dispatcher::new(project.schema.clone());
+        d.set_save_store(SaveStore::new(dir, &project.manifest.name));
+        GameWithSaves { sim, rt, d }
+    }
+
+    /// One main-loop step: step sim + handle save/load convention events.
+    fn step(&mut self) -> Vec<serde_json::Value> {
+        self.sim.step(&mut self.rt).unwrap();
+        let observed = self.rt.drain_observed();
+        self.d.handle_save_load_events(&observed, &mut self.sim, &mut self.rt)
+    }
+
+    fn hash(&self) -> u64 {
+        self.sim.world.state_hash()
+    }
+}
+
+#[test]
+fn rpg_full_save_load_roundtrip() {
+    // Save the game mid-play, progress further, load → state must match save point.
+    // Uses a temp copy with a symlink to the real modules/ dir (includes paths
+    // are relative: ../../modules/xxx must resolve from the temp copy).
+    let temp_root = std::env::temp_dir().join(format!(
+        "vitric-rpg-full-save-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp_root);
+    let dir = temp_root.join("examples/rpg-full");
+    copy_dir(&demo_dir(), &dir);
+    // Symlink modules/ so ../../modules/xxx resolves from the temp rpg-full copy.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        demo_dir().join("../../modules"),
+        temp_root.join("modules"),
+    )
+    .expect("symlink modules/ into temp root");
+    let mut g = GameWithSaves::new(&dir);
+
+    // title → playing.
+    g.sim.inject_input("space", "pressed");
+    g.step();
+    g.step();
+    assert_eq!(phase(&g.sim), "playing");
+
+    // Craft a sword (changes inventory: 3 iron + 1 wood → 1 sword).
+    g.sim.inject_input("c", "pressed");
+    for _ in 0..5 {
+        g.step();
+    }
+    assert_eq!(item_count(&g.sim, "player", "sword"), 1, "sword crafted before save");
+
+    // Save: press S → save-game convention event → SaveStore writes slot1.json.
+    g.sim.inject_input("s", "pressed");
+    let errs = g.step();
+    assert!(errs.is_empty(), "save should not error: {errs:?}");
+    let save_path = dir.join("saves/slot1.json");
+    assert!(save_path.exists(), "save file should exist after pressing S");
+    let h_save = g.hash();
+    let atk_save = player_attack(&g.sim);
+    let sword_save = item_count(&g.sim, "player", "sword");
+    let equipped_save = equipped_item(&g.sim, "player", "weapon");
+
+    // Progress: equip the sword (changes Attack.power from 10 to 25).
+    g.sim.inject_input("e", "pressed");
+    for _ in 0..5 {
+        g.step();
+    }
+    assert_eq!(equipped_item(&g.sim, "player", "weapon"), "sword", "sword equipped after save");
+    assert_eq!(player_attack(&g.sim), 25, "ATK should be 25 after equip");
+    assert_ne!(g.hash(), h_save, "state must change after equipping");
+
+    // Load: press L → load-game convention event → Sim::restore from slot1.
+    g.sim.inject_input("l", "pressed");
+    let errs = g.step();
+    assert!(errs.is_empty(), "load should not error: {errs:?}");
+
+    // State must match the save point exactly.
+    assert_eq!(g.hash(), h_save, "state hash must match save point after load");
+    assert_eq!(player_attack(&g.sim), atk_save, "ATK must match save point");
+    assert_eq!(item_count(&g.sim, "player", "sword"), sword_save, "sword count must match");
+    assert_eq!(
+        equipped_item(&g.sim, "player", "weapon"),
+        equipped_save,
+        "equipment must match save point (unequipped at save time)"
+    );
+
+    // Resume play after load — game must continue normally.
+    g.sim.inject_input("f", "pressed");
+    for _ in 0..5 {
+        g.step();
+    }
+    assert_eq!(wolf_hp(&g.sim), 30, "fireball should work after load (80-50=30)");
+
+    let _ = fs::remove_dir_all(&temp_root);
+}
+
+#[test]
+fn rpg_full_load_missing_slot_errors_gracefully() {
+    // Loading a non-existent slot reports an error but doesn't crash the game.
+    let temp_root = std::env::temp_dir().join(format!(
+        "vitric-rpg-full-missing-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp_root);
+    let dir = temp_root.join("examples/rpg-full");
+    copy_dir(&demo_dir(), &dir);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        demo_dir().join("../../modules"),
+        temp_root.join("modules"),
+    )
+    .expect("symlink modules/ into temp root");
+    let mut g = GameWithSaves::new(&dir);
+
+    // title → playing.
+    g.sim.inject_input("space", "pressed");
+    g.step();
+    g.step();
+
+    // Load without saving first → error, but game keeps running.
+    g.sim.inject_input("l", "pressed");
+    let errs = g.step();
+    assert_eq!(errs.len(), 1, "should report one error: {errs:?}");
+    let msg = errs[0]["error"].as_str().unwrap();
+    assert!(msg.contains("slot1") && msg.contains("不存在"), "error should mention missing slot: {msg}");
+
+    // Game still works.
+    g.sim.inject_input("c", "pressed");
+    for _ in 0..5 {
+        g.step();
+    }
+    assert_eq!(item_count(&g.sim, "player", "sword"), 1, "game continues after load error");
+
+    let _ = fs::remove_dir_all(&temp_root);
 }

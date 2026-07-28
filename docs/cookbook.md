@@ -2198,7 +2198,149 @@ vitric.fn("reset_game", (_args, ctx) => {
 
 配方 16 的 rpg-full 是"完整闭环"：必须合成武器、用技能击杀狼、收集战利品才能完成任务。五个额外模块把"可选的战斗"变成了"必须经历的生产-战斗-成长循环"——这正是商业 RPG 和 demo 的本质区别。
 
-完整可运行示例见 `examples/rpg-full/`，集成测试见 `crates/vitric-cli/tests/rpg_full.rs`（9 例：check 通过 / 初始状态 / 合成+穿戴剑 / 火球+治疗术 / 商店买药水 / 狼中毒玩家 / 火球杀狼+掉落+任务完成+升级 / 完整胜利循环 / 玩家死亡+重启）。
+完整可运行示例见 `examples/rpg-full/`，集成测试见 `crates/vitric-cli/tests/rpg_full.rs`（11 例：check 通过 / 初始状态 / 合成+穿戴剑 / 火球+治疗术 / 商店买药水 / 狼中毒玩家 / 火球杀狼+掉落+任务完成+升级 / 完整胜利循环 / 玩家死亡+重启 / 存档-读档往返 / 读档缺失槽位优雅报错）。
+
+---
+
+## 配方 17：存档系统（save-game / load-game 约定事件 / 确定性快照 / 原子写入）
+
+**目标**：让玩家随时存档、随时读档，状态精确恢复到存档时刻。存档系统是"完整游戏而非 demo"的必要条件——没有持久化的游戏只是 demo。
+
+Vitric 的存档系统建立在确定性快照（`Sim::snapshot` / `Sim::restore`）之上：存档 = 把完整世界状态（ECS / tick / RNG / 事件队列）序列化为 JSON；读档 = 从 JSON 恢复到那一刻。因为引擎是确定性的，存档不需要记录"操作历史"，只需要一个时刻的"状态切片"。
+
+### 1. 约定事件
+
+存档系统使用两个约定事件（convention events），由引擎的 `Dispatcher` 自动处理，不需要写模块规则：
+
+- `save-game { slot }` — 存档到指定槽位，写出 `<project>/saves/<slot>.json`
+- `load-game { slot }` — 从指定槽位读档，`Sim::restore` 恢复世界状态
+
+在游戏规则里 emit 这两个事件即可：
+
+```json
+{
+  "id": "save-on-s",
+  "comment": "Press S to save game to slot1.",
+  "on": { "event": "input", "filter": { "action": "s", "phase": "pressed" } },
+  "if": [["@game.GameState.phase", "==", "playing"]],
+  "do": [{ "emit": "save-game", "data": { "slot": "slot1" } }]
+},
+{
+  "id": "load-on-l",
+  "comment": "Press L to load game from slot1.",
+  "on": { "event": "input", "filter": { "action": "l", "phase": "pressed" } },
+  "if": [["@game.GameState.phase", "==", "playing"]],
+  "do": [{ "emit": "load-game", "data": { "slot": "slot1" } }]
+}
+```
+
+不需要 `includes` 任何模块——存档是引擎内置能力，不是模块。
+
+### 2. 确定性边界
+
+存档和读档跨越了确定性边界，理解这一点很重要：
+
+- **存档（save-game）是纯输出副作用**——和 play-sound 一样，在模拟之外执行。文件是否写入成功不影响世界状态，所以确定性回放不受影响。
+- **读档（load-game）重写模拟**——等价于 `Sim::restore`，时间线断裂。因此：
+  - 录制中（recording）的读档会被拒绝——录制要求时间线连续，读档会让录制不可回放。
+  - 存档在录制中是允许的——只是写文件，不影响时间线。
+
+### 3. 槽名验证
+
+槽名直接成为文件名，所以有严格验证：`[a-z0-9-]{1,32}`。这条规则同时堵死了路径穿越（`../evil` 不合法）：
+
+```
+slot1          ✓
+auto-save-3    ✓
+Slot1          ✗ (大写不合法)
+../evil        ✗ (路径穿越)
+a/b            ✗ (斜杠不合法)
+```
+
+### 4. 存档文件格式
+
+```json
+{
+  "engine_version": "0.2.0",
+  "project": "rpg-full",
+  "slot": "slot1",
+  "snapshot": {
+    "world": { ... },
+    "tick": 42,
+    "rng": { "state": [12345, 67890] },
+    "input_buffer": [],
+    "reply_buffer": [],
+    "event_queue": []
+  }
+}
+```
+
+- `engine_version` — 引擎版本，读档时如果不匹配则报错（不静默兼容）。
+- `project` — 项目名，人类可读。
+- `snapshot` — `Sim::snapshot` 的原始输出，包含完整世界状态。
+
+### 5. 原子写入
+
+存档使用"写临时文件 + 原子重命名"策略：先写到 `saves/.slot1.json.tmp`，再 `rename` 为 `saves/slot1.json`。崩溃或断电不会留下半个 JSON 覆盖旧存档。
+
+### 6. 在 rpg-full 中的使用
+
+rpg-full 示例已集成存档系统（按 S 存档、按 L 读档），是"完整游戏"的最后一块拼图：
+
+```
+play → craft sword → press S (save) → equip sword → press L (load)
+                                                          │
+                                                          ↓
+                                    state restored to "sword crafted, NOT equipped"
+```
+
+集成测试 `rpg_full_save_load_roundtrip` 验证：
+1. 存档时记录状态哈希、ATK、装备
+2. 继续游戏（穿戴剑，ATK 10→25）
+3. 读档后状态哈希必须等于存档时刻
+4. ATK 恢复到存档时的值（10，未穿戴）
+5. 读档后游戏可继续正常游玩
+
+### 7. 自动存档模式
+
+除了手动按 S 存档，可以在游戏规则里设自动存档触发点：
+
+```json
+{
+  "id": "auto-save-on-checkpoint",
+  "comment": "Auto-save when entering a new area.",
+  "on": { "event": "area-entered" },
+  "do": [{ "emit": "save-game", "data": { "slot": "auto-save" } }]
+},
+{
+  "id": "auto-save-on-quest-complete",
+  "comment": "Auto-save when a quest is turned in.",
+  "on": { "event": "quest-turned-in" },
+  "do": [{ "emit": "save-game", "data": { "slot": "auto-save" } }]
+}
+```
+
+### 8. 多槽位管理
+
+游戏可以提供多个存档槽（quick-save / auto-save / manual-1 / manual-2），让玩家自己管理：
+
+```json
+{ "emit": "save-game", "data": { "slot": "quick-save" } }
+{ "emit": "save-game", "data": { "slot": "manual-1" } }
+{ "emit": "save-game", "data": { "slot": "manual-2" } }
+```
+
+CLI 命令 `vitric saves` 列出所有存档槽，`vitric run --load slot1` 从指定槽位启动游戏。
+
+### 9. 与其他系统的关系
+
+- **与 game-flow 模块**：存档保存 `GameState.phase`，读档后游戏阶段恢复（playing → 存档 → 读档 → 仍在 playing）。
+- **与 combat 模块**：存档保存 `Health.hp` / `Attack.power`，读档后战斗状态恢复。
+- **与 inventory 模块**：存档保存 `Inventory.items` / `counts`，读档后背包恢复。
+- **与 progression 模块**：存档保存 `XP.current` / `Level.value`，读档后等级恢复。
+- **与所有 12 个模块**：存档保存全部组件状态，读档后所有模块状态精确恢复——这是确定性引擎的天然优势。
+
+完整可运行示例见 `examples/rpg-full/`（按 S/L 存读档），存档系统实现见 `crates/vitric-control/src/saves.rs`，集成测试见 `crates/vitric-cli/tests/saves.rs` 和 `crates/vitric-cli/tests/rpg_full.rs`。
 
 ---
 
