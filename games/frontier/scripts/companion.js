@@ -452,10 +452,11 @@ vitric.fn("inviteAnyNearby", (args, ctx) => {
 });
 
 // ---- Full item set (aligned with the Inventory schema) — for gift selection and write-back ----
-// Task 15 fix: include hide + crystal_core so inv-set emits the full 10-field set
+// Task 15 fix: include hide + crystal_core so inv-set emits the full field set
 // expected by the inv-apply rule (economy.json do/8 + do/9). Without these, gifting
 // a companion crashes the rule engine at runtime.
-const ITEM_KINDS = ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp", "hide", "crystal_core"];
+// P1 exploration gear also round-trips through inv-set (inv-apply rule writes all fields back).
+const ITEM_KINDS = ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp", "hide", "crystal_core", "climbing_gear", "swamp_boots", "heat_suit"];
 
 // ---- Gift (press g): when near a companion, pick the first "preferred by this companion" item in the inventory → gift +affinity ----
 // Gift-pick strategy: prefer preferred items → if no preferred item, pick the first item with quantity > 0.

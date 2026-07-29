@@ -344,6 +344,31 @@
         "_attack_cd": {
           "type": "number",
           "default": 0
+        },
+        "_hit_flash": {
+          "type": "number",
+          "default": 0,
+          "comment": "Hit flash timer: >0 means render enemy white, decays per tick"
+        },
+        "_charge_t": {
+          "type": "number",
+          "default": 0,
+          "comment": "Charge enemy: windup timer (>0 = charging up), 0 = walking"
+        },
+        "_charge_cd": {
+          "type": "number",
+          "default": 0,
+          "comment": "Charge enemy: cooldown until next windup"
+        },
+        "_flank_dir": {
+          "type": "number",
+          "default": 0,
+          "comment": "Flank enemy: +1 = approach from player's right, -1 = left"
+        },
+        "_nest_id": {
+          "type": "text",
+          "default": "",
+          "comment": "P2 nests: ID of the nest that spawned this enemy (for alive_count decrement)"
         }
       }
     },
@@ -503,6 +528,21 @@
         "crystal_core": {
           "type": "int",
           "default": 0
+        },
+        "climbing_gear": {
+          "type": "int",
+          "default": 0,
+          "comment": "P1 exploration gear: required to safely traverse mountain region"
+        },
+        "swamp_boots": {
+          "type": "int",
+          "default": 0,
+          "comment": "P1 exploration gear: required to safely traverse swamp region"
+        },
+        "heat_suit": {
+          "type": "int",
+          "default": 0,
+          "comment": "P1 exploration gear: required to safely traverse desert region"
         }
       }
     },
@@ -830,6 +870,31 @@
         "_negotiate_target": {
           "type": "text",
           "default": ""
+        },
+        "_rune_progress": {
+          "type": "int",
+          "default": 0,
+          "comment": "P2 rune puzzle: current progress (how many runes lit in correct order)"
+        },
+        "_rune_solve_pending": {
+          "type": "int",
+          "default": 0,
+          "comment": "P2 rune puzzle: set to 1 by rune-puzzle-solved event, consumed by rune-puzzle-solve system"
+        },
+        "_death_count": {
+          "type": "int",
+          "default": 0,
+          "comment": "P3 death penalty: consecutive deaths (resets on day change)"
+        },
+        "_death_drop_x": {
+          "type": "number",
+          "default": 0,
+          "comment": "P3 death penalty: x coord where player died (drop pile location)"
+        },
+        "_death_drop_y": {
+          "type": "number",
+          "default": 0,
+          "comment": "P3 death penalty: y coord where player died (drop pile location)"
         }
       }
     },
@@ -1007,6 +1072,16 @@
         "reward_table": {
           "type": "text",
           "default": "{}"
+        },
+        "risk_tier": {
+          "type": "text",
+          "default": "safe",
+          "comment": "P2 POI risk tier: safe (click→get) | danger (combat may trigger) | ruin (rune puzzle required)"
+        },
+        "rune_solved": {
+          "type": "int",
+          "default": 0,
+          "comment": "P2 ruin-tier: 1 = rune puzzle solved, allows looting"
         }
       }
     },
@@ -1087,6 +1162,37 @@
         "tier_nomads": { "type": "text", "default": "neutral" },
         "tier_caravan": { "type": "text", "default": "wary" },
         "tier_remnant": { "type": "text", "default": "wary" }
+      }
+    },
+    "Particle": {
+      "fields": {
+        "decay": { "type": "number", "default": 0.5, "comment": "Seconds until despawn (custom field)" },
+        "ttl": { "type": "int", "default": 30, "comment": "Engine built-in: remaining ticks until despawn (decremented by 1/tick)" }
+      }
+    },
+    "EnemyNest": {
+      "fields": {
+        "kind": { "type": "text", "default": "gnawer", "comment": "Enemy kind this nest spawns" },
+        "spawn_cd": { "type": "number", "default": 0, "comment": "Seconds until next spawn" },
+        "max_alive": { "type": "int", "default": 3, "comment": "Max concurrent children" },
+        "alive_count": { "type": "int", "default": 0, "comment": "Current children alive" }
+      }
+    },
+    "Relic": {
+      "fields": {
+        "text": { "type": "text", "default": "", "comment": "Environmental narrative shown when player approaches" }
+      }
+    },
+    "Rune": {
+      "fields": {
+        "sequence": { "type": "int", "default": 0, "comment": "Correct click order (1, 2, 3...)" },
+        "active": { "type": "int", "default": 0, "comment": "1 = lit up by player" }
+      }
+    },
+    "Fog": {
+      "fields": {
+        "state": { "type": "text", "default": "hidden", "comment": "hidden | dim | visible" },
+        "_orig_color": { "type": "text", "default": "", "comment": "Stashed original Sprite.color for restore on reveal" }
       }
     }
   }

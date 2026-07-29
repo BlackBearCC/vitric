@@ -82,6 +82,7 @@ vitric.fn("gen_region_content", (a, ctx) => {
         Region: { id: id, biome: spec.biome, state: "active", discovered: 1,
                   anchor_x: spec.anchor_x, anchor_y: spec.anchor_y, w: spec.w, h: spec.h,
                   dormant_ticks: 0, spawn_timer: 0 },
+        Fog: { state: "hidden", _orig_color: "" },
       });
     }
   }
@@ -111,13 +112,14 @@ vitric.fn("gen_region_content", (a, ctx) => {
     const px = spec.anchor_x + stream.nextInt(0, spec.w - 1);
     const py = spec.anchor_y + stream.nextInt(0, spec.h - 1);
     ctx.spawn({
-      Poi: { kind: poiSpec.kind, state: "fresh", cooldown: 0, reward_table: poiSpec.reward_table },
+      Poi: { kind: poiSpec.kind, state: "fresh", cooldown: 0, reward_table: poiSpec.reward_table, risk_tier: poiSpec.risk_tier || "safe", rune_solved: 0 },
       Position: { x: px, y: py },
       Sprite: { w: 1, h: 1, image: "", color: "#e8d878" },
       Text: { content: poiSpec.label, size: 0.34, color: "#ffffff", screen: false },
       Region: { id: id, biome: spec.biome, state: "active", discovered: 1,
                 anchor_x: spec.anchor_x, anchor_y: spec.anchor_y, w: spec.w, h: spec.h,
                 dormant_ticks: 0, spawn_timer: 0 },
+      Fog: { state: "hidden", _orig_color: "" },
     }, id + "_poi_" + poiIdx);
     poiIdx++;
   }
@@ -217,3 +219,41 @@ function checkUnlockCondition(id, ctx) {
   }
   return false;
 }
+
+// ---- P1 exploration gear gates: damage player in hazardous regions without proper gear ----
+// mountain without climbing_gear: -5 HP per 5s ("山路难行")
+// swamp without swamp_boots: no damage but movement is halved (handled by reading this in move.js
+//   — simpler: apply a small -2 HP per 8s "沼泽瘴气" instead, to avoid cross-system coupling)
+// desert without heat_suit: -3 HP per 10s ("高温")
+// Only applies when the region is active (thawed) and player is within its bounds.
+// Uses an accumulator on Colony (_hazard_tick) to throttle damage to the intended cadence.
+vitric.system("region-hazard", { query: ["Player", "Position", "Hp"], writes: ["Hp"] }, (entities, ctx) => {
+  const px = ctx.getField("player", "Position.x");
+  const py = ctx.getField("player", "Position.y");
+  if (typeof px !== "number" || typeof py !== "number") return;
+  const climbing = ctx.getField("player", "Inventory.climbing_gear") | 0;
+  const boots    = ctx.getField("player", "Inventory.swamp_boots")   | 0;
+  const suit     = ctx.getField("player", "Inventory.heat_suit")     | 0;
+  let dmg = 0;
+  // Mountain hazard
+  const mtnState = ctx.getField("mountain", "Region.state");
+  if (mtnState === "active" && climbing === 0) {
+    if (px >= 0 && px <= 30 && py >= 12 && py <= 40) dmg += 5 * ctx.dt / 5;
+  }
+  // Swamp hazard
+  const swampState = ctx.getField("swamp", "Region.state");
+  if (swampState === "active" && boots === 0) {
+    if (px >= 28 && px <= 60 && py >= 12 && py <= 40) dmg += 2 * ctx.dt / 8;
+  }
+  // Desert hazard
+  const desertState = ctx.getField("desert", "Region.state");
+  if (desertState === "active" && suit === 0) {
+    if (px >= 60 && px <= 120 && py >= 0 && py <= 60) dmg += 3 * ctx.dt / 10;
+  }
+  if (dmg > 0) {
+    for (const e of entities) {
+      const cur = (typeof e.Hp.value === "number" && !isNaN(e.Hp.value)) ? e.Hp.value : 100;
+      e.Hp.value = Math.max(0, cur - dmg);
+    }
+  }
+});

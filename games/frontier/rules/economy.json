@@ -11,7 +11,7 @@
           "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
           "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
           "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
-          "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core",
+          "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core", "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit",
           "known": "@colony.Research.known"
         } }
       ]
@@ -25,7 +25,7 @@
         "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
         "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
         "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
-        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core", "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit"
       } } ]
     },
     {
@@ -36,7 +36,7 @@
         "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
         "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
         "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
-        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core", "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit"
       } } ]
     },
     {
@@ -47,7 +47,47 @@
         "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
         "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
         "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
-        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core",
+        "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit"
+      } } ]
+    },
+    {
+      "id": "craft-climbing-gear",
+      "comment": "P1 exploration gear: climbing_gear ← hide×2 + fiber×2 (mountain region safety).",
+      "on": { "event": "ui-activate", "filter": { "action": "craft-climbing_gear" } },
+      "do": [ { "call": "craft", "with": {
+        "id": "climbing_gear",
+        "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+        "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core",
+        "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit"
+      } } ]
+    },
+    {
+      "id": "craft-swamp-boots",
+      "comment": "P1 exploration gear: swamp_boots ← hide×3 + ore×1 (swamp region safety).",
+      "on": { "event": "ui-activate", "filter": { "action": "craft-swamp_boots" } },
+      "do": [ { "call": "craft", "with": {
+        "id": "swamp_boots",
+        "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+        "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core",
+        "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit"
+      } } ]
+    },
+    {
+      "id": "craft-heat-suit",
+      "comment": "P1 exploration gear: heat_suit ← crystal_core×1 + plank×2 (desert region safety).",
+      "on": { "event": "ui-activate", "filter": { "action": "craft-heat_suit" } },
+      "do": [ { "call": "craft", "with": {
+        "id": "heat_suit",
+        "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+        "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core",
+        "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit"
       } } ]
     },
 
@@ -65,7 +105,10 @@
         { "set": "@player.Inventory.chair", "to": "event.chair" },
         { "set": "@player.Inventory.lamp",  "to": "event.lamp" },
         { "set": "@player.Inventory.hide",  "to": "event.hide" },
-        { "set": "@player.Inventory.crystal_core", "to": "event.crystal_core" }
+        { "set": "@player.Inventory.crystal_core", "to": "event.crystal_core" },
+        { "set": "@player.Inventory.climbing_gear", "to": "event.climbing_gear" },
+        { "set": "@player.Inventory.swamp_boots",   "to": "event.swamp_boots" },
+        { "set": "@player.Inventory.heat_suit",     "to": "event.heat_suit" }
       ]
     },
 
@@ -92,7 +135,7 @@
           "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
           "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
           "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
-          "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
+          "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core", "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit"
         } }
       ]
     },
@@ -106,7 +149,7 @@
         "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
         "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
         "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
-        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core", "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit"
       } } ]
     }
   ]

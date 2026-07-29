@@ -41,11 +41,16 @@ const CRAFT = {
   plank: { cost: { wood: 2 },            out: "plank" },
   chair: { cost: { plank: 1, fiber: 1 }, out: "chair" },
   lamp:  { cost: { plank: 1, ore: 1 },   out: "lamp" },
+  // P1 exploration gear: required to safely traverse hazardous regions.
+  climbing_gear: { cost: { hide: 2, fiber: 2 },          out: "climbing_gear" },
+  swamp_boots:   { cost: { hide: 3, ore: 1 },            out: "swamp_boots" },
+  heat_suit:     { cost: { crystal_core: 1, plank: 2 },  out: "heat_suit" },
 };
 
 // Full inventory field set (aligned with schema Inventory) — write-back always carries the full set of absolute values, the rule sets them one by one.
 // `hide` (Task 10 combat drops) + `crystal_core` (tech tree tier-3 cost) round-trip through inv-set.
-const ITEMS = ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp", "hide", "crystal_core"];
+// P1 exploration gear (climbing_gear/swamp_boots/heat_suit) also round-trips.
+const ITEMS = ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp", "hide", "crystal_core", "climbing_gear", "swamp_boots", "heat_suit"];
 
 // Read the current inventory from the incoming args (each item defaults to 0).
 function readInv(a) {

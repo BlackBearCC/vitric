@@ -12,6 +12,7 @@ vitric.fn("genWild", (a, ctx) => {
         Cell: { kind: "wild" },
         Position: { x: gx, y: gy },
         Sprite: { w: 1, h: 1, image: "", color: gx === 16 ? "#5a5040" : "#48402f" },
+        Fog: { state: "hidden", _orig_color: "" },
       });
     }
   }
@@ -33,6 +34,25 @@ vitric.fn("genWild", (a, ctx) => {
       // Resource node ≈ 0.9: a bit smaller than a tile, like "scatter"; the name tag tells the player what it is
       Sprite: { w: 0.9, h: 0.9, image: "", color: n[4] },
       Text: { content: n[3], size: 0.34, color: "#ffffff", screen: false },
+    });
+  }
+
+  // P2 environmental narrative: scatter relics in the wild that tell a fragmented story
+  // when the player approaches. Non-interactive decoration + proximity Text.
+  const RELICS = [
+    { x: 30, y: 6,  text: "墙上刻着:'别往南走。'" },
+    { x: 42, y: 14, text: "锈蚀的牌子:'星火定居点 — 人口 47。'" },
+    { x: 50, y: 22, text: "日记残页:'...第七次耀斑,食物不够了...'" },
+    { x: 36, y: 25, text: "石碑:'献给那些留下的人。'" },
+    { x: 55, y: 10, text: "废弃的广播塔。屏幕上还亮着:'撤离已启动。'" },
+  ];
+  for (const r of RELICS) {
+    ctx.spawn({
+      Relic: { text: r.text },
+      Position: { x: r.x, y: r.y },
+      Sprite: { w: 0.8, h: 0.8, image: "", color: "#444444" },
+      Text: { content: "", size: 0.32, color: "#aaaaaa", screen: false },
+      Fog: { state: "hidden", _orig_color: "" },
     });
   }
 });

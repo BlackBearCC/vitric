@@ -59,7 +59,7 @@ const POI_HANDLERS = {
       const x = a.comp.Position.x;
       const y = a.comp.Position.y;
       ctx.spawn({
-        Enemy: { kind: "gnawer", damage: 5, aggro_range: 6, home_region: "swamp", _attack_cd: 0 },
+        Enemy: { kind: "gnawer", damage: 5, aggro_range: 6, home_region: "swamp", _attack_cd: 0, _hit_flash: 0, _charge_t: 0, _charge_cd: 0, _flank_dir: 0, _nest_id: "" },
         Position: { x: x + 1, y: y },
         Velocity: { x: 0, y: 0 },
         Collider: { w: 0.8, h: 0.8 },
@@ -102,13 +102,23 @@ vitric.fn("interact_poi", (a, ctx) => {
   if (!poi) return;                       // Not a POI hit — ignore.
   if (poi.state !== "fresh") return;      // Already looted/depleted — ignore.
 
+  // P2 risk tier enforcement:
+  //   safe  → loot immediately
+  //   danger → loot immediately BUT handler may spawn enemies (existing behavior)
+  //   ruin  → requires rune_solved=1 before looting; otherwise show puzzle hint
+  const tier = poi.risk_tier || "safe";
+  if (tier === "ruin" && !(poi.rune_solved | 0)) {
+    ctx.emit("toast-show", { text: "古代封印:需要按正确顺序激活符文" });
+    return;
+  }
+
   // Parse reward table: {item: [lo, hi]}.
   let rewards = {};
   try { rewards = JSON.parse(poi.reward_table || "{}"); } catch { return; }
 
   // Build inventory from args (same pattern as economy.js readInv).
   // `hide` + `crystal_core` round-trip through inv-set alongside the rest of the inventory.
-  const ITEMS = ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp", "hide", "crystal_core"];
+  const ITEMS = ["ore", "wood", "fiber", "seed", "wheat", "plank", "chair", "lamp", "hide", "crystal_core", "climbing_gear", "swamp_boots", "heat_suit"];
   const inv = {};
   for (const k of ITEMS) inv[k] = a[k] | 0;
 
@@ -158,4 +168,87 @@ vitric.fn("interact_poi", (a, ctx) => {
 
   // Notify wish system.
   ctx.emit("entered-poi", { kind: poi.kind });
+});
+
+// ---- P2 rune puzzle: auto-activate runes when player approaches in interact mode ----
+// Each Rune has a `sequence` field (1, 2, 3...) indicating the correct activation order.
+// When player is within 1.5 tiles of a rune in interact mode, the rune auto-activates.
+// Progress is tracked via Colony._rune_progress. When all runes are activated in order,
+// the nearest ruin POI is unlocked. Wrong order (walking to a higher-sequence rune first)
+// resets all runes + spawns a curse enemy.
+//
+// rune-auto-activate system: runs every tick, checks player proximity to each rune.
+vitric.system("rune-auto-activate", { query: ["Rune", "Position"], writes: ["Rune"] }, (entities, ctx) => {
+  const mode = ctx.getField("uistate", "Mode.value") || "";
+  if (mode !== "interact") return;
+  if (entities.length === 0) return;
+  const px = ctx.getField("colony", "Colony.player_x") || 0;
+  const py = ctx.getField("colony", "Colony.player_y") || 0;
+  const total = entities.length;
+  const progress = ctx.getField("colony", "Colony._rune_progress") | 0;
+
+  // If already solved, do nothing.
+  if (progress >= total) return;
+
+  // Find the nearest inactive rune within 1.5 tiles.
+  let nearest = null, nearestD2 = Infinity;
+  for (const e of entities) {
+    if (e.Rune.active | 0) continue; // skip active runes
+    const dx = e.Position.x - px, dy = e.Position.y - py;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < nearestD2) { nearestD2 = d2; nearest = e; }
+  }
+  if (!nearest || nearestD2 > 2.25) return; // 1.5^2 = 2.25
+
+  const seq = nearest.Rune.sequence | 0;
+  // Check if this is the next rune in sequence.
+  if (seq === progress + 1) {
+    // Correct! Light this rune + increment progress.
+    nearest.Rune.active = 1;
+    ctx.setField("colony", "Colony._rune_progress", progress + 1);
+    ctx.emit("toast-show", { text: "符文 " + seq + " 激活" });
+    // If all runes lit, solve the puzzle.
+    if (progress + 1 >= total) {
+      ctx.setField("colony", "Colony._rune_progress", 0);
+      ctx.emit("rune-puzzle-solved", {});
+      ctx.emit("toast-show", { text: "封印解除!可以探索遗迹了" });
+    }
+  } else {
+    // Wrong order! Reset all runes + spawn enemy.
+    for (const e of entities) {
+      e.Rune.active = 0;
+    }
+    ctx.setField("colony", "Colony._rune_progress", 0);
+    ctx.spawn({
+      Enemy: { kind: "gnawer", damage: 5, aggro_range: 8, home_region: "wild", _attack_cd: 0, _hit_flash: 0, _charge_t: 0, _charge_cd: 0, _flank_dir: 0, _nest_id: "" },
+      Hp: { value: 15, max: 15 },
+      Position: { x: px + 2, y: py + 2 },
+      Velocity: { x: 0, y: 0 },
+      Sprite: { w: 0.8, h: 0.8, image: "", color: "#7a3a3a" },
+    });
+    ctx.emit("toast-show", { text: "符文顺序错误!封印反噬" });
+  }
+});
+
+// ---- rune-puzzle-solve system: listens for rune-puzzle-solved event, finds nearest ruin POI ----
+// We can't query in fns, so this system runs every tick and checks if Colony._rune_solve_pending
+// is set (the event handler sets it). When set, find the nearest unsolved ruin POI and solve it.
+vitric.system("rune-puzzle-solve", { query: ["Poi", "Position"], writes: ["Poi"] }, (entities, ctx) => {
+  const pending = ctx.getField("colony", "Colony._rune_solve_pending") | 0;
+  if (!pending) return;
+  // Clear the pending flag first (idempotent).
+  ctx.setField("colony", "Colony._rune_solve_pending", 0);
+  const px = ctx.getField("colony", "Colony.player_x") || 0;
+  const py = ctx.getField("colony", "Colony.player_y") || 0;
+  let bestD2 = Infinity, bestId = null;
+  for (const e of entities) {
+    if ((e.Poi.risk_tier || "safe") !== "ruin") continue;
+    if (e.Poi.rune_solved | 0) continue;
+    const dx = e.Position.x - px, dy = e.Position.y - py;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < bestD2) { bestD2 = d2; bestId = e.id; }
+  }
+  if (bestId) {
+    ctx.setField(bestId, "Poi.rune_solved", 1);
+  }
 });

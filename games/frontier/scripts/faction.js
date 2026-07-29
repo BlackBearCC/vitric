@@ -118,10 +118,12 @@ vitric.fn("complete_trade", (a, ctx) => {
   const offer = TRADE_OFFERS[f];
   if (!offer) return;
   // Read inventory from args (rule passes full inventory).
+  // P1 exploration gear round-trips through inv-set (inv-apply rule writes all fields back).
   const inv = {
     ore: a.ore|0, wood: a.wood|0, fiber: a.fiber|0, seed: a.seed|0,
     wheat: a.wheat|0, plank: a.plank|0, chair: a.chair|0, lamp: a.lamp|0,
     hide: a.hide|0, crystal_core: a.crystal_core|0,
+    climbing_gear: a.climbing_gear|0, swamp_boots: a.swamp_boots|0, heat_suit: a.heat_suit|0,
   };
   // Verify player has enough give_kind.
   if (inv[offer.give_kind] < offer.give_n) {
@@ -140,6 +142,7 @@ vitric.fn("complete_trade", (a, ctx) => {
     ore: inv.ore, wood: inv.wood, fiber: inv.fiber, seed: inv.seed,
     wheat: inv.wheat, plank: inv.plank, chair: inv.chair, lamp: inv.lamp,
     hide: inv.hide, crystal_core: inv.crystal_core,
+    climbing_gear: inv.climbing_gear, swamp_boots: inv.swamp_boots, heat_suit: inv.heat_suit,
   });
   // +2 relation to this faction (spec §4.5 line 281).
   // Inline the relation change (don't recursively call change_relation — keep it one fn).

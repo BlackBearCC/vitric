@@ -42,7 +42,9 @@
     "scripts/wish.js",
     "scripts/research.js",
     "scripts/faction.js",
-    "scripts/region.js"
+    "scripts/region.js",
+    "scripts/fog.js",
+    "scripts/relic.js"
   ],
   "seed": 1,
   "render": {

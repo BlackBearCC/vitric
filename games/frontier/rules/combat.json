@@ -2,8 +2,9 @@
   "rules": [
     {
       "id": "night-fall-spawn-wave",
-      "comment": "night-fall{threat} → 调 spawn_wave 脚本(按威胁度和已解锁区域数算波次大小,在区域边缘 spawn 敌人)。day 用于 raider 解锁判定(day>=5 且 mountain 已解锁)。",
+      "comment": "night-fall{threat} → 调 spawn_wave 脚本(按威胁度和已解锁区域数算波次大小,在区域边缘 spawn 敌人)。day 用于 raider 解锁判定(day>=5 且 mountain 已解锁)。P3: skip if Colony._death_count >= 3 (3 consecutive deaths → mercy, no night waves).",
       "on": { "event": "night-fall" },
+      "if": [ ["@colony.Colony._death_count", "<", 3] ],
       "do": [
         { "call": "spawn_wave", "with": {
           "threat": "event.threat",
@@ -13,10 +14,11 @@
     },
     {
       "id": "dawn-break-retreat",
-      "comment": "dawn-break → 调 retreat_all_enemies 脚本(despawn 所有敌人,它们退回野外)。",
+      "comment": "dawn-break → 调 retreat_all_enemies 脚本(despawn 所有敌人,它们退回野外)。P3: also reset Colony._death_count to 0 (consecutive death counter resets on dawn).",
       "on": { "event": "dawn-break" },
       "do": [
-        { "call": "retreat_all_enemies", "with": {} }
+        { "call": "retreat_all_enemies", "with": {} },
+        { "set": "@colony.Colony._death_count", "to": 0 }
       ]
     },
     {
@@ -43,8 +45,45 @@
           "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
           "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
           "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
-          "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
+          "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core", "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit"
         } }
+      ]
+    },
+
+    {
+      "id": "craft-weapon-bone-blade",
+      "comment": "P1 weapon upgrade: craft bone_blade from hide+ore (requires stone_axe equipped).",
+      "on": { "event": "ui-activate", "filter": { "action": "craft-weapon-bone_blade" } },
+      "do": [ { "call": "craft_weapon", "with": {
+        "id": "bone_blade",
+        "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+        "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core", "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit"
+      } } ]
+    },
+    {
+      "id": "craft-weapon-crystal-edge",
+      "comment": "P1 weapon upgrade: craft crystal_edge from crystal_core+plank (requires bone_blade equipped).",
+      "on": { "event": "ui-activate", "filter": { "action": "craft-weapon-crystal_edge" } },
+      "do": [ { "call": "craft_weapon", "with": {
+        "id": "crystal_edge",
+        "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
+        "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
+        "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core", "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit"
+      } } ]
+    },
+
+    {
+      "id": "weapon-upgrade-apply",
+      "comment": "P1 weapon upgrade: write new stats back to @player.Weapon.* on weapon-upgrade event.",
+      "on": { "event": "weapon-upgrade" },
+      "do": [
+        { "set": "@player.Weapon.kind",     "to": "event.kind" },
+        { "set": "@player.Weapon.damage",   "to": "event.damage" },
+        { "set": "@player.Weapon.range",    "to": "event.range" },
+        { "set": "@player.Weapon.cooldown", "to": "event.cooldown" }
       ]
     }
   ]

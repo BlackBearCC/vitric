@@ -45,7 +45,7 @@
         "fiber": "@player.Inventory.fiber", "seed": "@player.Inventory.seed",
         "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
         "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
-        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core"
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core", "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit"
       } }]
     },
 

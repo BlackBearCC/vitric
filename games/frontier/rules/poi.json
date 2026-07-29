@@ -10,9 +10,18 @@
         "ore": "@player.Inventory.ore", "wood": "@player.Inventory.wood", "fiber": "@player.Inventory.fiber",
         "seed": "@player.Inventory.seed", "wheat": "@player.Inventory.wheat", "plank": "@player.Inventory.plank",
         "chair": "@player.Inventory.chair", "lamp": "@player.Inventory.lamp",
-        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core",
+        "hide": "@player.Inventory.hide", "crystal_core": "@player.Inventory.crystal_core", "climbing_gear": "@player.Inventory.climbing_gear", "swamp_boots": "@player.Inventory.swamp_boots", "heat_suit": "@player.Inventory.heat_suit",
         "techpoint": "@player.TechPoint.value"
       } } ]
+    },
+
+    {
+      "id": "rune-puzzle-solved-handler",
+      "comment": "P2 rune puzzle: on rune-puzzle-solved event, set Colony._rune_solve_pending=1 so the rune-puzzle-solve system can find + unlock the nearest ruin POI.",
+      "on": { "event": "rune-puzzle-solved" },
+      "do": [
+        { "set": "@colony.Colony._rune_solve_pending", "to": 1 }
+      ]
     }
   ]
 }

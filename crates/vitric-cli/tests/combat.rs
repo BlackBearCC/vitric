@@ -44,7 +44,7 @@ fn parse_enemy_snapshot(sim: &vitric_sim::Sim) -> Vec<Value> {
 fn spawn_gnawer(sim: &mut vitric_sim::Sim, x: f64, y: f64) -> vitric_ecs::EntityId {
     let id = sim.world.spawn();
     sim.world
-        .set_component(id, "Enemy", json!({ "kind": "gnawer", "damage": 5, "aggro_range": 8, "home_region": "wild", "_attack_cd": 0 }))
+        .set_component(id, "Enemy", json!({ "kind": "gnawer", "damage": 5, "aggro_range": 8, "home_region": "wild", "_attack_cd": 0, "_hit_flash": 0, "_charge_t": 0, "_charge_cd": 0, "_flank_dir": 0, "_nest_id": "" }))
         .expect("set Enemy");
     sim.world
         .set_component(id, "Position", json!({ "x": x, "y": y }))
