@@ -2855,3 +2855,140 @@ modules/my-module/
 | VD091 | module.json 解析失败 |
 | VD092 | 字段类型冲突（同一字段在两处类型不一致） |
 | VD093 | includes 循环引用 |
+
+## 配方 22：使用 achievement 模块（成就 / 数据驱动定义 / 计数器进度 / 自动解锁）
+
+**目标**：让游戏有成就系统——击杀 10 只怪物、到达 5 级、探索全地图。成就是商业游戏的标配，给玩家长期目标和完成度追踪。
+
+Vitric 的 achievement 模块是**数据驱动**的：成就定义放在 `Achievements.defs`（JSON 数组），支持两种解锁模式——**即时解锁**（target=0）和**计数器解锁**（target>0，进度累加到 target 自动解锁）。
+
+### 1. includes
+
+```json
+{
+  "includes": ["../../modules/achievement"]
+}
+```
+
+模块会注入：
+- **组件**：`Achievements`（挂在追踪器实体上，如 `@achievements`）
+- **规则**：3 个事件处理（define / unlock / progress）
+- **脚本**：`achievement-init` 系统（启动时从 defs 同步 count）+ 3 个 fn
+
+### 2. 组件字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `defs` | text (JSON) | 成就定义数组：`[{id, name, desc, target}]` |
+| `unlocked` | text (JSON) | 已解锁的 ID 数组 |
+| `progress` | text (JSON) | 计数器进度：`{id: count}` |
+| `count` | int | 已定义成就总数（init 系统自动同步） |
+| `unlocked_count` | int | 已解锁数量 |
+
+### 3. 在场景里定义成就
+
+```json
+{
+  "name": "achievements",
+  "components": {
+    "Achievements": {
+      "defs": "[{\"id\":\"first_blood\",\"name\":\"First Blood\",\"desc\":\"Defeat your first enemy\",\"target\":0},{\"id\":\"kill_10\",\"name\":\"Exterminator\",\"desc\":\"Defeat 10 enemies\",\"target\":10},{\"id\":\"reach_level_5\",\"name\":\"Veteran\",\"desc\":\"Reach level 5\",\"target\":0}]"
+    }
+  }
+}
+```
+
+- `target=0` → 即时解锁，调 `achievement-unlock` 事件直接解锁
+- `target>0` → 计数器解锁，调 `achievement-progress` 累加进度，到 target 自动解锁
+
+也可以在运行时通过 `achievement-define` 事件动态添加成就。
+
+### 4. 在规则里驱动解锁
+
+**即时解锁**（击杀第一只怪）：
+
+```json
+{
+  "id": "first-kill-achievement",
+  "on": { "event": "died" },
+  "do": [{ "emit": "achievement-unlock", "data": { "tracker": "achievements", "id": "first_blood" } }]
+}
+```
+
+**计数器进度**（每次击杀 +1，到 10 自动解锁）：
+
+```json
+{
+  "id": "kill-count-achievement",
+  "on": { "event": "died" },
+  "do": [{ "emit": "achievement-progress", "data": { "tracker": "achievements", "id": "kill_10", "amount": 1 } }]
+}
+```
+
+### 5. 模块发出的事件
+
+| 事件 | 触发时机 | 数据 |
+|------|---------|------|
+| `achievement-unlocked` | 成就刚解锁 | `{id, name, desc}` |
+| `achievement-progress-updated` | 计数器进度变化（未解锁时） | `{id, progress, target, name}` |
+
+监听 `achievement-unlocked` 做 UI 弹窗提示：
+
+```json
+{
+  "id": "achievement-toast",
+  "on": { "event": "achievement-unlocked" },
+  "do": [{ "emit": "toast-show", "data": { "text": "🏆 成就解锁: event.name" } }]
+}
+```
+
+### 6. 动态定义成就
+
+运行时通过 `achievement-define` 添加新成就（合并去重，已有 id 会被忽略）：
+
+```json
+{
+  "id": "add-late-achievements",
+  "on": { "event": "region-discovered", "filter": { "region_id": "deep_cave" } },
+  "do": [{ "emit": "achievement-define", "data": {
+    "tracker": "achievements",
+    "defs": [{"id":"cave_explorer","name":"Cave Explorer","desc":"Discover the deep cave","target":0}]
+  }}]
+}
+```
+
+### 7. 行为语义
+
+| 场景 | 行为 |
+|------|------|
+| 解锁已解锁的成就 | 幂等 no-op |
+| 解锁未定义的成就 | 静默 no-op |
+| 对 target=0 的成就调 progress | 静默 no-op（progress 只对计数器成就有意义） |
+| 对已解锁的计数器成就调 progress | 静默 no-op（进度冻结） |
+| 对未定义的成就调 progress | 静默 no-op |
+
+### 8. 与其他模块组合
+
+成就模块是**纯监听型**——它不主动查询游戏状态，只响应游戏 emit 的事件。组合方式：
+
+| 游戏事件 | 触发的成就 |
+|---------|-----------|
+| `died`（combat 模块） | first_blood / kill_10 |
+| `leveled-up`（progression 模块） | reach_level_5 |
+| `quest-turned-in`（quest 模块） | quest_master |
+| `item-picked-up`（inventory 模块） | hoarder |
+| `region-discovered`（游戏自定义） | explorer |
+
+### 9. 完整 RPG 闭环中的位置
+
+在 rpg-full 旗舰示例中，achievement 是第 13 个模块，证明整个 RPG 闭环可以这样跑：
+
+```
+击杀 wolf → died 事件 →
+  ├─ combat:    wolf HP=0, 发 died
+  ├─ loot:      掉落 wolf_pelt
+  ├─ progression: +XP, 升级 → leveled-up
+  └─ achievement: first_blood 解锁 + kill_10 进度+1
+```
+
+所有模块通过事件解耦，achievement 模块不需要知道 combat/progression 的存在——它只响应 `achievement-unlock` / `achievement-progress` 这两个约定事件。

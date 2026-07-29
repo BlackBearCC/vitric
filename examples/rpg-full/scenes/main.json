@@ -114,6 +114,14 @@
         "Position": { "x": 1, "y": 5 },
         "Text": { "content": "RPG FULL — Press SPACE to start", "size": 0.7, "color": "#ffd75e" }
       }
+    },
+    {
+      "name": "achievements",
+      "components": {
+        "Achievements": {
+          "defs": "[{\"id\":\"first_blood\",\"name\":\"First Blood\",\"desc\":\"Defeat your first enemy\",\"target\":0},{\"id\":\"kill_10\",\"name\":\"Exterminator\",\"desc\":\"Defeat 10 enemies\",\"target\":10},{\"id\":\"reach_level_5\",\"name\":\"Veteran\",\"desc\":\"Reach level 5\",\"target\":0}]"
+        }
+      }
     }
   ]
 }

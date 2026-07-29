@@ -17,7 +17,8 @@
     "../../modules/equipment",
     "../../modules/status-effects",
     "../../modules/skills",
-    "../../modules/crafting"
+    "../../modules/crafting",
+    "../../modules/achievement"
   ],
   "seed": 7
 }

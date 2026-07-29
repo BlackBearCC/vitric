@@ -533,6 +533,137 @@ fn rpg_full_save_load_roundtrip() {
     let _ = fs::remove_dir_all(&temp_root);
 }
 
+// ---- achievement module tests ----
+
+fn ach_field(sim: &vitric_sim::Sim, field: &str) -> serde_json::Value {
+    let e = sim.world.entity("achievements").unwrap();
+    sim.world
+        .get_field(e, &format!("Achievements.{field}"))
+        .unwrap()
+        .clone()
+}
+
+fn ach_unlocked(sim: &vitric_sim::Sim) -> Vec<String> {
+    let raw = ach_field(sim, "unlocked");
+    let s = raw.as_str().unwrap_or("[]");
+    serde_json::from_str(s).unwrap_or_default()
+}
+
+fn ach_progress(sim: &vitric_sim::Sim, id: &str) -> i64 {
+    let raw = ach_field(sim, "progress");
+    let s = raw.as_str().unwrap_or("{}");
+    let map: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(s).unwrap_or_default();
+    map.get(id).and_then(|v| v.as_i64()).unwrap_or(0)
+}
+
+#[test]
+fn rpg_full_achievement_instant_unlock() {
+    let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
+    sim.step(&mut rt).unwrap(); // achievement-init system syncs count from defs
+
+    // Initial state: 3 defs, 0 unlocked.
+    assert_eq!(ach_field(&sim, "count").as_i64(), Some(3));
+    assert_eq!(ach_field(&sim, "unlocked_count").as_i64(), Some(0));
+    assert!(ach_unlocked(&sim).is_empty());
+
+    // Instant unlock first_blood (target=0).
+    sim.inject_reply(
+        "achievement-unlock",
+        json!({"tracker": "achievements", "id": "first_blood"}),
+    );
+    sim.step(&mut rt).unwrap();
+
+    assert_eq!(ach_field(&sim, "unlocked_count").as_i64(), Some(1));
+    assert_eq!(ach_unlocked(&sim), vec!["first_blood"]);
+
+    // Idempotent: unlock again = no-op.
+    sim.inject_reply(
+        "achievement-unlock",
+        json!({"tracker": "achievements", "id": "first_blood"}),
+    );
+    sim.step(&mut rt).unwrap();
+    assert_eq!(ach_field(&sim, "unlocked_count").as_i64(), Some(1));
+
+    // Undefined achievement = silent no-op.
+    sim.inject_reply(
+        "achievement-unlock",
+        json!({"tracker": "achievements", "id": "nonexistent"}),
+    );
+    sim.step(&mut rt).unwrap();
+    assert_eq!(ach_field(&sim, "unlocked_count").as_i64(), Some(1));
+}
+
+#[test]
+fn rpg_full_achievement_counter_progress() {
+    let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
+    sim.step(&mut rt).unwrap(); // achievement-init
+
+    // Progress kill_10 (target=10) by 3.
+    sim.inject_reply(
+        "achievement-progress",
+        json!({"tracker": "achievements", "id": "kill_10", "amount": 3}),
+    );
+    sim.step(&mut rt).unwrap();
+    assert_eq!(ach_progress(&sim, "kill_10"), 3);
+    assert_eq!(ach_field(&sim, "unlocked_count").as_i64(), Some(0));
+
+    // Progress by 5 more → 8, still not unlocked.
+    sim.inject_reply(
+        "achievement-progress",
+        json!({"tracker": "achievements", "id": "kill_10", "amount": 5}),
+    );
+    sim.step(&mut rt).unwrap();
+    assert_eq!(ach_progress(&sim, "kill_10"), 8);
+    assert_eq!(ach_field(&sim, "unlocked_count").as_i64(), Some(0));
+
+    // Progress by 2 more → 10 = target → auto-unlock.
+    sim.inject_reply(
+        "achievement-progress",
+        json!({"tracker": "achievements", "id": "kill_10", "amount": 2}),
+    );
+    sim.step(&mut rt).unwrap();
+    assert_eq!(ach_progress(&sim, "kill_10"), 10);
+    assert_eq!(ach_field(&sim, "unlocked_count").as_i64(), Some(1));
+    assert!(ach_unlocked(&sim).contains(&"kill_10".to_string()));
+
+    // Progress after unlock = no-op.
+    sim.inject_reply(
+        "achievement-progress",
+        json!({"tracker": "achievements", "id": "kill_10", "amount": 5}),
+    );
+    sim.step(&mut rt).unwrap();
+    assert_eq!(ach_progress(&sim, "kill_10"), 10, "progress frozen after unlock");
+}
+
+#[test]
+fn rpg_full_achievement_define_merges() {
+    let (mut sim, mut rt) = Runtime::boot(&demo_dir()).unwrap();
+    sim.step(&mut rt).unwrap(); // achievement-init
+    assert_eq!(ach_field(&sim, "count").as_i64(), Some(3));
+
+    // Define 2 new achievements (one duplicate id should be ignored).
+    sim.inject_reply(
+        "achievement-define",
+        json!({"tracker": "achievements", "defs": [
+            {"id": "explorer", "name": "Explorer", "desc": "Visit 5 areas", "target": 5},
+            {"id": "first_blood", "name": "Duplicate", "desc": "Should be ignored", "target": 0}
+        ]}),
+    );
+    sim.step(&mut rt).unwrap();
+
+    // count = 3 original + 1 new (duplicate ignored) = 4.
+    assert_eq!(ach_field(&sim, "count").as_i64(), Some(4));
+
+    // The new achievement is progressable.
+    sim.inject_reply(
+        "achievement-progress",
+        json!({"tracker": "achievements", "id": "explorer", "amount": 5}),
+    );
+    sim.step(&mut rt).unwrap();
+    assert!(ach_unlocked(&sim).contains(&"explorer".to_string()));
+}
+
 #[test]
 fn rpg_full_load_missing_slot_errors_gracefully() {
     // Loading a non-existent slot reports an error but doesn't crash the game.
