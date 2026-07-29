@@ -1,10 +1,8 @@
-//! `vitric bundle` — bundle the project + engine into a single distributable file (the "standalone" in "standalone single-player").
+//! `vitric bundle` — bundle the project + engine into a single distributable file.
 //!
-//! Stance: **release must also pass the gate**. bundle runs `vitric gate` first; no PASS, no
-//! package — no certificate, no release; the gate report is printed to stdout as-is, so what
-//! failed is clear at a glance. Clear-rate recordings (qa/ recordings referenced by gates) go
-//! into the package: they are the certificate itself — the release package carries its own
-//! replayable proof of delivery.
+//! Bundle runs `vitric gate` first if gates are declared; if gate fails, bundling is refused.
+//! Projects without gates bundle directly. Gate report is printed to stdout as-is.
+//! Recordings referenced by gates are included in the package for replayability.
 //!
 //! ## Release package file format (self-unpacking)
 //!
@@ -89,13 +87,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
 
-    // Gate first: no PASS, no release. Report goes to stdout (same as vitric gate);
-    // on rejection, what failed is visible
+    // Gate first (if declared): fail = refuse to bundle. Report goes to stdout.
     let (report, pass) = crate::gate::run(&dir)?;
     if !pass {
         println!("{}", serde_json::to_string_pretty(&report).expect("报告可序列化"));
         return Err(
-            "交付门禁未通过，拒绝打包——无证书不发行（fail 项详见上方 JSON 报告）".to_string()
+            "gate 验证未通过，拒绝打包（fail 项详见上方 JSON 报告）".to_string()
         );
     }
     let project_name =

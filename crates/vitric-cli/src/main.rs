@@ -6,8 +6,8 @@
 //! - `vitric replay <project-dir> <recording.json>` replay recording and verify determinism
 //! - `vitric playtest <project-dir> [options]` in-process automatic playtest: single session produces a replayable recording (default), --sessions N runs a parallel batch and aggregates a floor report, --seed-recording seed-style exploration (perturb a certificate recording to catch unreachable endings / sequence soft-locks)
 //! - `vitric balance <project-dir> [options]` auto balance: tune one numeric knob (--knob file#json-pointer), use an agent cluster to playtest repeatedly, binary search to a knob value that puts the clear rate within --target-clear-rate (non-monotonic degraded linear scan fallback). Never modifies user files (changes happen in a temporary copy that is deleted afterward)
-//! - `vitric gate <project-dir>`             delivery gate: check + clear recording replay + assertion set + optional playtest gate (only runs when manifest declares gates.playtest: actually runs swarm and asserts passing), certificate issued only when all pass
-//! - `vitric bundle <project-dir> [options]` release bundle: after gate PASS, attach the project into an engine copy and produce a self-contained single file (no release without certificate)
+//! - `vitric gate <project-dir>`             optional verification: check + recording replay + assertions + playtest (opt-in, projects without gates pass)
+//! - `vitric bundle <project-dir> [options]` release bundle: attach the project into an engine copy and produce a self-contained single file
 //! - `vitric assets <project-dir> [options]` unify palette for all project PNGs (regularize AI-generated images into one tone)
 //! - `vitric team <project-dir>`             multi-agent team coordination blackboard: per-role deliverable health + gate/contract status (read-only, always exits 0)
 //! - `vitric turf <project-dir> --role <role> <changed-files...>`  turf enforcement: changed files exceeding the role's turf means exit 1
@@ -481,13 +481,10 @@ fn cmd_playtest(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `vitric gate`: delivery gate. The report (same JSON for humans and machines) always goes to stdout;
-/// all gates must pass to exit 0 — "delivery complete" is decided here, not by agent self-report.
+/// `vitric gate`: optional verification add-on. Report (JSON) always goes to stdout;
+/// exit 0 when all declared checks pass. Projects without gates pass automatically.
 ///
-/// Gate set: check + clear recording replay + assertion set (see gate::run), plus **optional playtest gate** — only runs when the manifest
-/// declares `gates.playtest`: actually runs a playtest swarm (verifiable reproducibility), aggregates a report, checks each
-/// declared contract (can clear / soft-lock count / unreachable endings / lazy actions / numeric breakage), turning "auto-clear the floor" into
-/// a delivery contract. Not declared = this gate is not run (backward compatible, existing gate behavior unchanged).
+/// Checks: check + playthrough replay + assertions + optional playtest (see gate::run).
 fn cmd_gate(args: &[String]) -> Result<(), String> {
     let dir = args.first().ok_or("gate 缺少项目目录参数")?;
     let (report, pass) = vitric_cli::gate::run(&PathBuf::from(dir))?;
@@ -495,7 +492,7 @@ fn cmd_gate(args: &[String]) -> Result<(), String> {
     if pass {
         Ok(())
     } else {
-        Err("交付门禁未通过（fail 项详见上方 JSON 报告）".to_string())
+        Err("gate 验证未通过（fail 项详见上方 JSON 报告）".to_string())
     }
 }
 

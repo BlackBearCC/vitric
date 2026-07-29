@@ -49,17 +49,23 @@ def turbo_off():
     rpc("sim/turbo", {"on": False})
 
 def wait_until(cond, max_s=120):
-    """Turbo-run until cond() returns True, then pause. cond is a zero-arg callable."""
+    """Turbo-run until cond() returns True, then pause. cond is a zero-arg callable.
+
+    Returns True if cond was met within max_s, False on timeout.
+    """
     turbo_on()
     deadline = time.time() + max_s
+    met = False
     while time.time() < deadline:
         try:
             if cond():
+                met = True
                 break
         except Exception:
             pass
         time.sleep(0.01)
     turbo_off()
+    return met
 
 def step(n=1):
     rpc("sim/step", {"ticks": n})
@@ -240,17 +246,47 @@ PLOTS = [(9, 6), (9, 7), (9, 8), (9, 9)]
 # ---- New helpers for 96-day flow ----
 
 def research(tech_id):
-    """Start research on a tech. Assumes player has enough TP + prereqs."""
+    """Start research on a tech. Assumes player has enough TP + prereqs.
+
+    Returns True if Research.current was set to tech_id (research actually started),
+    False otherwise (e.g. insufficient TP, missing prereq, button click failed).
+    """
+    tp_before = wget("@player")["result"]["components"].get("TechPoint", {}).get("value", 0)
     inp("t"); step(3)  # enter research mode (shows tech_menu)
     ui_click_by_name(f"tech_{tech_id}"); step(3)  # click tech button → start_research fn
     inp("r"); step(3)  # back to interact mode
+    r = wget("@colony")["result"]["components"].get("Research", {})
+    started = r.get("current") == tech_id
+    if not started:
+        tp_after = wget("@player")["result"]["components"].get("TechPoint", {}).get("value", 0)
+        print(f"    [research {tech_id}] FAILED: tp_before={tp_before} tp_after={tp_after} "
+              f"current={r.get('current')!r} known={r.get('known')}")
+    return started
 
-def wait_research_complete(max_s=60):
-    """Wait until Research.current becomes empty (research done). Uses turbo."""
-    wait_until(
-        lambda: not wget("@colony")["result"]["components"].get("Research", {}).get("current"),
-        max_s
-    )
+def wait_research_complete(max_s=60, expected_tech=None):
+    """Wait for research to complete by stepping the exact number of ticks needed.
+
+    Research.progress advances by ctx.dt (1/60) per tick. cost_total is in seconds.
+    So completion takes cost_total * 60 ticks. We step that many ticks + a margin,
+    then verify Research.current is empty.
+
+    If expected_tech is given, first verifies research actually started (current==expected_tech).
+    Returns True if research completed, False otherwise.
+    """
+    r = wget("@colony")["result"]["components"].get("Research", {})
+    if expected_tech is not None:
+        if r.get("current") != expected_tech:
+            print(f"    [wait_research_complete] expected current={expected_tech!r} "
+                  f"but got {r.get('current')!r} — research never started")
+            return False
+
+    cost_total = r.get("cost_total", 45)
+    # Step cost_total * 60 ticks + 200 tick margin (e.g. 45s → 2700 + 200 = 2900 ticks)
+    needed_ticks = int(cost_total * 60) + 200
+    step(needed_ticks)
+
+    r = wget("@colony")["result"]["components"].get("Research", {})
+    return not r.get("current", "")
 
 def trade_nomads(n=1):
     """Trade with nomads n times. Each: 3 wheat → 2 fiber + +2 relation."""
@@ -282,8 +318,14 @@ def negotiate_nomads(n=1):
         step(30)  # extra margin for relation write to settle
     inp("r"); step(3)  # back to interact mode
 
+def step_days(n):
+    """Advance n game-days by stepping ticks. 1 day = 90 seconds = 5400 ticks at 60Hz.
+    Steps in 1-day chunks to avoid HTTP timeout on large step calls."""
+    for _ in range(n):
+        step(90 * 60)
+
 def advance_to_day(target_day):
-    """Turbo-run until Colony.day >= target_day. Farms plots along the way.
+    """Advance time until Colony.day >= target_day. Farms plots along the way.
 
     Only harvests/plants when seed > 0 — seed is a finite initial resource (5),
     and once depleted, plant fails silently (emit plant-fail). Harvesting without
@@ -291,7 +333,7 @@ def advance_to_day(target_day):
     farming entirely and rely on trader companion's passive wheat contribution
     (+1 wheat per 12s when affinity>=50).
 
-    Uses turbo for each ~1-day farming cycle instead of old big_step(PLOT_CYCLE).
+    Uses step_days for deterministic, fast day advancement (no polling overhead).
     """
     while True:
         c = wget("@colony")["result"]["components"]["Colony"]
@@ -299,26 +341,23 @@ def advance_to_day(target_day):
             return
         inv = wget("@player")["result"]["components"]["Inventory"]
         if (inv.get("seed", 0) | 0) > 0:
-            # Turbo ~1 day, then harvest/plant
-            start_day = c["day"]
-            wait_until(
-                lambda: wget("@colony")["result"]["components"]["Colony"]["day"] >= start_day + 1,
-                max_s=10
-            )
+            # Step ~1 day, then harvest/plant
+            step_days(1)
             for (px, py) in PLOTS:
                 harvest(px, py)
             for (px, py) in PLOTS:
                 plant(px, py)
         else:
-            # No seed — skip farming, turbo straight to target day
-            wait_until(
-                lambda: wget("@colony")["result"]["components"]["Colony"]["day"] >= target_day,
-                max_s=300
-            )
+            # No seed — step straight to target day
+            c = wget("@colony")["result"]["components"]["Colony"]
+            days_to_advance = target_day - c["day"]
+            if days_to_advance > 0:
+                step_days(days_to_advance)
 
 def wait_for_tp(n, max_s=120):
-    """Wait until TechPoint.value >= n (scholar contribution or POI). Uses turbo."""
-    wait_until(
+    """Wait until TechPoint.value >= n (scholar contribution or POI). Uses turbo.
+    Returns True if TP reached n, False on timeout."""
+    return wait_until(
         lambda: wget("@player")["result"]["components"].get("TechPoint", {}).get("value", 0) >= n,
         max_s
     )
@@ -395,6 +434,8 @@ try:
         except Exception: time.sleep(1)
     else: raise RuntimeError("server not ready")
     rpc("sim/pause")
+    # Uncap CPU for turbo mode so the 96-day playthrough runs at full speed
+    rpc("sim/cpu-cap", {"cap": 0})
     step(3)
 
     # === Phase 1: Day 1-3 (Early Game → step 4) ===
@@ -408,8 +449,8 @@ try:
     # 2nd build + plant + harvest → step 3
     build_plot(9, 6)
     plant(9, 6)
-    # Turbo ~1 day for crops to mature
-    wait_until(lambda: wget("@colony")["result"]["components"]["Colony"]["day"] >= 2, max_s=10)
+    # Step ~1 day for crops to mature
+    step_days(1)
     harvest(9, 6)
     s = wget("@quest")["result"]["components"]["QuestLog"]["step"]
     check("step==3 (first harvest)", s == 3, f"actual={s}")
@@ -538,12 +579,8 @@ try:
     print("    inviting pending drifters...")
     for _ in range(3):
         if not invite_any_drifter():
-            # No drifter on field — turbo ~2 days for next spawn
-            start_day = wget("@colony")["result"]["components"]["Colony"]["day"]
-            wait_until(
-                lambda: wget("@colony")["result"]["components"]["Colony"]["day"] >= start_day + 2,
-                max_s=10
-            )
+            # No drifter on field — step 2 days for next spawn
+            step_days(2)
         else:
             step(5)
 
@@ -574,11 +611,25 @@ try:
     r = wget("@colony")["result"]["components"].get("Research", {})
     check("exploration_t1 researched", r.get("has_exploration_t1") == 1, f"known={r.get('known')}")
 
-    # industry_t1: wait for 2 TP from scholar contribution
+    # industry_t1: wait for 2 TP from scholar contribution.
+    # start_research can fail silently (toast-only) if TP < cost or prereq missing.
+    # Retry the wait_for_tp + research loop if it didn't start (scholar TP contribution
+    # is per-tick, may need more ticks).
     print("    researching industry_t1 (waiting for scholar TP)...")
-    wait_for_tp(2)
-    research("industry_t1")
-    wait_research_complete()
+    started = False
+    for attempt in range(6):  # up to 6 attempts (~6 scholar contributions worth of TP)
+        wait_for_tp(2)
+        tp = wget("@player")["result"]["components"].get("TechPoint", {}).get("value", 0)
+        print(f"    attempt {attempt+1}: TP={tp}, clicking tech_industry_t1...")
+        if research("industry_t1"):
+            started = True
+            break
+        # Research didn't start — likely TP was consumed by something else or the click
+        # raced with a scholar contribution. Advance a few ticks and retry.
+        step(30)
+    check("industry_t1 research started", started, "start_research never set Research.current")
+    ok = wait_research_complete(expected_tech="industry_t1")
+    check("industry_t1 research completed", ok, "wait_research_complete timed out or never started")
     r = wget("@colony")["result"]["components"].get("Research", {})
     check("industry_t1 researched", r.get("has_industry_t1") == 1, f"known={r.get('known')}")
 
@@ -589,11 +640,7 @@ try:
         if c.get("pop", 0) >= 5:
             break
         if not invite_any_drifter():
-            start_day = c["day"]
-            wait_until(
-                lambda: wget("@colony")["result"]["components"]["Colony"]["day"] >= start_day + 2,
-                max_s=10
-            )
+            step_days(2)
         else:
             step(5)
     c = wget("@colony")["result"]["components"]["Colony"]
@@ -613,12 +660,8 @@ try:
             print(f"    [WARN] day={c.get('day')}>=70 and no trader yet, proceeding anyway")
             break
         if not invite_any_drifter():
-            # No drifter — turbo ~2 days for next spawn (cadence is 2 days)
-            start_day = c["day"]
-            wait_until(
-                lambda: wget("@colony")["result"]["components"]["Colony"]["day"] >= start_day + 2,
-                max_s=10
-            )
+            # No drifter — step 2 days for next spawn (cadence is 2 days)
+            step_days(2)
         else:
             step(5)
     trader = find_companion_by_role("trader")

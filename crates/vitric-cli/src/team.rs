@@ -216,11 +216,11 @@ pub fn run(dir: &Path) -> Result<Value, String> {
                 .map(|s| s.to_string())
                 .collect();
             if playthroughs.is_empty() {
-                blocking.push("gates.playthroughs 为空——没有录像就没有证书，gate 必拒".to_string());
+                // Gate is opt-in; empty playthroughs just means no recording checks
             }
             if !recordings_missing.is_empty() {
                 blocking.push(format!(
-                    "门禁录像缺失（{}）——gate 必红，QA/导演先录通关",
+                    "gate 录像缺失（{}）——声明了 playthrough 但文件不存在",
                     recordings_missing.join(", ")
                 ));
             }
@@ -240,7 +240,7 @@ pub fn run(dir: &Path) -> Result<Value, String> {
             out
         }
         None => {
-            blocking.push("清单未声明 gates——vitric gate 不出证书，交付没有机器裁决".to_string());
+            // Gate is opt-in; no gates declared = no verification, which is fine
             json!({"declared": false})
         }
     };

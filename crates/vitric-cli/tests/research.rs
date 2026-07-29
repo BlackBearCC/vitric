@@ -108,6 +108,94 @@ fn start_research_deducts_techpoints() {
 }
 
 #[test]
+fn industry_t1_completes_after_time() {
+    // Reproduce the recording failure: industry_t1 research completes (current clears)
+    // but has_industry_t1 is NOT set and known does NOT include industry_t1.
+    // Pre-seed known with the 3 T1 techs that were already researched in the recording,
+    // then set current=industry_t1 with a tiny cost_total (0.1s = 6 ticks at 60Hz).
+    let (mut sim, mut rt) = Runtime::boot(&frontier_dir()).unwrap();
+    set_field(&mut sim, "colony", "Research.known",
+        json!(r#"["survival_t1","agriculture_t1","exploration_t1"]"#));
+    set_field(&mut sim, "colony", "Research.current", json!("industry_t1"));
+    set_field(&mut sim, "colony", "Research.cost_total", json!(0.1));
+
+    let mut saw_researched = false;
+    for _ in 0..8 {
+        sim.step(&mut rt).unwrap();
+        let observed = rt.drain_observed();
+        if observed.iter().any(|e| e.name == "researched"
+            && e.data.get("id").and_then(|v| v.as_str()) == Some("industry_t1"))
+        {
+            saw_researched = true;
+        }
+    }
+
+    assert!(saw_researched, "researched event for industry_t1 should have been emitted");
+
+    let current = get_field(&sim, "colony", "Research.current");
+    assert_eq!(current.as_str(), Some(""),
+        "Research.current should be reset to empty after completion");
+
+    let known = get_field(&sim, "colony", "Research.known");
+    let known_str = known.as_str().expect("known is a text field");
+    assert!(known_str.contains("industry_t1"),
+        "Research.known should contain industry_t1, got {known_str}");
+
+    let has = get_field(&sim, "colony", "Research.has_industry_t1");
+    assert_eq!(has.as_i64(), Some(1),
+        "Research.has_industry_t1 should be 1 after completion, got {has}");
+}
+
+#[test]
+fn industry_t1_completes_via_start_research() {
+    // Full pipeline: trigger start_research for industry_t1 via ui-activate (like the recording).
+    // Pre-seed known with 3 T1 techs + give enough TP. Step until research completes.
+    let (mut sim, mut rt) = Runtime::boot(&frontier_dir()).unwrap();
+    set_field(&mut sim, "player", "TechPoint.value", json!(5));
+    set_field(&mut sim, "colony", "Research.known",
+        json!(r#"["survival_t1","agriculture_t1","exploration_t1"]"#));
+
+    sim.inject_reply("ui-activate", json!({ "action": "pick-tech-industry_t1" }));
+    sim.step(&mut rt).unwrap(); // start_research runs, sets current=industry_t1
+
+    let current = get_field(&sim, "colony", "Research.current");
+    assert_eq!(current.as_str(), Some("industry_t1"),
+        "Research.current should be industry_t1 after start_research, got {current}");
+
+    // Step until research completes (cost_total=45s = 2700 ticks at 60Hz; use 3000 to be safe).
+    let mut saw_researched = false;
+    for i in 0..3000 {
+        sim.step(&mut rt).unwrap();
+        let observed = rt.drain_observed();
+        if observed.iter().any(|e| e.name == "researched"
+            && e.data.get("id").and_then(|v| v.as_str()) == Some("industry_t1"))
+        {
+            saw_researched = true;
+            break;
+        }
+        // Early exit if current becomes empty without researched event (the bug).
+        let cur = get_field(&sim, "colony", "Research.current");
+        if cur.as_str() == Some("") {
+            let known = get_field(&sim, "colony", "Research.known");
+            let has = get_field(&sim, "colony", "Research.has_industry_t1");
+            panic!("Research.current became empty at tick {i} without researched event. \
+                    known={known}, has_industry_t1={has}");
+        }
+    }
+
+    assert!(saw_researched, "researched event for industry_t1 should have been emitted");
+
+    let known = get_field(&sim, "colony", "Research.known");
+    let known_str = known.as_str().expect("known is a text field");
+    assert!(known_str.contains("industry_t1"),
+        "Research.known should contain industry_t1, got {known_str}");
+
+    let has = get_field(&sim, "colony", "Research.has_industry_t1");
+    assert_eq!(has.as_i64(), Some(1),
+        "Research.has_industry_t1 should be 1 after completion, got {has}");
+}
+
+#[test]
 fn start_research_rejects_insufficient_techpoints() {
     // Player has 1 TechPoint. survival_t1 costs 2. start_research should reject:
     // emit toast-show{ text: "科技点不足" }, NOT emit tp-set, NOT set Research.current.

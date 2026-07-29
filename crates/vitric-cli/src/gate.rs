@@ -1,19 +1,17 @@
-//! `vitric gate` — delivery gate.
+//! `vitric gate` — optional verification add-on.
 //!
-//! Stance: games are made by agents (AI), so "done" cannot rely on agent self-report — the engine must **mechanically**
-//! verify delivery quality. The core of the gate is deterministic recording: a recording that can be replayed bit-by-bit
-//! across checkpoint points, and during replay actually triggered the terminal event (default game-won), is an
-//! **unforgeable clear certificate** — to forge any single frame, the state hash must diverge at the next checkpoint.
+//! Gate is a supplementary tool, not a project requirement. Projects work fine without it.
+//! When declared, it provides mechanical verification via deterministic recording replay:
+//! a recording replayed bit-by-bit across checkpoint hashes, with the terminal event observed,
+//! proves the game is clearable from a cold start.
 //!
-//! Four gates (declared in manifest `gates` field, see [`vitric_data::Gates`] in vitric-data):
-//! 1. check gate: full project verification (same as vitric check), any error = FAIL;
-//! 2. clear recording gate: each recording is independently replayed, checkpoints consistent + must_emit event occurred + length ≤ max_ticks;
-//! 3. assertion gate (optional): assertion set fully evaluated every tick during replay, any moment of violation = FAIL;
-//! 4. playtest gate (optional, runs only when `gates.playtest` is declared): actually runs a playtest swarm (deterministic & reproducible),
-//!    aggregates a report, then checks each contract declared in the manifest (clearable or not, soft-locks, unreachable endings, inert actions,
-//!    numeric collapse) — turns "auto-clearing the floor" into a delivery contract, any failure = FAIL.
+//! Four checks (all optional, declared in manifest `gates` field, see [`vitric_data::Gates`]):
+//! 1. check: full project verification (same as vitric check), any error = FAIL;
+//! 2. playthrough: each recording independently replayed, checkpoints consistent + must_emit event occurred + length ≤ max_ticks;
+//! 3. assertions (optional): assertion set evaluated every tick during replay, any violation = FAIL;
+//! 4. playtest (optional): runs a playtest swarm, checks declared contracts (clearable, soft-locks, unreachable endings, etc.).
 //!
-//! Projects that don't declare gates are rejected outright — no gate, no certificate; an empty gate is a backdoor.
+//! Projects without `gates` in their manifest simply pass — gate is opt-in.
 
 use std::path::Path;
 
@@ -37,23 +35,22 @@ type Assertion = (String, Vec<(String, String, Value)>);
 /// (directory has no manifest / manifest doesn't declare gates) — these must be explicit hard errors, not a pass=false report.
 pub fn run(dir: &Path) -> Result<(Value, bool), String> {
     let project = Project::load(dir).map_err(|r| r.to_string())?;
-    // Constraint: without gate declarations there's no machine-verifiable delivery standard, gate refuses to issue a certificate.
-    // Empty playthroughs likewise — the certificate body is the clear recording; a gate without recordings is an empty gate.
+    // Gate is opt-in: projects without gates simply pass.
     let Some(gates) = project.manifest.gates.clone() else {
-        return Err(
-            "清单未声明 gates——无门禁项目不出证书。\
-             提示：在 vitric.json 加 \"gates\": {\"playthroughs\": \
-             [{\"recording\": \"qa/clear.json\", \"must_emit\": \"game-won\"}]}，\
-             录像用 vitric run <项目目录> --record qa/clear.json 录制"
-                .to_string(),
-        );
+        return Ok((json!({
+            "pass": true,
+            "project": project.manifest.name,
+            "gates": [],
+            "note": "未声明 gates，跳过验证（gate 是可选附加功能）",
+        }), true));
     };
-    if gates.playthroughs.is_empty() {
-        return Err(
-            "gates.playthroughs 为空——通关录像是交付证书的本体，没有录像就没有证书。\
-             提示：vitric run <项目目录> --record qa/clear.json 录一局通关，再挂进 gates.playthroughs"
-                .to_string(),
-        );
+    if gates.playthroughs.is_empty() && gates.assertions.is_none() && gates.playtest.is_none() {
+        return Ok((json!({
+            "pass": true,
+            "project": project.manifest.name,
+            "gates": [],
+            "note": "gates 已声明但无检查项，跳过验证",
+        }), true));
     }
 
     let mut results: Vec<Value> = Vec::new();

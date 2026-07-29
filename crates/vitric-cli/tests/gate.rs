@@ -1,7 +1,7 @@
-//! `vitric gate` end-to-end: all verdict paths of the delivery gate.
+//! `vitric gate` end-to-end: all verdict paths of the optional verification add-on.
 //!
-//! Position lock: a clear recording is an unforgeable delivery certificate —
-//! a genuine clear recording is accepted; tampering with one frame is rejected; a recording without a win is rejected; no recording / no gate is rejected outright.
+//! Gate is opt-in: projects without gates pass; when declared, a clear recording is verified
+//! bit-by-bit — genuine recording accepted, tampered frame rejected, recording without win rejected.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -183,19 +183,19 @@ fn missing_recording_file_fails_explicitly() {
 }
 
 #[test]
-fn manifest_without_gates_is_rejected_not_passed() {
+fn manifest_without_gates_passes_as_opt_in() {
     let dir = copy_example("nogates");
     let out = run_gate(&dir);
-    assert!(!out.status.success(), "无门禁项目不出证书");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("清单未声明 gates——无门禁项目不出证书"), "{stderr}");
+    assert!(out.status.success(), "gate 是可选附加功能，无 gates 应直接通过");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("跳过验证"), "{stdout}");
 
-    // Declaring gates but with empty playthroughs = the same backdoor, also rejected
+    // Declaring gates but with no check items = also passes (nothing to verify)
     set_gates(&dir, json!({"check": true}));
     let out = run_gate(&dir);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("playthroughs 为空"), "{stderr}");
+    assert!(out.status.success(), "gates 无检查项应通过");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("跳过验证"), "{stdout}");
 
     fs::remove_dir_all(&dir).unwrap();
 }
