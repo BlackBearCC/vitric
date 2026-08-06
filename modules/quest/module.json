@@ -2,5 +2,6 @@
   "name": "quest",
   "schema": "schema.json",
   "rules": ["rules/quest.json"],
-  "scripts": ["scripts/quest.js"]
+  "scripts": ["scripts/quest.js"],
+  "testAssertions": "test-assertions.json"
 }

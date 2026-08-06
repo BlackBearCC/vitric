@@ -1,0 +1,12 @@
+[
+  {
+    "id": "level-positive",
+    "description": "Progression level must be at least 1",
+    "if": [["@player.Progression.level", ">=", 1]]
+  },
+  {
+    "id": "xp-non-negative",
+    "description": "XP must not be negative",
+    "if": [["@player.Progression.xp", ">=", 0]]
+  }
+]

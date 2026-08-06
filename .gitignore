@@ -25,3 +25,5 @@ Thumbs.db
 *.tmp
 
 echo-linux
+.libtv-workspace/
+crates/vitric-cli/coin-run-macos

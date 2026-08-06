@@ -1,0 +1,30 @@
+{
+  "observation": {
+    "include": ["Position", "Velocity", "Sprite", "Score", "Coin", "Player", "Collider", "Camera", "Text"],
+    "relabel": [
+      { "path": "player/Score.value", "name": "score" }
+    ],
+    "derived": [
+      {
+        "type": "distance",
+        "name": "dist_to_nearest_coin",
+        "from": "player",
+        "to": "coin-1",
+        "metric": "manhattan"
+      },
+      {
+        "type": "count",
+        "name": "coins_remaining",
+        "component": "Coin"
+      }
+    ]
+  },
+  "goal": {
+    "quantity": "coins_remaining",
+    "direction": "min"
+  },
+  "terminal": {
+    "win_events": ["game-won"],
+    "lose_events": []
+  }
+}

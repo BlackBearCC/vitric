@@ -1,0 +1,17 @@
+[
+  {
+    "id": "shop-prices-positive",
+    "description": "All shop prices must be positive integers",
+    "if": [["@shop.Shop.prices", "exists"]]
+  },
+  {
+    "id": "shop-stocks-non-negative",
+    "description": "All shop stocks must be non-negative",
+    "if": [["@shop.Shop.stocks", "exists"]]
+  },
+  {
+    "id": "shop-items-prices-aligned",
+    "description": "Shop items and prices arrays must have equal length",
+    "if": [["@shop.Shop.items", "exists"]]
+  }
+]

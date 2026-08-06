@@ -6,6 +6,7 @@ pub mod bc7;
 pub mod bundle;
 pub mod frames;
 pub mod gate;
+pub mod install;
 pub mod llm;
 pub mod normals;
 pub mod playtest_llm;

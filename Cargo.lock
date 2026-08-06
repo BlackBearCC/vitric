@@ -2951,6 +2951,7 @@ dependencies = [
  "png",
  "pollster",
  "rodio",
+ "serde",
  "serde_json",
  "softbuffer",
  "tiny_http",

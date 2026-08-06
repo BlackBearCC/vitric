@@ -1,0 +1,12 @@
+[
+  {
+    "id": "quest-state-valid",
+    "description": "Quest state must be one of: inactive, offered, active, completed, failed",
+    "if": [["@herb-quest.QuestState.state", "exists"]]
+  },
+  {
+    "id": "quest-objectives-non-negative",
+    "description": "Quest objective progress must not be negative",
+    "if": [["@herb-quest.QuestState.progress", ">=", 0]]
+  }
+]

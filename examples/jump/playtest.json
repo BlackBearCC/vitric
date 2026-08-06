@@ -1,0 +1,26 @@
+{
+  "observation": {
+    "include": ["Position", "Velocity", "Body", "Collider", "Sprite", "Camera", "Player", "Solid", "Text"],
+    "relabel": [
+      { "path": "hero/Body.grounded", "name": "grounded" },
+      { "path": "hero/Position.y", "name": "height" }
+    ],
+    "derived": [
+      {
+        "type": "distance",
+        "name": "dist_to_goal",
+        "from": "hero",
+        "to": "goal",
+        "metric": "manhattan"
+      }
+    ]
+  },
+  "goal": {
+    "quantity": "dist_to_goal",
+    "direction": "min"
+  },
+  "terminal": {
+    "win_events": ["game-won", "reached-goal"],
+    "lose_events": ["game-lose"]
+  }
+}

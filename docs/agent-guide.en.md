@@ -2,7 +2,7 @@
 
 A one-page manual for AI agents (and humans): how to autonomously run, observe, test, and modify a Vitric game.
 
-## Eight commands
+## Nine commands
 
 ```bash
 vitric check <project-dir>                 # validate everything (schema/scenes/rules/scripts/assets); errors carry path + code + fix hint
@@ -11,6 +11,7 @@ vitric replay <project-dir> <recording>    # replay a recording, verifying deter
 vitric gate <project-dir>                  # delivery gate: check + playthrough replays + assertions; exit 0 only if ALL pass (see "Delivery gates")
 vitric bundle <project-dir> [--out file] [--engine exe]  # ship a self-contained single file; gate must PASS first — no certificate, no release (see "Shipping a bundle")
 vitric assets <project-dir> [--colors N] [--height H] [--palette-lock]  # harmonize all project PNGs onto one shared palette (AI-generated art → one coherent look), see docs/art-pipeline.md
+vitric install <module> [--project <dir>]  # install a gameplay module from the built-in registry into a project (copies files + updates vitric.json includes); `vitric install --list` shows available modules
 vitric team <project-dir>                  # multi-agent team blackboard: per-role deliverable health + contract/gate status + blocking hints (read-only, always exits 0), see team/README.md
 vitric turf <project-dir> --role <name> <changed-files...>  # turf enforcement: exit 1 naming every changed file outside the role's turf
 ```

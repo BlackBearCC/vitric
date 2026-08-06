@@ -2,5 +2,6 @@
   "name": "equipment",
   "schema": "schema.json",
   "rules": ["rules/equipment.json"],
-  "scripts": ["scripts/equipment.js"]
+  "scripts": ["scripts/equipment.js"],
+  "testAssertions": "test-assertions.json"
 }

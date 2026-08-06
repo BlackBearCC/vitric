@@ -2,5 +2,6 @@
   "name": "progression",
   "schema": "schema.json",
   "rules": ["rules/progression.json"],
-  "scripts": ["scripts/progression.js"]
+  "scripts": ["scripts/progression.js"],
+  "testAssertions": "test-assertions.json"
 }

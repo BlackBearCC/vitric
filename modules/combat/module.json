@@ -2,5 +2,6 @@
   "name": "combat",
   "schema": "schema.json",
   "rules": ["rules/combat.json"],
-  "scripts": ["scripts/combat.js"]
+  "scripts": ["scripts/combat.js"],
+  "testAssertions": "test-assertions.json"
 }

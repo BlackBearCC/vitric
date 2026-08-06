@@ -93,6 +93,11 @@ pub struct ModuleManifest {
     /// Nested includes (paths relative to this module's directory). Cycles are detected (VD093).
     #[serde(default)]
     pub includes: Vec<String>,
+    /// Domain-specific test assertions shipped with the module (path relative to the module directory).
+    /// When a project includes this module, these assertions are available for `vitric playtest` / `vitric gate`
+    /// to verify module-specific invariants (e.g. inventory counts non-negative, HP never below zero).
+    #[serde(default)]
+    pub test_assertions: Option<String>,
 }
 
 /// Delivery gate declaration (the manifest's `gates` field).

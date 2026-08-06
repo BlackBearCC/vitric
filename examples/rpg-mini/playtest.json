@@ -1,0 +1,39 @@
+{
+  "observation": {
+    "include": ["Position", "Velocity", "Sprite", "Health", "Player", "Enemy", "Pickup", "Npc", "GameState", "QuestState", "Inventory", "DialogueRunner", "Text", "Camera"],
+    "relabel": [
+      { "path": "player/Health.hp", "name": "player_hp" },
+      { "path": "wolf/Health.hp", "name": "wolf_hp" },
+      { "path": "herb-quest/QuestState.state", "name": "quest_state" }
+    ],
+    "derived": [
+      {
+        "type": "distance",
+        "name": "dist_to_wolf",
+        "from": "player",
+        "to": "wolf",
+        "metric": "manhattan"
+      },
+      {
+        "type": "distance",
+        "name": "dist_to_elder",
+        "from": "player",
+        "to": "elder",
+        "metric": "manhattan"
+      },
+      {
+        "type": "count",
+        "name": "herbs_in_inventory",
+        "component": "Pickup"
+      }
+    ]
+  },
+  "goal": {
+    "quantity": "dist_to_elder",
+    "direction": "min"
+  },
+  "terminal": {
+    "win_events": ["game-win", "quest-turned-in"],
+    "lose_events": ["game-lose", "died"]
+  }
+}

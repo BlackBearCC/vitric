@@ -72,6 +72,7 @@ fn main() {
         Some("bundle") => vitric_cli::bundle::run(&args[1..]),
         Some("run-embedded") => cmd_run_embedded(&args[1..]),
         Some("assets") => vitric_cli::assets_cmd::run(&args[1..]),
+        Some("install") => vitric_cli::install::run(&args[1..]),
         Some("team") => cmd_team(&args[1..]),
         Some("turf") => cmd_turf(&args[1..]),
         Some("gpu-probe") => gpu::gpu_probe(&args[1..]),
@@ -88,7 +89,7 @@ fn main() {
 }
 
 fn usage_and_exit() -> ! {
-    eprintln!("用法: vitric <check|run|replay|playtest|balance|gate|bundle|assets|team|turf> <项目目录> [选项]\n详见 vitric 仓库 docs/");
+    eprintln!("用法: vitric <check|run|replay|playtest|balance|gate|bundle|assets|install|team|turf> <项目目录> [选项]\n详见 vitric 仓库 docs/");
     std::process::exit(2);
 }
 

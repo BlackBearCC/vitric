@@ -1,0 +1,33 @@
+{
+  "observation": {
+    "include": ["Position", "Velocity", "Sprite", "Health", "Player", "Enemy", "Npc", "GameState", "QuestState", "Inventory", "DialogueRunner", "Progression", "Equipment", "Skill", "Text", "Camera"],
+    "relabel": [
+      { "path": "player/Health.hp", "name": "hp" },
+      { "path": "player/Progression.level", "name": "level" },
+      { "path": "player/Progression.xp", "name": "xp" },
+      { "path": "game/GameState.phase", "name": "phase" }
+    ],
+    "derived": [
+      {
+        "type": "count",
+        "name": "alive_enemies",
+        "component": "Enemy"
+      },
+      {
+        "type": "distance",
+        "name": "dist_to_nearest_npc",
+        "from": "player",
+        "to": "elder",
+        "metric": "manhattan"
+      }
+    ]
+  },
+  "goal": {
+    "quantity": "alive_enemies",
+    "direction": "min"
+  },
+  "terminal": {
+    "win_events": ["game-won", "quest-turned-in"],
+    "lose_events": ["game-lose", "died"]
+  }
+}

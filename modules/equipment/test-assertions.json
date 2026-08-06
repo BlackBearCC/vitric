@@ -1,0 +1,7 @@
+[
+  {
+    "id": "equip-slots-valid",
+    "description": "Equipment slot must be a known slot name",
+    "if": [["@player.Equipment.slots", "exists"]]
+  }
+]

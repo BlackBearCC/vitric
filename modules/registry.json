@@ -1,0 +1,82 @@
+{
+  "modules": [
+    {
+      "name": "inventory",
+      "description": "拾取/堆叠/溢出/转移 — 背包系统",
+      "source": "builtin",
+      "path": "inventory"
+    },
+    {
+      "name": "quest",
+      "description": "任务状态机/目标追踪/奖励 — 任务系统",
+      "source": "builtin",
+      "path": "quest"
+    },
+    {
+      "name": "dialogue",
+      "description": "分支对话树/选项推进 — 对话系统",
+      "source": "builtin",
+      "path": "dialogue"
+    },
+    {
+      "name": "game-flow",
+      "description": "标题/进行/胜利/失败/重启 — 游戏流程控制",
+      "source": "builtin",
+      "path": "game-flow"
+    },
+    {
+      "name": "combat",
+      "description": "HP/攻击/伤害/死亡/治疗 — 战斗系统",
+      "source": "builtin",
+      "path": "combat"
+    },
+    {
+      "name": "progression",
+      "description": "XP/等级/自动升级 — 成长系统",
+      "source": "builtin",
+      "path": "progression"
+    },
+    {
+      "name": "loot",
+      "description": "战利品表/确定性RNG/自动拾取 — 掉落系统",
+      "source": "builtin",
+      "path": "loot"
+    },
+    {
+      "name": "shop",
+      "description": "买卖/货币/库存/经济闭环 — 商店系统",
+      "source": "builtin",
+      "path": "shop"
+    },
+    {
+      "name": "equipment",
+      "description": "槽位/穿脱/属性奖励事件 — 装备系统",
+      "source": "builtin",
+      "path": "equipment"
+    },
+    {
+      "name": "status-effects",
+      "description": "DoT/HoT/属性修饰/清除 — 状态效果系统",
+      "source": "builtin",
+      "path": "status-effects"
+    },
+    {
+      "name": "skills",
+      "description": "法力/冷却/施法验证/效果桥接 — 技能系统",
+      "source": "builtin",
+      "path": "skills"
+    },
+    {
+      "name": "crafting",
+      "description": "配方/材料消耗/产出/数据驱动 — 合成系统",
+      "source": "builtin",
+      "path": "crafting"
+    },
+    {
+      "name": "achievement",
+      "description": "数据驱动的成就定义与解锁 — 成就系统",
+      "source": "builtin",
+      "path": "achievement"
+    }
+  ]
+}

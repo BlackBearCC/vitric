@@ -68,3 +68,6 @@
 - UI 组件: UiRoot / Ui (anchor+parent布局) / Panel / UiLabel / Button (action+state) / Container (VBox/HBox)
 - 程序化生成: ctx.random() 取种子化随机数, ctx.spawn({ Component: {...} }) 运行时创建实体
 - includes 机制: vitric.json 的 includes 数组引入模块目录，合并 schema/rules/scripts
+- `vitric install <模块名>`: 从内置模块注册表安装玩法模块（复制文件到 modules/ + 更新 includes）；`vitric install --list` 列出可用模块
+- 模块自带测试断言: module.json 的 testAssertions 字段声明该模块的领域断言文件（如 combat 的 HP 非负检查），供 playtest/gate 使用
+- playtest.json: 项目根目录可选配置，声明 playtest 观察投影（include/exclude/relabel/derived quantities）、greedy 目标、终局事件覆盖

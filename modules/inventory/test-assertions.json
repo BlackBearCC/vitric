@@ -1,0 +1,17 @@
+[
+  {
+    "id": "inv-no-negative-count",
+    "description": "No inventory slot should have a negative count",
+    "if": [["@player.Inventory.counts", "exists"]]
+  },
+  {
+    "id": "inv-within-capacity",
+    "description": "Inventory items count must not exceed capacity",
+    "if": [["@player.Inventory.capacity", ">=", 1]]
+  },
+  {
+    "id": "inv-items-counts-aligned",
+    "description": "Items and counts arrays must have equal length",
+    "if": [["@player.Inventory.items", "exists"]]
+  }
+]
