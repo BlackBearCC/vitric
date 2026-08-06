@@ -1,12 +1,18 @@
 [
   {
     "id": "level-positive",
-    "description": "Progression level must be at least 1",
-    "if": [["@player.Progression.level", ">=", 1]]
+    "if": [["@player.Level.value", ">=", 1]]
   },
   {
     "id": "xp-non-negative",
-    "description": "XP must not be negative",
-    "if": [["@player.Progression.xp", ">=", 0]]
+    "if": [["@player.XP.current", ">=", 0]]
+  },
+  {
+    "id": "xp-threshold-positive",
+    "if": [["@player.XP.threshold", ">=", 1]]
+  },
+  {
+    "id": "level-points-non-negative",
+    "if": [["@player.Level.points", ">=", 0]]
   }
 ]

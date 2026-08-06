@@ -1,7 +1,6 @@
 [
   {
-    "id": "equip-slots-valid",
-    "description": "Equipment slot must be a known slot name",
+    "id": "equip-items-within-slots",
     "if": [["@player.Equipment.slots", "exists"]]
   }
 ]

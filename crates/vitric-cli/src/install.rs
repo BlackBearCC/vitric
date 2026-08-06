@@ -64,9 +64,20 @@ impl Registry {
 }
 
 /// Find the engine's bundled modules directory.
-/// The executable is at `<repo>/target/release/vitric` (or debug); modules are at `<repo>/modules/`.
-/// We walk up from the executable to find a `modules/` directory containing `registry.json`.
+///
+/// Resolution order:
+/// 1. `VITRIC_MODULES` env var (explicit override — for release binaries or custom layouts)
+/// 2. Walk up from the executable to find a `modules/` dir containing `registry.json`
+///    (works in dev: `target/release/vitric` → walk up → `<repo>/modules/`)
 fn find_engine_modules() -> Result<PathBuf, String> {
+    if let Ok(dir) = std::env::var("VITRIC_MODULES") {
+        let p = PathBuf::from(&dir);
+        if p.join("registry.json").exists() {
+            return Ok(p);
+        }
+        return Err(format!("VITRIC_MODULES={dir} 但该目录下没有 registry.json"));
+    }
+
     let exe = std::env::current_exe().map_err(|e| format!("无法定位引擎可执行文件: {e}"))?;
     let mut dir = exe.parent().ok_or("引擎可执行文件没有父目录")?;
     // Walk up at most 5 levels (target/release → target → repo)
@@ -80,7 +91,7 @@ fn find_engine_modules() -> Result<PathBuf, String> {
             None => break,
         };
     }
-    Err("找不到引擎内置模块目录（modules/registry.json）。如果你是从源码运行的，请确保在仓库根目录下执行。".to_string())
+    Err("找不到引擎内置模块目录。请设置 VITRIC_MODULES 环境变量指向 modules/ 目录，或在仓库根目录下执行。".to_string())
 }
 
 /// Run the install command.
@@ -177,35 +188,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
     copy_dir_recursive(&source_dir, &dest_dir)?;
 
-    // Update vitric.json includes
+    // Update vitric.json includes — text-based patching preserves original key order & formatting
+    let include_path = format!("modules/{}", entry.name);
     let manifest_text = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("读取 vitric.json 失败: {e}"))?;
-    let mut manifest: serde_json::Value = serde_json::from_str(&manifest_text)
-        .map_err(|e| format!("解析 vitric.json 失败: {e}"))?;
-
-    let include_path = format!("modules/{}", entry.name);
-    let includes = manifest
-        .get_mut("includes")
-        .and_then(|v| v.as_array_mut());
-
-    match includes {
-        Some(arr) => {
-            let already = arr.iter().any(|v| {
-                v.as_str().map(|s| s == include_path).unwrap_or(false)
-            });
-            if !already {
-                arr.push(serde_json::Value::String(include_path.clone()));
-            }
-        }
-        None => {
-            manifest["includes"] = serde_json::json!([include_path]);
-        }
+    let updated_text = patch_includes(&manifest_text, &include_path)?;
+    if updated_text != manifest_text {
+        fs::write(&manifest_path, &updated_text)
+            .map_err(|e| format!("写入 vitric.json 失败: {e}"))?;
     }
-
-    let updated = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| format!("序列化 vitric.json 失败: {e}"))?;
-    fs::write(&manifest_path, updated)
-        .map_err(|e| format!("写入 vitric.json 失败: {e}"))?;
 
     println!(
         "{}",
@@ -219,6 +210,119 @@ pub fn run(args: &[String]) -> Result<(), String> {
     );
 
     Ok(())
+}
+
+/// Patch the `includes` array in a vitric.json text, preserving original key order and formatting.
+///
+/// - If `includes` already contains the path → no-op (return original text unchanged).
+/// - If `includes` exists but doesn't contain the path → append to the array (text-level insertion
+///   before the closing `]`).
+/// - If `includes` doesn't exist → insert a new `"includes": ["<path>"]` entry before the final `}`.
+fn patch_includes(json_text: &str, include_path: &str) -> Result<String, String> {
+    // Parse to check if already present
+    let parsed: serde_json::Value = serde_json::from_str(json_text)
+        .map_err(|e| format!("解析 vitric.json 失败: {e}"))?;
+    let root = parsed
+        .as_object()
+        .ok_or("vitric.json 顶层不是对象")?;
+
+    // Already present?
+    if let Some(includes) = root.get("includes").and_then(|v| v.as_array()) {
+        if includes.iter().any(|v| {
+            v.as_str().map(|s| s == include_path).unwrap_or(false)
+        }) {
+            return Ok(json_text.to_string());
+        }
+    }
+
+    let mut text = json_text.to_string();
+
+    if root.get("includes").and_then(|v| v.as_array()).is_some() {
+        // Append to existing includes array: find the closing "]" of the includes value
+        let includes_key = find_includes_value_range(&text)?;
+        let close_bracket = text[includes_key.clone()].rfind(']').ok_or("找不到 includes 数组的闭合 ]")?;
+        let abs_pos = includes_key.start + close_bracket;
+        // Check if the array is empty "[]" or has content
+        let array_inner = text[includes_key.start + 1..includes_key.end - 1].trim();
+        if array_inner.is_empty() {
+            // Empty array — insert directly
+            text.insert_str(abs_pos, &format!("\"{include_path}\""));
+        } else {
+            // Non-empty — insert before the closing bracket, with a comma
+            // Walk backwards from ] to find last non-whitespace
+            let mut insert_at = abs_pos;
+            while insert_at > 0 && text.as_bytes()[insert_at - 1].is_ascii_whitespace() {
+                insert_at -= 1;
+            }
+            text.insert_str(insert_at, &format!(", \"{include_path}\""));
+        }
+    } else {
+        // No includes key — insert before the final closing brace
+        let last_brace = text.rfind('}').ok_or("找不到 vitric.json 的闭合 }")?;
+        // Check if there's content before the brace (trailing comma handling)
+        let mut insert_at = last_brace;
+        while insert_at > 0 && text.as_bytes()[insert_at - 1].is_ascii_whitespace() {
+            insert_at -= 1;
+        }
+        let needs_comma = insert_at > 0 && text.as_bytes()[insert_at - 1] != b'{' && text.as_bytes()[insert_at - 1] != b',';
+        let prefix = if needs_comma { "," } else { "" };
+        let indent = detect_indent(&text);
+        let insertion = format!(
+            "{prefix}\n{indent}\"includes\": [\"{include_path}\"]\n",
+        );
+        text.insert_str(insert_at, &insertion);
+    }
+
+    Ok(text)
+}
+
+/// Find the byte range of the value following the `"includes"` key in JSON text.
+fn find_includes_value_range(text: &str) -> Result<std::ops::Range<usize>, String> {
+    let key_pos = text.find("\"includes\"").ok_or("找不到 includes 键")?;
+    // Skip past the key and its following colon+whitespace
+    let after_key = key_pos + "\"includes\"".len();
+    let colon_pos = text[after_key..]
+        .find(':')
+        .ok_or("includes 键后缺少冒号")?;
+    let value_start = after_key + colon_pos + 1;
+    // Skip whitespace after colon
+    let value_start = text[value_start..]
+        .char_indices()
+        .find(|(_, c)| !c.is_whitespace())
+        .map(|(i, _)| value_start + i)
+        .unwrap_or(value_start);
+    // Find the matching closing bracket for the array
+    let mut depth = 0i32;
+    let mut value_end = value_start;
+    for (i, b) in text[value_start..].bytes().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    value_end = value_start + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if value_end == value_start {
+        return Err("找不到 includes 数组的闭合 ]".to_string());
+    }
+    Ok(value_start..value_end)
+}
+
+/// Detect the indentation unit used in a JSON file (first indented line).
+fn detect_indent(text: &str) -> &str {
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed != line && !trimmed.is_empty() {
+            let indent_len = line.len() - trimmed.len();
+            return &line[..indent_len];
+        }
+    }
+    "  "
 }
 
 const USAGE_TIP: &str = "用法: vitric install <模块名> [--project <dir>] 或 vitric install --list";
@@ -273,5 +377,50 @@ mod tests {
         let list = r.list();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0], ("a", "desc a"));
+    }
+
+    #[test]
+    fn patch_appends_to_existing_includes() {
+        let json = r#"{
+  "name": "my-game",
+  "includes": ["../../modules/inventory"]
+}"#;
+        let result = patch_includes(json, "modules/combat").unwrap();
+        assert!(result.contains("\"../../modules/inventory\""));
+        assert!(result.contains("\"modules/combat\""));
+        // Key order preserved: "name" still before "includes"
+        assert!(result.find("\"name\"").unwrap() < result.find("\"includes\"").unwrap());
+    }
+
+    #[test]
+    fn patch_noop_if_already_present() {
+        let json = r#"{"includes": ["modules/inventory"]}"#;
+        let result = patch_includes(json, "modules/inventory").unwrap();
+        assert_eq!(result, json);
+    }
+
+    #[test]
+    fn patch_creates_includes_if_missing() {
+        let json = r#"{
+  "name": "my-game",
+  "schema": "schema.json"
+}"#;
+        let result = patch_includes(json, "modules/inventory").unwrap();
+        assert!(result.contains("\"includes\""));
+        assert!(result.contains("\"modules/inventory\""));
+        // Existing keys still present and in order
+        assert!(result.find("\"name\"").unwrap() < result.find("\"includes\"").unwrap());
+        // Valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["includes"][0], "modules/inventory");
+    }
+
+    #[test]
+    fn patch_handles_empty_includes_array() {
+        let json = r#"{"includes": []}"#;
+        let result = patch_includes(json, "modules/inventory").unwrap();
+        assert!(result.contains("\"modules/inventory\""));
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["includes"].as_array().unwrap().len(), 1);
     }
 }

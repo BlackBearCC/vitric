@@ -10,7 +10,7 @@
         "type": "distance",
         "name": "dist_to_goal",
         "from": "hero",
-        "to": "goal",
+        "to": "flag",
         "metric": "manhattan"
       }
     ]

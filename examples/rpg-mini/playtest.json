@@ -23,14 +23,10 @@
       },
       {
         "type": "count",
-        "name": "herbs_in_inventory",
+        "name": "herbs_remaining",
         "component": "Pickup"
       }
     ]
-  },
-  "goal": {
-    "quantity": "dist_to_elder",
-    "direction": "min"
   },
   "terminal": {
     "win_events": ["game-win", "quest-turned-in"],

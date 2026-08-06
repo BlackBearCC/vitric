@@ -1,22 +1,18 @@
 [
   {
     "id": "hp-non-negative",
-    "description": "Health HP must never go negative",
     "if": [["@player.Health.hp", ">=", 0]]
   },
   {
-    "id": "hp-not-exceeding-max",
-    "description": "Health HP should not exceed max (healing cap)",
+    "id": "hp-within-max",
     "if": [["@player.Health.hp", "<=", "@player.Health.max"]]
   },
   {
     "id": "hp-max-positive",
-    "description": "Max HP must be at least 1",
     "if": [["@player.Health.max", ">=", 1]]
   },
   {
     "id": "attack-power-non-negative",
-    "description": "Attack power must not be negative",
     "if": [["@player.Attack.power", ">=", 0]]
   }
 ]

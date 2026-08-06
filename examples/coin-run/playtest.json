@@ -24,7 +24,7 @@
     "direction": "min"
   },
   "terminal": {
-    "win_events": ["game-won"],
+    "win_events": ["coin-collected"],
     "lose_events": []
   }
 }
