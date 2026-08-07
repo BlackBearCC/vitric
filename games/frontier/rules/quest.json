@@ -104,7 +104,7 @@
       "if": [ ["@quest.QuestLog.step", "==", 1] ],
       "do": [
         { "set": "@quest_title_lbl.UiLabel.content", "to": "修复信标" },
-        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "切建造(q) → 选信标(6) → 点地放下" }
+        { "set": "@quest_sub_lbl.UiLabel.content",   "to": "切建造(q) → 选信标(6) → 点地放下。材料不够?去野外(右侧)采矿伐木" }
       ]
     },
     {

@@ -33,7 +33,25 @@ vitric.system("flare-bar", { query: ["Colony"], writes: ["Colony"] }, (entities,
   }
 });
 
-// 7-day weather forecast. Updates once per day (not every tick) to avoid flicker.
+// Low-resource warning: when oxygen/food/water drops below 20, flash the food bar label red.
+// Uses ctx.setField to change @hud_food_lbl.UiLabel.color — red when low, normal when fine.
+const LOW_THRESHOLD = 20;
+const COLOR_NORMAL = "#ffd58a";
+const COLOR_LOW = "#ff4444";
+
+vitric.system("low-resource-warn", { query: ["Colony"], writes: [] }, (entities, ctx) => {
+  for (const e of entities) {
+    const food = e.Colony.food_i || 0;
+    const o2 = e.Colony.o2_i || 0;
+    const water = e.Colony.water_i || 0;
+    const anyLow = food < LOW_THRESHOLD || o2 < LOW_THRESHOLD || water < LOW_THRESHOLD;
+    const wantColor = anyLow ? COLOR_LOW : COLOR_NORMAL;
+    const curColor = ctx.getField("hud_food_lbl", "UiLabel.color");
+    if (curColor !== wantColor) {
+      ctx.setField("hud_food_lbl", "UiLabel.color", wantColor);
+    }
+  }
+});
 // Uses ctx.random_stream("forecast") for deterministic generation — the forecast for
 // day N is the same regardless of when it's generated (replay-stable via E3 substream).
 //

@@ -17,7 +17,7 @@
       { "set": "@toast_lbl.Toast.timer", "to": 2.0 } ] },
     { "id": "toast-gathered", "on": { "event": "gathered" }, "do": [
       { "set": "@toast_lbl.UiLabel.content", "to": { "format": "采到 {} ×{}", "args": ["event.id", "event.n"] } },
-      { "set": "@toast_lbl.Toast.timer", "to": 1.6 } ] },
+      { "set": "@toast_lbl.Toast.timer", "to": 2.0 } ] },
     { "id": "toast-crafted", "on": { "event": "crafted" }, "do": [
       { "set": "@toast_lbl.UiLabel.content", "to": { "format": "做好了 {}", "args": ["event.id"] } },
       { "set": "@toast_lbl.Toast.timer", "to": 2.0 } ] },

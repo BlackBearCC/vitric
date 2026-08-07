@@ -119,7 +119,7 @@ vitric.system("stage", { query: ["Colony", "Clock"], writes: ["Colony"] }, (enti
 });
 
 // Colony stockpile: each frame adjust stockpile by (output - base consumption).
-vitric.system("colony", { query: ["Colony"], writes: ["Colony"] }, (entities, ctx) => {
+vitric.system("colony", { query: ["Colony", "Clock"], writes: ["Colony"] }, (entities, ctx) => {
   for (const e of entities) {
     const c = e.Colony;
     const draw = BASE_USE + c.pop * 0.5;
