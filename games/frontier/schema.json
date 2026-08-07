@@ -895,6 +895,16 @@
           "type": "number",
           "default": 0,
           "comment": "P3 death penalty: y coord where player died (drop pile location)"
+        },
+        "mine_layer": {
+          "type": "text",
+          "default": "surface",
+          "comment": "surface | underground — tracks which layer the player is on"
+        },
+        "mine_depth": {
+          "type": "int",
+          "default": 0,
+          "comment": "Current underground depth (0 = surface, increments each mine entry)"
         }
       }
     },
@@ -1194,6 +1204,15 @@
         "state": { "type": "text", "default": "hidden", "comment": "hidden | dim | visible" },
         "_orig_color": { "type": "text", "default": "", "comment": "Stashed original Sprite.color for restore on reveal" }
       }
+    },
+    "MineShaft": {
+      "fields": {
+        "state": { "type": "text", "default": "open", "comment": "open | collapsed" },
+        "depth": { "type": "int", "default": 0, "comment": "Current mine depth level (0 = surface, 1+ = underground layers)" }
+      }
+    },
+    "MineExit": {
+      "fields": {}
     }
   }
 }

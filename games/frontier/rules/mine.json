@@ -1,0 +1,18 @@
+{
+  "rules": [
+    {
+      "id": "mine-enter-on-collision",
+      "comment": "Interact mode + collision with mine entrance → enter mine",
+      "on": { "event": "collision", "between": ["Player", "MineShaft"] },
+      "if": [["@uistate.Mode.value", "==", "interact"]],
+      "do": [{ "call": "enter_mine", "with": {} }]
+    },
+    {
+      "id": "mine-exit-on-collision",
+      "comment": "Interact mode + collision with mine exit → return to surface",
+      "on": { "event": "collision", "between": ["Player", "MineExit"] },
+      "if": [["@uistate.Mode.value", "==", "interact"]],
+      "do": [{ "call": "exit_mine", "with": {} }]
+    }
+  ]
+}

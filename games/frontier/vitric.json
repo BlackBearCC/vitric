@@ -26,7 +26,8 @@
     "rules/combat.json",
     "rules/faction.json",
     "rules/trade.json",
-    "rules/region.json"
+    "rules/region.json",
+    "rules/mine.json"
   ],
   "scripts": [
     "scripts/colony.js",
@@ -44,7 +45,8 @@
     "scripts/faction.js",
     "scripts/region.js",
     "scripts/fog.js",
-    "scripts/relic.js"
+    "scripts/relic.js",
+    "scripts/mine.js"
   ],
   "seed": 1,
   "render": {
