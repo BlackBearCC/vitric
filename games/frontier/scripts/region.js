@@ -73,12 +73,21 @@ vitric.fn("gen_region_content", (a, ctx) => {
   const stream = ctx.random_stream("region:" + id);
 
   // Spawn terrain tiles within the region bounds.
+  // Apply Perlin noise variation around the biome's base color so terrain looks natural
+  // (patches of darker/lighter ground) instead of a flat solid color. The noise helpers
+  // (__noise2D, __terrainColor) are defined in world.js (loaded before this file).
+  const terrainStream = ctx.random_stream("region:" + id + ":terrain");
+  const ox = terrainStream.next() * 100;
+  const oy = terrainStream.next() * 100;
   for (let gx = spec.anchor_x; gx < spec.anchor_x + spec.w; gx++) {
     for (let gy = spec.anchor_y; gy < spec.anchor_y + spec.h; gy++) {
+      const n = __noise2D(gx * 0.15 + ox, gy * 0.15 + oy);
+      // Blend: 70% biome base color + 30% noise-driven color for subtle variation.
+      const noiseColor = __terrainColor(n);
       ctx.spawn({
         Cell: { kind: spec.biome },
         Position: { x: gx, y: gy },
-        Sprite: { w: 1, h: 1, image: "", color: content.tile_color },
+        Sprite: { w: 1, h: 1, image: "", color: noiseColor },
         Region: { id: id, biome: spec.biome, state: "active", discovered: 1,
                   anchor_x: spec.anchor_x, anchor_y: spec.anchor_y, w: spec.w, h: spec.h,
                   dormant_ticks: 0, spawn_timer: 0 },

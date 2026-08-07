@@ -3,40 +3,102 @@
 // seed-determined positions via ctx.random_stream — same seed = same layout (replay-safe),
 // different seed = different map.
 //
+// Terrain colors are derived from a deterministic Perlin noise (hash-based gradients,
+// no RNG stream calls — replay-safe) so adjacent tiles blend into natural biome bands
+// (water → beach → grassland → rocky → highland) instead of a flat solid color.
+//
 // Gathering logic lives in the interact fn in economy.js. Here we only:
 // ① lay wild terrain + place resource nodes; ② scatter POIs; ③ scatter relics;
 // ④ apply cooldown to resource nodes after gathering.
 
+// ---- Deterministic Perlin noise (2D). Pure hash of integer lattice → gradient vectors,
+// classic Ken Perlin fade+lerp interpolation. No ctx.random_stream / Math.random used —
+// the same (x,y) always yields the same value, so terrain is reproducible per seed and
+// replay-safe. region.js (loaded after this file) reuses these globals.
+globalThis.__noiseHash2 = function (ix, iy) {
+  let h = (ix * 374761393 + iy * 668265263) | 0;
+  h = ((h ^ (h >> 13)) * 1274126177) | 0;
+  return (h ^ (h >> 16)) >>> 0;
+};
+globalThis.__noiseGrad = function (ix, iy) {
+  const h = __noiseHash2(ix, iy);
+  return [ (h & 0xFF) / 127.5 - 1, ((h >> 8) & 0xFF) / 127.5 - 1 ];
+};
+globalThis.__perlin2 = function (x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * xf * (xf * (xf * 6 - 15) + 10);
+  const v = yf * yf * yf * (yf * (yf * 6 - 15) + 10);
+  const g00 = __noiseGrad(xi, yi),     g10 = __noiseGrad(xi + 1, yi);
+  const g01 = __noiseGrad(xi, yi + 1), g11 = __noiseGrad(xi + 1, yi + 1);
+  const d00 = g00[0] * xf       + g00[1] * yf;
+  const d10 = g10[0] * (xf - 1) + g10[1] * yf;
+  const d01 = g01[0] * xf       + g01[1] * (yf - 1);
+  const d11 = g11[0] * (xf - 1) + g11[1] * (yf - 1);
+  const nx = d00 + (d10 - d00) * u;
+  const ny = d01 + (d11 - d01) * u;
+  return nx + (ny - nx) * v; // ≈ [-1, 1]
+};
+// Multi-octave: base shape + detail.
+globalThis.__noise2D = function (x, y) {
+  return 0.6 * __perlin2(x, y) + 0.4 * __perlin2(x * 2.1 + 31.4, y * 2.1 + 17.7);
+};
+// Terrain palette: noise band → color. Lower = water/sand, mid = grass, high = rock.
+globalThis.__terrainColor = function (n) {
+  if (n < -0.28) return "#2c3a52"; // water
+  if (n < -0.10) return "#7a7a5a"; // beach/sand
+  if (n <  0.30) return "#4a5a32"; // grassland
+  if (n <  0.55) return "#5a4a38"; // rocky dirt
+  return "#3a3a3a";                // highland
+};
+
 vitric.fn("genWild", (a, ctx) => {
-  // Wild terrain: x16..59, y0..29 (home transition x16..27 + expanded wild x28..59).
+  // Wild terrain: x16..59, y0..29 — noise-driven colors for natural biome bands.
+  // The noise offset is seeded once from ctx.random_stream so different world seeds
+  // produce different terrain shapes (same seed = same terrain, replay-safe).
+  const terrainStream = ctx.random_stream("wild:terrain");
+  const ox = terrainStream.next() * 100;
+  const oy = terrainStream.next() * 100;
   for (let gx = 16; gx <= 59; gx++) {
     for (let gy = 0; gy <= 29; gy++) {
+      const n = __noise2D(gx * 0.15 + ox, gy * 0.15 + oy);
       ctx.spawn({
         Cell: { kind: "wild" },
         Position: { x: gx, y: gy },
-        Sprite: { w: 1, h: 1, image: "", color: gx === 16 ? "#5a5040" : "#48402f" },
+        Sprite: { w: 1, h: 1, image: "", color: __terrainColor(n) },
         Fog: { state: "hidden", _orig_color: "" },
       });
     }
   }
 
-  // Resource nodes: seed-driven positions within wild bounds.
-  // 10 nodes total: 4 ore, 3 wood, 3 fiber — same counts as before, different positions.
+  // Resource nodes: seed-driven positions, but placed on biome-appropriate terrain.
+  // The noise at each candidate position determines which resource type fits:
+  //   rocky/highland (n > 0.30) → ore
+  //   grassland    (0.00..0.30) → wood
+  //   beach/water  (n < 0.00)   → fiber
+  // This makes the world feel coherent: ore in the hills, trees in the grass, fiber near water.
   const nodeStream = ctx.random_stream("wild:nodes");
-  const NODE_SPECS = [
-    { kind: "ore",   count: 4, color: "#caa45a", label: "矿脉" },
-    { kind: "wood",  count: 3, color: "#5f8f3a", label: "林木" },
-    { kind: "fiber", count: 3, color: "#9aac5a", label: "纤维丛" },
+  const placed = [];
+  const NODE_TARGETS = [
+    { kind: "ore",   count: 4, color: "#caa45a", label: "矿脉",   minN: 0.30 },
+    { kind: "wood",  count: 3, color: "#5f8f3a", label: "林木",   minN: 0.00, maxN: 0.30 },
+    { kind: "fiber", count: 3, color: "#9aac5a", label: "纤维丛", maxN: 0.00 },
   ];
-  const placed = []; // track positions for min-distance check
-  for (const spec of NODE_SPECS) {
+  for (const spec of NODE_TARGETS) {
     for (let i = 0; i < spec.count; i++) {
-      let nx, ny, attempts = 0;
-      do {
-        nx = 17 + nodeStream.nextInt(0, 42); // x17..59
+      let nx = 0, ny = 0, ok = false, attempts = 0;
+      while (!ok && attempts < 30) {
+        nx = 17 + nodeStream.nextInt(0, 42);
         ny = nodeStream.nextInt(0, 29);
         attempts++;
-      } while (attempts < 20 && placed.some(p => (p.x-nx)**2 + (p.y-ny)**2 < 4));
+        // Min-distance check
+        if (placed.some(p => (p.x-nx)**2 + (p.y-ny)**2 < 4)) continue;
+        // Terrain match: check noise at this position
+        const n = __noise2D(nx * 0.15 + ox, ny * 0.15 + oy);
+        if (spec.minN !== undefined && n < spec.minN) continue;
+        if (spec.maxN !== undefined && n >= spec.maxN) continue;
+        ok = true;
+      }
       placed.push({ x: nx, y: ny });
       ctx.spawn({
         Node: { kind: spec.kind, left: 5, max: 5, cooldown: 0 },
