@@ -21,42 +21,40 @@ const REGION_SPECS = {
 };
 
 // Per-region content config: tile color, resource node types/counts, POI types/counts.
-// Task 13 will expand POI tables and add biome-specific enemies; Task 12 lays the framework.
+// Each node/POI carries optional minN/maxN — the noise band where it belongs, so resources
+// match terrain (ore on rocky, fiber near water, etc.). The noise helpers are in world.js.
 const REGION_CONTENT = {
   mountain: {
     tile_color: "#3a3530",
     nodes: [
-      { kind: "ore", count: 6, color: "#caa45a", label: "矿脉", left: 5 },
+      { kind: "ore", count: 6, color: "#caa45a", label: "矿脉", left: 5, minN: 0.30 },
+      { kind: "crystal_core", count: 2, color: "#5acaff", label: "晶核", left: 3, minN: 0.55 },
     ],
     pois: [
-      // Ancient ruins: TechPoint reward (already in Task 12).
-      { kind: "ancient-ruins", reward_table: '{"techpoint":[1,3]}', label: "古代遗迹" },
-      // Crystal cave: crystal_core reward + cave-injury risk (handler in poi.js).
-      { kind: "crystal-cave", reward_table: '{"crystal_core":[1,2]}', label: "水晶洞" },
+      { kind: "ancient-ruins", reward_table: '{"techpoint":[1,3]}', label: "古代遗迹", minN: 0.30 },
+      { kind: "crystal-cave", reward_table: '{"crystal_core":[1,2]}', label: "水晶洞", minN: 0.45 },
     ],
   },
   swamp: {
     tile_color: "#2a3a2a",
     nodes: [
-      { kind: "fiber", count: 5, color: "#9aac5a", label: "纤维丛", left: 5 },
+      { kind: "fiber", count: 5, color: "#9aac5a", label: "纤维丛", left: 5, maxN: 0.00 },
+      { kind: "wood", count: 3, color: "#5f8f3a", label: "林木", left: 5, minN: 0.00, maxN: 0.30 },
     ],
     pois: [
-      // Dangerous flora: hide reward + combat trigger (handler spawns a weak enemy).
-      { kind: "dangerous-flora", reward_table: '{"hide":[1,2]}', label: "危险植物" },
-      // Oasis: seed + fiber reward (fertile ground).
-      { kind: "oasis", reward_table: '{"seed":[2,4],"fiber":[1,3]}', label: "绿洲" },
+      { kind: "dangerous-flora", reward_table: '{"hide":[1,2]}', label: "危险植物", minN: 0.00, maxN: 0.30 },
+      { kind: "oasis", reward_table: '{"seed":[2,4],"fiber":[1,3]}', label: "绿洲", maxN: 0.00 },
     ],
   },
   desert: {
     tile_color: "#7a6a3a",
     nodes: [
-      { kind: "crystal_core", count: 2, color: "#5acaff", label: "晶核", left: 3 },
+      { kind: "crystal_core", count: 2, color: "#5acaff", label: "晶核", left: 3, minN: 0.45 },
+      { kind: "ore", count: 3, color: "#caa45a", label: "矿脉", left: 5, minN: 0.30, maxN: 0.55 },
     ],
     pois: [
-      // Caravan stop: no direct reward, but handler emits trade-available (faction hook).
-      { kind: "caravan-stop", reward_table: '{}', label: "商队驿站" },
-      // Tomb: high-tier reward + curse risk (handler applies mood drop).
-      { kind: "tomb", reward_table: '{"crystal_core":[1,2],"techpoint":[2,4]}', label: "古墓" },
+      { kind: "caravan-stop", reward_table: '{}', label: "商队驿站", minN: -0.10, maxN: 0.30 },
+      { kind: "tomb", reward_table: '{"crystal_core":[1,2],"techpoint":[2,4]}', label: "古墓", minN: 0.45 },
     ],
   },
 };
@@ -96,12 +94,24 @@ vitric.fn("gen_region_content", (a, ctx) => {
     }
   }
 
-  // Spawn resource nodes at deterministic positions within region bounds.
+  // Spawn resource nodes at deterministic positions, matched to terrain noise.
+  // Each node spec carries optional minN/maxN — the noise band where it belongs.
+  // Mountain: ore on rocky/highland; crystal_core only on highest peaks.
+  // Swamp:    fiber near water/beach; wood on grassland patches.
+  // Desert:   crystal_core on rocky; ore on highland.
   let nodeIdx = 0;
   for (const nodeSpec of content.nodes) {
     for (let i = 0; i < nodeSpec.count; i++) {
-      const nx = spec.anchor_x + stream.nextInt(0, spec.w - 1);
-      const ny = spec.anchor_y + stream.nextInt(0, spec.h - 1);
+      let nx = 0, ny = 0, ok = false, attempts = 0;
+      while (!ok && attempts < 30) {
+        nx = spec.anchor_x + stream.nextInt(0, spec.w - 1);
+        ny = spec.anchor_y + stream.nextInt(0, spec.h - 1);
+        attempts++;
+        const n = __noise2D(nx * 0.15 + ox, ny * 0.15 + oy);
+        if (nodeSpec.minN !== undefined && n < nodeSpec.minN) continue;
+        if (nodeSpec.maxN !== undefined && n >= nodeSpec.maxN) continue;
+        ok = true;
+      }
       ctx.spawn({
         Node: { kind: nodeSpec.kind, left: nodeSpec.left, max: nodeSpec.left, cooldown: 0 },
         Position: { x: nx, y: ny },
@@ -115,11 +125,19 @@ vitric.fn("gen_region_content", (a, ctx) => {
     }
   }
 
-  // Spawn POIs at deterministic positions.
+  // Spawn POIs at terrain-matched positions (ancient-ruins on high ground, oasis near water, etc.)
   let poiIdx = 0;
   for (const poiSpec of content.pois) {
-    const px = spec.anchor_x + stream.nextInt(0, spec.w - 1);
-    const py = spec.anchor_y + stream.nextInt(0, spec.h - 1);
+    let px = 0, py = 0, ok = false, attempts = 0;
+    while (!ok && attempts < 30) {
+      px = spec.anchor_x + stream.nextInt(0, spec.w - 1);
+      py = spec.anchor_y + stream.nextInt(0, spec.h - 1);
+      attempts++;
+      const n = __noise2D(px * 0.15 + ox, py * 0.15 + oy);
+      if (poiSpec.minN !== undefined && n < poiSpec.minN) continue;
+      if (poiSpec.maxN !== undefined && n >= poiSpec.maxN) continue;
+      ok = true;
+    }
     ctx.spawn({
       Poi: { kind: poiSpec.kind, state: "fresh", cooldown: 0, reward_table: poiSpec.reward_table, risk_tier: poiSpec.risk_tier || "safe", rune_solved: 0 },
       Position: { x: px, y: py },
